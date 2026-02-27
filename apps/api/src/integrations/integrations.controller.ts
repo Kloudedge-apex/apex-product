@@ -10,13 +10,13 @@ export class IntegrationsController {
     return this.integrationsService.findAll(orgId);
   }
 
-  @Post("connect")
-  connect(@Body() body: { orgId: string; provider: string }) {
-    return this.integrationsService.connect(body);
+  @Post()
+  create(@Body() body: { orgId: string; provider: string; credentials: Record<string, unknown> }) {
+    return this.integrationsService.create(body);
   }
 
   @Delete(":id")
-  disconnect(@Param("id") id: string) {
-    return this.integrationsService.disconnect(id);
+  remove(@Param("id") id: string) {
+    return this.integrationsService.remove(id);
   }
 }

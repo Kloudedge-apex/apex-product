@@ -1,24 +1,61 @@
 import { Injectable } from "@nestjs/common";
+import { PrismaService } from "../prisma/prisma.service";
 
 @Injectable()
 export class RunsService {
-  findAll(agentId: string, orgId: string) {
-    // TODO: Prisma query scoped by agentId + orgId
-    return { agentId, orgId, runs: [], message: "Runs list stub" };
+  constructor(private prisma: PrismaService) {}
+
+  async findByOrg(orgId: string, limit = 50) {
+    return this.prisma.agentRun.findMany({
+      where: { orgId },
+      include: { agent: { select: { name: true, domain: true } }, logs: { take: 5, orderBy: { createdAt: "desc" } } },
+      orderBy: { startedAt: "desc" },
+      take: limit,
+    });
   }
 
-  findOne(id: string) {
-    // TODO: Prisma findUnique with logs
-    return { id, message: "Run detail stub" };
+  async findByAgent(agentId: string, limit = 50) {
+    return this.prisma.agentRun.findMany({
+      where: { agentId },
+      include: { logs: { orderBy: { createdAt: "desc" } } },
+      orderBy: { startedAt: "desc" },
+      take: limit,
+    });
   }
 
-  getLogs(id: string) {
-    // TODO: Prisma query for run logs
-    return { runId: id, logs: [], message: "Run logs stub" };
+  async findOne(id: string) {
+    return this.prisma.agentRun.findUnique({
+      where: { id },
+      include: { agent: true, logs: { orderBy: { createdAt: "asc" } } },
+    });
   }
 
-  trigger(agentId: string) {
-    // TODO: Queue a new run via BullMQ
-    return { agentId, status: "QUEUED", message: "Run triggered stub" };
+  async create(data: { agentId: string; orgId: string }) {
+    return this.prisma.agentRun.create({
+      data: {
+        agentId: data.agentId,
+        orgId: data.orgId,
+        status: "QUEUED",
+      },
+    });
+  }
+
+  async updateStatus(id: string, status: "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED", result?: any, tokensUsed?: number, cost?: number) {
+    return this.prisma.agentRun.update({
+      where: { id },
+      data: {
+        status,
+        ...(status === "COMPLETED" || status === "FAILED" ? { completedAt: new Date() } : {}),
+        ...(result && { result }),
+        ...(tokensUsed && { tokensUsed }),
+        ...(cost && { cost }),
+      },
+    });
+  }
+
+  async addLog(runId: string, level: "DEBUG" | "INFO" | "WARN" | "ERROR", message: string, metadata?: any) {
+    return this.prisma.agentLog.create({
+      data: { runId, level, message, metadata },
+    });
   }
 }

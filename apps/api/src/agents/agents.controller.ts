@@ -5,6 +5,11 @@ import { AgentsService } from "./agents.service";
 export class AgentsController {
   constructor(private readonly agentsService: AgentsService) {}
 
+  @Get("templates")
+  getTemplates(@Query("domain") domain?: string) {
+    return this.agentsService.getTemplates(domain);
+  }
+
   @Get()
   findAll(@Query("orgId") orgId: string) {
     return this.agentsService.findAll(orgId);
@@ -16,12 +21,19 @@ export class AgentsController {
   }
 
   @Post()
-  create(@Body() body: Record<string, unknown>) {
+  create(@Body() body: {
+    orgId: string;
+    templateId: string;
+    name: string;
+    domain: "SALES" | "MARKETING" | "OPS";
+    config: Record<string, unknown>;
+    schedule?: string;
+  }) {
     return this.agentsService.create(body);
   }
 
   @Patch(":id")
-  update(@Param("id") id: string, @Body() body: Record<string, unknown>) {
+  update(@Param("id") id: string, @Body() body: { name?: string; config?: Record<string, unknown>; schedule?: string }) {
     return this.agentsService.update(id, body);
   }
 

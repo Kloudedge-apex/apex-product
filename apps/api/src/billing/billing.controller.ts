@@ -5,19 +5,18 @@ import { BillingService } from "./billing.service";
 export class BillingController {
   constructor(private readonly billingService: BillingService) {}
 
+  @Post("subscribe")
+  createSubscription(@Body() body: { orgId: string; planId: string }) {
+    return this.billingService.createSubscription(body.orgId, body.planId);
+  }
+
   @Get(":orgId")
   getSubscription(@Param("orgId") orgId: string) {
     return this.billingService.getSubscription(orgId);
   }
 
-  @Post("subscribe")
-  subscribe(@Body() body: { orgId: string; plan: string }) {
-    return this.billingService.subscribe(body);
-  }
-
-  @Post("webhook")
-  handleWebhook(@Body() body: unknown) {
-    // TODO: Handle Razorpay webhook events
-    return this.billingService.handleWebhook(body);
+  @Post("upgrade")
+  upgradePlan(@Body() body: { orgId: string; plan: "STARTER" | "GROWTH" | "ENTERPRISE" }) {
+    return this.billingService.upgradePlan(body.orgId, body.plan);
   }
 }

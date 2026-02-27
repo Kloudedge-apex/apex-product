@@ -1,19 +1,36 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, NotFoundException } from "@nestjs/common";
+import { PrismaService } from "../prisma/prisma.service";
 
 @Injectable()
 export class IntegrationsService {
-  findAll(orgId: string) {
-    // TODO: Prisma query scoped by orgId
-    return { orgId, integrations: [], message: "Integrations list stub" };
+  constructor(private prisma: PrismaService) {}
+
+  async findAll(orgId: string) {
+    return this.prisma.integration.findMany({
+      where: { orgId },
+      orderBy: { createdAt: "desc" },
+    });
   }
 
-  connect(data: { orgId: string; provider: string }) {
-    // TODO: Initiate OAuth flow for provider
-    return { ...data, status: "PENDING", message: "Integration connect stub" };
+  async create(data: { orgId: string; provider: string; credentials: Record<string, unknown> }) {
+    return this.prisma.integration.create({
+      data: {
+        orgId: data.orgId,
+        provider: data.provider,
+        credentials: data.credentials as any,
+        status: "CONNECTED",
+      },
+    });
   }
 
-  disconnect(id: string) {
-    // TODO: Revoke integration
-    return { id, status: "REVOKED", message: "Integration disconnected stub" };
+  async remove(id: string) {
+    return this.prisma.integration.delete({ where: { id } });
+  }
+
+  async updateStatus(id: string, status: "PENDING" | "CONNECTED" | "ERROR" | "REVOKED") {
+    return this.prisma.integration.update({
+      where: { id },
+      data: { status },
+    });
   }
 }
