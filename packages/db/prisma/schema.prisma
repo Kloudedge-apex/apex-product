@@ -1,0 +1,165 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ───────────────────────────────────────────────
+
+enum Plan {
+  TRIAL
+  STARTER
+  GROWTH
+  ENTERPRISE
+}
+
+enum UserRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+enum Domain {
+  SALES
+  MARKETING
+  OPS
+}
+
+enum AgentStatus {
+  ACTIVE
+  PAUSED
+  ERROR
+  DEPLOYING
+}
+
+enum IntegrationStatus {
+  PENDING
+  CONNECTED
+  ERROR
+  REVOKED
+}
+
+enum RunStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum LogLevel {
+  DEBUG
+  INFO
+  WARN
+  ERROR
+}
+
+// ─── Models ──────────────────────────────────────────────
+
+model Org {
+  id           String        @id @default(cuid())
+  name         String
+  slug         String        @unique
+  plan         Plan          @default(TRIAL)
+  trialEndsAt  DateTime?
+  billingId    String?       // Razorpay subscription ID
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  users        User[]
+  agents       Agent[]
+  integrations Integration[]
+
+  @@index([slug])
+}
+
+model User {
+  id        String   @id @default(cuid())
+  orgId     String
+  org       Org      @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  email     String   @unique
+  name      String?
+  role      UserRole @default(MEMBER)
+  clerkId   String   @unique
+  createdAt DateTime @default(now())
+
+  @@index([orgId])
+  @@index([clerkId])
+}
+
+model AgentTemplate {
+  id                   String   @id @default(cuid())
+  domain               Domain
+  name                 String
+  description          String
+  defaultConfig        Json
+  requiredIntegrations String[] // e.g. ["email", "crm"]
+  agents               Agent[]
+
+  @@index([domain])
+}
+
+model Agent {
+  id         String      @id @default(cuid())
+  orgId      String
+  org        Org         @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  templateId String
+  template   AgentTemplate @relation(fields: [templateId], references: [id])
+  name       String
+  domain     Domain
+  config     Json
+  schedule   String?     // Cron expression
+  status     AgentStatus @default(PAUSED)
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+  runs       AgentRun[]
+
+  @@index([orgId])
+  @@index([orgId, domain])
+}
+
+model Integration {
+  id          String            @id @default(cuid())
+  orgId       String
+  org         Org               @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  provider    String            // gmail, outlook, hubspot, linkedin, etc
+  credentials Json              // Encrypted
+  status      IntegrationStatus @default(PENDING)
+  createdAt   DateTime          @default(now())
+
+  @@index([orgId])
+  @@index([orgId, provider])
+}
+
+model AgentRun {
+  id          String    @id @default(cuid())
+  agentId     String
+  agent       Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  orgId       String
+  startedAt   DateTime  @default(now())
+  completedAt DateTime?
+  status      RunStatus @default(RUNNING)
+  result      Json?
+  tokensUsed  Int       @default(0)
+  cost        Float     @default(0)
+  logs        AgentLog[]
+
+  @@index([agentId])
+  @@index([orgId])
+  @@index([orgId, status])
+}
+
+model AgentLog {
+  id        String   @id @default(cuid())
+  runId     String
+  run       AgentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  level     LogLevel
+  message   String
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@index([runId])
+  @@index([runId, level])
+}
