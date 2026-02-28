@@ -2,6 +2,11 @@ import { Injectable } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import { LLMService, ChatMessage } from "./llm.service";
 import { getPromptForTemplate } from "./prompts";
+import { ToolRegistry } from "./tools/registry";
+import { ToolContext, toolToOpenAIFunction, IntegrationCredentials } from "./tools/tool.interface";
+import { decryptCredentials } from "../integrations/crypto.util";
+
+const MAX_STEPS = 10;
 
 interface ExecutionResult {
   output: Record<string, unknown>;
@@ -9,10 +14,23 @@ interface ExecutionResult {
   cost: number;
   model: string;
   duration: number;
+  steps: StepLog[];
+}
+
+interface StepLog {
+  step: number;
+  type: "planning" | "tool_call" | "tool_result" | "final_answer";
+  toolName?: string;
+  toolInput?: Record<string, unknown>;
+  toolOutput?: unknown;
+  content?: string;
+  timestamp: number;
 }
 
 @Injectable()
 export class ExecutorService {
+  private toolRegistry = new ToolRegistry();
+
   constructor(
     private prisma: PrismaService,
     private llm: LLMService,
@@ -21,7 +39,7 @@ export class ExecutorService {
   async executeAgent(agentId: string, runId: string): Promise<ExecutionResult> {
     const startTime = Date.now();
 
-    // Load agent with template
+    // Load agent with template and org
     const agent = await this.prisma.agent.findUnique({
       where: { id: agentId },
       include: { template: true, org: true },
@@ -31,15 +49,30 @@ export class ExecutorService {
       throw new Error(`Agent not found: ${agentId}`);
     }
 
-    // Log start
     await this.addLog(runId, "INFO", `Starting execution for agent: ${agent.name}`);
 
-    // Build system prompt from template
-    const systemPrompt = getPromptForTemplate(agent.template.name, agent.config as Record<string, unknown>);
+    // Load integration credentials for tool context
+    const integrations = await this.loadIntegrations(agent.orgId);
 
-    await this.addLog(runId, "DEBUG", `System prompt loaded for template: ${agent.template.name}`);
+    // Build tool context
+    const toolContext: ToolContext = {
+      orgId: agent.orgId,
+      agentId: agent.id,
+      runId,
+      integrations,
+    };
 
-    // Build user message with context
+    // Get tools for this agent template
+    const tools = this.toolRegistry.getForTemplate(agent.template.name);
+    const openAITools = tools.map(toolToOpenAIFunction);
+
+    await this.addLog(runId, "INFO", `Loaded ${tools.length} tools: ${tools.map((t) => t.name).join(", ")}`);
+
+    // Build system prompt with tool awareness
+    const basePrompt = getPromptForTemplate(agent.template.name, agent.config as Record<string, unknown>);
+    const systemPrompt = this.buildToolAwarePrompt(basePrompt, tools);
+
+    // Build user message
     const userMessage = this.buildUserMessage(agent.template.name, agent.config as Record<string, unknown>);
 
     const messages: ChatMessage[] = [
@@ -47,39 +80,197 @@ export class ExecutorService {
       { role: "user", content: userMessage },
     ];
 
-    // Determine model based on complexity
+    // Determine model
     const isComplex = this.isComplexTask(agent.template.name);
     const model = isComplex ? "gpt-4o" : "gpt-4o-mini";
-
-    await this.addLog(runId, "INFO", `Using model: ${model} (complex: ${isComplex})`);
-
-    // Execute LLM call
     const plan = agent.org.plan;
-    const response = await this.llm.chat(messages, { model, plan });
 
-    await this.addLog(runId, "INFO", `LLM response received: ${response.tokensUsed} tokens used`);
+    await this.addLog(runId, "INFO", `Using model: ${model}, plan: ${plan}`);
 
-    // Parse structured output
+    // Multi-step agent loop
+    let totalTokens = 0;
+    let totalCost = 0;
+    const steps: StepLog[] = [];
+    let stepNum = 0;
+
+    for (let i = 0; i < MAX_STEPS; i++) {
+      stepNum = i + 1;
+
+      const response = await this.llm.chat(messages, {
+        model,
+        plan,
+        maxTokens: 4000,
+        tools: openAITools.length > 0 ? openAITools : undefined,
+      });
+
+      totalTokens += response.tokensUsed;
+      totalCost += response.cost;
+
+      // Check for tool calls
+      if (response.toolCalls && response.toolCalls.length > 0) {
+        // Add assistant message with tool calls
+        messages.push({
+          role: "assistant",
+          content: response.content || null,
+          tool_calls: response.toolCalls,
+        });
+
+        // Execute each tool call
+        for (const toolCall of response.toolCalls) {
+          const toolName = toolCall.function.name;
+          let toolArgs: Record<string, unknown>;
+          try {
+            toolArgs = JSON.parse(toolCall.function.arguments);
+          } catch {
+            toolArgs = {};
+          }
+
+          await this.addLog(runId, "INFO", `Step ${stepNum}: Tool call -> ${toolName}(${JSON.stringify(toolArgs).slice(0, 200)})`);
+
+          steps.push({
+            step: stepNum,
+            type: "tool_call",
+            toolName,
+            toolInput: toolArgs,
+            timestamp: Date.now(),
+          });
+
+          const tool = this.toolRegistry.get(toolName);
+          let toolResult: unknown;
+
+          if (tool) {
+            try {
+              const result = await tool.execute(toolArgs, toolContext);
+              toolResult = result;
+              await this.addLog(runId, "DEBUG", `${toolName} returned: success=${result.success}`);
+            } catch (error) {
+              toolResult = { success: false, error: error instanceof Error ? error.message : "Tool execution failed" };
+              await this.addLog(runId, "WARN", `${toolName} failed: ${error instanceof Error ? error.message : "unknown error"}`);
+            }
+          } else {
+            toolResult = { success: false, error: `Unknown tool: ${toolName}` };
+            await this.addLog(runId, "WARN", `Unknown tool: ${toolName}`);
+          }
+
+          steps.push({
+            step: stepNum,
+            type: "tool_result",
+            toolName,
+            toolOutput: toolResult,
+            timestamp: Date.now(),
+          });
+
+          // Add tool result message
+          messages.push({
+            role: "tool",
+            content: JSON.stringify(toolResult),
+            tool_call_id: toolCall.id,
+          });
+        }
+
+        continue; // Next iteration to get LLM's response to tool results
+      }
+
+      // No tool calls = final answer
+      await this.addLog(runId, "INFO", `Step ${stepNum}: Final answer generated`);
+
+      steps.push({
+        step: stepNum,
+        type: "final_answer",
+        content: response.content,
+        timestamp: Date.now(),
+      });
+
+      break;
+    }
+
+    // Parse final output from the last response
+    const lastStep = steps[steps.length - 1];
     let output: Record<string, unknown>;
+
     try {
-      output = JSON.parse(response.content);
-      await this.addLog(runId, "DEBUG", `Output parsed successfully: type=${(output as Record<string, unknown>).type || "unknown"}`);
+      output = JSON.parse(lastStep?.content || "{}");
+      await this.addLog(runId, "DEBUG", `Output parsed: type=${output.type || "unknown"}`);
     } catch {
-      output = { type: "raw", content: response.content };
+      output = { type: "raw", content: lastStep?.content || "" };
       await this.addLog(runId, "WARN", "Could not parse structured output, storing raw");
     }
 
-    const duration = Date.now() - startTime;
+    // Add step metadata to output
+    output._meta = {
+      steps: steps.length,
+      toolCalls: steps.filter((s) => s.type === "tool_call").length,
+      toolsUsed: [...new Set(steps.filter((s) => s.type === "tool_call").map((s) => s.toolName))],
+    };
 
-    await this.addLog(runId, "INFO", `Execution completed in ${duration}ms`);
+    const duration = Date.now() - startTime;
+    await this.addLog(runId, "INFO", `Execution completed: ${stepNum} steps, ${totalTokens} tokens, ${(duration / 1000).toFixed(1)}s`);
 
     return {
       output,
-      tokensUsed: response.tokensUsed,
-      cost: response.cost,
-      model: response.model,
+      tokensUsed: totalTokens,
+      cost: totalCost,
+      model,
       duration,
+      steps,
     };
+  }
+
+  private buildToolAwarePrompt(basePrompt: string, tools: { name: string; description: string }[]): string {
+    if (tools.length === 0) return basePrompt;
+
+    const toolDescriptions = tools
+      .map((t) => `- ${t.name}: ${t.description}`)
+      .join("\n");
+
+    return `${basePrompt}
+
+## Available Tools
+You have access to the following tools. Use them to research, take actions, and produce better results:
+${toolDescriptions}
+
+## Execution Strategy
+1. ALWAYS use available tools to gather real data before generating output
+2. Call tools one at a time or in batches as needed
+3. Use tool results to inform your final structured JSON output
+4. If a tool fails, note the failure and proceed with available information`;
+  }
+
+  private async loadIntegrations(orgId: string): Promise<Map<string, IntegrationCredentials>> {
+    const integrations = new Map<string, IntegrationCredentials>();
+
+    try {
+      const records = await this.prisma.integration.findMany({
+        where: { orgId, status: "CONNECTED" },
+      });
+
+      for (const record of records) {
+        try {
+          const creds = record.credentials as Record<string, unknown>;
+          let decrypted: Record<string, unknown>;
+
+          if (creds.encrypted && typeof creds.encrypted === "string") {
+            decrypted = decryptCredentials(creds.encrypted);
+          } else {
+            decrypted = creds;
+          }
+
+          integrations.set(record.provider, {
+            provider: record.provider,
+            accessToken: (decrypted.access_token as string) || "",
+            refreshToken: decrypted.refresh_token as string | undefined,
+            expiresAt: decrypted.expires_at as number | undefined,
+            scopes: decrypted.scope as string | undefined,
+          });
+        } catch {
+          // Skip integration with bad credentials
+        }
+      }
+    } catch {
+      // No integrations available
+    }
+
+    return integrations;
   }
 
   private buildUserMessage(templateName: string, config: Record<string, unknown>): string {
@@ -89,30 +280,30 @@ export class ExecutorService {
 
     switch (templateName.toLowerCase()) {
       case "sdr agent":
-        return `Execute outbound sales task with these parameters:\n${configSummary}\n\nGenerate a prospecting email draft based on the ICP criteria.`;
+        return `Execute outbound sales task with these parameters:\n${configSummary}\n\nResearch the target, score the lead, and generate a personalized prospecting email.`;
       case "crm sync agent":
         return `Perform CRM synchronization with these settings:\n${configSummary}\n\nSync and report on changes.`;
       case "content writer":
-        return `Create content with these parameters:\n${configSummary}\n\nGenerate a piece of content for the target platform.`;
+        return `Create content with these parameters:\n${configSummary}\n\nResearch trending topics and generate engaging content for the target platform.`;
       case "social engagement agent":
         return `Monitor and engage on social media with:\n${configSummary}\n\nReport on engagement opportunities.`;
       case "inbox monitor":
-        return `Triage emails with these rules:\n${configSummary}\n\nClassify and prioritize incoming messages.`;
+        return `Triage emails with these rules:\n${configSummary}\n\nClassify and prioritize incoming messages, draft replies for urgent items.`;
       case "reporting agent":
-        return `Generate a report with these metrics:\n${configSummary}\n\nCreate a summary report.`;
+        return `Generate a report with these metrics:\n${configSummary}\n\nGather data, analyze metrics, and create a comprehensive summary report.`;
       default:
         return `Execute task with configuration:\n${configSummary}`;
     }
   }
 
   private isComplexTask(templateName: string): boolean {
-    const complexTemplates = ["reporting agent", "crm sync agent"];
+    const complexTemplates = ["reporting agent", "crm sync agent", "sdr agent"];
     return complexTemplates.includes(templateName.toLowerCase());
   }
 
-  private async addLog(runId: string, level: "DEBUG" | "INFO" | "WARN" | "ERROR", message: string) {
+  private async addLog(runId: string, level: "DEBUG" | "INFO" | "WARN" | "ERROR", message: string, metadata?: Record<string, unknown>) {
     return this.prisma.agentLog.create({
-      data: { runId, level, message },
+      data: { runId, level, message, metadata: (metadata || undefined) as any },
     });
   }
 }
