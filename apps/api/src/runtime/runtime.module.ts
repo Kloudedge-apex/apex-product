@@ -7,8 +7,10 @@ import { ExecutorService } from "./executor.service";
 import { SchedulerService } from "./scheduler.service";
 import { RuntimeController } from "./runtime.controller";
 import { MemoryService } from "./memory.service";
+import { IntegrationsModule } from "../integrations/integrations.module";
 
 @Module({
+  imports: [IntegrationsModule],
   controllers: [RuntimeController],
   providers: [
     RuntimeService,

@@ -49,6 +49,85 @@ export class IntegrationsService {
     });
   }
 
+  async getDecryptedCredentials(orgId: string, provider: string): Promise<Record<string, unknown> | null> {
+    const integration = await this.prisma.integration.findFirst({
+      where: { orgId, provider, status: "CONNECTED" },
+    });
+
+    if (!integration) return null;
+
+    try {
+      const creds = integration.credentials as Record<string, unknown>;
+      if (creds.encrypted && typeof creds.encrypted === "string") {
+        return decryptCredentials(creds.encrypted);
+      }
+      return creds;
+    } catch {
+      return null;
+    }
+  }
+
+  async refreshTokenIfNeeded(orgId: string, provider: string): Promise<Record<string, unknown> | null> {
+    const creds = await this.getDecryptedCredentials(orgId, provider);
+    if (!creds) return null;
+
+    const expiresAt = creds.expires_at as number | undefined;
+    if (!expiresAt || Date.now() < expiresAt - 300000) {
+      // Token still valid (with 5 min buffer)
+      return creds;
+    }
+
+    // Token expired or about to expire - attempt refresh
+    const refreshToken = creds.refresh_token as string | undefined;
+    if (!refreshToken) return creds; // No refresh token, return as-is
+
+    const config = OAUTH_CONFIGS[provider];
+    if (!config || !config.clientId || !config.clientSecret) return creds;
+
+    try {
+      const body = new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+        client_id: config.clientId,
+        client_secret: config.clientSecret,
+      });
+
+      const response = await fetch(config.tokenUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: body.toString(),
+      });
+
+      if (!response.ok) return creds;
+
+      const tokens = await response.json() as Record<string, unknown>;
+      const newCreds = {
+        ...creds,
+        access_token: tokens.access_token || creds.access_token,
+        refresh_token: tokens.refresh_token || refreshToken,
+        expires_at: tokens.expires_in
+          ? Date.now() + (tokens.expires_in as number) * 1000
+          : creds.expires_at,
+      };
+
+      // Save refreshed credentials
+      const integration = await this.prisma.integration.findFirst({
+        where: { orgId, provider },
+      });
+      if (integration) {
+        const encrypted = encryptCredentials(newCreds);
+        await this.prisma.integration.update({
+          where: { id: integration.id },
+          data: { credentials: { encrypted } as any },
+        });
+      }
+
+      return newCreds;
+    } catch {
+      return creds;
+    }
+  }
+
   async findOne(id: string) {
     const integration = await this.prisma.integration.findUnique({ where: { id } });
     if (!integration) throw new NotFoundException("Integration not found");

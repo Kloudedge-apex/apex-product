@@ -4,8 +4,8 @@ import { LLMService, ChatMessage } from "./llm.service";
 import { getPromptForTemplate } from "./prompts";
 import { ToolRegistry } from "./tools/registry";
 import { ToolContext, toolToOpenAIFunction, IntegrationCredentials } from "./tools/tool.interface";
-import { decryptCredentials } from "../integrations/crypto.util";
 import { MemoryService } from "./memory.service";
+import { IntegrationsService } from "../integrations/integrations.service";
 
 const MAX_STEPS = 10;
 
@@ -36,6 +36,7 @@ export class ExecutorService {
     private prisma: PrismaService,
     private llm: LLMService,
     private memoryService: MemoryService,
+    private integrationsService: IntegrationsService,
   ) {
     this.toolRegistry = new ToolRegistry(memoryService);
   }
@@ -259,14 +260,9 @@ ${toolDescriptions}
 
       for (const record of records) {
         try {
-          const creds = record.credentials as Record<string, unknown>;
-          let decrypted: Record<string, unknown>;
-
-          if (creds.encrypted && typeof creds.encrypted === "string") {
-            decrypted = decryptCredentials(creds.encrypted);
-          } else {
-            decrypted = creds;
-          }
+          // Use IntegrationsService for token refresh
+          const decrypted = await this.integrationsService.refreshTokenIfNeeded(orgId, record.provider);
+          if (!decrypted) continue;
 
           integrations.set(record.provider, {
             provider: record.provider,
