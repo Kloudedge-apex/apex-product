@@ -48,6 +48,8 @@ export const api = {
     get: (id: string) => fetchAPI(`/runs/${id}`),
     trigger: (agentId: string, orgId: string) =>
       fetchAPI("/runs", { method: "POST", body: JSON.stringify({ agentId, orgId }) }),
+    cancel: (agentId: string, runId: string) =>
+      fetchAPI(`/agents/${agentId}/runs/${runId}/cancel`, { method: "POST" }),
   },
 
   integrations: {
@@ -55,6 +57,9 @@ export const api = {
     create: (data: { orgId: string; provider: string; credentials: Record<string, unknown> }) =>
       fetchAPI("/integrations", { method: "POST", body: JSON.stringify(data) }),
     delete: (id: string) => fetchAPI(`/integrations/${id}`, { method: "DELETE" }),
+    connect: (orgId: string, provider: string) =>
+      fetchAPI("/integrations/connect", { method: "POST", body: JSON.stringify({ orgId, provider }) }),
+    health: (id: string) => fetchAPI(`/integrations/${id}/health`),
   },
 
   billing: {
