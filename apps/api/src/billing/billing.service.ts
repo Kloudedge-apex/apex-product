@@ -5,19 +5,21 @@ import Razorpay from "razorpay";
 
 @Injectable()
 export class BillingService {
-  private razorpay: Razorpay;
+  private razorpay: Razorpay | null = null;
 
   constructor(
     private prisma: PrismaService,
     private config: ConfigService,
   ) {
-    this.razorpay = new Razorpay({
-      key_id: this.config.get("RAZORPAY_KEY_ID") || "",
-      key_secret: this.config.get("RAZORPAY_KEY_SECRET") || "",
-    });
+    const keyId = this.config.get("RAZORPAY_KEY_ID");
+    const keySecret = this.config.get("RAZORPAY_KEY_SECRET");
+    if (keyId && keySecret) {
+      this.razorpay = new Razorpay({ key_id: keyId, key_secret: keySecret });
+    }
   }
 
   async createSubscription(orgId: string, planId: string) {
+    if (!this.razorpay) throw new Error("Razorpay not configured");
     // Create Razorpay subscription
     const subscription = await this.razorpay.subscriptions.create({
       plan_id: planId,
@@ -42,6 +44,7 @@ export class BillingService {
     if (!org?.billingId) return { plan: org?.plan, subscription: null };
 
     try {
+      if (!this.razorpay) return { plan: org?.plan, subscription: null };
       const subscription = await this.razorpay.subscriptions.fetch(org.billingId);
       return { plan: org.plan, subscription };
     } catch {
