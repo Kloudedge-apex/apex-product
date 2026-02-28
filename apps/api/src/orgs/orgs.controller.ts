@@ -6,7 +6,7 @@ export class OrgsController {
   constructor(private readonly orgsService: OrgsService) {}
 
   @Post()
-  create(@Body() body: { name: string; slug: string; clerkUserId: string; email: string; userName?: string }) {
+  create(@Body() body: { name: string; slug?: string; clerkUserId: string; email: string; userName?: string }) {
     return this.orgsService.create(body);
   }
 

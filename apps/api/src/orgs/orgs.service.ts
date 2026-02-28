@@ -5,17 +5,31 @@ import { PrismaService } from "../prisma/prisma.service";
 export class OrgsService {
   constructor(private prisma: PrismaService) {}
 
-  async create(data: { name: string; slug: string; clerkUserId: string; email: string; userName?: string }) {
+  async create(data: { name: string; slug?: string; clerkUserId: string; email: string; userName?: string }) {
+    // Auto-generate slug if not provided
+    const slug = data.slug || data.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") + "-" + Date.now().toString(36);
+
+    // Check if user already has an org
+    const existingUser = await this.prisma.user.findUnique({ where: { clerkId: data.clerkUserId } });
+    if (existingUser) {
+      // Return existing org
+      const org = await this.prisma.org.findUnique({
+        where: { id: existingUser.orgId },
+        include: { users: true },
+      });
+      return org;
+    }
+
     const org = await this.prisma.org.create({
       data: {
         name: data.name,
-        slug: data.slug,
+        slug,
         plan: "TRIAL",
         trialEndsAt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000), // 3 days
         users: {
           create: {
             email: data.email,
-            name: data.userName,
+            name: data.userName || data.name,
             role: "OWNER",
             clerkId: data.clerkUserId,
           },

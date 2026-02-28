@@ -11,6 +11,8 @@ async function bootstrap() {
     process.env.FRONTEND_URL || "http://localhost:3000",
     "http://localhost:3000",
     "https://apex.kloudedge.com",
+    "https://apex.kloudedge.xyz",
+    "https://apex-v2.ashysmoke-fd2f7a7f.eastus.azurecontainerapps.io",
   ].filter(Boolean);
 
   app.enableCors({

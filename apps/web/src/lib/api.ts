@@ -20,7 +20,7 @@ async function fetchAPI(path: string, options?: RequestInit) {
 // Orgs
 export const api = {
   orgs: {
-    create: (data: { name: string; slug: string; clerkUserId: string; email: string; userName?: string }) =>
+    create: (data: { name: string; slug?: string; clerkUserId: string; email: string; userName?: string }) =>
       fetchAPI("/orgs", { method: "POST", body: JSON.stringify(data) }),
     get: (id: string) => fetchAPI(`/orgs/${id}`),
     getByClerkUser: (clerkId: string) => fetchAPI(`/orgs/by-clerk/${clerkId}`),
@@ -47,9 +47,9 @@ export const api = {
     listByAgent: (agentId: string, limit?: number) => fetchAPI(`/runs/agent/${agentId}${limit ? `&limit=${limit}` : ""}`),
     get: (id: string) => fetchAPI(`/runs/${id}`),
     trigger: (agentId: string, orgId: string) =>
-      fetchAPI("/runs", { method: "POST", body: JSON.stringify({ agentId, orgId }) }),
+      fetchAPI(`/agents/${agentId}/runs`, { method: "POST", body: JSON.stringify({ orgId }) }),
     cancel: (agentId: string, runId: string) =>
-      fetchAPI(`/agents/${agentId}/runs/${runId}/cancel`, { method: "POST" }),
+      fetchAPI(`/runtime/cancel/${runId}`, { method: "POST" }),
   },
 
   integrations: {
