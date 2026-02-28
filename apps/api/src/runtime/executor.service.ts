@@ -5,6 +5,7 @@ import { getPromptForTemplate } from "./prompts";
 import { ToolRegistry } from "./tools/registry";
 import { ToolContext, toolToOpenAIFunction, IntegrationCredentials } from "./tools/tool.interface";
 import { decryptCredentials } from "../integrations/crypto.util";
+import { MemoryService } from "./memory.service";
 
 const MAX_STEPS = 10;
 
@@ -29,12 +30,15 @@ interface StepLog {
 
 @Injectable()
 export class ExecutorService {
-  private toolRegistry = new ToolRegistry();
+  private toolRegistry: ToolRegistry;
 
   constructor(
     private prisma: PrismaService,
     private llm: LLMService,
-  ) {}
+    private memoryService: MemoryService,
+  ) {
+    this.toolRegistry = new ToolRegistry(memoryService);
+  }
 
   async executeAgent(agentId: string, runId: string): Promise<ExecutionResult> {
     const startTime = Date.now();
@@ -68,9 +72,15 @@ export class ExecutorService {
 
     await this.addLog(runId, "INFO", `Loaded ${tools.length} tools: ${tools.map((t) => t.name).join(", ")}`);
 
-    // Build system prompt with tool awareness
+    // Load agent memories
+    const memories = await this.memoryService.getAll(agent.id);
+    const memoryContext = this.buildMemoryContext(memories);
+
+    await this.addLog(runId, "DEBUG", `Loaded ${Object.keys(memories).length} memory entries`);
+
+    // Build system prompt with tool awareness and memory
     const basePrompt = getPromptForTemplate(agent.template.name, agent.config as Record<string, unknown>);
-    const systemPrompt = this.buildToolAwarePrompt(basePrompt, tools);
+    const systemPrompt = this.buildToolAwarePrompt(basePrompt, tools) + memoryContext;
 
     // Build user message
     const userMessage = this.buildUserMessage(agent.template.name, agent.config as Record<string, unknown>);
@@ -203,6 +213,9 @@ export class ExecutorService {
       toolsUsed: [...new Set(steps.filter((s) => s.type === "tool_call").map((s) => s.toolName))],
     };
 
+    // Save post-run memory
+    await this.savePostRunMemory(agent.id, output, steps, runId);
+
     const duration = Date.now() - startTime;
     await this.addLog(runId, "INFO", `Execution completed: ${stepNum} steps, ${totalTokens} tokens, ${(duration / 1000).toFixed(1)}s`);
 
@@ -299,6 +312,48 @@ ${toolDescriptions}
   private isComplexTask(templateName: string): boolean {
     const complexTemplates = ["reporting agent", "crm sync agent", "sdr agent"];
     return complexTemplates.includes(templateName.toLowerCase());
+  }
+
+  private buildMemoryContext(memories: Record<string, unknown>): string {
+    if (Object.keys(memories).length === 0) return "";
+
+    const lines: string[] = ["\n\n## Your Memory (from previous runs)"];
+
+    if (memories.last_run_summary) {
+      lines.push(`Last run: ${memories.last_run_summary}`);
+    }
+
+    if (Array.isArray(memories.contacted_leads) && memories.contacted_leads.length > 0) {
+      const leads = memories.contacted_leads as string[];
+      lines.push(`Contacted leads (${leads.length}): ${leads.slice(-10).join(", ")}`);
+    }
+
+    // Include other memory keys
+    for (const [key, value] of Object.entries(memories)) {
+      if (key === "last_run_summary" || key === "contacted_leads") continue;
+      const valueStr = typeof value === "string" ? value : JSON.stringify(value);
+      lines.push(`${key}: ${valueStr.slice(0, 200)}`);
+    }
+
+    lines.push("\nUse the memory tool to update your memories as you work. Avoid contacting leads you've already reached out to.");
+
+    return lines.join("\n");
+  }
+
+  private async savePostRunMemory(agentId: string, output: Record<string, unknown>, steps: StepLog[], runId: string): Promise<void> {
+    try {
+      // Save run summary
+      const toolsUsed = [...new Set(steps.filter((s) => s.type === "tool_call").map((s) => s.toolName))];
+      const summary = `Completed ${steps.length} steps using ${toolsUsed.join(", ") || "no tools"}. Output type: ${output.type || "unknown"}.`;
+      await this.memoryService.setLastRunSummary(agentId, summary);
+
+      // If output has a "to" field (email), track as contacted lead
+      if (output.to && typeof output.to === "string" && output.to.includes("@")) {
+        await this.memoryService.addContactedLead(agentId, output.to as string);
+      }
+    } catch (error) {
+      // Memory save failures should not break the run
+    }
   }
 
   private async addLog(runId: string, level: "DEBUG" | "INFO" | "WARN" | "ERROR", message: string, metadata?: Record<string, unknown>) {

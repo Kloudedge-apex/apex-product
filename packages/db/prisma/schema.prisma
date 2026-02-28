@@ -115,6 +115,7 @@ model Agent {
   createdAt  DateTime    @default(now())
   updatedAt  DateTime    @updatedAt
   runs       AgentRun[]
+  memories   AgentMemory[]
 
   @@index([orgId])
   @@index([orgId, domain])
@@ -162,4 +163,17 @@ model AgentLog {
 
   @@index([runId])
   @@index([runId, level])
+}
+
+model AgentMemory {
+  id        String   @id @default(cuid())
+  agentId   String
+  agent     Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  key       String
+  value     Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([agentId, key])
+  @@index([agentId])
 }

@@ -6,6 +6,7 @@ import { LLMService } from "./llm.service";
 import { ExecutorService } from "./executor.service";
 import { SchedulerService } from "./scheduler.service";
 import { RuntimeController } from "./runtime.controller";
+import { MemoryService } from "./memory.service";
 
 @Module({
   controllers: [RuntimeController],
@@ -16,7 +17,8 @@ import { RuntimeController } from "./runtime.controller";
     LLMService,
     ExecutorService,
     SchedulerService,
+    MemoryService,
   ],
-  exports: [RuntimeService, LLMService],
+  exports: [RuntimeService, LLMService, MemoryService],
 })
 export class RuntimeModule {}
