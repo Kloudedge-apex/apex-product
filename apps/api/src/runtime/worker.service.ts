@@ -14,9 +14,34 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
     private executor: ExecutorService,
   ) {}
 
-  onModuleInit() {
+  async onModuleInit() {
+    // Recover orphaned QUEUED runs from DB (runs created but never enqueued)
+    await this.recoverOrphanedRuns();
     // Poll queue every 2 seconds
     this.intervalHandle = setInterval(() => this.processNext(), 2000);
+  }
+
+  private async recoverOrphanedRuns() {
+    try {
+      const orphaned = await this.prisma.agentRun.findMany({
+        where: { status: "QUEUED" },
+        orderBy: { startedAt: "asc" },
+        take: 20,
+      });
+      for (const run of orphaned) {
+        this.queue.enqueue({
+          id: `job_${run.id}`,
+          agentId: run.agentId,
+          orgId: run.orgId,
+          runId: run.id,
+        });
+      }
+      if (orphaned.length > 0) {
+        console.log(`[Worker] Recovered ${orphaned.length} orphaned QUEUED runs`);
+      }
+    } catch (err) {
+      console.error("[Worker] Failed to recover orphaned runs:", err);
+    }
   }
 
   onModuleDestroy() {

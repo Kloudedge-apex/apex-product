@@ -1,12 +1,15 @@
-import { Controller, Get, Post, Patch, Delete, Param, Body, Query } from "@nestjs/common";
+import { Controller, Get, Post, Patch, Delete, Param, Body, Query, Inject, forwardRef } from "@nestjs/common";
 import { AgentsService } from "./agents.service";
 import { PrismaService } from "../prisma/prisma.service";
+import { RuntimeService } from "../runtime/runtime.service";
 
 @Controller("agents")
 export class AgentsController {
   constructor(
     private readonly agentsService: AgentsService,
     private readonly prisma: PrismaService,
+    @Inject(forwardRef(() => RuntimeService))
+    private readonly runtime: RuntimeService,
   ) {}
 
   @Get("templates")
@@ -56,19 +59,13 @@ export class AgentsController {
     return this.agentsService.pause(id);
   }
 
-  // Trigger a run for an agent
+  // Trigger a run for an agent (goes through the runtime queue + worker)
   @Post(":id/runs")
   async triggerRun(@Param("id") agentId: string, @Body() body?: { orgId?: string }) {
     const agent = await this.prisma.agent.findUnique({ where: { id: agentId } });
     if (!agent) throw new Error("Agent not found");
     const orgId = body?.orgId || agent.orgId;
-    const run = await this.prisma.agentRun.create({
-      data: { agentId, orgId, status: "QUEUED" },
-    });
-    await this.prisma.agentLog.create({
-      data: { runId: run.id, level: "INFO", message: "Run queued for execution" },
-    });
-    return run;
+    return this.runtime.triggerRun(agentId, orgId);
   }
 
   // Get runs for an agent
@@ -76,7 +73,7 @@ export class AgentsController {
   async getAgentRuns(@Param("id") agentId: string) {
     return this.prisma.agentRun.findMany({
       where: { agentId },
-      include: { logs: { take: 5, orderBy: { createdAt: "desc" } } },
+      include: { logs: { take: 10, orderBy: { createdAt: "desc" } } },
       orderBy: { startedAt: "desc" },
       take: 50,
     });
