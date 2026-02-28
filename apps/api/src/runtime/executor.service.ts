@@ -103,15 +103,21 @@ export class ExecutorService {
     let totalCost = 0;
     const steps: StepLog[] = [];
     let stepNum = 0;
+    const minToolSteps = this.getMinToolSteps(agent.template.name);
 
     for (let i = 0; i < MAX_STEPS; i++) {
       stepNum = i + 1;
+
+      // Force tool use for the first N iterations to ensure agents actually use their tools
+      const toolCallsSoFar = steps.filter((s) => s.type === "tool_call").length;
+      const forceTools = toolCallsSoFar < minToolSteps && openAITools.length > 0;
 
       const response = await this.llm.chat(messages, {
         model,
         plan,
         maxTokens: 4000,
         tools: openAITools.length > 0 ? openAITools : undefined,
+        toolChoice: forceTools ? "required" : "auto",
       });
 
       totalTokens += response.tokensUsed;
@@ -303,6 +309,20 @@ ${toolDescriptions}
       default:
         return `Execute task with configuration:\n${configSummary}`;
     }
+  }
+
+  private getMinToolSteps(templateName: string): number {
+    // Minimum number of tool calls before allowing final answer
+    // This prevents lazy LLMs from skipping research steps
+    const minSteps: Record<string, number> = {
+      "sdr agent": 3,          // web_search + company_research/lead_score + send_email
+      "content writer": 2,     // web_search + web_scrape
+      "inbox monitor": 1,      // at least check inbox
+      "crm sync agent": 2,     // hubspot read + hubspot write
+      "reporting agent": 2,    // hubspot + web_search
+      "social engagement agent": 1,
+    };
+    return minSteps[templateName.toLowerCase()] || 1;
   }
 
   private isComplexTask(templateName: string): boolean {

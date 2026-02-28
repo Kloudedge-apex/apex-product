@@ -129,12 +129,30 @@ export class LLMService {
     const lastMessage = messages[messages.length - 1];
     const mockTokens = Math.min(Math.floor(Math.random() * 500) + 100, maxTokens);
 
-    // If tools are available and this is not a tool result, simulate tool calls
-    if (tools && tools.length > 0 && lastMessage?.role !== "tool") {
-      return this.mockToolCallResponse(tools, systemMessage, userMessage, model, mockTokens);
+    // If tools are available, simulate multi-step tool calling
+    if (tools && tools.length > 0) {
+      // Count how many tool results we've received so far
+      const toolResultCount = messages.filter((m) => m.role === "tool").length;
+      const toolCallCount = messages.filter((m) => m.role === "assistant" && m.tool_calls && m.tool_calls.length > 0).length;
+
+      // Get the planned tool sequence for this agent type
+      const sequence = this.getToolSequence(systemMessage, tools);
+
+      // If we haven't exhausted the sequence, make the next tool call
+      if (toolCallCount < sequence.length) {
+        const next = sequence[toolCallCount];
+        return {
+          content: "",
+          tokensUsed: mockTokens,
+          model: `${model}-mock`,
+          cost: (mockTokens / 1000) * (COST_PER_1K[model] || 0.00015),
+          toolCalls: [{ id: `call_${Date.now()}_${toolCallCount + 1}`, type: "function" as const, function: { name: next.name, arguments: JSON.stringify(next.args) } }],
+          finishReason: "tool_calls",
+        };
+      }
     }
 
-    // After tool results, generate final response
+    // All tool calls done (or no tools) — generate final response
     const content = this.generateMockContent(systemMessage, userMessage);
 
     return {
@@ -144,6 +162,40 @@ export class LLMService {
       cost: (mockTokens / 1000) * (COST_PER_1K[model] || 0.00015),
       finishReason: "stop",
     };
+  }
+
+  private getToolSequence(systemMessage: string, tools: OpenAIFunctionDef[]): Array<{ name: string; args: Record<string, unknown> }> {
+    const sysLower = systemMessage.toLowerCase();
+    const hasTool = (name: string) => tools.some((t) => t.function.name === name);
+    const seq: Array<{ name: string; args: Record<string, unknown> }> = [];
+
+    if (sysLower.includes("sdr") || sysLower.includes("sales")) {
+      if (hasTool("web_search")) seq.push({ name: "web_search", args: { query: "Acme Corp SaaS company overview funding", max_results: 3 } });
+      if (hasTool("company_research")) seq.push({ name: "company_research", args: { company_name: "Acme Corp", domain: "acme.com" } });
+      if (hasTool("lead_score")) seq.push({ name: "lead_score", args: { lead: { company: "Acme Corp", industry: "SaaS", size: "200", title: "CTO" }, icp: { industry: "SaaS", min_size: 50, max_size: 1000 } } });
+      if (hasTool("send_email")) seq.push({ name: "send_email", args: { to: "cto@acme.com", subject: "Quick question about Acme's growth", body: "Hi Alex,\n\nI noticed Acme Corp just closed your Series B — congrats. We help SaaS teams like yours automate outbound with AI agents that research, personalize, and send at scale.\n\nWorth a 15-min call this week?\n\nBest,\nYour AI SDR" } });
+      if (hasTool("hubspot")) seq.push({ name: "hubspot", args: { action: "create_contact", data: { email: "cto@acme.com", firstname: "Alex", lastname: "Chen", company: "Acme Corp", jobtitle: "CTO" } } });
+    } else if (sysLower.includes("content") || sysLower.includes("writer")) {
+      if (hasTool("web_search")) seq.push({ name: "web_search", args: { query: "trending B2B SaaS content topics 2026", max_results: 5 } });
+      if (hasTool("web_scrape")) seq.push({ name: "web_scrape", args: { url: "https://example.com/trending-b2b-topics" } });
+    } else if (sysLower.includes("inbox") || sysLower.includes("email triage")) {
+      if (hasTool("send_email")) seq.push({ name: "send_email", args: { action: "read_inbox", limit: 20 } });
+    } else if (sysLower.includes("report")) {
+      if (hasTool("hubspot")) seq.push({ name: "hubspot", args: { action: "search_contacts", data: { limit: 50 } } });
+      if (hasTool("web_search")) seq.push({ name: "web_search", args: { query: "B2B SaaS benchmarks response rate 2026", max_results: 3 } });
+    } else if (sysLower.includes("crm") || sysLower.includes("sync")) {
+      if (hasTool("hubspot")) seq.push({ name: "hubspot", args: { action: "search_contacts", data: { recently_modified: true } } });
+      if (hasTool("hubspot")) seq.push({ name: "hubspot", args: { action: "update_contact", data: { email: "john@example.com", properties: { last_synced: new Date().toISOString() } } } });
+    } else if (sysLower.includes("social") || sysLower.includes("engagement")) {
+      if (hasTool("web_search")) seq.push({ name: "web_search", args: { query: "LinkedIn B2B AI discussions today", max_results: 5 } });
+    }
+
+    // Fallback: if no sequence matched, call first available tool
+    if (seq.length === 0 && tools.length > 0) {
+      seq.push({ name: tools[0].function.name, args: {} });
+    }
+
+    return seq;
   }
 
   private mockToolCallResponse(
