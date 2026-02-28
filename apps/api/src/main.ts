@@ -6,14 +6,22 @@ async function bootstrap() {
 
   app.setGlobalPrefix("api");
 
+  // CORS configuration
+  const allowedOrigins = [
+    process.env.FRONTEND_URL || "http://localhost:3000",
+    "http://localhost:3000",
+    "https://apex.kloudedge.com",
+  ].filter(Boolean);
+
   app.enableCors({
-    origin: process.env.FRONTEND_URL || "http://localhost:3000",
+    origin: allowedOrigins,
+    methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
     credentials: true,
   });
 
   const port = process.env.API_PORT || 4000;
   await app.listen(port);
-  console.log(`[Apex API] Running on http://localhost:${port}`);
 }
 
 bootstrap();

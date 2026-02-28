@@ -17,11 +17,11 @@
 
 @layer components {
   .btn-primary {
-    @apply bg-apex-indigo hover:bg-apex-indigo-light text-white font-medium px-4 py-2 rounded-lg transition-colors;
+    @apply bg-apex-indigo hover:bg-apex-indigo-light text-white font-medium px-4 py-2 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
   }
 
   .btn-secondary {
-    @apply bg-apex-slate hover:bg-apex-slate-light text-white font-medium px-4 py-2 rounded-lg transition-colors border border-apex-border;
+    @apply bg-apex-slate hover:bg-apex-slate-light text-white font-medium px-4 py-2 rounded-lg transition-colors border border-apex-border disabled:opacity-50 disabled:cursor-not-allowed;
   }
 
   .card {
@@ -29,6 +29,42 @@
   }
 
   .input-field {
-    @apply bg-apex-surface border border-apex-border rounded-lg px-4 py-2 text-white placeholder-apex-muted focus:outline-none focus:ring-2 focus:ring-apex-indigo focus:border-transparent;
+    @apply bg-apex-surface border border-apex-border rounded-lg px-4 py-2 text-white placeholder-apex-muted focus:outline-none focus:ring-2 focus:ring-apex-indigo focus:border-transparent disabled:opacity-50 disabled:cursor-not-allowed;
   }
+}
+
+@layer utilities {
+  .animate-slide-in {
+    animation: slideIn 0.3s ease-out;
+  }
+
+  @keyframes slideIn {
+    from {
+      opacity: 0;
+      transform: translateX(100%);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(0);
+    }
+  }
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #2d3a4d;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3d4a5d;
 }

@@ -1,4 +1,4 @@
-import { Module } from "@nestjs/common";
+import { Module, MiddlewareConsumer, NestModule } from "@nestjs/common";
 import { ConfigModule } from "@nestjs/config";
 import { PrismaModule } from "./prisma/prisma.module";
 import { HealthModule } from "./health/health.module";
@@ -9,6 +9,7 @@ import { IntegrationsModule } from "./integrations/integrations.module";
 import { BillingModule } from "./billing/billing.module";
 import { RunsModule } from "./runs/runs.module";
 import { RuntimeModule } from "./runtime/runtime.module";
+import { RateLimitMiddleware } from "./common/rate-limit.middleware";
 
 @Module({
   imports: [
@@ -24,4 +25,8 @@ import { RuntimeModule } from "./runtime/runtime.module";
     RuntimeModule,
   ],
 })
-export class AppModule {}
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) {
+    consumer.apply(RateLimitMiddleware).forRoutes("*");
+  }
+}
