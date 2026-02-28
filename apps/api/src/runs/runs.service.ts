@@ -5,13 +5,52 @@ import { PrismaService } from "../prisma/prisma.service";
 export class RunsService {
   constructor(private prisma: PrismaService) {}
 
-  async findByOrg(orgId: string, limit = 50) {
-    return this.prisma.agentRun.findMany({
-      where: { orgId },
-      include: { agent: { select: { name: true, domain: true } }, logs: { take: 5, orderBy: { createdAt: "desc" } } },
+  async findByOrg(orgId: string, opts: {
+    limit?: number; offset?: number; status?: string;
+    agentId?: string; from?: string; to?: string; search?: string;
+  } = {}) {
+    const { limit = 50, offset = 0, status, agentId, from, to, search } = opts;
+    const where: any = { orgId };
+    if (status) {
+      const statuses = status.split(",").map((s) => s.trim());
+      where.status = { in: statuses };
+    }
+    if (agentId) where.agentId = agentId;
+    if (from || to) {
+      where.startedAt = {};
+      if (from) where.startedAt.gte = new Date(from);
+      if (to) where.startedAt.lte = new Date(to);
+    }
+
+    const runs = await this.prisma.agentRun.findMany({
+      where,
+      include: {
+        agent: { select: { name: true, domain: true } },
+        logs: { orderBy: { createdAt: "desc" }, take: 20 },
+        _count: { select: { logs: true } },
+      },
       orderBy: { startedAt: "desc" },
       take: limit,
+      skip: offset,
     });
+
+    // Step count and search filter
+    let results = runs.map((run) => {
+      const stepCount = run.logs.filter((l) => l.level === "INFO" && l.message.startsWith("Step")).length;
+      return { ...run, stepCount };
+    });
+
+    if (search) {
+      const q = search.toLowerCase();
+      results = results.filter((r) =>
+        r.agent?.name?.toLowerCase().includes(q) ||
+        r.logs.some((l) => l.message.toLowerCase().includes(q)) ||
+        (r.result && JSON.stringify(r.result).toLowerCase().includes(q))
+      );
+    }
+
+    const total = await this.prisma.agentRun.count({ where });
+    return { runs: results, total, limit, offset };
   }
 
   async findByAgent(agentId: string, limit = 50) {

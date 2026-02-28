@@ -32,6 +32,7 @@ export const api = {
   agents: {
     list: (orgId: string) => fetchAPI(`/agents?orgId=${orgId}`),
     get: (id: string) => fetchAPI(`/agents/${id}`),
+    analytics: (id: string) => fetchAPI(`/agents/${id}/analytics`),
     create: (data: Record<string, unknown>) =>
       fetchAPI("/agents", { method: "POST", body: JSON.stringify(data) }),
     update: (id: string, data: Record<string, unknown>) =>
@@ -50,7 +51,17 @@ export const api = {
   },
 
   runs: {
-    listByOrg: (orgId: string, limit?: number) => fetchAPI(`/runs?orgId=${orgId}${limit ? `&limit=${limit}` : ""}`),
+    listByOrg: (orgId: string, limit?: number, opts?: { offset?: number; status?: string; agentId?: string; from?: string; to?: string; search?: string }) => {
+      const params = new URLSearchParams({ orgId });
+      if (limit) params.set("limit", String(limit));
+      if (opts?.offset) params.set("offset", String(opts.offset));
+      if (opts?.status) params.set("status", opts.status);
+      if (opts?.agentId) params.set("agentId", opts.agentId);
+      if (opts?.from) params.set("from", opts.from);
+      if (opts?.to) params.set("to", opts.to);
+      if (opts?.search) params.set("search", opts.search);
+      return fetchAPI(`/runs?${params.toString()}`);
+    },
     listByAgent: (agentId: string, limit?: number) => fetchAPI(`/runs/agent/${agentId}${limit ? `&limit=${limit}` : ""}`),
     get: (id: string) => fetchAPI(`/runs/${id}`),
     trigger: (agentId: string, orgId: string) =>

@@ -24,6 +24,11 @@ export class AgentsController {
     return this.agentsService.findAll(orgId);
   }
 
+  @Get(":id/analytics")
+  getAnalytics(@Param("id") id: string) {
+    return this.agentsService.getAnalytics(id);
+  }
+
   @Get(":id")
   findOne(@Param("id") id: string) {
     return this.agentsService.findOne(id);
