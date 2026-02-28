@@ -3,9 +3,10 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import { Bot, Play, Pause, Clock, Activity, ArrowLeft, Loader2, CheckCircle, XCircle, Trash2, ChevronDown, ChevronRight, Search, Filter, Brain, Mail, FileText, BarChart3, Globe, Database, Wrench, Copy, Send } from "lucide-react";
+import { Bot, Play, Pause, Clock, Activity, ArrowLeft, Loader2, CheckCircle, XCircle, Trash2, ChevronDown, ChevronRight, Search, Filter, Brain, Mail, FileText, BarChart3, Globe, Database, Wrench, Copy, TrendingUp } from "lucide-react";
 import { api } from "@/lib/api";
 
+// ─── Interfaces ─────────────────────────────────────────
 interface LogEntry {
   id: string;
   level: string;
@@ -37,32 +38,36 @@ interface Agent {
   runs: Run[];
 }
 
+interface Analytics {
+  totalRuns: number;
+  runsLast7Days: number;
+  runsLast30Days: number;
+  successRate: number;
+  avgExecutionTime: number;
+  avgTokensPerRun: number;
+  totalTokens: number;
+  totalCost: number;
+  runsByDay: Array<{ date: string; total: number; completed: number; failed: number }>;
+  memoryKeys: number;
+  recentRuns: Array<{ id: string; status: string; startedAt: string; completedAt: string | null; tokensUsed: number; steps: number }>;
+  toolUsage: Record<string, number>;
+}
+
+// ─── Helper functions ───────────────────────────────────
 const logLevelColors: Record<string, string> = {
-  DEBUG: "text-gray-400",
-  INFO: "text-blue-400",
-  WARN: "text-yellow-400",
-  ERROR: "text-red-400",
+  DEBUG: "text-gray-400", INFO: "text-blue-400", WARN: "text-yellow-400", ERROR: "text-red-400",
 };
 
 const stepIcons: Record<string, typeof Wrench> = {
-  web_search: Globe,
-  web_scrape: Globe,
-  company_research: Search,
-  lead_score: BarChart3,
-  send_email: Mail,
-  hubspot: Database,
-  memory: Brain,
+  web_search: Globe, web_scrape: Globe, company_research: Search,
+  lead_score: BarChart3, send_email: Mail, hubspot: Database, memory: Brain,
 };
 
 function getStepIcon(message: string) {
   const toolMatch = message.match(/Tool call -> (\w+)/);
-  if (toolMatch) {
-    const Icon = stepIcons[toolMatch[1]] || Wrench;
-    return Icon;
-  }
+  if (toolMatch) return stepIcons[toolMatch[1]] || Wrench;
   if (message.includes("Starting")) return Play;
-  if (message.includes("Final answer")) return CheckCircle;
-  if (message.includes("completed")) return CheckCircle;
+  if (message.includes("Final answer") || message.includes("completed")) return CheckCircle;
   return Activity;
 }
 
@@ -74,22 +79,25 @@ function getStepColor(message: string, level: string) {
   return "border-apex-indigo bg-apex-indigo/10";
 }
 
-// Output card components
+function formatDay(dateStr: string) {
+  return new Date(dateStr + "T00:00:00").toLocaleDateString("en-US", { weekday: "short" });
+}
+
+function formatMs(ms: number) {
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+// ─── Output card components ─────────────────────────────
 function EmailOutputCard({ result }: { result: Record<string, unknown> }) {
   const [copied, setCopied] = useState(false);
   return (
     <div className="space-y-3">
       <div className="rounded-lg border border-apex-border bg-apex-surface p-4">
         <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2">
-            <Mail size={16} className="text-apex-indigo" />
-            <span className="text-sm font-medium">Email Draft</span>
-          </div>
+          <div className="flex items-center gap-2"><Mail size={16} className="text-apex-indigo" /><span className="text-sm font-medium">Email Draft</span></div>
           {result.leadScore != null && (
-            <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-              (result.leadScore as number) >= 70 ? "bg-green-500/10 text-green-400" :
-              (result.leadScore as number) >= 40 ? "bg-yellow-500/10 text-yellow-400" : "bg-red-500/10 text-red-400"
-            }`}>
+            <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${(result.leadScore as number) >= 70 ? "bg-green-500/10 text-green-400" : (result.leadScore as number) >= 40 ? "bg-yellow-500/10 text-yellow-400" : "bg-red-500/10 text-red-400"}`}>
               Score: {String(result.leadScore)}/100
             </span>
           )}
@@ -101,9 +109,7 @@ function EmailOutputCard({ result }: { result: Record<string, unknown> }) {
         </div>
         <div className="flex gap-2 mt-3">
           <button onClick={() => { navigator.clipboard.writeText(String(result.body || "")); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
-            className="btn-secondary text-xs flex items-center gap-1">
-            <Copy size={12} /> {copied ? "Copied!" : "Copy"}
-          </button>
+            className="btn-secondary text-xs flex items-center gap-1"><Copy size={12} /> {copied ? "Copied!" : "Copy"}</button>
         </div>
       </div>
       {result.companyResearch != null && (
@@ -158,9 +164,7 @@ function TriageOutputCard({ result }: { result: Record<string, unknown> }) {
         {emails.map((email, i) => (
           <div key={i} className="flex items-center justify-between p-2 rounded bg-apex-navy-dark text-xs">
             <div className="flex items-center gap-2">
-              <span className={`w-2 h-2 rounded-full ${
-                (email.priority as number) <= 2 ? "bg-red-400" : (email.priority as number) <= 3 ? "bg-yellow-400" : "bg-gray-400"
-              }`} />
+              <span className={`w-2 h-2 rounded-full ${(email.priority as number) <= 2 ? "bg-red-400" : (email.priority as number) <= 3 ? "bg-yellow-400" : "bg-gray-400"}`} />
               <span className="font-medium">{String(email.category || "")}</span>
               {email.from != null && <span className="text-apex-muted">{String(email.from)}</span>}
             </div>
@@ -183,19 +187,13 @@ function ReportOutputCard({ result }: { result: Record<string, unknown> }) {
       {result.metrics != null && (
         <div className="grid grid-cols-2 md:grid-cols-3 gap-2 mb-3">
           {Object.entries(result.metrics as Record<string, unknown>).map(([k, v]) => (
-            <div key={k} className="p-2 bg-apex-navy-dark rounded text-center">
-              <div className="text-xs text-apex-muted capitalize">{k.replace(/([A-Z])/g, " $1")}</div>
-              <div className="font-medium">{Array.isArray(v) ? v.join(", ") : String(v)}</div>
-            </div>
+            <div key={k} className="p-2 bg-apex-navy-dark rounded text-center"><div className="text-xs text-apex-muted capitalize">{k.replace(/([A-Z])/g, " $1")}</div><div className="font-medium">{Array.isArray(v) ? v.join(", ") : String(v)}</div></div>
           ))}
         </div>
       )}
       {result.summary != null && <div className="p-3 bg-apex-navy-dark rounded-lg text-sm">{String(result.summary)}</div>}
       {Array.isArray(result.recommendations) && (
-        <div className="mt-3">
-          <h5 className="text-xs font-medium text-apex-muted mb-1">Recommendations</h5>
-          <ul className="space-y-1 text-xs">{(result.recommendations as string[]).map((r, i) => <li key={i} className="flex gap-1"><span className="text-cyan-400">-</span> {r}</li>)}</ul>
-        </div>
+        <div className="mt-3"><h5 className="text-xs font-medium text-apex-muted mb-1">Recommendations</h5><ul className="space-y-1 text-xs">{(result.recommendations as string[]).map((r, i) => <li key={i} className="flex gap-1"><span className="text-cyan-400">-</span> {r}</li>)}</ul></div>
       )}
     </div>
   );
@@ -214,6 +212,149 @@ function RunOutputCard({ result }: { result: Record<string, unknown> }) {
   );
 }
 
+// ─── Analytics Tab Component ────────────────────────────
+function AnalyticsTab({ agentId }: { agentId: string }) {
+  const [analytics, setAnalytics] = useState<Analytics | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    api.agents.analytics(agentId).then(setAnalytics).catch(() => {}).finally(() => setLoading(false));
+  }, [agentId]);
+
+  if (loading) return <div className="text-center py-12"><Loader2 className="animate-spin text-apex-indigo mx-auto" size={24} /></div>;
+  if (!analytics) return <div className="text-center py-12 text-apex-muted">Failed to load analytics</div>;
+
+  const maxRuns = Math.max(...analytics.runsByDay.map((d) => d.total), 1);
+  const toolEntries = Object.entries(analytics.toolUsage).sort((a, b) => b[1] - a[1]);
+  const maxToolUse = toolEntries.length > 0 ? toolEntries[0][1] : 1;
+
+  return (
+    <div className="space-y-6">
+      {/* Stats row */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="card"><p className="text-xs text-apex-muted mb-1">Total Runs</p><p className="text-2xl font-bold">{analytics.totalRuns}</p></div>
+        <div className="card"><p className="text-xs text-apex-muted mb-1">Success Rate</p><p className={`text-2xl font-bold ${analytics.successRate >= 90 ? "text-green-400" : analytics.successRate >= 75 ? "text-yellow-400" : "text-red-400"}`}>{analytics.successRate}%</p></div>
+        <div className="card"><p className="text-xs text-apex-muted mb-1">Avg Execution</p><p className="text-2xl font-bold">{formatMs(analytics.avgExecutionTime)}</p></div>
+        <div className="card"><p className="text-xs text-apex-muted mb-1">Avg Tokens/Run</p><p className="text-2xl font-bold">{analytics.avgTokensPerRun.toLocaleString()}</p></div>
+      </div>
+
+      {/* 7-day chart */}
+      <div className="card">
+        <h3 className="text-sm font-semibold mb-4">Runs (Last 7 Days)</h3>
+        <div className="flex items-end gap-2 h-32">
+          {analytics.runsByDay.map((day) => (
+            <div key={day.date} className="flex-1 flex flex-col justify-end group relative">
+              <div className="absolute -top-12 left-1/2 -translate-x-1/2 bg-apex-surface border border-apex-border rounded-lg p-2 text-xs whitespace-nowrap z-10 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
+                <p className="text-green-400">{day.completed} ok</p>
+                <p className="text-red-400">{day.failed} fail</p>
+              </div>
+              <div className="flex flex-col rounded-t overflow-hidden" style={{ minHeight: day.total > 0 ? 2 : 0 }}>
+                {day.failed > 0 && <div className="bg-red-500/80" style={{ height: `${(day.failed / maxRuns) * 100}px` }} />}
+                {day.completed > 0 && <div className="bg-green-500/80 rounded-t" style={{ height: `${(day.completed / maxRuns) * 100}px` }} />}
+              </div>
+              {day.total === 0 && <div className="bg-apex-border/30 rounded-t" style={{ height: 2 }} />}
+              <span className="text-xs text-apex-muted text-center mt-1">{formatDay(day.date)}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        {/* Tool usage breakdown */}
+        <div className="card">
+          <h3 className="text-sm font-semibold mb-4">Tool Usage</h3>
+          {toolEntries.length === 0 ? (
+            <p className="text-sm text-apex-muted">No tool usage recorded</p>
+          ) : (
+            <div className="space-y-2">
+              {toolEntries.map(([tool, count]) => (
+                <div key={tool} className="flex items-center gap-3">
+                  <span className="text-sm w-32 truncate">{tool}</span>
+                  <div className="flex-1 h-2 bg-apex-surface rounded-full overflow-hidden">
+                    <div className="h-full bg-apex-indigo/60 rounded-full" style={{ width: `${(count / maxToolUse) * 100}%` }} />
+                  </div>
+                  <span className="text-xs text-apex-muted w-10 text-right">{count}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Cost & tokens */}
+        <div className="card">
+          <h3 className="text-sm font-semibold mb-4">Cost Summary</h3>
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-apex-muted">Total Tokens</span>
+              <span className="font-medium">{analytics.totalTokens.toLocaleString()}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-apex-muted">Total Cost</span>
+              <span className="font-medium">${analytics.totalCost.toFixed(4)}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-apex-muted">Runs (7d)</span>
+              <span className="font-medium">{analytics.runsLast7Days}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-apex-muted">Runs (30d)</span>
+              <span className="font-medium">{analytics.runsLast30Days}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-apex-muted">Memory Keys</span>
+              <span className="font-medium">{analytics.memoryKeys}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Run Comparison Component ───────────────────────────
+function RunComparison({ currentRun, previousRun }: { currentRun: Run; previousRun: Run }) {
+  return (
+    <div className="border-t border-apex-border pt-4 mt-4">
+      <h4 className="text-xs font-medium text-apex-muted mb-3">Comparison with Previous Run</h4>
+      <div className="grid grid-cols-2 gap-4">
+        <div>
+          <p className="text-xs font-medium text-green-400 mb-2">Current Run</p>
+          <div className="space-y-1 text-xs">
+            <p>Status: <span className="font-medium">{currentRun.status}</span></p>
+            <p>Tokens: <span className="font-medium">{currentRun.tokensUsed.toLocaleString()}</span></p>
+            {currentRun.completedAt && <p>Duration: <span className="font-medium">{((new Date(currentRun.completedAt).getTime() - new Date(currentRun.startedAt).getTime()) / 1000).toFixed(1)}s</span></p>}
+          </div>
+          {currentRun.result && (
+            <pre className="mt-2 text-xs bg-apex-navy-dark p-2 rounded-lg overflow-x-auto max-h-48 overflow-y-auto text-green-300 font-mono">
+              {JSON.stringify(currentRun.result, null, 2)}
+            </pre>
+          )}
+        </div>
+        <div>
+          <p className="text-xs font-medium text-blue-400 mb-2">Previous Run</p>
+          <div className="space-y-1 text-xs">
+            <p>Status: <span className="font-medium">{previousRun.status}</span></p>
+            <p>Tokens: <span className="font-medium">{previousRun.tokensUsed.toLocaleString()}</span>
+              {currentRun.tokensUsed !== previousRun.tokensUsed && (
+                <span className={currentRun.tokensUsed < previousRun.tokensUsed ? "text-green-400 ml-1" : "text-red-400 ml-1"}>
+                  ({currentRun.tokensUsed < previousRun.tokensUsed ? "-" : "+"}{Math.abs(currentRun.tokensUsed - previousRun.tokensUsed)})
+                </span>
+              )}
+            </p>
+            {previousRun.completedAt && <p>Duration: <span className="font-medium">{((new Date(previousRun.completedAt).getTime() - new Date(previousRun.startedAt).getTime()) / 1000).toFixed(1)}s</span></p>}
+          </div>
+          {previousRun.result && (
+            <pre className="mt-2 text-xs bg-apex-navy-dark p-2 rounded-lg overflow-x-auto max-h-48 overflow-y-auto text-blue-300 font-mono">
+              {JSON.stringify(previousRun.result, null, 2)}
+            </pre>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Main Page ──────────────────────────────────────────
 export default function AgentDetailPage() {
   const params = useParams();
   const router = useRouter();
@@ -222,9 +363,10 @@ export default function AgentDetailPage() {
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
   const [expandedRun, setExpandedRun] = useState<string | null>(null);
+  const [compareRun, setCompareRun] = useState<string | null>(null);
   const [logFilter, setLogFilter] = useState<string>("ALL");
   const [logSearch, setLogSearch] = useState("");
-  const [tab, setTab] = useState<"runs" | "config" | "memory" | "logs">("runs");
+  const [tab, setTab] = useState<"runs" | "analytics" | "config" | "memory" | "logs">("runs");
   const [deleting, setDeleting] = useState(false);
   const [memories, setMemories] = useState<Record<string, unknown>>({});
   const [memoriesLoading, setMemoriesLoading] = useState(false);
@@ -237,17 +379,11 @@ export default function AgentDetailPage() {
     } catch { /* */ }
   }, [id]);
 
-  // Initial load
   useEffect(() => {
-    async function load() {
-      setLoading(true);
-      await loadAgent();
-      setLoading(false);
-    }
+    async function load() { setLoading(true); await loadAgent(); setLoading(false); }
     load();
   }, [loadAgent]);
 
-  // Real-time polling: poll every 2s when any run is in progress
   useEffect(() => {
     const hasRunningRun = agent?.runs.some((r) => r.status === "RUNNING" || r.status === "QUEUED");
     if (hasRunningRun) {
@@ -259,7 +395,6 @@ export default function AgentDetailPage() {
     return () => { if (pollingRef.current) clearInterval(pollingRef.current); };
   }, [agent?.runs, loadAgent]);
 
-  // Load memories when tab changes
   useEffect(() => {
     if (tab === "memory" && id) {
       setMemoriesLoading(true);
@@ -298,12 +433,7 @@ export default function AgentDetailPage() {
 
   async function handleDeleteMemory(key: string) {
     if (!agent) return;
-    try {
-      await api.agents.deleteMemory(agent.id, key);
-      const updated = { ...memories };
-      delete updated[key];
-      setMemories(updated);
-    } catch { /* */ }
+    try { await api.agents.deleteMemory(agent.id, key); const updated = { ...memories }; delete updated[key]; setMemories(updated); } catch { /* */ }
   }
 
   async function handleClearMemories() {
@@ -312,11 +442,11 @@ export default function AgentDetailPage() {
   }
 
   if (loading) {
-    return (<div className="flex items-center justify-center min-h-[60vh]"><Loader2 className="animate-spin text-apex-indigo" size={32} /></div>);
+    return <div className="flex items-center justify-center min-h-[60vh]"><Loader2 className="animate-spin text-apex-indigo" size={32} /></div>;
   }
 
   if (!agent) {
-    return (<div className="card text-center py-16"><p className="text-apex-muted">Agent not found</p><Link href="/agents" className="text-apex-indigo mt-4 inline-block hover:underline">Back to agents</Link></div>);
+    return <div className="card text-center py-16"><p className="text-apex-muted">Agent not found</p><Link href="/agents" className="text-apex-indigo mt-4 inline-block hover:underline">Back to agents</Link></div>;
   }
 
   const statusColor = agent.status === "ACTIVE" ? "bg-green-500/10 text-green-400" :
@@ -387,9 +517,9 @@ export default function AgentDetailPage() {
 
       {/* Tabs */}
       <div className="flex gap-1 p-1 bg-apex-surface rounded-lg mb-6 w-fit">
-        {(["runs", "config", "memory", "logs"] as const).map((t) => (
+        {(["runs", "analytics", "config", "memory", "logs"] as const).map((t) => (
           <button key={t} onClick={() => setTab(t)} className={`px-4 py-2 rounded-md text-sm font-medium transition-colors capitalize ${tab === t ? "bg-apex-indigo text-white" : "text-apex-muted hover:text-white"}`}>
-            {t === "runs" ? `Runs (${agent.runs.length})` : t === "logs" ? `Logs (${allLogs.length})` : t === "memory" ? "Memory" : "Config"}
+            {t === "runs" ? `Runs (${agent.runs.length})` : t === "analytics" ? "Analytics" : t === "logs" ? `Logs (${allLogs.length})` : t === "memory" ? "Memory" : "Config"}
           </button>
         ))}
       </div>
@@ -398,19 +528,18 @@ export default function AgentDetailPage() {
         <div className="card">
           <h2 className="text-lg font-semibold mb-4">Run History</h2>
           {agent.runs.length === 0 ? (
-            <div className="text-center py-12">
-              <Activity size={48} className="mx-auto text-apex-border mb-4" />
-              <p className="text-apex-muted">No runs yet</p>
-            </div>
+            <div className="text-center py-12"><Activity size={48} className="mx-auto text-apex-border mb-4" /><p className="text-apex-muted">No runs yet</p></div>
           ) : (
             <div className="space-y-3">
-              {agent.runs.map((run) => {
+              {agent.runs.map((run, runIdx) => {
                 const isExpanded = expandedRun === run.id;
+                const isComparing = compareRun === run.id;
                 const duration = run.completedAt ? Math.round((new Date(run.completedAt).getTime() - new Date(run.startedAt).getTime()) / 1000) : null;
                 const isActive = run.status === "RUNNING" || run.status === "QUEUED";
                 const meta = run.result?._meta as Record<string, unknown> | undefined;
                 const toolsUsed = (meta?.toolsUsed || []) as string[];
                 const stepCount = meta?.steps as number | undefined;
+                const previousRun = runIdx < agent.runs.length - 1 ? agent.runs[runIdx + 1] : null;
 
                 return (
                   <div key={run.id} className={`rounded-lg bg-apex-surface overflow-hidden ${isActive ? "ring-1 ring-yellow-500/30" : ""}`}>
@@ -450,9 +579,7 @@ export default function AgentDetailPage() {
                                 return (
                                   <div key={log.id} className="flex gap-3">
                                     <div className="flex flex-col items-center">
-                                      <div className={`w-7 h-7 rounded-full border-2 flex items-center justify-center flex-shrink-0 ${colorClass}`}>
-                                        <Icon size={12} />
-                                      </div>
+                                      <div className={`w-7 h-7 rounded-full border-2 flex items-center justify-center flex-shrink-0 ${colorClass}`}><Icon size={12} /></div>
                                       {!isLast && <div className="w-0.5 h-6 bg-apex-border" />}
                                     </div>
                                     <div className="pb-3 min-w-0">
@@ -472,6 +599,19 @@ export default function AgentDetailPage() {
                             <h4 className="text-xs font-medium text-apex-muted mb-2">Output</h4>
                             <RunOutputCard result={run.result} />
                           </div>
+                        )}
+
+                        {/* Compare toggle */}
+                        {previousRun && (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setCompareRun(isComparing ? null : run.id); }}
+                            className="text-xs text-apex-indigo-light hover:underline flex items-center gap-1"
+                          >
+                            <BarChart3 size={12} /> {isComparing ? "Hide Comparison" : "Compare with Previous Run"}
+                          </button>
+                        )}
+                        {isComparing && previousRun && (
+                          <RunComparison currentRun={run} previousRun={previousRun} />
                         )}
 
                         {/* Debug Logs (collapsed) */}
@@ -497,6 +637,8 @@ export default function AgentDetailPage() {
           )}
         </div>
       )}
+
+      {tab === "analytics" && <AnalyticsTab agentId={id} />}
 
       {tab === "config" && (
         <div className="card">
@@ -525,9 +667,7 @@ export default function AgentDetailPage() {
               <span className="text-xs text-apex-muted">({Object.keys(memories).length} entries)</span>
             </div>
             {Object.keys(memories).length > 0 && (
-              <button onClick={handleClearMemories} className="text-xs text-red-400 hover:text-red-300 flex items-center gap-1">
-                <Trash2 size={12} /> Clear All
-              </button>
+              <button onClick={handleClearMemories} className="text-xs text-red-400 hover:text-red-300 flex items-center gap-1"><Trash2 size={12} /> Clear All</button>
             )}
           </div>
           {memoriesLoading ? (
