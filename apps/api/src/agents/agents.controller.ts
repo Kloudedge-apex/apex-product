@@ -2,6 +2,7 @@ import { Controller, Get, Post, Patch, Delete, Param, Body, Query, Inject, forwa
 import { AgentsService } from "./agents.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { RuntimeService } from "../runtime/runtime.service";
+import { MemoryService } from "../runtime/memory.service";
 
 @Controller("agents")
 export class AgentsController {
@@ -10,6 +11,7 @@ export class AgentsController {
     private readonly prisma: PrismaService,
     @Inject(forwardRef(() => RuntimeService))
     private readonly runtime: RuntimeService,
+    private readonly memoryService: MemoryService,
   ) {}
 
   @Get("templates")
@@ -73,9 +75,36 @@ export class AgentsController {
   async getAgentRuns(@Param("id") agentId: string) {
     return this.prisma.agentRun.findMany({
       where: { agentId },
-      include: { logs: { take: 10, orderBy: { createdAt: "desc" } } },
+      include: { logs: { orderBy: { createdAt: "asc" } } },
       orderBy: { startedAt: "desc" },
       take: 50,
     });
+  }
+
+  // Get agent memories
+  @Get(":id/memories")
+  async getMemories(@Param("id") agentId: string) {
+    return this.memoryService.getAll(agentId);
+  }
+
+  // Update a memory entry
+  @Post(":id/memories")
+  async setMemory(@Param("id") agentId: string, @Body() body: { key: string; value: unknown }) {
+    await this.memoryService.set(agentId, body.key, body.value);
+    return { success: true };
+  }
+
+  // Delete a memory entry
+  @Delete(":id/memories/:key")
+  async deleteMemory(@Param("id") agentId: string, @Param("key") key: string) {
+    await this.memoryService.delete(agentId, key);
+    return { success: true };
+  }
+
+  // Clear all memories
+  @Delete(":id/memories")
+  async clearMemories(@Param("id") agentId: string) {
+    await this.memoryService.deleteAll(agentId);
+    return { success: true };
   }
 }

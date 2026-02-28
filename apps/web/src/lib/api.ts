@@ -40,6 +40,13 @@ export const api = {
     deploy: (id: string) => fetchAPI(`/agents/${id}/deploy`, { method: "POST" }),
     pause: (id: string) => fetchAPI(`/agents/${id}/pause`, { method: "POST" }),
     templates: (domain?: string) => fetchAPI(`/agents/templates${domain ? `?domain=${domain}` : ""}`),
+    getMemories: (id: string) => fetchAPI(`/agents/${id}/memories`),
+    setMemory: (id: string, key: string, value: unknown) =>
+      fetchAPI(`/agents/${id}/memories`, { method: "POST", body: JSON.stringify({ key, value }) }),
+    deleteMemory: (id: string, key: string) =>
+      fetchAPI(`/agents/${id}/memories/${encodeURIComponent(key)}`, { method: "DELETE" }),
+    clearMemories: (id: string) =>
+      fetchAPI(`/agents/${id}/memories`, { method: "DELETE" }),
   },
 
   runs: {
