@@ -1,0 +1,86 @@
+import { Injectable, OnModuleInit, OnModuleDestroy } from "@nestjs/common";
+import { PrismaService } from "../prisma/prisma.service";
+import { QueueService } from "./queue.service";
+import { ExecutorService } from "./executor.service";
+
+@Injectable()
+export class WorkerService implements OnModuleInit, OnModuleDestroy {
+  private intervalHandle: ReturnType<typeof setInterval> | null = null;
+  private processing = false;
+
+  constructor(
+    private prisma: PrismaService,
+    private queue: QueueService,
+    private executor: ExecutorService,
+  ) {}
+
+  onModuleInit() {
+    // Poll queue every 2 seconds
+    this.intervalHandle = setInterval(() => this.processNext(), 2000);
+  }
+
+  onModuleDestroy() {
+    if (this.intervalHandle) {
+      clearInterval(this.intervalHandle);
+    }
+  }
+
+  private async processNext() {
+    if (this.processing) return;
+
+    const job = this.queue.dequeue();
+    if (!job) return;
+
+    this.processing = true;
+
+    try {
+      // Update run status to RUNNING
+      await this.prisma.agentRun.update({
+        where: { id: job.runId },
+        data: { status: "RUNNING" },
+      });
+
+      // Execute the agent
+      const result = await this.executor.executeAgent(job.agentId, job.runId);
+
+      // Update run with results
+      await this.prisma.agentRun.update({
+        where: { id: job.runId },
+        data: {
+          status: "COMPLETED",
+          completedAt: new Date(),
+          result: result.output as any,
+          tokensUsed: result.tokensUsed,
+          cost: result.cost,
+        },
+      });
+
+      this.queue.complete(job.id);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "Unknown execution error";
+
+      // Update run as failed
+      await this.prisma.agentRun.update({
+        where: { id: job.runId },
+        data: {
+          status: "FAILED",
+          completedAt: new Date(),
+          result: { error: errorMessage } as any,
+        },
+      });
+
+      // Log the error
+      await this.prisma.agentLog.create({
+        data: {
+          runId: job.runId,
+          level: "ERROR",
+          message: errorMessage,
+        },
+      });
+
+      this.queue.fail(job.id, errorMessage);
+    } finally {
+      this.processing = false;
+    }
+  }
+}
