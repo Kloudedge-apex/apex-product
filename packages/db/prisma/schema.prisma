@@ -57,6 +57,14 @@ enum LogLevel {
   ERROR
 }
 
+enum RunStepType {
+  LLM_CALL
+  TOOL_CALL
+  TOOL_RESULT
+  ERROR
+  FINAL_OUTPUT
+}
+
 // ─── Models ──────────────────────────────────────────────
 
 model Org {
@@ -71,6 +79,7 @@ model Org {
   users        User[]
   agents       Agent[]
   integrations Integration[]
+  runs         AgentRun[]
 
   @@index([slug])
 }
@@ -92,46 +101,61 @@ model User {
 model AgentTemplate {
   id                   String   @id @default(cuid())
   domain               Domain
-  name                 String
+  name                 String   @unique
   description          String
+  systemPrompt         String?  @db.Text
   defaultConfig        Json
   requiredIntegrations String[] // e.g. ["email", "crm"]
+  isActive             Boolean  @default(true)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
   agents               Agent[]
 
   @@index([domain])
+  @@index([isActive])
 }
 
 model Agent {
-  id         String      @id @default(cuid())
+  id         String        @id @default(cuid())
   orgId      String
-  org        Org         @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  org        Org           @relation(fields: [orgId], references: [id], onDelete: Cascade)
   templateId String
   template   AgentTemplate @relation(fields: [templateId], references: [id])
   name       String
   domain     Domain
   config     Json
-  schedule   String?     // Cron expression
-  status     AgentStatus @default(PAUSED)
-  createdAt  DateTime    @default(now())
-  updatedAt  DateTime    @updatedAt
+  schedule   String?       // Cron expression
+  status     AgentStatus   @default(PAUSED)
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
   runs       AgentRun[]
   memories   AgentMemory[]
 
   @@index([orgId])
   @@index([orgId, domain])
+  @@index([orgId, status])
+  @@index([templateId])
 }
 
 model Integration {
-  id          String            @id @default(cuid())
-  orgId       String
-  org         Org               @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  provider    String            // gmail, outlook, hubspot, linkedin, etc
-  credentials Json              // Encrypted
-  status      IntegrationStatus @default(PENDING)
-  createdAt   DateTime          @default(now())
+  id                   String            @id @default(cuid())
+  orgId                String
+  org                  Org               @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  provider             String            // gmail, outlook, hubspot, linkedin, etc
+  credentials          Json              // Encrypted JSON blob
+  encryptedCredentials String?           @db.Text // AES-256-GCM encrypted token string
+  status               IntegrationStatus @default(PENDING)
+  scopes               String[]          // OAuth scopes granted
+  lastSyncAt           DateTime?
+  lastErrorAt          DateTime?
+  lastErrorMessage     String?
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
 
+  @@unique([orgId, provider])
   @@index([orgId])
   @@index([orgId, provider])
+  @@index([status])
 }
 
 model AgentRun {
@@ -139,6 +163,7 @@ model AgentRun {
   agentId     String
   agent       Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
   orgId       String
+  org         Org       @relation(fields: [orgId], references: [id], onDelete: Cascade)
   startedAt   DateTime  @default(now())
   completedAt DateTime?
   status      RunStatus @default(RUNNING)
@@ -146,10 +171,13 @@ model AgentRun {
   tokensUsed  Int       @default(0)
   cost        Float     @default(0)
   logs        AgentLog[]
+  steps       RunStep[]
 
   @@index([agentId])
   @@index([orgId])
   @@index([orgId, status])
+  @@index([agentId, startedAt])
+  @@index([startedAt])
 }
 
 model AgentLog {
@@ -163,6 +191,26 @@ model AgentLog {
 
   @@index([runId])
   @@index([runId, level])
+  @@index([createdAt])
+}
+
+model RunStep {
+  id         String      @id @default(cuid())
+  runId      String
+  run        AgentRun    @relation(fields: [runId], references: [id], onDelete: Cascade)
+  stepIndex  Int
+  type       RunStepType
+  toolName   String?
+  input      Json?
+  output     Json?
+  durationMs Int         @default(0)
+  tokenCount Int         @default(0)
+  error      String?
+  createdAt  DateTime    @default(now())
+
+  @@index([runId])
+  @@index([runId, stepIndex])
+  @@index([runId, type])
 }
 
 model AgentMemory {
