@@ -46,7 +46,7 @@ export class OrgScopeGuard implements CanActivate {
     }
 
     // Store orgId on request for downstream use
-    (request as Record<string, unknown>).orgId = orgId;
+    (request as unknown as Record<string, unknown>).orgId = orgId;
 
     return true;
   }
