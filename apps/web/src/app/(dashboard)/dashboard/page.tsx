@@ -1,14 +1,21 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState } from "react";
 import { useUser } from "@clerk/nextjs";
 import Link from "next/link";
 import {
-  Bot, Activity, Zap, TrendingUp, TrendingDown, Plus, ArrowRight, Loader2,
-  Play, Pause, CheckCircle, XCircle, Clock, AlertTriangle, DollarSign,
-  BarChart3, ArrowUpRight, ArrowDownRight,
+  Bot, Activity, Zap, TrendingUp, Plus, ArrowRight,
+  Play, Pause, CheckCircle, XCircle, AlertTriangle, DollarSign,
+  ArrowUpRight, ArrowDownRight, ChevronDown, ChevronRight, Clock,
+  FileText,
 } from "lucide-react";
+import {
+  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip,
+  ResponsiveContainer, PieChart, Pie, Cell, Legend,
+} from "recharts";
 import { api } from "@/lib/api";
+import { useOrg, useDashboardData } from "@/lib/hooks";
+import { StatSkeleton, TableRowSkeleton } from "@/components/ui/skeleton";
 
 // ─── Types ──────────────────────────────────────────────
 interface OrgStats {
@@ -24,13 +31,17 @@ interface OrgStats {
   tokensToday: number;
   totalCost: number;
   costToday: number;
-  runsByDay: Array<{ date: string; total: number; completed: number; failed: number }>;
-  tokensByDay: Array<{ date: string; tokens: number; cost: number }>;
-  topAgents: Array<{ id: string; name: string; domain: string; runs: number; successRate: number; avgTokens: number }>;
+  runsByDay: DayStats[];
+  tokensByDay: TokenDay[];
+  topAgents: TopAgent[];
   recentFailures: Array<{ runId: string; agentName: string; error: string; timestamp: string }>;
   agentsByDomain: Record<string, number>;
   runsByDomain: Record<string, number>;
 }
+
+interface DayStats { date: string; total: number; completed: number; failed: number }
+interface TokenDay { date: string; tokens: number; cost: number }
+interface TopAgent { id: string; name: string; domain: string; runs: number; successRate: number; avgTokens: number }
 
 interface Agent {
   id: string;
@@ -43,6 +54,13 @@ interface Agent {
   _count?: { runs: number };
 }
 
+interface RunLog {
+  id: string;
+  level: string;
+  message: string;
+  createdAt: string;
+}
+
 interface Run {
   id: string;
   agentId: string;
@@ -52,104 +70,97 @@ interface Run {
   tokensUsed: number;
   cost: number;
   agent?: { name: string; domain: string };
+  logs?: RunLog[];
+  stepCount?: number;
+  _count?: { logs: number };
 }
 
-// ─── Utility Components ─────────────────────────────────
-
-function DonutChart({ success, fail, size = 80 }: { success: number; fail: number; size?: number }) {
-  const total = success + fail;
-  const successPct = total > 0 ? (success / total) * 100 : 0;
-  return (
-    <div className="relative" style={{ width: size, height: size }}>
-      <div
-        className="absolute inset-0 rounded-full"
-        style={{
-          background: total > 0
-            ? `conic-gradient(#22c55e 0% ${successPct}%, #ef4444 ${successPct}% 100%)`
-            : `conic-gradient(#2d3a4d 0% 100%)`,
-        }}
-      />
-      <div className="absolute inset-2 rounded-full bg-apex-card flex items-center justify-center">
-        <span className="text-sm font-bold">{Math.round(successPct)}%</span>
-      </div>
-    </div>
-  );
-}
-
-function formatDay(dateStr: string) {
-  const d = new Date(dateStr + "T00:00:00");
-  return d.toLocaleDateString("en-US", { weekday: "short" });
-}
-
+// ─── Utilities ──────────────────────────────────────────
 function formatNum(n: number) {
-  if (n >= 1000000) return (n / 1000000).toFixed(1) + "M";
-  if (n >= 1000) return (n / 1000).toFixed(1) + "K";
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + "K";
   return n.toLocaleString();
 }
+
+function formatDuration(startedAt: string, completedAt: string | null): string {
+  if (!completedAt) return "—";
+  const ms = new Date(completedAt).getTime() - new Date(startedAt).getTime();
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`;
+}
+
+function formatTime(dateStr: string): string {
+  return new Date(dateStr).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
+}
+
+function formatDate(dateStr: string): string {
+  return new Date(dateStr).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+const STATUS_COLORS: Record<string, string> = {
+  ACTIVE: "bg-green-500/10 text-green-400",
+  PAUSED: "bg-yellow-500/10 text-yellow-400",
+  ERROR: "bg-red-500/10 text-red-400",
+  DEPLOYING: "bg-blue-500/10 text-blue-400",
+};
+
+const STATUS_DOT: Record<string, string> = {
+  ACTIVE: "bg-green-400",
+  PAUSED: "bg-yellow-400",
+  ERROR: "bg-red-400",
+  DEPLOYING: "bg-blue-400",
+};
+
+const RUN_STATUS_COLORS: Record<string, string> = {
+  COMPLETED: "bg-green-500/10 text-green-400",
+  FAILED: "bg-red-500/10 text-red-400",
+  RUNNING: "bg-blue-500/10 text-blue-400",
+  QUEUED: "bg-yellow-500/10 text-yellow-400",
+  CANCELLED: "bg-gray-500/10 text-gray-400",
+};
+
+const CHART_COLORS = {
+  completed: "#22c55e",
+  failed: "#ef4444",
+  other: "#3b82f6",
+};
+
+const PIE_COLORS = ["#22c55e", "#ef4444", "#3b82f6", "#eab308"];
 
 // ─── Main Dashboard ─────────────────────────────────────
 export default function DashboardPage() {
   const { user } = useUser();
-  const [orgId, setOrgId] = useState<string | null>(null);
-  const [stats, setStats] = useState<OrgStats | null>(null);
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [recentRuns, setRecentRuns] = useState<Run[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const { org, orgId, isLoading: orgLoading } = useOrg(user?.id);
+  const dashData = useDashboardData(orgId);
+  const stats = dashData.stats as OrgStats | null;
+  const agents = dashData.agents as Agent[];
+  const runs = dashData.runs as Run[];
+  const dataLoading = dashData.isLoading;
+  const error = dashData.error as Error | null;
+  const mutateRuns = dashData.mutateRuns;
   const [sortCol, setSortCol] = useState<string>("runs");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
-  const [hoveredDay, setHoveredDay] = useState<number | null>(null);
+  const [expandedRun, setExpandedRun] = useState<string | null>(null);
 
-  const loadDashboard = useCallback(async () => {
-    if (!user?.id) return;
-    try {
-      const org = await api.orgs.getByClerkUser(user.id).catch(() => null);
-      if (org?.id) {
-        setOrgId(org.id);
-        const [statsData, agentsData, runsData] = await Promise.all([
-          api.orgs.getStats(org.id).catch(() => null),
-          api.agents.list(org.id).catch(() => []),
-          api.runs.listByOrg(org.id, 20).catch(() => ({ runs: [] })),
-        ]);
-        if (statsData) setStats(statsData);
-        setAgents(Array.isArray(agentsData) ? agentsData : []);
-        const runs = Array.isArray(runsData) ? runsData : (runsData?.runs || []);
-        setRecentRuns(runs);
-      }
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load dashboard");
-    } finally {
-      setLoading(false);
-    }
-  }, [user?.id]);
-
-  useEffect(() => { loadDashboard(); }, [loadDashboard]);
-
-  // Auto-refresh every 10 seconds
-  useEffect(() => {
-    if (!orgId) return;
-    const interval = setInterval(loadDashboard, 10000);
-    return () => clearInterval(interval);
-  }, [orgId, loadDashboard]);
+  const isLoading = orgLoading || dataLoading;
 
   async function handleToggleAgent(agent: Agent) {
     try {
       if (agent.status === "ACTIVE") {
         await api.agents.pause(agent.id);
-        setAgents((prev) => prev.map((a) => a.id === agent.id ? { ...a, status: "PAUSED" } : a));
       } else {
         await api.agents.deploy(agent.id);
-        setAgents((prev) => prev.map((a) => a.id === agent.id ? { ...a, status: "ACTIVE" } : a));
       }
-    } catch { /* */ }
+    } catch { /* ignore */ }
   }
 
   async function handleTriggerRun(agent: Agent) {
     if (!orgId) return;
     try {
-      const run = await api.runs.trigger(agent.id, orgId);
-      setRecentRuns((prev) => [run, ...prev].slice(0, 20));
-    } catch { /* */ }
+      await api.runs.trigger(agent.id, orgId);
+      mutateRuns();
+    } catch { /* ignore */ }
   }
 
   function handleSort(col: string) {
@@ -161,14 +172,39 @@ export default function DashboardPage() {
     }
   }
 
-  if (loading) {
+  // ─── Loading State ──────────────────────────────────
+  if (isLoading) {
     return (
-      <div className="flex items-center justify-center min-h-[60vh]">
-        <Loader2 className="animate-spin text-apex-indigo" size={32} />
+      <div>
+        <div className="flex items-center justify-between mb-8">
+          <div>
+            <div className="h-7 w-40 bg-apex-surface rounded animate-pulse" />
+            <div className="h-4 w-64 bg-apex-surface rounded animate-pulse mt-2" />
+          </div>
+          <div className="h-10 w-32 bg-apex-surface rounded-lg animate-pulse" />
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-8">
+          {Array.from({ length: 6 }).map((_, i) => <StatSkeleton key={i} />)}
+        </div>
+        <div className="card mb-8">
+          <div className="h-5 w-48 bg-apex-surface rounded animate-pulse mb-4" />
+          <div className="h-52 bg-apex-surface rounded animate-pulse" />
+        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-5 gap-6 mb-8">
+          <div className="lg:col-span-3 card">
+            <div className="h-5 w-40 bg-apex-surface rounded animate-pulse mb-4" />
+            {Array.from({ length: 4 }).map((_, i) => <TableRowSkeleton key={i} />)}
+          </div>
+          <div className="lg:col-span-2 card">
+            <div className="h-5 w-32 bg-apex-surface rounded animate-pulse mb-4" />
+            <div className="h-64 bg-apex-surface rounded animate-pulse" />
+          </div>
+        </div>
       </div>
     );
   }
 
+  // ─── No Org State ───────────────────────────────────
   if (!orgId) {
     return (
       <div className="card text-center py-16">
@@ -180,13 +216,30 @@ export default function DashboardPage() {
     );
   }
 
-  // Chart data
-  const runsByDay = stats?.runsByDay || [];
-  const maxRuns = Math.max(...runsByDay.map((d) => d.total), 1);
-  const tokensByDay = stats?.tokensByDay || [];
-  const topAgentsData = stats?.topAgents || [];
+  // ─── Derived Data ───────────────────────────────────
+  const runsByDay: DayStats[] = stats?.runsByDay || [];
+  const tokensByDay: TokenDay[] = stats?.tokensByDay || [];
+  const topAgentsData: TopAgent[] = stats?.topAgents || [];
 
-  // Sort agents for the table
+  // Chart data for Recharts
+  const activityChartData = runsByDay.map((day) => ({
+    date: new Date(day.date + "T00:00:00").toLocaleDateString("en-US", { weekday: "short" }),
+    Completed: day.completed,
+    Failed: day.failed,
+    Other: Math.max(0, day.total - day.completed - day.failed),
+  }));
+
+  // Donut data for success/failure
+  const totalCompleted = runsByDay.reduce((s, d) => s + d.completed, 0);
+  const totalFailed = runsByDay.reduce((s, d) => s + d.failed, 0);
+  const totalOther = runsByDay.reduce((s, d) => s + Math.max(0, d.total - d.completed - d.failed), 0);
+  const pieData = [
+    { name: "Completed", value: totalCompleted },
+    { name: "Failed", value: totalFailed },
+    { name: "Running", value: totalOther },
+  ].filter((d) => d.value > 0);
+
+  // Sort agents
   const sortedAgents = [...agents].sort((a, b) => {
     let aVal: number | string = 0, bVal: number | string = 0;
     if (sortCol === "name") { aVal = a.name.toLowerCase(); bVal = b.name.toLowerCase(); }
@@ -197,7 +250,7 @@ export default function DashboardPage() {
     return sortDir === "asc" ? aVal - (bVal as number) : (bVal as number) - aVal;
   });
 
-  // Alerts & recommendations
+  // Alerts
   const alerts: Array<{ type: "warning" | "error" | "info"; message: string }> = [];
   const staleAgents = agents.filter((a) => {
     const agentTop = topAgentsData.find((t) => t.id === a.id);
@@ -214,7 +267,6 @@ export default function DashboardPage() {
     alerts.push({ type: "info", message: "No integrations connected - connect to enable real outreach" });
   }
 
-  // Cost calculations
   const weekCost = tokensByDay.reduce((sum, d) => sum + d.cost, 0);
 
   return (
@@ -233,278 +285,230 @@ export default function DashboardPage() {
 
       {error && (
         <div className="card border-red-500/30 bg-red-500/5 mb-6">
-          <p className="text-red-400 text-sm">{error}</p>
+          <p className="text-red-400 text-sm">{error instanceof Error ? error.message : "Failed to load dashboard"}</p>
         </div>
       )}
 
       {/* ─── Section 1: KPI Bar ──────────────────────────── */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-8">
+        <KPICard label="Active Agents" value={stats?.activeAgents ?? 0} icon={Bot} color="text-indigo-400" sub={`${stats?.totalAgents ?? 0} total`} />
         <KPICard
-          label="Active Agents"
-          value={stats?.activeAgents ?? 0}
-          icon={Bot}
-          color="text-indigo-400"
-          sub={`${stats?.totalAgents ?? 0} total`}
-        />
-        <KPICard
-          label="Runs Today"
-          value={stats?.runsToday ?? 0}
-          icon={Activity}
-          color="text-green-400"
+          label="Runs Today" value={stats?.runsToday ?? 0} icon={Activity} color="text-green-400"
           sub={`${stats?.runsThisWeek ?? 0} this week`}
-          trend={stats?.runsToday !== undefined && stats.runsThisWeek > 0
-            ? Math.round((stats.runsToday / (stats.runsThisWeek / 7)) * 100 - 100)
-            : undefined}
+          trend={stats?.runsToday !== undefined && stats.runsThisWeek > 0 ? Math.round((stats.runsToday / (stats.runsThisWeek / 7)) * 100 - 100) : undefined}
         />
         <KPICard
-          label="Success Rate"
-          value={`${stats?.successRate ?? 0}%`}
-          icon={CheckCircle}
-          color={
-            (stats?.successRate ?? 0) >= 90 ? "text-green-400" :
-            (stats?.successRate ?? 0) >= 75 ? "text-yellow-400" : "text-red-400"
-          }
+          label="Success Rate" value={`${stats?.successRate ?? 0}%`} icon={CheckCircle}
+          color={(stats?.successRate ?? 0) >= 90 ? "text-green-400" : (stats?.successRate ?? 0) >= 75 ? "text-yellow-400" : "text-red-400"}
           sub={`${stats?.totalRuns ?? 0} total runs`}
         />
-        <KPICard
-          label="Tokens Today"
-          value={formatNum(stats?.tokensToday ?? 0)}
-          icon={TrendingUp}
-          color="text-yellow-400"
-          sub={`$${(stats?.costToday ?? 0).toFixed(2)}`}
-        />
-        <KPICard
-          label="Total Cost"
-          value={`$${(stats?.totalCost ?? 0).toFixed(2)}`}
-          icon={DollarSign}
-          color="text-cyan-400"
-          sub={`$${weekCost.toFixed(2)} this week`}
-        />
-        <KPICard
-          label="Integrations"
-          value={stats?.integrations ?? 0}
-          icon={Zap}
-          color="text-purple-400"
-          sub="connected"
-        />
+        <KPICard label="Tokens Today" value={formatNum(stats?.tokensToday ?? 0)} icon={TrendingUp} color="text-yellow-400" sub={`$${(stats?.costToday ?? 0).toFixed(2)}`} />
+        <KPICard label="Total Cost" value={`$${(stats?.totalCost ?? 0).toFixed(2)}`} icon={DollarSign} color="text-cyan-400" sub={`$${weekCost.toFixed(2)} this week`} />
+        <KPICard label="Integrations" value={stats?.integrations ?? 0} icon={Zap} color="text-purple-400" sub="connected" />
       </div>
 
-      {/* ─── Section 2: Activity Chart ───────────────────── */}
-      <div className="card mb-8">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-semibold">Activity (Last 7 Days)</h2>
-          <div className="flex items-center gap-4 text-xs">
-            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-green-500/80" /> Completed</span>
-            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-red-500/80" /> Failed</span>
-            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-blue-500/80" /> Other</span>
-          </div>
-        </div>
-        <div className="flex items-end gap-2 h-44">
-          {runsByDay.map((day, i) => {
-            const other = Math.max(0, day.total - day.completed - day.failed);
-            const isHovered = hoveredDay === i;
-            return (
-              <div
-                key={day.date}
-                className="flex-1 flex flex-col justify-end relative"
-                onMouseEnter={() => setHoveredDay(i)}
-                onMouseLeave={() => setHoveredDay(null)}
-              >
-                {isHovered && (
-                  <div className="absolute -top-16 left-1/2 -translate-x-1/2 bg-apex-surface border border-apex-border rounded-lg p-2 text-xs whitespace-nowrap z-10 shadow-lg">
-                    <p className="font-medium mb-1">{new Date(day.date + "T00:00:00").toLocaleDateString()}</p>
-                    <p className="text-green-400">{day.completed} completed</p>
-                    <p className="text-red-400">{day.failed} failed</p>
-                    {other > 0 && <p className="text-blue-400">{other} other</p>}
-                  </div>
-                )}
-                <div className="flex flex-col rounded-t overflow-hidden" style={{ minHeight: day.total > 0 ? 4 : 0 }}>
-                  {other > 0 && (
-                    <div className="bg-blue-500/80 transition-all" style={{ height: `${(other / maxRuns) * 140}px` }} />
-                  )}
-                  {day.failed > 0 && (
-                    <div className="bg-red-500/80 transition-all" style={{ height: `${(day.failed / maxRuns) * 140}px` }} />
-                  )}
-                  {day.completed > 0 && (
-                    <div className="bg-green-500/80 transition-all rounded-t" style={{ height: `${(day.completed / maxRuns) * 140}px` }} />
-                  )}
-                </div>
-                {day.total === 0 && <div className="bg-apex-border/30 rounded-t" style={{ height: 4 }} />}
-                <span className="text-xs text-apex-muted text-center mt-2">{formatDay(day.date)}</span>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* ─── Section 3: Two Column Layout ────────────────── */}
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-6 mb-8">
-        {/* Left: Agent Performance Table (60%) */}
-        <div className="lg:col-span-3 card overflow-hidden">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-semibold">Agent Performance</h2>
-            <Link href="/agents" className="text-apex-indigo text-sm flex items-center gap-1 hover:underline">
-              View all <ArrowRight size={14} />
-            </Link>
-          </div>
-          {agents.length === 0 ? (
-            <div className="text-center py-8">
-              <Bot size={32} className="mx-auto text-apex-border mb-3" />
-              <p className="text-sm text-apex-muted">No agents yet</p>
-            </div>
-          ) : (
-            <div className="overflow-x-auto -mx-6">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-apex-border text-apex-muted text-xs">
-                    {[
-                      { key: "name", label: "Agent" },
-                      { key: "domain", label: "Domain" },
-                      { key: "status", label: "Status" },
-                      { key: "runs", label: "Runs" },
-                    ].map((col) => (
-                      <th
-                        key={col.key}
-                        className="text-left px-6 py-3 font-medium cursor-pointer hover:text-white transition-colors"
-                        onClick={() => handleSort(col.key)}
-                      >
-                        {col.label}
-                        {sortCol === col.key && (
-                          <span className="ml-1">{sortDir === "asc" ? "↑" : "↓"}</span>
-                        )}
-                      </th>
-                    ))}
-                    <th className="text-right px-6 py-3 font-medium">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {sortedAgents.map((agent) => {
-                    const agentTop = topAgentsData.find((t) => t.id === agent.id);
-                    return (
-                      <tr key={agent.id} className="border-b border-apex-border/50 hover:bg-apex-surface/50 transition-colors">
-                        <td className="px-6 py-3">
-                          <Link href={`/agents/${agent.id}`} className="font-medium hover:text-apex-indigo-light transition-colors">
-                            {agent.name}
-                          </Link>
-                        </td>
-                        <td className="px-6 py-3">
-                          <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-apex-indigo/10 text-apex-indigo-light">
-                            {agent.domain}
-                          </span>
-                        </td>
-                        <td className="px-6 py-3">
-                          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${
-                            agent.status === "ACTIVE" ? "bg-green-500/10 text-green-400" :
-                            agent.status === "PAUSED" ? "bg-yellow-500/10 text-yellow-400" :
-                            agent.status === "ERROR" ? "bg-red-500/10 text-red-400" :
-                            "bg-gray-500/10 text-gray-400"
-                          }`}>
-                            <span className={`w-1.5 h-1.5 rounded-full ${
-                              agent.status === "ACTIVE" ? "bg-green-400" :
-                              agent.status === "PAUSED" ? "bg-yellow-400" :
-                              agent.status === "ERROR" ? "bg-red-400" : "bg-gray-400"
-                            }`} />
-                            {agent.status}
-                          </span>
-                        </td>
-                        <td className="px-6 py-3">
-                          <div>
-                            <span className="font-medium">{agent._count?.runs || 0}</span>
-                            {agentTop && agentTop.runs > 0 && (
-                              <span className="text-xs text-apex-muted ml-1">({agentTop.successRate}%)</span>
-                            )}
-                          </div>
-                        </td>
-                        <td className="px-6 py-3 text-right">
-                          <div className="flex items-center justify-end gap-1">
-                            <button
-                              onClick={() => handleTriggerRun(agent)}
-                              className="p-1.5 rounded-md hover:bg-apex-surface transition-colors text-apex-muted hover:text-white"
-                              title="Run now"
-                            >
-                              <Play size={14} />
-                            </button>
-                            <button
-                              onClick={() => handleToggleAgent(agent)}
-                              className="p-1.5 rounded-md hover:bg-apex-surface transition-colors text-apex-muted hover:text-white"
-                              title={agent.status === "ACTIVE" ? "Pause" : "Resume"}
-                            >
-                              {agent.status === "ACTIVE" ? <Pause size={14} /> : <Play size={14} />}
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-
-        {/* Right: Live Activity Feed (40%) */}
+      {/* ─── Section 2: Charts Row ───────────────────────── */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
+        {/* Runs Over Time (Area Chart) */}
         <div className="lg:col-span-2 card">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-semibold">Live Activity</h2>
-            <Link href="/activity" className="text-apex-indigo text-sm flex items-center gap-1 hover:underline">
-              View all <ArrowRight size={14} />
-            </Link>
-          </div>
-          {recentRuns.length === 0 ? (
-            <div className="text-center py-8">
-              <Activity size={32} className="mx-auto text-apex-border mb-3" />
-              <p className="text-sm text-apex-muted">No activity yet</p>
+          <h2 className="text-lg font-semibold mb-4">Runs Over Time (7 Days)</h2>
+          {activityChartData.length === 0 ? (
+            <div className="flex items-center justify-center h-52 text-apex-muted text-sm">
+              <Activity size={24} className="mr-2 text-apex-border" /> No run data yet
             </div>
           ) : (
-            <div className="space-y-2 max-h-[400px] overflow-y-auto">
-              {recentRuns.slice(0, 15).map((run) => {
-                const duration = run.completedAt
-                  ? ((new Date(run.completedAt).getTime() - new Date(run.startedAt).getTime()) / 1000).toFixed(1)
-                  : null;
-                return (
-                  <div key={run.id} className="flex items-start gap-3 p-2 rounded-lg hover:bg-apex-surface/50 transition-colors">
-                    <span className={`mt-1 w-2 h-2 rounded-full flex-shrink-0 ${
-                      run.status === "COMPLETED" ? "bg-green-400" :
-                      run.status === "FAILED" ? "bg-red-400" :
-                      run.status === "RUNNING" ? "bg-blue-400 animate-pulse" :
-                      "bg-yellow-400"
-                    }`} />
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm truncate">
-                        <span className="font-medium">{run.agent?.name || "Agent"}</span>
-                        {run.status === "COMPLETED" && duration && (
-                          <span className="text-apex-muted"> completed in {duration}s ({(run.tokensUsed || 0).toLocaleString()} tokens)</span>
-                        )}
-                        {run.status === "FAILED" && (
-                          <span className="text-red-400"> failed</span>
-                        )}
-                        {run.status === "RUNNING" && (
-                          <span className="text-blue-400"> running...</span>
-                        )}
-                        {run.status === "QUEUED" && (
-                          <span className="text-yellow-400"> queued</span>
-                        )}
-                      </p>
-                      <p className="text-xs text-apex-muted">
-                        {new Date(run.startedAt).toLocaleTimeString()}
-                      </p>
-                    </div>
-                  </div>
-                );
-              })}
+            <ResponsiveContainer width="100%" height={220}>
+              <AreaChart data={activityChartData} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="colorCompleted" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor={CHART_COLORS.completed} stopOpacity={0.3} />
+                    <stop offset="95%" stopColor={CHART_COLORS.completed} stopOpacity={0} />
+                  </linearGradient>
+                  <linearGradient id="colorFailed" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor={CHART_COLORS.failed} stopOpacity={0.3} />
+                    <stop offset="95%" stopColor={CHART_COLORS.failed} stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="#2d3a4d" />
+                <XAxis dataKey="date" tick={{ fill: "#94a3b8", fontSize: 12 }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fill: "#94a3b8", fontSize: 12 }} axisLine={false} tickLine={false} allowDecimals={false} />
+                <RechartsTooltip
+                  contentStyle={{ backgroundColor: "#1a2332", border: "1px solid #2d3a4d", borderRadius: "8px", fontSize: 12 }}
+                  labelStyle={{ color: "#fff" }}
+                />
+                <Area type="monotone" dataKey="Completed" stackId="1" stroke={CHART_COLORS.completed} fill="url(#colorCompleted)" />
+                <Area type="monotone" dataKey="Failed" stackId="1" stroke={CHART_COLORS.failed} fill="url(#colorFailed)" />
+                <Area type="monotone" dataKey="Other" stackId="1" stroke={CHART_COLORS.other} fill={CHART_COLORS.other} fillOpacity={0.1} />
+              </AreaChart>
+            </ResponsiveContainer>
+          )}
+        </div>
+
+        {/* Success/Failure Donut */}
+        <div className="card">
+          <h2 className="text-lg font-semibold mb-4">Success / Failure</h2>
+          {pieData.length === 0 ? (
+            <div className="flex items-center justify-center h-52 text-apex-muted text-sm">
+              <CheckCircle size={24} className="mr-2 text-apex-border" /> No data yet
             </div>
+          ) : (
+            <ResponsiveContainer width="100%" height={220}>
+              <PieChart>
+                <Pie data={pieData} cx="50%" cy="50%" innerRadius={55} outerRadius={80} paddingAngle={3} dataKey="value">
+                  {pieData.map((_, index) => (
+                    <Cell key={index} fill={PIE_COLORS[index % PIE_COLORS.length]} />
+                  ))}
+                </Pie>
+                <Legend
+                  verticalAlign="bottom"
+                  formatter={(value: string) => <span className="text-xs text-apex-muted">{value}</span>}
+                />
+                <RechartsTooltip
+                  contentStyle={{ backgroundColor: "#1a2332", border: "1px solid #2d3a4d", borderRadius: "8px", fontSize: 12 }}
+                />
+              </PieChart>
+            </ResponsiveContainer>
           )}
         </div>
       </div>
 
-      {/* ─── Section 4: Domain Breakdown ─────────────────── */}
+      {/* ─── Section 3: Agent Status Cards ────────────────── */}
+      <div className="card mb-8 overflow-hidden">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold">Agent Status</h2>
+          <Link href="/agents" className="text-apex-indigo text-sm flex items-center gap-1 hover:underline">
+            View all <ArrowRight size={14} />
+          </Link>
+        </div>
+        {agents.length === 0 ? (
+          <div className="text-center py-8">
+            <Bot size={32} className="mx-auto text-apex-border mb-3" />
+            <p className="text-sm text-apex-muted">No agents deployed yet</p>
+            <Link href="/onboarding" className="text-apex-indigo text-sm mt-2 inline-block hover:underline">Deploy your first agent</Link>
+          </div>
+        ) : (
+          <div className="overflow-x-auto -mx-6">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-apex-border text-apex-muted text-xs">
+                  {[
+                    { key: "name", label: "Agent" },
+                    { key: "domain", label: "Domain" },
+                    { key: "status", label: "Status" },
+                    { key: "runs", label: "Runs" },
+                  ].map((col) => (
+                    <th key={col.key} className="text-left px-6 py-3 font-medium cursor-pointer hover:text-white transition-colors" onClick={() => handleSort(col.key)}>
+                      {col.label}
+                      {sortCol === col.key && <span className="ml-1">{sortDir === "asc" ? "↑" : "↓"}</span>}
+                    </th>
+                  ))}
+                  <th className="text-left px-6 py-3 font-medium">Success Rate</th>
+                  <th className="text-right px-6 py-3 font-medium">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sortedAgents.map((agent) => {
+                  const agentTop = topAgentsData.find((t) => t.id === agent.id);
+                  return (
+                    <tr key={agent.id} className="border-b border-apex-border/50 hover:bg-apex-surface/50 transition-colors">
+                      <td className="px-6 py-3">
+                        <Link href={`/agents/${agent.id}`} className="font-medium hover:text-apex-indigo-light transition-colors">{agent.name}</Link>
+                      </td>
+                      <td className="px-6 py-3">
+                        <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-apex-indigo/10 text-apex-indigo-light">{agent.domain}</span>
+                      </td>
+                      <td className="px-6 py-3">
+                        <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_COLORS[agent.status] || "bg-gray-500/10 text-gray-400"}`}>
+                          <span className={`w-1.5 h-1.5 rounded-full ${STATUS_DOT[agent.status] || "bg-gray-400"}`} />
+                          {agent.status}
+                        </span>
+                      </td>
+                      <td className="px-6 py-3 font-medium">{agent._count?.runs || 0}</td>
+                      <td className="px-6 py-3">
+                        {agentTop && agentTop.runs > 0 ? (
+                          <div className="flex items-center gap-2">
+                            <div className="w-16 h-1.5 bg-apex-surface rounded-full overflow-hidden">
+                              <div className="h-full bg-green-500 rounded-full" style={{ width: `${agentTop.successRate}%` }} />
+                            </div>
+                            <span className="text-xs text-apex-muted">{agentTop.successRate}%</span>
+                          </div>
+                        ) : (
+                          <span className="text-xs text-apex-muted">—</span>
+                        )}
+                      </td>
+                      <td className="px-6 py-3 text-right">
+                        <div className="flex items-center justify-end gap-1">
+                          <button onClick={() => handleTriggerRun(agent)} className="p-1.5 rounded-md hover:bg-apex-surface transition-colors text-apex-muted hover:text-white" title="Run now">
+                            <Play size={14} />
+                          </button>
+                          <button onClick={() => handleToggleAgent(agent)} className="p-1.5 rounded-md hover:bg-apex-surface transition-colors text-apex-muted hover:text-white" title={agent.status === "ACTIVE" ? "Pause" : "Resume"}>
+                            {agent.status === "ACTIVE" ? <Pause size={14} /> : <Play size={14} />}
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* ─── Section 4: Run History Table ─────────────────── */}
+      <div className="card mb-8 overflow-hidden">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold">Run History</h2>
+          <Link href="/activity" className="text-apex-indigo text-sm flex items-center gap-1 hover:underline">
+            View all <ArrowRight size={14} />
+          </Link>
+        </div>
+        {runs.length === 0 ? (
+          <div className="text-center py-8">
+            <FileText size={32} className="mx-auto text-apex-border mb-3" />
+            <p className="text-sm text-apex-muted">No runs recorded yet</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto -mx-6">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-apex-border text-apex-muted text-xs">
+                  <th className="text-left px-6 py-3 font-medium w-8" />
+                  <th className="text-left px-6 py-3 font-medium">Agent</th>
+                  <th className="text-left px-6 py-3 font-medium">Status</th>
+                  <th className="text-left px-6 py-3 font-medium">Duration</th>
+                  <th className="text-left px-6 py-3 font-medium">Tokens</th>
+                  <th className="text-left px-6 py-3 font-medium">Time</th>
+                </tr>
+              </thead>
+              <tbody>
+                {runs.slice(0, 20).map((run) => {
+                  const isExpanded = expandedRun === run.id;
+                  const logs = run.logs || [];
+                  return (
+                    <RunHistoryRow
+                      key={run.id}
+                      run={run}
+                      logs={logs}
+                      isExpanded={isExpanded}
+                      onToggle={() => setExpandedRun(isExpanded ? null : run.id)}
+                    />
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* ─── Section 5: Domain Breakdown ─────────────────── */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
         {(["SALES", "MARKETING", "OPS"] as const).map((domain) => {
           const agentCount = stats?.agentsByDomain?.[domain] || 0;
           const runsCount = stats?.runsByDomain?.[domain] || 0;
           const domainAgents = topAgentsData.filter((a) => a.domain === domain);
-          const totalCompleted = domainAgents.reduce((s, a) => s + Math.round(a.runs * a.successRate / 100), 0);
-          const totalFailed = domainAgents.reduce((s, a) => s + (a.runs - Math.round(a.runs * a.successRate / 100)), 0);
+          const dCompleted = domainAgents.reduce((s, a) => s + Math.round(a.runs * a.successRate / 100), 0);
+          const dFailed = domainAgents.reduce((s, a) => s + (a.runs - Math.round(a.runs * a.successRate / 100)), 0);
           const topAgent = domainAgents.length > 0 ? domainAgents[0] : null;
           const domainColor = domain === "SALES" ? "text-blue-400" : domain === "MARKETING" ? "text-purple-400" : "text-orange-400";
 
@@ -515,7 +519,7 @@ export default function DashboardPage() {
                 <span className="text-xs text-apex-muted">{agentCount} agents</span>
               </div>
               <div className="flex items-center gap-4">
-                <DonutChart success={totalCompleted} fail={totalFailed} size={64} />
+                <MiniDonut success={dCompleted} fail={dFailed} size={64} />
                 <div className="flex-1">
                   <p className="text-2xl font-bold">{runsCount}</p>
                   <p className="text-xs text-apex-muted">runs this week</p>
@@ -531,7 +535,7 @@ export default function DashboardPage() {
         })}
       </div>
 
-      {/* ─── Section 5: Alerts & Recommendations ─────────── */}
+      {/* ─── Section 6: Alerts & Recommendations ─────────── */}
       {alerts.length > 0 && (
         <div className="card mb-8">
           <h2 className="text-lg font-semibold mb-4">Alerts & Recommendations</h2>
@@ -552,7 +556,7 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* ─── Section 6: Token Usage & Cost ───────────────── */}
+      {/* ─── Section 7: Token Usage & Cost ───────────────── */}
       <div className="card">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-lg font-semibold">Token Usage & Cost</h2>
@@ -562,7 +566,6 @@ export default function DashboardPage() {
             <span className="text-apex-muted">Total: <span className="text-white font-medium">${(stats?.totalCost ?? 0).toFixed(2)}</span></span>
           </div>
         </div>
-        {/* Token usage bar */}
         <div className="mb-6">
           <div className="flex items-center justify-between text-xs text-apex-muted mb-2">
             <span>{formatNum(stats?.tokensUsed ?? 0)} tokens used</span>
@@ -575,7 +578,6 @@ export default function DashboardPage() {
             />
           </div>
         </div>
-        {/* Per-agent cost breakdown */}
         {topAgentsData.length > 0 && (
           <div>
             <h3 className="text-sm font-medium text-apex-muted mb-3">Per-Agent Usage (7 days)</h3>
@@ -585,14 +587,9 @@ export default function DashboardPage() {
                 const width = ((agent.avgTokens * agent.runs) / maxTokens) * 100;
                 return (
                   <div key={agent.id} className="flex items-center gap-3">
-                    <Link href={`/agents/${agent.id}`} className="text-sm w-36 truncate hover:text-apex-indigo-light transition-colors">
-                      {agent.name}
-                    </Link>
+                    <Link href={`/agents/${agent.id}`} className="text-sm w-36 truncate hover:text-apex-indigo-light transition-colors">{agent.name}</Link>
                     <div className="flex-1 h-2 bg-apex-surface rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-apex-indigo/60 rounded-full"
-                        style={{ width: `${width}%` }}
-                      />
+                      <div className="h-full bg-apex-indigo/60 rounded-full" style={{ width: `${width}%` }} />
                     </div>
                     <span className="text-xs text-apex-muted w-20 text-right">{formatNum(agent.avgTokens * agent.runs)}</span>
                   </div>
@@ -606,10 +603,66 @@ export default function DashboardPage() {
   );
 }
 
+// ─── Run History Row ─────────────────────────────────────
+function RunHistoryRow({ run, logs, isExpanded, onToggle }: {
+  run: Run;
+  logs: RunLog[];
+  isExpanded: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <>
+      <tr className="border-b border-apex-border/50 hover:bg-apex-surface/50 transition-colors cursor-pointer" onClick={onToggle}>
+        <td className="px-6 py-3">
+          {logs.length > 0 ? (
+            isExpanded ? <ChevronDown size={14} className="text-apex-muted" /> : <ChevronRight size={14} className="text-apex-muted" />
+          ) : (
+            <span className="w-3.5" />
+          )}
+        </td>
+        <td className="px-6 py-3 font-medium">{run.agent?.name || "Unknown"}</td>
+        <td className="px-6 py-3">
+          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${RUN_STATUS_COLORS[run.status] || "bg-gray-500/10 text-gray-400"}`}>
+            {run.status === "RUNNING" && <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />}
+            {run.status}
+          </span>
+        </td>
+        <td className="px-6 py-3 text-apex-muted">
+          <span className="inline-flex items-center gap-1">
+            <Clock size={12} />
+            {formatDuration(run.startedAt, run.completedAt)}
+          </span>
+        </td>
+        <td className="px-6 py-3 text-apex-muted">{run.tokensUsed > 0 ? formatNum(run.tokensUsed) : "—"}</td>
+        <td className="px-6 py-3 text-apex-muted">
+          {formatDate(run.startedAt)} {formatTime(run.startedAt)}
+        </td>
+      </tr>
+      {isExpanded && logs.length > 0 && (
+        <tr>
+          <td colSpan={6} className="px-6 py-0">
+            <div className="bg-apex-surface/50 rounded-lg p-4 my-2 max-h-64 overflow-y-auto font-mono text-xs">
+              {logs.map((log) => (
+                <div key={log.id} className="flex gap-3 py-1">
+                  <span className="text-apex-muted flex-shrink-0 w-20">{formatTime(log.createdAt)}</span>
+                  <span className={`flex-shrink-0 w-12 uppercase font-medium ${
+                    log.level === "ERROR" ? "text-red-400" :
+                    log.level === "WARN" ? "text-yellow-400" :
+                    log.level === "DEBUG" ? "text-gray-500" : "text-blue-400"
+                  }`}>{log.level}</span>
+                  <span className="text-gray-300 break-all">{log.message}</span>
+                </div>
+              ))}
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
 // ─── KPI Card Component ─────────────────────────────────
-function KPICard({
-  label, value, icon: Icon, color, sub, trend,
-}: {
+function KPICard({ label, value, icon: Icon, color, sub, trend }: {
   label: string;
   value: string | number;
   icon: typeof Bot;
@@ -633,6 +686,27 @@ function KPICard({
         )}
       </div>
       {sub && <p className="text-xs text-apex-muted mt-1">{sub}</p>}
+    </div>
+  );
+}
+
+// ─── Mini Donut ─────────────────────────────────────────
+function MiniDonut({ success, fail, size = 80 }: { success: number; fail: number; size?: number }) {
+  const total = success + fail;
+  const successPct = total > 0 ? (success / total) * 100 : 0;
+  return (
+    <div className="relative" style={{ width: size, height: size }}>
+      <div
+        className="absolute inset-0 rounded-full"
+        style={{
+          background: total > 0
+            ? `conic-gradient(#22c55e 0% ${successPct}%, #ef4444 ${successPct}% 100%)`
+            : `conic-gradient(#2d3a4d 0% 100%)`,
+        }}
+      />
+      <div className="absolute inset-2 rounded-full bg-apex-card flex items-center justify-center">
+        <span className="text-sm font-bold">{Math.round(successPct)}%</span>
+      </div>
     </div>
   );
 }
