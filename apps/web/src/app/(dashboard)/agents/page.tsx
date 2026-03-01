@@ -7,11 +7,15 @@ import { Bot, Plus, Loader2, Target, Megaphone, Cog } from "lucide-react";
 import { api } from "@/lib/api";
 
 interface Template {
-  id: string;
+  slug: string;
   name: string;
   description: string;
   domain: string;
   defaultConfig: Record<string, unknown>;
+  requiredIntegrations: string[];
+  availableTools: { name: string; description: string }[];
+  exampleTasks: string[];
+  defaultSchedule: string;
 }
 
 interface Agent {
@@ -48,7 +52,7 @@ export default function AgentsPage() {
       try {
         setLoading(true);
         const [tmpl, org] = await Promise.all([
-          api.agents.templates(),
+          api.agents.templateConfigs(),
           user?.id ? api.orgs.getByClerkUser(user.id).catch(() => null) : null,
         ]);
         setTemplates(Array.isArray(tmpl) ? tmpl : []);
@@ -164,7 +168,7 @@ export default function AgentsPage() {
           {templates.map((tmpl) => {
             const Icon = domainIcons[tmpl.domain] || Bot;
             return (
-              <div key={tmpl.id} className="card">
+              <div key={tmpl.slug} className="card">
                 <div className="flex items-center gap-3 mb-3">
                   <div className="w-10 h-10 bg-apex-indigo/10 rounded-xl flex items-center justify-center">
                     <Icon size={20} className="text-apex-indigo" />
