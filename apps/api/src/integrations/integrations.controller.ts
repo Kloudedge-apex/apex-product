@@ -1,6 +1,7 @@
 import { Controller, Get, Post, Delete, Param, Body, Query, Res, HttpStatus } from "@nestjs/common";
 import { Response } from "express";
 import { IntegrationsService } from "./integrations.service";
+import { CreateIntegrationDto, ConnectIntegrationDto } from "../common/dto/integrations.dto";
 
 @Controller("integrations")
 export class IntegrationsController {
@@ -12,7 +13,7 @@ export class IntegrationsController {
   }
 
   @Post()
-  create(@Body() body: { orgId: string; provider: string; credentials: Record<string, unknown> }) {
+  create(@Body() body: CreateIntegrationDto) {
     return this.integrationsService.create(body);
   }
 
@@ -84,7 +85,7 @@ export class IntegrationsController {
 
   // Simulate connect (MVP: creates mock integration record)
   @Post("connect")
-  simulateConnect(@Body() body: { orgId: string; provider: string }) {
+  simulateConnect(@Body() body: ConnectIntegrationDto) {
     return this.integrationsService.simulateConnect(body.orgId, body.provider);
   }
 }

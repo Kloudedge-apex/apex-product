@@ -1,35 +1,27 @@
 import { Controller, Get, Post, Param, Query, Body } from "@nestjs/common";
 import { RunsService } from "./runs.service";
+import { ListRunsQueryDto, CreateRunDto } from "../common/dto/runs.dto";
 
 @Controller("runs")
 export class RunsController {
   constructor(private readonly runsService: RunsService) {}
 
   @Get()
-  findByOrg(
-    @Query("orgId") orgId: string,
-    @Query("limit") limit?: string,
-    @Query("offset") offset?: string,
-    @Query("status") status?: string,
-    @Query("agentId") agentId?: string,
-    @Query("from") from?: string,
-    @Query("to") to?: string,
-    @Query("search") search?: string,
-  ) {
-    return this.runsService.findByOrg(orgId, {
-      limit: limit ? parseInt(limit) : 50,
-      offset: offset ? parseInt(offset) : 0,
-      status: status || undefined,
-      agentId: agentId || undefined,
-      from: from || undefined,
-      to: to || undefined,
-      search: search || undefined,
+  findByOrg(@Query() query: ListRunsQueryDto) {
+    return this.runsService.findByOrg(query.orgId, {
+      limit: query.limit ?? 50,
+      offset: query.offset ?? 0,
+      status: query.status,
+      agentId: query.agentId,
+      from: query.from,
+      to: query.to,
+      search: query.search,
     });
   }
 
   @Get("agent/:agentId")
-  findByAgent(@Param("agentId") agentId: string, @Query("limit") limit?: string) {
-    return this.runsService.findByAgent(agentId, limit ? parseInt(limit) : 50);
+  findByAgent(@Param("agentId") agentId: string, @Query("limit") limit?: number) {
+    return this.runsService.findByAgent(agentId, limit ?? 50);
   }
 
   @Get(":id")
@@ -38,7 +30,7 @@ export class RunsController {
   }
 
   @Post()
-  create(@Body() body: { agentId: string; orgId: string }) {
+  create(@Body() body: CreateRunDto) {
     return this.runsService.create(body);
   }
 }

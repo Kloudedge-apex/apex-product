@@ -1,0 +1,55 @@
+import { IsString, IsOptional, IsIn, IsObject, ValidateNested, MinLength, MaxLength } from "class-validator";
+import { Type } from "class-transformer";
+
+export class CreateAgentDto {
+  @IsString()
+  orgId!: string;
+
+  @IsString()
+  templateId!: string;
+
+  @IsString()
+  @MinLength(1)
+  @MaxLength(100)
+  name!: string;
+
+  @IsIn(["SALES", "MARKETING", "OPS"])
+  domain!: "SALES" | "MARKETING" | "OPS";
+
+  @IsObject()
+  config!: Record<string, unknown>;
+
+  @IsOptional()
+  @IsString()
+  schedule?: string;
+}
+
+export class UpdateAgentDto {
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(100)
+  name?: string;
+
+  @IsOptional()
+  @IsObject()
+  config?: Record<string, unknown>;
+
+  @IsOptional()
+  @IsString()
+  schedule?: string;
+}
+
+export class TriggerRunDto {
+  @IsOptional()
+  @IsString()
+  orgId?: string;
+}
+
+export class SetMemoryDto {
+  @IsString()
+  @MinLength(1)
+  key!: string;
+
+  value!: unknown;
+}

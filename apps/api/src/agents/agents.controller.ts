@@ -1,8 +1,9 @@
-import { Controller, Get, Post, Patch, Delete, Param, Body, Query, Inject, forwardRef } from "@nestjs/common";
+import { Controller, Get, Post, Patch, Delete, Param, Body, Query, Inject, forwardRef, NotFoundException } from "@nestjs/common";
 import { AgentsService } from "./agents.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { RuntimeService } from "../runtime/runtime.service";
 import { MemoryService } from "../runtime/memory.service";
+import { CreateAgentDto, UpdateAgentDto, TriggerRunDto, SetMemoryDto } from "../common/dto/agents.dto";
 
 @Controller("agents")
 export class AgentsController {
@@ -35,19 +36,12 @@ export class AgentsController {
   }
 
   @Post()
-  create(@Body() body: {
-    orgId: string;
-    templateId: string;
-    name: string;
-    domain: "SALES" | "MARKETING" | "OPS";
-    config: Record<string, unknown>;
-    schedule?: string;
-  }) {
+  create(@Body() body: CreateAgentDto) {
     return this.agentsService.create(body);
   }
 
   @Patch(":id")
-  update(@Param("id") id: string, @Body() body: { name?: string; config?: Record<string, unknown>; schedule?: string }) {
+  update(@Param("id") id: string, @Body() body: UpdateAgentDto) {
     return this.agentsService.update(id, body);
   }
 
@@ -66,12 +60,11 @@ export class AgentsController {
     return this.agentsService.pause(id);
   }
 
-  // Trigger a run for an agent (goes through the runtime queue + worker)
   @Post(":id/runs")
-  async triggerRun(@Param("id") agentId: string, @Body() body?: { orgId?: string }) {
+  async triggerRun(@Param("id") agentId: string, @Body() body: TriggerRunDto) {
     const agent = await this.prisma.agent.findUnique({ where: { id: agentId } });
-    if (!agent) throw new Error("Agent not found");
-    const orgId = body?.orgId || agent.orgId;
+    if (!agent) throw new NotFoundException("Agent not found");
+    const orgId = body.orgId || agent.orgId;
     return this.runtime.triggerRun(agentId, orgId);
   }
 
@@ -92,9 +85,8 @@ export class AgentsController {
     return this.memoryService.getAll(agentId);
   }
 
-  // Update a memory entry
   @Post(":id/memories")
-  async setMemory(@Param("id") agentId: string, @Body() body: { key: string; value: unknown }) {
+  async setMemory(@Param("id") agentId: string, @Body() body: SetMemoryDto) {
     await this.memoryService.set(agentId, body.key, body.value);
     return { success: true };
   }
