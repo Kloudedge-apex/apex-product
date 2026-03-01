@@ -3,7 +3,7 @@ import { AgentsService } from "./agents.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { RuntimeService } from "../runtime/runtime.service";
 import { MemoryService } from "../runtime/memory.service";
-import { CreateAgentDto, UpdateAgentDto, TriggerRunDto, SetMemoryDto } from "../common/dto/agents.dto";
+import { CreateAgentDto, UpdateAgentDto, TriggerRunDto, SetMemoryDto, CreateFromTemplateDto } from "../common/dto/agents.dto";
 
 @Controller("agents")
 export class AgentsController {
@@ -18,6 +18,21 @@ export class AgentsController {
   @Get("templates")
   getTemplates(@Query("domain") domain?: string) {
     return this.agentsService.getTemplates(domain);
+  }
+
+  @Get("template-configs")
+  getTemplateConfigs(@Query("domain") domain?: string) {
+    return this.agentsService.getTemplateConfigs(domain);
+  }
+
+  @Get("template-configs/:slug")
+  getTemplateConfig(@Param("slug") slug: string) {
+    return this.agentsService.getTemplateConfig(slug);
+  }
+
+  @Post("from-template")
+  createFromTemplate(@Body() body: CreateFromTemplateDto) {
+    return this.agentsService.createFromTemplate(body);
   }
 
   @Get()

@@ -41,6 +41,10 @@ export const api = {
     deploy: (id: string) => fetchAPI(`/agents/${id}/deploy`, { method: "POST" }),
     pause: (id: string) => fetchAPI(`/agents/${id}/pause`, { method: "POST" }),
     templates: (domain?: string) => fetchAPI(`/agents/templates${domain ? `?domain=${domain}` : ""}`),
+    templateConfigs: (domain?: string) => fetchAPI(`/agents/template-configs${domain ? `?domain=${domain}` : ""}`),
+    templateConfig: (slug: string) => fetchAPI(`/agents/template-configs/${slug}`),
+    createFromTemplate: (data: { orgId: string; templateSlug: string; name?: string; configOverrides?: Record<string, unknown>; schedule?: string }) =>
+      fetchAPI("/agents/from-template", { method: "POST", body: JSON.stringify(data) }),
     getMemories: (id: string) => fetchAPI(`/agents/${id}/memories`),
     setMemory: (id: string, key: string, value: unknown) =>
       fetchAPI(`/agents/${id}/memories`, { method: "POST", body: JSON.stringify({ key, value }) }),

@@ -1,5 +1,7 @@
-import { Injectable, NotFoundException, ForbiddenException } from "@nestjs/common";
+import { Injectable, NotFoundException, ForbiddenException, BadRequestException } from "@nestjs/common";
+import { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
+import { getAllTemplates, getTemplateBySlug, getTemplatesByDomain, AgentTemplateConfig } from "./templates";
 
 @Injectable()
 export class AgentsService {
@@ -81,6 +83,70 @@ export class AgentsService {
     return this.prisma.agentTemplate.findMany({
       where: domain ? { domain: domain as any } : {},
       orderBy: { name: "asc" },
+    });
+  }
+
+  /** Get all in-code template configs (with full system prompts, tools, etc.) */
+  getTemplateConfigs(domain?: string): AgentTemplateConfig[] {
+    if (domain) return getTemplatesByDomain(domain);
+    return getAllTemplates();
+  }
+
+  /** Get a single template config by slug */
+  getTemplateConfig(slug: string): AgentTemplateConfig {
+    const template = getTemplateBySlug(slug);
+    if (!template) throw new NotFoundException(`Template "${slug}" not found`);
+    return template;
+  }
+
+  /** Create an agent from a template slug */
+  async createFromTemplate(data: {
+    orgId: string;
+    templateSlug: string;
+    name?: string;
+    configOverrides?: Record<string, unknown>;
+    schedule?: string;
+  }) {
+    const templateConfig = getTemplateBySlug(data.templateSlug);
+    if (!templateConfig) {
+      throw new BadRequestException(`Unknown template slug: "${data.templateSlug}"`);
+    }
+
+    // Find or create the DB template record
+    let dbTemplate = await this.prisma.agentTemplate.findFirst({
+      where: { name: templateConfig.name, domain: templateConfig.domain },
+    });
+
+    if (!dbTemplate) {
+      dbTemplate = await this.prisma.agentTemplate.create({
+        data: {
+          name: templateConfig.name,
+          domain: templateConfig.domain,
+          description: templateConfig.description,
+          defaultConfig: templateConfig.defaultConfig as unknown as Prisma.InputJsonValue,
+          requiredIntegrations: templateConfig.requiredIntegrations,
+        },
+      });
+    }
+
+    const mergedConfig = {
+      ...templateConfig.defaultConfig,
+      ...data.configOverrides,
+      systemPrompt: templateConfig.systemPrompt,
+      availableTools: templateConfig.availableTools,
+    };
+
+    return this.prisma.agent.create({
+      data: {
+        orgId: data.orgId,
+        templateId: dbTemplate.id,
+        name: data.name || templateConfig.name,
+        domain: templateConfig.domain,
+        config: mergedConfig as unknown as Prisma.InputJsonValue,
+        schedule: data.schedule || templateConfig.defaultSchedule,
+        status: "PAUSED",
+      },
+      include: { template: true },
     });
   }
 
