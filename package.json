@@ -9,9 +9,13 @@
     "type-check": "turbo run type-check",
     "db:generate": "turbo run db:generate",
     "db:push": "turbo run db:push",
-    "clean": "turbo run clean"
+    "clean": "turbo run clean",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "test:e2e:headed": "playwright test --headed"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
     "turbo": "^2.4.0",
     "typescript": "^5.7.0"
   },
