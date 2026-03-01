@@ -8,3 +8,4 @@ dist/
 .turbo/
 .pnpm-debug.log
 packages/db/prisma/*.db
+.superpowers/
