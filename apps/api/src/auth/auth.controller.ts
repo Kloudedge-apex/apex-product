@@ -1,7 +1,9 @@
 import { Controller, Get, Post, Body } from "@nestjs/common";
 import { AuthService } from "./auth.service";
+import { SkipOrgGuard } from "../common/org-scope.guard";
 
 @Controller("auth")
+@SkipOrgGuard()
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 

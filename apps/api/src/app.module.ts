@@ -1,4 +1,5 @@
 import { Module, MiddlewareConsumer, NestModule } from "@nestjs/common";
+import { APP_GUARD } from "@nestjs/core";
 import { ConfigModule } from "@nestjs/config";
 import { PrismaModule } from "./prisma/prisma.module";
 import { HealthModule } from "./health/health.module";
@@ -10,6 +11,7 @@ import { BillingModule } from "./billing/billing.module";
 import { RunsModule } from "./runs/runs.module";
 import { RuntimeModule } from "./runtime/runtime.module";
 import { RateLimitMiddleware } from "./common/rate-limit.middleware";
+import { OrgScopeGuard } from "./common/org-scope.guard";
 
 @Module({
   imports: [
@@ -23,6 +25,12 @@ import { RateLimitMiddleware } from "./common/rate-limit.middleware";
     BillingModule,
     RunsModule,
     RuntimeModule,
+  ],
+  providers: [
+    {
+      provide: APP_GUARD,
+      useClass: OrgScopeGuard,
+    },
   ],
 })
 export class AppModule implements NestModule {
