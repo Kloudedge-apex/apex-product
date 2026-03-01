@@ -9,6 +9,9 @@
     "start:prod": "node dist/main",
     "lint": "eslint \"src/**/*.ts\"",
     "type-check": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
     "clean": "rm -rf dist .turbo node_modules"
   },
   "dependencies": {
@@ -29,6 +32,8 @@
     "@nestjs/cli": "^11.0.0",
     "@types/express": "^5.0.0",
     "@types/node": "^22.0.0",
-    "typescript": "^5.7.0"
+    "@vitest/coverage-v8": "^4.0.18",
+    "typescript": "^5.7.0",
+    "vitest": "^4.0.18"
   }
 }
