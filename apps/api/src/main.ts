@@ -1,5 +1,6 @@
 import { NestFactory } from "@nestjs/core";
 import { ValidationPipe } from "@nestjs/common";
+import { SwaggerModule, DocumentBuilder } from "@nestjs/swagger";
 import { AppModule } from "./app.module";
 import { GlobalExceptionFilter } from "./common/http-exception.filter";
 
@@ -7,6 +8,24 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
   app.setGlobalPrefix("api");
+
+  // ── Swagger / OpenAPI docs ──────────────────────────────────────────────
+  const swaggerConfig = new DocumentBuilder()
+    .setTitle("Apex AI Workforce Platform")
+    .setDescription("REST API for Apex — the AI agent platform for SDR, content, and ops teams.")
+    .setVersion("1.0")
+    .addBearerAuth({ type: "http", scheme: "bearer", bearerFormat: "JWT" })
+    .addTag("auth", "Authentication and user management")
+    .addTag("agents", "AI agent configuration and management")
+    .addTag("runtime", "Agent execution and run management")
+    .addTag("integrations", "OAuth integrations (Gmail, HubSpot, LinkedIn)")
+    .addTag("billing", "Subscription and billing management")
+    .build();
+
+  const document = SwaggerModule.createDocument(app, swaggerConfig);
+  SwaggerModule.setup("api/docs", app, document, {
+    swaggerOptions: { persistAuthorization: true },
+  });
 
   // Global validation pipe for DTO validation
   app.useGlobalPipes(

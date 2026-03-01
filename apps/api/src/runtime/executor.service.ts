@@ -9,6 +9,9 @@ import { IntegrationsService } from "../integrations/integrations.service";
 
 const MAX_STEPS = 10;
 
+/** Tools whose failures should be surfaced prominently in the run output */
+const CRITICAL_TOOLS = new Set(["send_email", "hubspot"]);
+
 interface ExecutionResult {
   output: Record<string, unknown>;
   tokensUsed: number;
@@ -104,6 +107,7 @@ export class ExecutorService {
     const steps: StepLog[] = [];
     let stepNum = 0;
     const minToolSteps = this.getMinToolSteps(agent.template.name);
+    const criticalToolFailures: string[] = [];
 
     for (let i = 0; i < MAX_STEPS; i++) {
       stepNum = i + 1;
@@ -160,9 +164,22 @@ export class ExecutorService {
               const result = await tool.execute(toolArgs, toolContext);
               toolResult = result;
               await this.addLog(runId, "DEBUG", `${toolName} returned: success=${result.success}`);
+
+              // Track failures for critical tools
+              if (CRITICAL_TOOLS.has(toolName) && !result.success) {
+                const errMsg = `${toolName}: ${(result as unknown as Record<string, unknown>).error || "returned success=false"}`;
+                criticalToolFailures.push(errMsg);
+                await this.addLog(runId, "ERROR", `Critical tool failure: ${errMsg}`);
+              }
             } catch (error) {
               toolResult = { success: false, error: error instanceof Error ? error.message : "Tool execution failed" };
               await this.addLog(runId, "WARN", `${toolName} failed: ${error instanceof Error ? error.message : "unknown error"}`);
+
+              if (CRITICAL_TOOLS.has(toolName)) {
+                const errMsg = `${toolName}: ${error instanceof Error ? error.message : "unknown error"}`;
+                criticalToolFailures.push(errMsg);
+                await this.addLog(runId, "ERROR", `Critical tool failure: ${errMsg}`);
+              }
             }
           } else {
             toolResult = { success: false, error: `Unknown tool: ${toolName}` };
@@ -219,6 +236,16 @@ export class ExecutorService {
       toolCalls: steps.filter((s) => s.type === "tool_call").length,
       toolsUsed: [...new Set(steps.filter((s) => s.type === "tool_call").map((s) => s.toolName))],
     };
+
+    // Surface critical tool failures in the output
+    if (criticalToolFailures.length > 0) {
+      output._criticalFailures = criticalToolFailures;
+      await this.addLog(
+        runId,
+        "ERROR",
+        `Run completed with ${criticalToolFailures.length} critical tool failure(s): ${criticalToolFailures.join("; ")}`,
+      );
+    }
 
     // Save post-run memory
     await this.savePostRunMemory(agent.id, output, steps, runId);

@@ -1,16 +1,51 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, ForbiddenException } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import { QueueService } from "./queue.service";
+
+const DAILY_RUN_LIMITS: Record<string, number> = {
+  TRIAL: 3,
+  STARTER: 10,
+  GROWTH: 50,
+  ENTERPRISE: Infinity,
+};
 
 @Injectable()
 export class RuntimeService {
   constructor(
     private prisma: PrismaService,
     private queue: QueueService,
-  ) {}
+  ) { }
 
   async triggerRun(agentId: string, orgId: string) {
-    // Create run record
+    // ── Enforce per-plan daily run limits ──────────────────────────────────
+    const org = await this.prisma.org.findUnique({
+      where: { id: orgId },
+      select: { plan: true },
+    });
+
+    const plan = org?.plan || "TRIAL";
+    const limit = DAILY_RUN_LIMITS[plan] ?? DAILY_RUN_LIMITS.TRIAL;
+
+    if (limit !== Infinity) {
+      const todayStart = new Date();
+      todayStart.setHours(0, 0, 0, 0);
+
+      const runsToday = await this.prisma.agentRun.count({
+        where: {
+          orgId,
+          startedAt: { gte: todayStart },
+        },
+      });
+
+      if (runsToday >= limit) {
+        throw new ForbiddenException(
+          `Daily run limit reached for your plan (${plan}: ${limit} runs/day). ` +
+          `Upgrade your plan to run more agents today.`,
+        );
+      }
+    }
+
+    // ── Create run record ─────────────────────────────────────────────────
     const run = await this.prisma.agentRun.create({
       data: {
         agentId,

@@ -48,6 +48,7 @@ enum RunStatus {
   COMPLETED
   FAILED
   CANCELLED
+  PENDING_APPROVAL
 }
 
 enum LogLevel {
@@ -170,6 +171,9 @@ model AgentRun {
   result      Json?
   tokensUsed  Int       @default(0)
   cost        Float     @default(0)
+  requiresApproval Boolean  @default(false)
+  approvedAt  DateTime?
+  approvedBy  String?   // Clerk user ID of the approver
   logs        AgentLog[]
   steps       RunStep[]
 

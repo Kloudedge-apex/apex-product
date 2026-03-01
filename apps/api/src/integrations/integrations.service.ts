@@ -36,11 +36,19 @@ const OAUTH_CONFIGS: Record<string, OAuthConfig> = {
     tokenUrl: "https://api.hubapi.com/oauth/v1/token",
     scopes: ["contacts", "crm.objects.deals.read", "crm.objects.companies.read"],
   },
+  linkedin: {
+    clientId: process.env.LINKEDIN_CLIENT_ID,
+    clientSecret: process.env.LINKEDIN_CLIENT_SECRET,
+    redirectUri: process.env.LINKEDIN_REDIRECT_URI || "http://localhost:4000/api/integrations/linkedin/callback",
+    authUrl: "https://www.linkedin.com/oauth/v2/authorization",
+    tokenUrl: "https://www.linkedin.com/oauth/v2/accessToken",
+    scopes: ["r_liteprofile", "r_emailaddress", "w_member_social"],
+  },
 };
 
 @Injectable()
 export class IntegrationsService {
-  constructor(private prisma: PrismaService) {}
+  constructor(private prisma: PrismaService) { }
 
   async findAll(orgId: string) {
     return this.prisma.integration.findMany({
@@ -58,12 +66,27 @@ export class IntegrationsService {
 
     try {
       const creds = integration.credentials as Record<string, unknown>;
-      if (creds.encrypted && typeof creds.encrypted === "string") {
-        return decryptCredentials(creds.encrypted);
-      }
-      return creds;
+      this.assertEncrypted(creds, provider);
+      return decryptCredentials(creds.encrypted as string);
     } catch {
       return null;
+    }
+  }
+
+  /**
+   * Assert that stored credentials use the encrypted wrapper format.
+   * Throws if plaintext credentials are detected — this is a configuration bug.
+   */
+  private assertEncrypted(creds: Record<string, unknown>, provider: string): void {
+    if (!creds || typeof creds !== "object") {
+      throw new Error(`[Integration:${provider}] credentials field is empty or malformed`);
+    }
+    if (!creds.encrypted || typeof creds.encrypted !== "string") {
+      throw new Error(
+        `[Integration:${provider}] credentials are not encrypted. ` +
+        `Expected { encrypted: string }, got keys: [${Object.keys(creds).join(", ")}]. ` +
+        `Re-connecting the integration will fix this.`,
+      );
     }
   }
 

@@ -33,7 +33,14 @@ const TOKEN_LIMITS: Record<string, number> = {
 const COST_PER_1K: Record<string, number> = {
   "gpt-4o-mini": 0.00015,
   "gpt-4o": 0.005,
+  "claude-3-5-sonnet-20241022": 0.003,
+  "claude-3-haiku-20240307": 0.00025,
 };
+
+/** Default model for complex tasks — uses Claude when key available, else GPT-4o */
+export function getComplexModel(): string {
+  return process.env.ANTHROPIC_API_KEY ? "claude-3-5-sonnet-20241022" : "gpt-4o";
+}
 
 export interface ChatOptions {
   model?: string;
@@ -53,11 +60,29 @@ export class LLMService {
     const tokenLimit = TOKEN_LIMITS[plan] || TOKEN_LIMITS.TRIAL;
     const maxTokens = Math.min(options?.maxTokens || 4000, tokenLimit);
 
-    if (this.apiKey) {
-      return this.callOpenAI(messages, model, maxTokens, options?.tools, options?.toolChoice);
+    // Route Claude models to Anthropic API
+    if (model.startsWith("claude-")) {
+      if (process.env.ANTHROPIC_API_KEY) {
+        return this.callAnthropic(messages, model, maxTokens, options?.tools);
+      }
+      // Fall back to GPT-4o if no Anthropic key
+      return this.callOpenAIOrMock(messages, "gpt-4o", maxTokens, options?.tools, options?.toolChoice);
     }
 
-    return this.mockResponse(messages, model, maxTokens, options?.tools);
+    return this.callOpenAIOrMock(messages, model, maxTokens, options?.tools, options?.toolChoice);
+  }
+
+  private async callOpenAIOrMock(
+    messages: ChatMessage[],
+    model: string,
+    maxTokens: number,
+    tools?: OpenAIFunctionDef[],
+    toolChoice?: string,
+  ): Promise<LLMResponse> {
+    if (this.apiKey) {
+      return this.callOpenAI(messages, model, maxTokens, tools, toolChoice);
+    }
+    return this.mockResponse(messages, model, maxTokens, tools);
   }
 
   private async callOpenAI(
@@ -114,6 +139,87 @@ export class LLMService {
         finishReason: choice?.finish_reason,
       };
     } catch (error) {
+      return this.mockResponse(messages, model, maxTokens, tools);
+    }
+  }
+
+  private async callAnthropic(
+    messages: ChatMessage[],
+    model: string,
+    maxTokens: number,
+    tools?: OpenAIFunctionDef[],
+  ): Promise<LLMResponse> {
+    const anthropicKey = process.env.ANTHROPIC_API_KEY;
+    if (!anthropicKey) return this.mockResponse(messages, model, maxTokens, tools);
+
+    try {
+      // Extract system message (Anthropic takes it as a top-level param)
+      const systemMsg = messages.find((m) => m.role === "system")?.content || "";
+      const nonSystemMessages = messages.filter((m) => m.role !== "system").map((m) => ({
+        role: m.role === "tool" ? "user" : m.role,
+        content: m.role === "tool"
+          ? [{ type: "tool_result", tool_use_id: m.tool_call_id, content: m.content || "" }]
+          : m.content || "",
+      }));
+
+      const body: Record<string, unknown> = {
+        model,
+        max_tokens: maxTokens,
+        system: systemMsg,
+        messages: nonSystemMessages,
+      };
+
+      if (tools && tools.length > 0) {
+        body.tools = tools.map((t) => ({
+          name: t.function.name,
+          description: t.function.description,
+          input_schema: t.function.parameters,
+        }));
+      }
+
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": anthropicKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify(body),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Anthropic API error: ${response.status}`);
+      }
+
+      const data = (await response.json()) as {
+        content: Array<{ type: string; text?: string; id?: string; name?: string; input?: unknown }>;
+        usage: { input_tokens: number; output_tokens: number };
+        stop_reason: string;
+      };
+
+      const tokensUsed = (data.usage?.input_tokens || 0) + (data.usage?.output_tokens || 0);
+      const costPer1K = COST_PER_1K[model] || COST_PER_1K["claude-3-5-sonnet-20241022"];
+
+      // Map tool_use blocks to OpenAI-style tool_calls
+      const toolUseBlocks = data.content.filter((b) => b.type === "tool_use");
+      const openAIToolCalls: ToolCallMessage[] = toolUseBlocks.map((b) => ({
+        id: b.id || `call_${Date.now()}`,
+        type: "function" as const,
+        function: { name: b.name || "", arguments: JSON.stringify(b.input || {}) },
+      }));
+
+      const textBlock = data.content.find((b) => b.type === "text");
+
+      return {
+        content: textBlock?.text || "",
+        tokensUsed,
+        model,
+        cost: (tokensUsed / 1000) * costPer1K,
+        toolCalls: openAIToolCalls.length > 0 ? openAIToolCalls : undefined,
+        finishReason: data.stop_reason,
+      };
+    } catch (error) {
+      // Fall back to mock on Anthropic errors
       return this.mockResponse(messages, model, maxTokens, tools);
     }
   }

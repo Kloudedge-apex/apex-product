@@ -1,21 +1,26 @@
-import { Controller, Get, Post, Body } from "@nestjs/common";
+import { Controller, Get, Post, Body, Req, UnauthorizedException } from "@nestjs/common";
 import { AuthService } from "./auth.service";
 import { SkipOrgGuard } from "../common/org-scope.guard";
+import { Request } from "express";
 
 @Controller("auth")
-@SkipOrgGuard()
 export class AuthController {
-  constructor(private readonly authService: AuthService) {}
+  constructor(private readonly authService: AuthService) { }
 
   @Get("me")
-  getMe() {
-    // TODO: Implement with Clerk JWT verification
-    return { message: "Auth endpoint stub" };
+  @SkipOrgGuard()
+  getMe(@Req() req: Request) {
+    // clerkUserId is set by OrgScopeGuard after JWT verification
+    const clerkUserId = (req as unknown as Record<string, unknown>).clerkUserId as string | undefined;
+    if (!clerkUserId) {
+      throw new UnauthorizedException("Not authenticated");
+    }
+    return this.authService.getUserByClerkId(clerkUserId);
   }
 
   @Post("webhook")
+  @SkipOrgGuard()
   handleWebhook(@Body() body: unknown) {
-    // TODO: Handle Clerk webhook events (user.created, org.created, etc.)
     return this.authService.handleWebhook(body);
   }
 }
