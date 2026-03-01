@@ -1,7 +1,6 @@
 import { Injectable, UnauthorizedException, BadRequestException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { google, gmail_v1 } from "googleapis";
-import { OAuth2Client } from "google-auth-library";
+import { google, gmail_v1, Auth } from "googleapis";
 import { PrismaService } from "../../prisma/prisma.service";
 import { encrypt, decrypt } from "../crypto.util";
 
@@ -305,7 +304,7 @@ export class GmailService {
 
   // ─── Private helpers ──────────────────────────────────
 
-  private createOAuth2Client(): OAuth2Client {
+  private createOAuth2Client(): Auth.OAuth2Client {
     return new google.auth.OAuth2(
       this.clientId,
       this.clientSecret,
@@ -323,7 +322,7 @@ export class GmailService {
     });
 
     // Set up automatic token refresh
-    oauth2Client.on("tokens", async (newTokens) => {
+    oauth2Client.on("tokens", async (newTokens: Auth.Credentials) => {
       const updated: GmailTokens = {
         ...tokens,
         access_token: newTokens.access_token ?? tokens.access_token,

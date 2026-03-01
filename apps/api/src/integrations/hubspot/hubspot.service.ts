@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException, NotFoundException } from "@nestjs/common";
+import { Injectable, UnauthorizedException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { Client } from "@hubspot/api-client";
 import { PrismaService } from "../../prisma/prisma.service";
