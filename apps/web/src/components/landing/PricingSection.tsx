@@ -17,6 +17,8 @@ const plans = [
     ],
     cta: "Start Free Trial",
     popular: false,
+    monthlyLink: "https://rzp.io/rzp/obCLnmhT",
+    annualLink: "https://rzp.io/rzp/HH1JTnP",
   },
   {
     name: "Growth",
@@ -34,6 +36,8 @@ const plans = [
     ],
     cta: "Start Free Trial",
     popular: true,
+    monthlyLink: "https://rzp.io/rzp/g1wWro4g",
+    annualLink: "https://rzp.io/rzp/x3wPkqqy",
   },
   {
     name: "Enterprise",
@@ -50,6 +54,8 @@ const plans = [
     ],
     cta: "Contact Sales",
     popular: false,
+    monthlyLink: "mailto:kestrel@kloudedge.co",
+    annualLink: "mailto:kestrel@kloudedge.co",
   },
 ];
 
@@ -86,6 +92,7 @@ export function PricingSection() {
           const price = annual
             ? Math.round(plan.monthlyPrice * 0.8)
             : plan.monthlyPrice;
+          const paymentLink = annual ? plan.annualLink : plan.monthlyLink;
 
           return (
             <div
@@ -126,14 +133,16 @@ export function PricingSection() {
                   </li>
                 ))}
               </ul>
-              <Link
-                href={isEnterprise ? "mailto:hello@kloudedge.com" : "/signup"}
+              <a
+                href={paymentLink}
+                target={isEnterprise ? undefined : "_blank"}
+                rel={isEnterprise ? undefined : "noopener noreferrer"}
                 className={`mt-8 block text-center py-2.5 rounded-lg font-medium text-sm ${
                   plan.popular ? "btn-primary" : "btn-secondary"
                 }`}
               >
                 {plan.cta}
-              </Link>
+              </a>
             </div>
           );
         })}
