@@ -1,6 +1,8 @@
 FROM node:20-slim AS base
 RUN corepack enable pnpm
 
+# ── Build stage ──────────────────────────────────────────
+FROM base AS builder
 WORKDIR /app
 
 # Copy workspace root files
@@ -20,7 +22,7 @@ COPY apps/api/ apps/api/
 # Generate Prisma client (needed by web too)
 RUN cd packages/db && npx prisma generate
 
-# Build args for Next.js
+# Build args for Next.js (baked into the client bundle at build time)
 ARG NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
 ARG NEXT_PUBLIC_CLERK_SIGN_IN_URL=/login
 ARG NEXT_PUBLIC_CLERK_SIGN_UP_URL=/signup
@@ -35,8 +37,25 @@ ENV NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL=$NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL
 ENV NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL=$NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 
-# Build
+# Build the Next.js app (produces .next/standalone)
 RUN pnpm --filter @apex/web build
 
+# ── Production stage ─────────────────────────────────────
+FROM base AS runner
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV HOSTNAME=0.0.0.0
+ENV PORT=3000
+
+# Copy standalone server (includes all needed node_modules)
+COPY --from=builder /app/apps/web/.next/standalone ./
+
+# Copy static assets and public folder that standalone doesn't include
+COPY --from=builder /app/apps/web/.next/static ./apps/web/.next/static
+COPY --from=builder /app/apps/web/public ./apps/web/public
+
 EXPOSE 3000
-CMD ["pnpm", "--filter", "@apex/web", "start"]
+
+# The standalone output produces a self-contained server.js
+CMD ["node", "apps/web/server.js"]
