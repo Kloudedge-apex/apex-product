@@ -6,7 +6,7 @@ import { usePathname } from "next/navigation";
 import { useUser } from "@clerk/nextjs";
 import { UserButton } from "@clerk/nextjs";
 import {
-  LayoutDashboard, Bot, Settings, Zap, Activity,
+  LayoutDashboard, Bot, Settings, Zap, Activity, Send,
   Menu, X, ChevronRight, Sparkles, TrendingUp,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
@@ -15,6 +15,7 @@ import { useOrg, useDashboardData } from "@/lib/hooks";
 const navItems = [
   { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
   { label: "Agents", href: "/agents", icon: Bot },
+  { label: "Outreach", href: "/outreach", icon: Send },
   { label: "Integrations", href: "/integrations", icon: Zap },
   { label: "Activity", href: "/activity", icon: Activity },
   { label: "Settings", href: "/settings", icon: Settings },
