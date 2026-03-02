@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
-    branches: [main]
+    branches: [master]
 
 env:
   NODE_VERSION: "20"
@@ -40,18 +40,3 @@ jobs:
 
       - name: Build
         run: pnpm build
-
-  # Placeholder for deployment
-  deploy:
-    name: Deploy to Azure
-    needs: lint-typecheck-build
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      # TODO: Azure Container Apps deployment
-      - name: Deploy (placeholder)
-        run: echo "Deployment to Azure Container Apps will be configured here"
