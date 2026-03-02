@@ -5,7 +5,7 @@ import { getAllTemplates, getTemplateBySlug, getTemplatesByDomain, AgentTemplate
 
 @Injectable()
 export class AgentsService {
-  constructor(private prisma: PrismaService) {}
+  constructor(private prisma: PrismaService) { }
 
   async findAll(orgId: string) {
     return this.prisma.agent.findMany({
@@ -80,11 +80,29 @@ export class AgentsService {
   }
 
   async getTemplates(domain?: string) {
+    // Auto-seed from in-code template definitions if the table is empty.
+    // This means onboarding works even before `prisma db seed` has been run.
+    const count = await this.prisma.agentTemplate.count();
+    if (count === 0) {
+      const inCode = getAllTemplates();
+      await this.prisma.agentTemplate.createMany({
+        data: inCode.map((t) => ({
+          name: t.name,
+          domain: t.domain as any,
+          description: t.description,
+          defaultConfig: t.defaultConfig as any,
+          requiredIntegrations: t.requiredIntegrations,
+        })),
+        skipDuplicates: true,
+      });
+    }
+
     return this.prisma.agentTemplate.findMany({
       where: domain ? { domain: domain as any } : {},
       orderBy: { name: "asc" },
     });
   }
+
 
   /** Get all in-code template configs (with full system prompts, tools, etc.) */
   getTemplateConfigs(domain?: string): AgentTemplateConfig[] {
