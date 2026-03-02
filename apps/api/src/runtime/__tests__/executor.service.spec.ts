@@ -14,6 +14,9 @@ function createMockPrisma() {
     agentLog: {
       create: vi.fn().mockResolvedValue({ id: "log_1" }),
     },
+    runStep: {
+      create: vi.fn().mockResolvedValue({ id: "step_1" }),
+    },
     integration: {
       findMany: vi.fn().mockResolvedValue([]),
     },

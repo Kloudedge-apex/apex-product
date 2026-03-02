@@ -85,13 +85,22 @@ export class AgentsController {
 
   // Get runs for an agent
   @Get(":id/runs")
-  async getAgentRuns(@Param("id") agentId: string) {
-    return this.prisma.agentRun.findMany({
-      where: { agentId },
-      include: { logs: { orderBy: { createdAt: "asc" } } },
-      orderBy: { startedAt: "desc" },
-      take: 50,
-    });
+  async getAgentRuns(@Param("id") agentId: string, @Query("limit") limit?: number) {
+    const take = Math.min(limit || 50, 100);
+    const [runs, total] = await Promise.all([
+      this.prisma.agentRun.findMany({
+        where: { agentId },
+        include: {
+          logs: { orderBy: { createdAt: "asc" } },
+          steps: { orderBy: { stepIndex: "asc" } },
+          _count: { select: { steps: true, logs: true } },
+        },
+        orderBy: { startedAt: "desc" },
+        take,
+      }),
+      this.prisma.agentRun.count({ where: { agentId } }),
+    ]);
+    return { runs, total };
   }
 
   // Get agent memories

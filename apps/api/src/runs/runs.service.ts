@@ -65,7 +65,11 @@ export class RunsService {
   async findOne(id: string) {
     return this.prisma.agentRun.findUnique({
       where: { id },
-      include: { agent: true, logs: { orderBy: { createdAt: "asc" } } },
+      include: {
+        agent: { select: { id: true, name: true, domain: true, templateId: true } },
+        logs: { orderBy: { createdAt: "asc" } },
+        steps: { orderBy: { stepIndex: "asc" } },
+      },
     });
   }
 

@@ -1,10 +1,14 @@
-import { Controller, Post, Get, Param, Body } from "@nestjs/common";
+import { Controller, Post, Get, Param, Body, Query, NotFoundException } from "@nestjs/common";
 import { RuntimeService } from "./runtime.service";
 import { TriggerRunBodyDto } from "../common/dto/runtime.dto";
+import { PrismaService } from "../prisma/prisma.service";
 
 @Controller("runtime")
 export class RuntimeController {
-  constructor(private readonly runtime: RuntimeService) {}
+  constructor(
+    private readonly runtime: RuntimeService,
+    private readonly prisma: PrismaService,
+  ) {}
 
   @Post("trigger/:agentId")
   triggerRun(@Param("agentId") agentId: string, @Body() body: TriggerRunBodyDto) {

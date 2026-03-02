@@ -9,6 +9,14 @@ import { IntegrationsService } from "../integrations/integrations.service";
 
 const MAX_STEPS = 10;
 
+/** Per-run token budgets by plan */
+const TOKEN_BUDGETS: Record<string, number> = {
+  TRIAL: 5000,
+  STARTER: 10000,
+  GROWTH: 50000,
+  ENTERPRISE: Infinity,
+};
+
 /** Tools whose failures should be surfaced prominently in the run output */
 const CRITICAL_TOOLS = new Set(["send_email", "hubspot"]);
 
@@ -106,26 +114,48 @@ export class ExecutorService {
     let totalCost = 0;
     const steps: StepLog[] = [];
     let stepNum = 0;
+    let dbStepIndex = 0;
     const minToolSteps = this.getMinToolSteps(agent.template.name);
     const criticalToolFailures: string[] = [];
+    const tokenBudget = TOKEN_BUDGETS[plan] ?? TOKEN_BUDGETS.TRIAL;
 
     for (let i = 0; i < MAX_STEPS; i++) {
       stepNum = i + 1;
+
+      // ── Token budget enforcement ──────────────────────────────────────
+      if (tokenBudget !== Infinity && totalTokens >= tokenBudget) {
+        await this.addLog(runId, "WARN", `Token budget exhausted (${totalTokens}/${tokenBudget} for plan ${plan}). Stopping.`);
+        await this.persistStep(runId, dbStepIndex++, "ERROR", undefined, undefined, { budget: tokenBudget, used: totalTokens }, 0, 0, `Token budget exhausted for plan ${plan}`);
+        break;
+      }
 
       // Force tool use for the first N iterations to ensure agents actually use their tools
       const toolCallsSoFar = steps.filter((s) => s.type === "tool_call").length;
       const forceTools = toolCallsSoFar < minToolSteps && openAITools.length > 0;
 
+      // Cap maxTokens to remaining budget
+      const remainingBudget = tokenBudget === Infinity ? 4000 : Math.min(4000, tokenBudget - totalTokens);
+
+      const llmStart = Date.now();
       const response = await this.llm.chat(messages, {
         model,
         plan,
-        maxTokens: 4000,
+        maxTokens: Math.max(remainingBudget, 500), // at least 500 tokens for any useful response
         tools: openAITools.length > 0 ? openAITools : undefined,
         toolChoice: forceTools ? "required" : "auto",
       });
+      const llmDuration = Date.now() - llmStart;
 
       totalTokens += response.tokensUsed;
       totalCost += response.cost;
+
+      // Persist LLM_CALL step
+      await this.persistStep(
+        runId, dbStepIndex++, "LLM_CALL", undefined,
+        { model: response.model, toolChoice: forceTools ? "required" : "auto" },
+        { content: response.content?.slice(0, 500), hasToolCalls: !!(response.toolCalls && response.toolCalls.length > 0) },
+        llmDuration, response.tokensUsed,
+      );
 
       // Check for tool calls
       if (response.toolCalls && response.toolCalls.length > 0) {
@@ -158,6 +188,7 @@ export class ExecutorService {
 
           const tool = this.toolRegistry.get(toolName);
           let toolResult: unknown;
+          const toolStart = Date.now();
 
           if (tool) {
             try {
@@ -185,6 +216,19 @@ export class ExecutorService {
             toolResult = { success: false, error: `Unknown tool: ${toolName}` };
             await this.addLog(runId, "WARN", `Unknown tool: ${toolName}`);
           }
+
+          const toolDuration = Date.now() - toolStart;
+
+          // Persist TOOL_CALL step
+          await this.persistStep(runId, dbStepIndex++, "TOOL_CALL", toolName, toolArgs, null, toolDuration, 0);
+
+          // Persist TOOL_RESULT step
+          await this.persistStep(
+            runId, dbStepIndex++, "TOOL_RESULT", toolName, null,
+            typeof toolResult === "object" ? toolResult : { value: toolResult },
+            0, 0,
+            (toolResult as any)?.success === false ? ((toolResult as any)?.error || "Tool failed") : undefined,
+          );
 
           steps.push({
             step: stepNum,
@@ -215,6 +259,13 @@ export class ExecutorService {
         timestamp: Date.now(),
       });
 
+      // Persist FINAL_OUTPUT step
+      await this.persistStep(
+        runId, dbStepIndex++, "FINAL_OUTPUT", undefined,
+        null, { content: response.content?.slice(0, 5000) },
+        0, 0,
+      );
+
       break;
     }
 
@@ -235,6 +286,9 @@ export class ExecutorService {
       steps: steps.length,
       toolCalls: steps.filter((s) => s.type === "tool_call").length,
       toolsUsed: [...new Set(steps.filter((s) => s.type === "tool_call").map((s) => s.toolName))],
+      tokenBudget: tokenBudget === Infinity ? "unlimited" : tokenBudget,
+      tokensUsed: totalTokens,
+      budgetRemaining: tokenBudget === Infinity ? "unlimited" : Math.max(0, tokenBudget - totalTokens),
     };
 
     // Surface critical tool failures in the output
@@ -396,6 +450,36 @@ ${toolDescriptions}
       }
     } catch (error) {
       // Memory save failures should not break the run
+    }
+  }
+
+  private async persistStep(
+    runId: string,
+    stepIndex: number,
+    type: "LLM_CALL" | "TOOL_CALL" | "TOOL_RESULT" | "ERROR" | "FINAL_OUTPUT",
+    toolName?: string,
+    input?: unknown,
+    output?: unknown,
+    durationMs: number = 0,
+    tokenCount: number = 0,
+    error?: string,
+  ): Promise<void> {
+    try {
+      await this.prisma.runStep.create({
+        data: {
+          runId,
+          stepIndex,
+          type,
+          toolName: toolName || null,
+          input: input != null ? (input as any) : undefined,
+          output: output != null ? (output as any) : undefined,
+          durationMs,
+          tokenCount,
+          error: error || null,
+        },
+      });
+    } catch {
+      // RunStep persistence should not break the run
     }
   }
 
