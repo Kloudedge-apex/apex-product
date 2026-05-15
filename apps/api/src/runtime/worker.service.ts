@@ -6,7 +6,8 @@ import { ExecutorService } from "./executor.service";
 @Injectable()
 export class WorkerService implements OnModuleInit, OnModuleDestroy {
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
-  private processing = false;
+  private activeJobs = 0;
+  private readonly maxConcurrency = 5;
 
   constructor(
     private prisma: PrismaService,
@@ -51,12 +52,12 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async processNext() {
-    if (this.processing) return;
+    if (this.activeJobs >= this.maxConcurrency) return;
 
     const job = this.queue.dequeue();
     if (!job) return;
 
-    this.processing = true;
+    this.activeJobs++;
 
     try {
       // Update run status to RUNNING
@@ -105,7 +106,7 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
 
       this.queue.fail(job.id, errorMessage);
     } finally {
-      this.processing = false;
+      this.activeJobs--;
     }
   }
 }

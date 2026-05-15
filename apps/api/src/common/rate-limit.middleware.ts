@@ -18,6 +18,25 @@ export class RateLimitMiddleware implements NestMiddleware {
   private readonly windowMs = 60_000; // 1 minute
   private readonly orgLimit = 200;    // requests per minute per org
   private readonly ipLimit = 100;     // requests per minute per IP
+  private cleanupHandle: ReturnType<typeof setInterval>;
+
+  constructor() {
+    // Evict expired entries every 5 minutes to prevent memory leak
+    this.cleanupHandle = setInterval(() => this.evictExpired(), 5 * 60_000);
+  }
+
+  onModuleDestroy() {
+    clearInterval(this.cleanupHandle);
+  }
+
+  private evictExpired() {
+    const now = Date.now();
+    for (const [key, entry] of this.store) {
+      if (now > entry.resetAt) {
+        this.store.delete(key);
+      }
+    }
+  }
 
   use(req: Request, _res: Response, next: NextFunction) {
     // Prefer orgId for keying — gives each org their own quota

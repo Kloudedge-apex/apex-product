@@ -139,7 +139,7 @@ export class LLMService {
         finishReason: choice?.finish_reason,
       };
     } catch (error) {
-      return this.mockResponse(messages, model, maxTokens, tools);
+      throw error instanceof Error ? error : new Error("OpenAI API call failed");
     }
   }
 
@@ -219,8 +219,7 @@ export class LLMService {
         finishReason: data.stop_reason,
       };
     } catch (error) {
-      // Fall back to mock on Anthropic errors
-      return this.mockResponse(messages, model, maxTokens, tools);
+      throw error instanceof Error ? error : new Error("Anthropic API call failed");
     }
   }
 
@@ -302,53 +301,6 @@ export class LLMService {
     }
 
     return seq;
-  }
-
-  private mockToolCallResponse(
-    tools: OpenAIFunctionDef[],
-    systemMessage: string,
-    _userMessage: string,
-    model: string,
-    mockTokens: number,
-  ): LLMResponse {
-    const sysLower = systemMessage.toLowerCase();
-    const toolCalls: ToolCallMessage[] = [];
-    const hasTool = (name: string) => tools.some((t) => t.function.name === name);
-
-    if (sysLower.includes("sdr") || sysLower.includes("sales")) {
-      if (hasTool("web_search")) {
-        toolCalls.push({ id: `call_${Date.now()}_1`, type: "function", function: { name: "web_search", arguments: JSON.stringify({ query: "target company SaaS overview", max_results: 3 }) } });
-      }
-    } else if (sysLower.includes("content") || sysLower.includes("writer")) {
-      if (hasTool("web_search")) {
-        toolCalls.push({ id: `call_${Date.now()}_1`, type: "function", function: { name: "web_search", arguments: JSON.stringify({ query: "trending B2B content topics 2026", max_results: 3 }) } });
-      }
-    } else if (sysLower.includes("report")) {
-      if (hasTool("hubspot")) {
-        toolCalls.push({ id: `call_${Date.now()}_1`, type: "function", function: { name: "hubspot", arguments: JSON.stringify({ action: "search_contacts", data: { company: "all" } }) } });
-      }
-    } else if (tools.length > 0) {
-      toolCalls.push({ id: `call_${Date.now()}_1`, type: "function", function: { name: tools[0].function.name, arguments: JSON.stringify({}) } });
-    }
-
-    if (toolCalls.length === 0) {
-      return {
-        content: this.generateMockContent(systemMessage, _userMessage),
-        tokensUsed: mockTokens,
-        model: `${model}-mock`,
-        cost: (mockTokens / 1000) * (COST_PER_1K[model] || 0.00015),
-        finishReason: "stop",
-      };
-    }
-
-    return {
-      content: "",
-      tokensUsed: mockTokens,
-      model: `${model}-mock`,
-      cost: (mockTokens / 1000) * (COST_PER_1K[model] || 0.00015),
-      toolCalls,
-      finishReason: "tool_calls",
-    };
   }
 
   private generateMockContent(systemMessage: string, userMessage: string): string {

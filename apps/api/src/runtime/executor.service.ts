@@ -140,7 +140,7 @@ export class ExecutorService {
       const response = await this.llm.chat(messages, {
         model,
         plan,
-        maxTokens: Math.max(remainingBudget, 500), // at least 500 tokens for any useful response
+        maxTokens: Math.min(remainingBudget, 4000), // cap to remaining budget; minimum enforced below
         tools: openAITools.length > 0 ? openAITools : undefined,
         toolChoice: forceTools ? "required" : "auto",
       });

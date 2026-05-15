@@ -3,6 +3,21 @@ import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "../prisma/prisma.service";
 import Razorpay from "razorpay";
 
+/** Explicit Razorpay plan ID to internal plan mapping */
+const PLAN_ID_MAP: Record<string, "STARTER" | "GROWTH" | "ENTERPRISE"> = {
+  // Add actual Razorpay plan IDs here as they are created
+  // e.g. "plan_abc123": "STARTER",
+};
+
+// Also match by substring as fallback for legacy plan IDs
+function resolvePlan(planId: string): "STARTER" | "GROWTH" | "ENTERPRISE" {
+  if (PLAN_ID_MAP[planId]) return PLAN_ID_MAP[planId];
+  const lower = planId.toLowerCase();
+  if (lower.includes("enterprise")) return "ENTERPRISE";
+  if (lower.includes("starter")) return "STARTER";
+  return "GROWTH";
+}
+
 @Injectable()
 export class BillingService {
   private razorpay: Razorpay | null = null;
@@ -32,7 +47,7 @@ export class BillingService {
       where: { id: orgId },
       data: {
         billingId: subscription.id,
-        plan: planId.includes("starter") ? "STARTER" : "GROWTH",
+        plan: resolvePlan(planId),
       },
     });
 

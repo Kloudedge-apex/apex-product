@@ -81,22 +81,58 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
   }
 
   private matchCron(expression: string, now: Date, diffMinutes: number): boolean {
-    // Basic cron parser for simple expressions like "0 * * * *" (every hour)
     const parts = expression.split(" ");
     if (parts.length !== 5) return diffMinutes >= 60; // fallback: once per hour
 
-    const [minute, hour] = parts;
+    const [minute, hour, dayOfMonth, month, dayOfWeek] = parts;
 
-    if (minute === "*" && hour === "*") {
-      return diffMinutes >= 1;
+    // Must have at least 1 minute since last run to avoid double-firing
+    if (diffMinutes < 1) return false;
+
+    const currentMinute = now.getUTCMinutes();
+    const currentHour = now.getUTCHours();
+    const currentDayOfMonth = now.getUTCDate();
+    const currentMonth = now.getUTCMonth() + 1; // 1-indexed
+    const currentDayOfWeek = now.getUTCDay(); // 0=Sunday
+
+    const minuteMatch = this.matchCronField(minute, currentMinute);
+    const hourMatch = this.matchCronField(hour, currentHour);
+    const dayOfMonthMatch = this.matchCronField(dayOfMonth, currentDayOfMonth);
+    const monthMatch = this.matchCronField(month, currentMonth);
+    const dayOfWeekMatch = this.matchCronField(dayOfWeek, currentDayOfWeek);
+
+    return minuteMatch && hourMatch && dayOfMonthMatch && monthMatch && dayOfWeekMatch;
+  }
+
+  /** Match a single cron field (supports *, exact numbers, comma-separated, and step syntax) */
+  private matchCronField(field: string, value: number): boolean {
+    if (field === "*") return true;
+
+    // Handle step syntax: */5 or 1-10/2
+    if (field.includes("/")) {
+      const [range, stepStr] = field.split("/");
+      const step = parseInt(stepStr);
+      if (isNaN(step) || step <= 0) return false;
+      if (range === "*") return value % step === 0;
+      // range like 1-10/2
+      if (range.includes("-")) {
+        const [start, end] = range.split("-").map(Number);
+        return value >= start && value <= end && (value - start) % step === 0;
+      }
+      return false;
     }
 
-    const currentMinute = now.getMinutes();
-    const currentHour = now.getHours();
+    // Handle comma-separated values: 1,15,30
+    if (field.includes(",")) {
+      return field.split(",").some((v) => parseInt(v) === value);
+    }
 
-    const minuteMatch = minute === "*" || parseInt(minute) === currentMinute;
-    const hourMatch = hour === "*" || parseInt(hour) === currentHour;
+    // Handle range: 1-5
+    if (field.includes("-")) {
+      const [start, end] = field.split("-").map(Number);
+      return value >= start && value <= end;
+    }
 
-    return minuteMatch && hourMatch && diffMinutes >= 1;
+    return parseInt(field) === value;
   }
 }

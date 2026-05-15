@@ -52,7 +52,7 @@ export class OrgScopeGuard implements CanActivate {
     const request = context.switchToHttp().getRequest<Request>();
 
     const orgId = this.extractOrgId(request);
-    if (!orgId) return true; // Some endpoints don't require orgId
+    if (!orgId) return false; // Deny by default — use @SkipOrgGuard() for endpoints that don't need orgId
 
     if (this.clerkEnabled) {
       // ── Verify JWT and confirm org ownership ──────────────────────────────

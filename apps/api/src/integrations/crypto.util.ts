@@ -15,7 +15,8 @@ function getEncryptionKey(): Buffer {
     return Buffer.from(key, "hex");
   }
   // Derive key from passphrase
-  return crypto.scryptSync(key, "apex-salt", 32);
+  const salt = process.env.CRYPTO_SALT || "apex-salt";
+  return crypto.scryptSync(key, salt, 32);
 }
 
 export function encrypt(plaintext: string): string {
