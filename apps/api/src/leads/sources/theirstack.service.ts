@@ -1,4 +1,5 @@
 import { Injectable, Logger } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
 
 interface IcpInput {
   targetTitles: string[];
@@ -57,7 +58,11 @@ const GEO_TO_COUNTRY_CODE: Record<string, string> = {
 @Injectable()
 export class TheirStackService {
   private readonly logger = new Logger(TheirStackService.name);
-  private readonly apiKey = process.env.THEIRSTACK_API_KEY ?? "";
+  private readonly apiKey: string;
+
+  constructor(private readonly config: ConfigService) {
+    this.apiKey = this.config.get<string>('THEIRSTACK_API_KEY') ?? '';
+  }
 
   private get enabled(): boolean {
     return this.apiKey.length > 0;

@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable, Logger, ConflictException } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import { AtsScraper } from "./sources/ats-scraper.service";
 import { TeamPageScraper } from "./sources/team-page-scraper.service";
@@ -87,6 +87,13 @@ export class LeadsService {
   // ─── Discovery Pipeline ──────────────────────────────
 
   async triggerDiscovery(orgId: string, icpProfileId: string) {
+    const existingJob = await this.prisma.scrapeJob.findFirst({
+      where: { orgId, status: { in: ['QUEUED', 'RUNNING'] } },
+    });
+    if (existingJob) {
+      throw new ConflictException('Discovery pipeline already running for this org');
+    }
+
     const icp = await this.prisma.icpProfile.findFirstOrThrow({
       where: { id: icpProfileId, orgId },
     });
@@ -170,6 +177,7 @@ export class LeadsService {
     const totalSteps = 4;
 
     const upsertCompany = async (co: { domain: string; name: string; industry?: string; country?: string; atsProvider?: string; atsSlug?: string; source?: string; linkedinCompanyUrl?: string }) => {
+      if (!co.domain || co.domain.length === 0) return;
       if (seenDomains.has(co.domain)) return;
       seenDomains.add(co.domain);
       try {
@@ -272,9 +280,20 @@ export class LeadsService {
         for (const sp of serpPeople) {
           // Try to match to an existing company or skip
           if (sp.companyName) {
-            const company = await this.prisma.company.findFirst({
-              where: { orgId, name: { contains: sp.companyName, mode: "insensitive" } },
+            // Try exact match first, then startsWith, then contains (skip if name too short)
+            let company = await this.prisma.company.findFirst({
+              where: { orgId, name: { equals: sp.companyName, mode: 'insensitive' } },
             });
+            if (!company) {
+              company = await this.prisma.company.findFirst({
+                where: { orgId, name: { startsWith: sp.companyName, mode: 'insensitive' } },
+              });
+            }
+            if (!company && sp.companyName.length >= 5) {
+              company = await this.prisma.company.findFirst({
+                where: { orgId, name: { contains: sp.companyName, mode: 'insensitive' } },
+              });
+            }
             if (company) {
               await this.upsertPerson(company.id, {
                 firstName: sp.firstName,
@@ -435,6 +454,15 @@ export class LeadsService {
             },
           });
           count++;
+        }
+
+        // Learn patterns from verified or source-confirmed emails
+        for (const c of candidates) {
+          const verification = verifyResults.get(c.email);
+          if ((verification && verification.result === 'VALID') || ['TEAM_PAGE', 'GITHUB_COMMIT', 'SEC_FILING'].includes(c.source)) {
+            await this.emailPatternService.learnPattern(c.email, person.company.domain);
+            break; // Learn from the first confirmed email only
+          }
         }
       } catch (err) {
         this.logger.warn(`Email enrichment failed for person ${person.id}: ${err instanceof Error ? err.message : String(err)}`);
@@ -604,6 +632,39 @@ export class LeadsService {
       orderBy: { createdAt: "desc" },
       take: 50,
     });
+  }
+
+  async exportCsv(orgId: string): Promise<string> {
+    const people = await this.prisma.person.findMany({
+      where: {
+        company: { orgId },
+        scores: { some: { orgId, score: { gte: 100 } } },
+      },
+      include: {
+        company: { select: { name: true, domain: true } },
+        emails: { orderBy: { confidence: 'desc' }, take: 1 },
+        scores: { where: { orgId }, select: { score: true } },
+      },
+    });
+
+    const header = 'firstName,lastName,title,company,domain,email,confidence,score,linkedinUrl';
+    const rows = people.map(p => {
+      const email = p.emails[0];
+      const score = p.scores[0]?.score ?? 0;
+      const escapeCsv = (s: string | null | undefined) => {
+        if (!s) return '';
+        if (s.includes(',') || s.includes('"') || s.includes('\n')) return `"${s.replace(/"/g, '""')}"`;
+        return s;
+      };
+      return [
+        escapeCsv(p.firstName), escapeCsv(p.lastName), escapeCsv(p.title),
+        escapeCsv(p.company.name), escapeCsv(p.company.domain),
+        escapeCsv(email?.email), email?.confidence?.toString() ?? '', score.toString(),
+        escapeCsv(p.linkedinUrl),
+      ].join(',');
+    });
+
+    return [header, ...rows].join('\n');
   }
 
   async getStats(orgId: string) {

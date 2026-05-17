@@ -5,10 +5,12 @@ import {
   Body,
   Param,
   Query,
+  Res,
   HttpCode,
   HttpStatus,
   BadRequestException,
 } from "@nestjs/common";
+import type { Response } from "express";
 import { OrgId } from "../common/org-context.decorator";
 import { LeadsService } from "./leads.service";
 import type { Seniority, Department } from "@prisma/client";
@@ -32,6 +34,8 @@ export class LeadsController {
       minEmployees?: number;
       maxEmployees?: number;
       techStackSignals?: string[];
+      intentKeywords?: string[];
+      seedDomains?: string[];
     },
   ) {
     if (!orgId) throw new BadRequestException("orgId required");
@@ -96,6 +100,18 @@ export class LeadsController {
       department,
       minScore: minScore ? parseInt(minScore, 10) : undefined,
     });
+  }
+
+  @Get('export/csv')
+  async exportCsv(
+    @OrgId() orgId: string | undefined,
+    @Res() res: Response,
+  ) {
+    if (!orgId) throw new BadRequestException('orgId required');
+    const csv = await this.leads.exportCsv(orgId);
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename=leads.csv');
+    res.send(csv);
   }
 
   @Get("people/:id")

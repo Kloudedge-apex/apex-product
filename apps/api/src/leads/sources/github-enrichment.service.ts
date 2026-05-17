@@ -117,13 +117,23 @@ export class GithubEnrichment {
   }
 
   private async searchOrgs(domain: string): Promise<GithubOrg[]> {
-    const domainName = domain.replace(/\.[^.]+$/, ""); // strip TLD
-    const res = await this.ghFetch(
-      `https://api.github.com/search/users?q=${encodeURIComponent(domainName)}+type:org&per_page=5`,
-    );
-    if (!res.ok) return [];
-    const data = await res.json() as { items?: GithubOrg[] };
-    return data.items ?? [];
+    const domainName = domain.replace(/\.[^.]+$/, '');
+    const variants = [domainName, `${domainName}hq`, `${domainName}-inc`, `${domainName}app`];
+    const allOrgs: GithubOrg[] = [];
+    const seen = new Set<number>();
+
+    for (const variant of variants.slice(0, 3)) {
+      const res = await this.ghFetch(
+        `https://api.github.com/search/users?q=${encodeURIComponent(variant)}+type:org&per_page=5`,
+      );
+      if (!res.ok) continue;
+      const data = await res.json() as { items?: GithubOrg[] };
+      for (const org of data.items ?? []) {
+        if (!seen.has(org.id)) { seen.add(org.id); allOrgs.push(org); }
+      }
+      if (allOrgs.length >= 5) break;
+    }
+    return allOrgs.slice(0, 5);
   }
 
   private async getOrgRepos(org: string): Promise<GithubRepo[]> {

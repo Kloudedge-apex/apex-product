@@ -52,7 +52,7 @@ export class RegistryScraper {
       await new Promise((r) => setTimeout(r, 500));
     }
 
-    return results;
+    return results.filter(c => c.domain.length > 0);
   }
 
   /** Search EDGAR full-text search for companies */
@@ -163,23 +163,12 @@ export class RegistryScraper {
 
       if (!res.ok) return [];
 
-      const data = await res.json() as {
-        officers?: Array<{ name?: string; title?: string }>;
-        filings?: { recent?: { form?: string[] } };
-      };
-
-      const officers = data.officers ?? [];
-      return officers
-        .filter((o): o is { name: string; title?: string } => !!o.name)
-        .map((o) => {
-          const parts = o.name.split(/\s+/);
-          return {
-            firstName: parts[0] ?? "",
-            lastName: parts.slice(1).join(" "),
-            title: o.title ?? "Officer",
-          };
-        })
-        .filter((o) => o.firstName.length > 0 && o.lastName.length > 0);
+      // TODO: data.sec.gov/submissions/CIK*.json does not include an 'officers' field.
+      // Officer extraction would require parsing specific filing documents (e.g. DEF 14A proxy statements).
+      // For now, we use this endpoint only for company metadata validation.
+      await res.json(); // consume body
+      this.logger.debug(`EDGAR submissions endpoint does not provide officer data for CIK ${cik}; returning empty`);
+      return [];
     } catch (err) {
       this.logger.warn(`EDGAR submissions fetch failed: ${err instanceof Error ? err.message : String(err)}`);
       return [];

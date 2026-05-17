@@ -1,4 +1,5 @@
 import { Injectable, Logger } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
 
 interface IcpInput {
   targetTitles: string[];
@@ -40,8 +41,12 @@ interface SerperResponse {
 @Injectable()
 export class SerpDiscoveryService {
   private readonly logger = new Logger(SerpDiscoveryService.name);
-  private readonly apiKey = process.env.SERPER_API_KEY ?? "";
+  private readonly apiKey: string;
   private readonly MAX_QUERIES = 50;
+
+  constructor(private readonly config: ConfigService) {
+    this.apiKey = this.config.get<string>('SERPER_API_KEY') ?? '';
+  }
 
   private get enabled(): boolean {
     return this.apiKey.length > 0;
@@ -77,8 +82,18 @@ export class SerpDiscoveryService {
       await delay(300);
     }
 
-    this.logger.log(`SERP discovery found ${allResults.length} unique companies`);
-    return allResults;
+    // Validate domains in batch
+    const validated: DiscoveredCompany[] = [];
+    for (const co of allResults) {
+      const validDomain = await this.validateDomain(co.domain);
+      if (validDomain) {
+        co.domain = validDomain;
+        validated.push(co);
+      }
+    }
+
+    this.logger.log(`SERP discovery found ${validated.length} unique companies (after domain validation)`);
+    return validated;
   }
 
   // ─── People Discovery ───────────────────────────────
@@ -131,15 +146,13 @@ export class SerpDiscoveryService {
     const queries: string[] = [];
     const industries = icp.targetIndustries.length > 0 ? icp.targetIndustries : ["technology"];
     const geos = icp.targetGeos.length > 0 ? icp.targetGeos : [""];
-    const sizeSignal = this.employeeSizeSignal(icp.minEmployees ?? null, icp.maxEmployees ?? null);
 
     for (const industry of industries) {
       for (const geo of geos) {
         const geoStr = geo ? ` "${geo}"` : "";
-        const sizeStr = sizeSignal ? ` "${sizeSignal}"` : "";
 
         // LinkedIn company pages
-        queries.push(`site:linkedin.com/company "${industry}"${geoStr}${sizeStr}`);
+        queries.push(`site:linkedin.com/company "${industry}"${geoStr}`);
 
         // Direct company websites
         queries.push(`"${industry}" "company"${geoStr} -site:linkedin.com`);
@@ -161,26 +174,21 @@ export class SerpDiscoveryService {
     const queries: string[] = [];
     const titles = icp.targetTitles.length > 0 ? icp.targetTitles : [];
     const geos = icp.targetGeos.length > 0 ? icp.targetGeos : [""];
+    const industries = icp.targetIndustries.length > 0 ? icp.targetIndustries : [''];
 
     for (const title of titles) {
       for (const geo of geos) {
-        const geoStr = geo ? ` "${geo}"` : "";
-        queries.push(`site:linkedin.com/in "${title}"${geoStr}`);
+        for (const industry of industries) {
+          const geoStr = geo ? ` "${geo}"` : '';
+          queries.push(`site:linkedin.com/in "${title}" "${industry}"${geoStr}`);
+          if (queries.length >= this.MAX_QUERIES) break;
+        }
         if (queries.length >= this.MAX_QUERIES) break;
       }
       if (queries.length >= this.MAX_QUERIES) break;
     }
 
     return queries.slice(0, this.MAX_QUERIES);
-  }
-
-  private employeeSizeSignal(min: number | null, max: number | null): string {
-    if (!min && !max) return "";
-    if (max && max <= 50) return "startup";
-    if (max && max <= 200) return "Series A";
-    if (min && min >= 1000) return "enterprise";
-    if (min && min >= 200) return "mid-market";
-    return "";
   }
 
   // ─── API Execution ──────────────────────────────────
@@ -253,6 +261,38 @@ export class SerpDiscoveryService {
       linkedinCompanyUrl,
       source: "serp",
     };
+  }
+
+  private async validateDomain(candidateDomain: string): Promise<string | null> {
+    try {
+      const res = await fetch(`https://${candidateDomain}`, {
+        method: 'HEAD',
+        signal: AbortSignal.timeout(5000),
+        redirect: 'follow',
+      });
+      if (res.ok) return candidateDomain;
+    } catch {
+      // Try removing common suffixes
+      const suffixes = ['-inc', '-hq', '-io', '-co', '-app', '-labs'];
+      const base = candidateDomain.replace(/\.[^.]+$/, ''); // strip TLD
+      const tld = candidateDomain.slice(base.length); // e.g. '.com'
+      for (const suffix of suffixes) {
+        if (base.endsWith(suffix)) {
+          const cleaned = base.slice(0, -suffix.length) + tld;
+          try {
+            const res2 = await fetch(`https://${cleaned}`, {
+              method: 'HEAD',
+              signal: AbortSignal.timeout(5000),
+              redirect: 'follow',
+            });
+            if (res2.ok) return cleaned;
+          } catch {
+            // continue
+          }
+        }
+      }
+    }
+    return null;
   }
 
   private parseLinkedInPersonResult(result: SerperResult): DiscoveredPerson | null {

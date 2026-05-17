@@ -171,12 +171,24 @@ export class TeamPageScraper {
       if (liMatch[1]) linkedinUrls.push(liMatch[1]);
     }
 
-    // Associate LinkedIn URLs with people (best effort, by proximity in HTML)
-    for (let i = 0; i < Math.min(people.length, linkedinUrls.length); i++) {
-      const url = linkedinUrls[i];
-      if (url) {
-        people[i]!.linkedinUrl = url;
-        people[i]!.linkedinSlug = this.extractLinkedinSlug(url);
+    // Match LinkedIn URLs to people by name similarity in slug
+    for (const url of linkedinUrls) {
+      const slug = this.extractLinkedinSlug(url) ?? '';
+      const slugNorm = slug.toLowerCase().replace(/[^a-z]/g, '');
+      let bestMatch = -1;
+      let bestScore = 0;
+      for (let i = 0; i < people.length; i++) {
+        if (people[i]!.linkedinUrl) continue; // already matched
+        const nameNorm = `${people[i]!.firstName}${people[i]!.lastName}`.toLowerCase().replace(/[^a-z]/g, '');
+        // Check if slug contains the full name or name contains slug
+        if (slugNorm.includes(nameNorm) || nameNorm.includes(slugNorm)) {
+          const score = nameNorm.length;
+          if (score > bestScore) { bestScore = score; bestMatch = i; }
+        }
+      }
+      if (bestMatch >= 0) {
+        people[bestMatch]!.linkedinUrl = url;
+        people[bestMatch]!.linkedinSlug = this.extractLinkedinSlug(url);
       }
     }
 
