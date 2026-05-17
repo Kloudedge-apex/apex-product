@@ -354,6 +354,19 @@ export class LeadsService {
     companyId: string,
     p: { firstName: string; lastName: string; title?: string; seniority?: Seniority; department?: Department; linkedinSlug?: string; linkedinUrl?: string; githubHandle?: string },
   ) {
+    // Validate name: skip garbage entries from DOM parsing
+    if (!this.isValidPersonName(p.firstName, p.lastName)) return null;
+
+    // Infer seniority from title if not already set
+    if ((!p.seniority || p.seniority === "UNKNOWN") && p.title) {
+      p.seniority = this.inferSeniority(p.title);
+    }
+
+    // Infer department from title if not already set
+    if ((!p.department || p.department === "UNKNOWN") && p.title) {
+      p.department = this.inferDepartment(p.title);
+    }
+
     // Check for existing by linkedinSlug or name match
     const existing = p.linkedinSlug
       ? await this.prisma.person.findFirst({
@@ -395,6 +408,59 @@ export class LeadsService {
       },
     });
     return created.id;
+  }
+
+  /** Validate that a name looks like a real person, not DOM garbage */
+  private isValidPersonName(firstName: string, lastName: string): boolean {
+    // Each part should be 2-20 chars, start with uppercase, mostly alpha
+    const nameRegex = /^[A-Z][a-zA-Z'-]{1,19}$/;
+    if (!nameRegex.test(firstName) || !nameRegex.test(lastName.split(" ")[0] ?? "")) return false;
+
+    // Filter out common DOM garbage
+    const combined = `${firstName} ${lastName}`.toLowerCase();
+    const garbage = [
+      "find out", "learn more", "read more", "contact us", "get started",
+      "discover how", "what to expect", "our program", "our team",
+      "selection by", "supported by", "powered by", "backed by",
+      "terms of", "privacy policy", "cookie policy", "all rights",
+      "click here", "sign up", "log in", "join us",
+    ];
+    if (garbage.some((g) => combined.includes(g))) return false;
+
+    // Name parts shouldn't be common English words
+    const commonWords = new Set([
+      "the", "and", "for", "our", "how", "what", "who", "when", "where",
+      "more", "find", "out", "get", "all", "new", "top", "best",
+      "programmes", "initiatives", "discover", "selection", "expect",
+    ]);
+    if (commonWords.has(firstName.toLowerCase()) || commonWords.has(lastName.toLowerCase())) return false;
+
+    return true;
+  }
+
+  /** Infer seniority level from job title */
+  private inferSeniority(title: string): Seniority {
+    const lower = title.toLowerCase();
+    if (/\b(chief|c[etomp]o|cfo|ciso|cro|cso)\b/.test(lower)) return "C_LEVEL";
+    if (/\b(vp|vice\s+president)\b/.test(lower)) return "VP";
+    if (/\b(director|head\s+of)\b/.test(lower)) return "DIRECTOR";
+    if (/\b(manager|lead)\b/.test(lower)) return "MANAGER";
+    if (/\b(senior|staff|principal)\b/.test(lower)) return "IC";
+    return "UNKNOWN";
+  }
+
+  /** Infer department from job title */
+  private inferDepartment(title: string): Department {
+    const lower = title.toLowerCase();
+    if (/\b(sales|revenue|account\s+exec|business\s+dev|bdr|sdr)\b/.test(lower)) return "SALES";
+    if (/\b(marketing|growth|brand|content|seo|demand\s+gen)\b/.test(lower)) return "MARKETING";
+    if (/\b(engineer|developer|devops|platform|infra|backend|frontend|fullstack|sre)\b/.test(lower)) return "ENGINEERING";
+    if (/\b(financ|accounting|controller|treasury|cfo)\b/.test(lower)) return "FINANCE";
+    if (/\b(operations|ops|logistics|supply\s+chain)\b/.test(lower)) return "OPERATIONS";
+    if (/\b(people|hr|human\s+resources|talent|recruit)\b/.test(lower)) return "HR";
+    if (/\b(legal|compliance|regulatory|counsel)\b/.test(lower)) return "LEGAL";
+    if (/\b(ceo|coo|chief|president|founder|co-founder)\b/.test(lower)) return "EXECUTIVE";
+    return "OTHER";
   }
 
   private async enrichContacts(orgId: string): Promise<number> {
