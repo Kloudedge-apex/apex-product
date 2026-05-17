@@ -83,12 +83,98 @@ export class AtsScraper {
 
   async discoverCompanies(
     _icp: { targetIndustries: string[]; targetGeos: string[]; techStackSignals: string[] },
+    seedDomains?: string[],
   ): Promise<DiscoveredCompany[]> {
-    // ATS discovery requires known slugs; return empty for now
-    // In production, this would be fed by a database of known ATS slugs
-    // or integrated with a company database that has ATS mappings
-    this.logger.log("ATS company discovery: requires pre-seeded ATS slugs");
-    return [];
+    if (!seedDomains || seedDomains.length === 0) {
+      this.logger.log("ATS company discovery: no seed domains provided, skipping");
+      return [];
+    }
+
+    this.logger.log(`ATS discovery: probing ${seedDomains.length} seed domains`);
+    const results: DiscoveredCompany[] = [];
+
+    for (const domain of seedDomains) {
+      try {
+        const detected = await this.discoverAtsSlugs([domain]);
+        if (detected.length > 0) {
+          const d = detected[0]!;
+          results.push({
+            domain,
+            name: domain.replace(/\.\w+$/, ""),
+            atsProvider: d.provider,
+            atsSlug: d.slug,
+          });
+        }
+      } catch (err) {
+        this.logger.warn(`ATS probe failed for ${domain}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      await new Promise((r) => setTimeout(r, 300));
+    }
+
+    return results;
+  }
+
+  /** Probe domains to detect their ATS provider and slug */
+  async discoverAtsSlugs(domains: string[]): Promise<Array<{ domain: string; provider: string; slug: string }>> {
+    const results: Array<{ domain: string; provider: string; slug: string }> = [];
+
+    for (const domain of domains) {
+      const baseName = domain.replace(/\.\w+$/, "").toLowerCase();
+      const noDots = domain.replace(/\./g, "").toLowerCase();
+      const slugVariants = [...new Set([baseName, noDots, baseName.replace(/[^a-z0-9]/g, "-")])];
+
+      const detected = await this.probeAtsProviders(domain, slugVariants);
+      if (detected) {
+        results.push({ domain, ...detected });
+      }
+    }
+
+    return results;
+  }
+
+  private async probeAtsProviders(
+    domain: string,
+    slugs: string[],
+  ): Promise<{ provider: string; slug: string } | null> {
+    for (const slug of slugs) {
+      // Greenhouse
+      try {
+        const res = await rateLimitedFetch(`https://boards-api.greenhouse.io/v1/boards/${slug}/jobs`);
+        if (res.ok) {
+          const data = await res.json() as { jobs?: unknown[] };
+          if (data.jobs && data.jobs.length > 0) {
+            this.logger.debug(`Found Greenhouse board for ${domain}: ${slug}`);
+            return { provider: "greenhouse", slug };
+          }
+        }
+      } catch { /* skip */ }
+
+      // Lever
+      try {
+        const res = await rateLimitedFetch(`https://api.lever.co/v0/postings/${slug}?mode=json`);
+        if (res.ok) {
+          const data = await res.json() as unknown[];
+          if (Array.isArray(data) && data.length > 0) {
+            this.logger.debug(`Found Lever board for ${domain}: ${slug}`);
+            return { provider: "lever", slug };
+          }
+        }
+      } catch { /* skip */ }
+
+      // Ashby
+      try {
+        const res = await rateLimitedFetch(`https://api.ashbyhq.com/posting-api/job-board/${slug}`);
+        if (res.ok) {
+          const data = await res.json() as { jobs?: unknown[] };
+          if (data.jobs && data.jobs.length > 0) {
+            this.logger.debug(`Found Ashby board for ${domain}: ${slug}`);
+            return { provider: "ashby", slug };
+          }
+        }
+      } catch { /* skip */ }
+    }
+
+    return null;
   }
 
   async extractPeopleFromJobs(

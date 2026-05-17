@@ -2,7 +2,14 @@ import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "../../prisma/prisma.service";
 import { promises as dns } from "dns";
+import * as net from "net";
 import type { EmailSource } from "@prisma/client";
+
+interface SmtpVerifyResult {
+  valid: boolean;
+  catchAll: boolean;
+  result: "VALID" | "INVALID" | "CATCH_ALL" | "UNKNOWN";
+}
 
 interface EmailCandidate {
   email: string;
@@ -206,6 +213,100 @@ export class EmailPatternService {
       source: "HUNTER",
       confidence: (data.data.score ?? 50) / 100,
     };
+  }
+
+  /** Verify an email via SMTP RCPT TO */
+  async verifyEmail(email: string): Promise<SmtpVerifyResult> {
+    const domain = email.split("@")[1];
+    if (!domain) return { valid: false, catchAll: false, result: "UNKNOWN" };
+
+    try {
+      const mxRecords = await dns.resolveMx(domain);
+      if (mxRecords.length === 0) return { valid: false, catchAll: false, result: "UNKNOWN" };
+
+      const mx = mxRecords.sort((a, b) => a.priority - b.priority)[0]!.exchange;
+
+      // First check catch-all with random address
+      const randomAddr = `verify-${Math.random().toString(36).slice(2, 10)}@${domain}`;
+      const catchAllResult = await this.smtpRcptTo(mx, randomAddr);
+      if (catchAllResult === 250) {
+        return { valid: true, catchAll: true, result: "CATCH_ALL" };
+      }
+
+      // Now check the actual email
+      const result = await this.smtpRcptTo(mx, email);
+      if (result === 250) return { valid: true, catchAll: false, result: "VALID" };
+      if (result === 550) return { valid: false, catchAll: false, result: "INVALID" };
+      return { valid: false, catchAll: false, result: "UNKNOWN" };
+    } catch (err) {
+      this.logger.debug(`SMTP verify failed for ${email}: ${err instanceof Error ? err.message : String(err)}`);
+      return { valid: false, catchAll: false, result: "UNKNOWN" };
+    }
+  }
+
+  /** Verify a batch of emails with concurrency limit */
+  async verifyBatch(emails: string[]): Promise<Map<string, SmtpVerifyResult>> {
+    const results = new Map<string, SmtpVerifyResult>();
+    const concurrency = 10;
+
+    for (let i = 0; i < emails.length; i += concurrency) {
+      const batch = emails.slice(i, i + concurrency);
+      const batchResults = await Promise.all(batch.map((e) => this.verifyEmail(e).then((r) => [e, r] as const)));
+      for (const [email, result] of batchResults) {
+        results.set(email, result);
+      }
+    }
+
+    return results;
+  }
+
+  private smtpRcptTo(mx: string, email: string): Promise<number> {
+    return new Promise((resolve) => {
+      const socket = net.createConnection(25, mx);
+      let step = 0;
+      let buffer = "";
+
+      const timeout = setTimeout(() => {
+        socket.destroy();
+        resolve(0);
+      }, 10000);
+
+      socket.setEncoding("utf8");
+      socket.on("data", (data: string) => {
+        buffer += data;
+        if (!buffer.includes("\r\n")) return;
+
+        const lines = buffer.split("\r\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const code = parseInt(line.slice(0, 3), 10);
+          if (isNaN(code)) continue;
+
+          if (step === 0 && code === 220) {
+            step = 1;
+            socket.write("EHLO workforceos.com\r\n");
+          } else if (step === 1 && code === 250) {
+            step = 2;
+            socket.write("MAIL FROM:<verify@workforceos.com>\r\n");
+          } else if (step === 2 && code === 250) {
+            step = 3;
+            socket.write(`RCPT TO:<${email}>\r\n`);
+          } else if (step === 3) {
+            socket.write("QUIT\r\n");
+            clearTimeout(timeout);
+            socket.destroy();
+            resolve(code);
+            return;
+          }
+        }
+      });
+
+      socket.on("error", () => {
+        clearTimeout(timeout);
+        resolve(0);
+      });
+    });
   }
 
   private normalize(name: string): string {

@@ -28,16 +28,43 @@ export class JobSignalService {
    * Score a company's buying intent based on job postings.
    * Higher score = more likely to need workforce/ops tools.
    */
-  scoreJobIntent(jobTitles: string[], jobDescriptions: string[]): JobSignal {
+  scoreJobIntent(
+    jobTitles: string[],
+    jobDescriptions: string[],
+    customerKeywords?: string[],
+    targetTitles?: string[],
+  ): JobSignal {
     const signals: string[] = [];
     let intentScore = 0;
 
     const allText = [...jobTitles, ...jobDescriptions].join(" ");
+    const allTextLower = allText.toLowerCase();
 
     for (const kw of INTENT_KEYWORDS) {
       if (kw.pattern.test(allText)) {
         intentScore += kw.weight;
         signals.push(kw.label);
+      }
+    }
+
+    // Score against customer-provided keywords
+    if (customerKeywords) {
+      for (const keyword of customerKeywords) {
+        if (allTextLower.includes(keyword.toLowerCase())) {
+          intentScore += 8;
+          signals.push(`custom-kw:${keyword}`);
+        }
+      }
+    }
+
+    // Score against target titles (hiring for roles the customer targets = buying signal)
+    if (targetTitles) {
+      for (const title of targetTitles) {
+        const titleLower = title.toLowerCase();
+        if (jobTitles.some((jt) => jt.toLowerCase().includes(titleLower))) {
+          intentScore += 10;
+          signals.push(`target-title:${title}`);
+        }
       }
     }
 
@@ -56,8 +83,13 @@ export class JobSignalService {
   /**
    * Check if a company's hiring patterns indicate they need the customer's product.
    */
-  hasBuyingIntent(jobTitles: string[], jobDescriptions: string[]): boolean {
-    const { intentScore } = this.scoreJobIntent(jobTitles, jobDescriptions);
+  hasBuyingIntent(
+    jobTitles: string[],
+    jobDescriptions: string[],
+    customerKeywords?: string[],
+    targetTitles?: string[],
+  ): boolean {
+    const { intentScore } = this.scoreJobIntent(jobTitles, jobDescriptions, customerKeywords, targetTitles);
     return intentScore >= 15;
   }
 }

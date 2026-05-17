@@ -53,6 +53,8 @@ export class LeadsService {
       minEmployees?: number;
       maxEmployees?: number;
       techStackSignals?: string[];
+      intentKeywords?: string[];
+      seedDomains?: string[];
     },
   ) {
     return this.prisma.icpProfile.create({
@@ -65,6 +67,8 @@ export class LeadsService {
         minEmployees: data.minEmployees ?? null,
         maxEmployees: data.maxEmployees ?? null,
         techStackSignals: data.techStackSignals ?? [],
+        intentKeywords: data.intentKeywords ?? [],
+        seedDomains: data.seedDomains ?? [],
       },
     });
   }
@@ -96,7 +100,7 @@ export class LeadsService {
   private async runPipeline(
     orgId: string,
     icpProfileId: string,
-    icp: { targetTitles: string[]; targetIndustries: string[]; targetGeos: string[]; minEmployees: number | null; maxEmployees: number | null; techStackSignals: string[] },
+    icp: { targetTitles: string[]; targetIndustries: string[]; targetGeos: string[]; minEmployees: number | null; maxEmployees: number | null; techStackSignals: string[]; seedDomains?: string[]; intentKeywords?: string[] },
   ) {
     // Stage 1: Company Discovery
     const companyJobId = await this.createJob(orgId, icpProfileId, "COMPANY_DISCOVERY");
@@ -153,12 +157,12 @@ export class LeadsService {
 
   private async discoverCompanies(
     orgId: string,
-    icp: { targetIndustries: string[]; targetGeos: string[]; techStackSignals: string[] },
+    icp: { targetIndustries: string[]; targetGeos: string[]; techStackSignals: string[]; seedDomains?: string[] },
   ): Promise<string[]> {
     const companyIds: string[] = [];
 
     // ATS scraping: look for companies with public job boards
-    const atsCompanies = await this.atsScraper.discoverCompanies(icp);
+    const atsCompanies = await this.atsScraper.discoverCompanies(icp, icp.seedDomains);
     for (const co of atsCompanies) {
       try {
         const company = await this.prisma.company.upsert({
@@ -197,9 +201,9 @@ export class LeadsService {
     });
 
     let count = 0;
-    for (const co of companies) {
+
+    const processCompany = async (co: typeof companies[number]) => {
       try {
-        // Team page scraping
         const teamPeople = await this.teamPageScraper.scrapeTeamPage(co.domain, co.teamPageUrl);
         for (const p of teamPeople) {
           await this.upsertPerson(co.id, p);
@@ -210,7 +214,6 @@ export class LeadsService {
       }
 
       try {
-        // ATS people extraction
         if (co.atsProvider && co.atsSlug) {
           const atsPeople = await this.atsScraper.extractPeopleFromJobs(co.atsProvider, co.atsSlug);
           for (const p of atsPeople) {
@@ -223,7 +226,6 @@ export class LeadsService {
       }
 
       try {
-        // GitHub enrichment
         const ghPeople = await this.githubEnrichment.discoverPeople(co.domain);
         for (const p of ghPeople) {
           await this.upsertPerson(co.id, p);
@@ -232,10 +234,9 @@ export class LeadsService {
       } catch (err) {
         this.logger.warn(`GitHub enrichment failed for ${co.domain}: ${err instanceof Error ? err.message : String(err)}`);
       }
+    };
 
-      // Rate limit between companies
-      await delay(500);
-    }
+    await batchProcess(companies, 5, processCompany);
 
     return count;
   }
@@ -294,8 +295,9 @@ export class LeadsService {
     });
 
     let count = 0;
-    for (const person of people) {
-      if (person.emails.length > 0) continue; // already has emails
+
+    const processPerson = async (person: typeof people[number]) => {
+      if (person.emails.length > 0) return;
 
       try {
         const candidates = await this.emailPatternService.generateCandidates(
@@ -303,7 +305,28 @@ export class LeadsService {
           person.lastName,
           person.company.domain,
         );
+
+        // Verify top 2 candidates via SMTP
+        const top2 = candidates.slice(0, 2);
+        const verifyResults = await this.emailPatternService.verifyBatch(top2.map((c) => c.email));
+
         for (const c of candidates) {
+          const verification = verifyResults.get(c.email);
+          let adjustedConfidence = c.confidence;
+          let verified = false;
+
+          if (verification) {
+            if (verification.result === "VALID") {
+              adjustedConfidence = Math.min(0.98, c.confidence + 0.3);
+              verified = true;
+            } else if (verification.result === "INVALID") {
+              adjustedConfidence = 0.05;
+            } else if (verification.result === "CATCH_ALL") {
+              // Catch-all: keep original confidence, can't confirm
+              adjustedConfidence = Math.min(c.confidence, 0.5);
+            }
+          }
+
           await this.prisma.emailCandidate.upsert({
             where: {
               personId_email: { personId: person.id, email: c.email },
@@ -313,18 +336,22 @@ export class LeadsService {
               email: c.email,
               pattern: c.pattern,
               source: c.source,
-              confidence: c.confidence,
+              confidence: adjustedConfidence,
+              verified,
             },
-            update: {},
+            update: {
+              confidence: adjustedConfidence,
+              verified,
+            },
           });
           count++;
         }
       } catch (err) {
         this.logger.warn(`Email enrichment failed for person ${person.id}: ${err instanceof Error ? err.message : String(err)}`);
       }
+    };
 
-      await delay(200);
-    }
+    await batchProcess(people, 10, processPerson);
 
     return count;
   }
@@ -486,4 +513,12 @@ export class LeadsService {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function batchProcess<T>(items: T[], batchSize: number, fn: (item: T) => Promise<void>): Promise<void> {
+  for (let i = 0; i < items.length; i += batchSize) {
+    const batch = items.slice(i, i + batchSize);
+    await Promise.all(batch.map(fn));
+    if (i + batchSize < items.length) await delay(500);
+  }
 }

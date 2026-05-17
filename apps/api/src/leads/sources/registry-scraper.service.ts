@@ -37,12 +37,62 @@ export class RegistryScraper {
   }
 
   async discoverCompanies(
-    _icp: { targetIndustries: string[]; targetGeos: string[] },
+    icp: { targetIndustries: string[]; targetGeos: string[] },
   ): Promise<DiscoveredCompany[]> {
-    // Registry-based company discovery requires specific search terms
-    // This is typically used as an enrichment source, not primary discovery
-    this.logger.log("Registry company discovery: stub (requires specific company names)");
-    return [];
+    const results: DiscoveredCompany[] = [];
+
+    // Search EDGAR for companies in target industries
+    for (const industry of icp.targetIndustries.slice(0, 5)) {
+      try {
+        const edgarResults = await this.searchEdgarCompanies(industry);
+        results.push(...edgarResults);
+      } catch (err) {
+        this.logger.warn(`EDGAR industry search failed for "${industry}": ${err instanceof Error ? err.message : String(err)}`);
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+
+    return results;
+  }
+
+  /** Search EDGAR full-text search for companies */
+  private async searchEdgarCompanies(query: string): Promise<DiscoveredCompany[]> {
+    try {
+      const res = await fetch(
+        `https://efts.sec.gov/LATEST/search-index?q=${encodeURIComponent(`"${query}"`)}&forms=10-K&dateRange=custom&startdt=2024-01-01`,
+        {
+          headers: {
+            "User-Agent": "WorkforceOS lead-engine support@workforceos.com",
+            Accept: "application/json",
+          },
+          signal: AbortSignal.timeout(10000),
+        },
+      );
+
+      if (!res.ok) return [];
+
+      const data = await res.json() as { hits?: { hits?: Array<{ _source?: { entity_name?: string; file_num?: string } }> } };
+      const hits = data.hits?.hits ?? [];
+      const seen = new Set<string>();
+      const results: DiscoveredCompany[] = [];
+
+      for (const hit of hits.slice(0, 20)) {
+        const name = hit._source?.entity_name;
+        if (!name || seen.has(name.toLowerCase())) continue;
+        seen.add(name.toLowerCase());
+
+        results.push({
+          domain: "",
+          name,
+          registryId: hit._source?.file_num,
+          registrySource: "edgar",
+        });
+      }
+
+      return results;
+    } catch {
+      return [];
+    }
   }
 
   /** Fetch officers from UK Companies House by company number */
@@ -93,36 +143,15 @@ export class RegistryScraper {
 
   /** Search SEC EDGAR for company filings and extract officer names */
   async searchEdgar(companyName: string): Promise<Array<{ firstName: string; lastName: string; title: string }>> {
+    // First, find the CIK for this company
+    const cik = await this.findEdgarCik(companyName);
+    if (!cik) return [];
+
+    // Fetch company submissions which include officer info
     try {
-      // EDGAR full-text search
+      const paddedCik = cik.padStart(10, "0");
       const res = await fetch(
-        `https://efts.sec.gov/LATEST/search-index?q=%22${encodeURIComponent(companyName)}%22&dateRange=custom&startdt=2023-01-01&forms=10-K,10-Q,DEF%2014A`,
-        {
-          headers: {
-            "User-Agent": "WorkforceOS lead-engine support@workforceos.com",
-            Accept: "application/json",
-          },
-          signal: AbortSignal.timeout(10000),
-        },
-      );
-
-      if (!res.ok) {
-        // Try the simpler EDGAR company search
-        return this.searchEdgarCompanyApi(companyName);
-      }
-
-      // Parse filing results for officer names
-      // This is a simplified extraction; real implementation would parse XBRL
-      return [];
-    } catch {
-      return this.searchEdgarCompanyApi(companyName);
-    }
-  }
-
-  private async searchEdgarCompanyApi(companyName: string): Promise<Array<{ firstName: string; lastName: string; title: string }>> {
-    try {
-      const res = await fetch(
-        `https://efts.sec.gov/LATEST/search-index?q=%22${encodeURIComponent(companyName)}%22&forms=DEF+14A`,
+        `https://data.sec.gov/submissions/CIK${paddedCik}.json`,
         {
           headers: {
             "User-Agent": "WorkforceOS lead-engine support@workforceos.com",
@@ -134,12 +163,51 @@ export class RegistryScraper {
 
       if (!res.ok) return [];
 
-      // EDGAR returns filing references; actual person extraction requires
-      // downloading and parsing the filing documents (10-K, DEF 14A, etc.)
-      this.logger.debug(`EDGAR search for "${companyName}" returned ${res.status}`);
+      const data = await res.json() as {
+        officers?: Array<{ name?: string; title?: string }>;
+        filings?: { recent?: { form?: string[] } };
+      };
+
+      const officers = data.officers ?? [];
+      return officers
+        .filter((o): o is { name: string; title?: string } => !!o.name)
+        .map((o) => {
+          const parts = o.name.split(/\s+/);
+          return {
+            firstName: parts[0] ?? "",
+            lastName: parts.slice(1).join(" "),
+            title: o.title ?? "Officer",
+          };
+        })
+        .filter((o) => o.firstName.length > 0 && o.lastName.length > 0);
+    } catch (err) {
+      this.logger.warn(`EDGAR submissions fetch failed: ${err instanceof Error ? err.message : String(err)}`);
       return [];
+    }
+  }
+
+  /** Find a company's CIK number via EDGAR company search */
+  private async findEdgarCik(companyName: string): Promise<string | null> {
+    try {
+      const res = await fetch(
+        `https://www.sec.gov/cgi-bin/browse-edgar?company=${encodeURIComponent(companyName)}&CIK=&type=10-K&dateb=&owner=include&count=1&search_text=&action=getcompany&output=atom`,
+        {
+          headers: {
+            "User-Agent": "WorkforceOS lead-engine support@workforceos.com",
+            Accept: "application/atom+xml",
+          },
+          signal: AbortSignal.timeout(10000),
+        },
+      );
+
+      if (!res.ok) return null;
+
+      const text = await res.text();
+      // Extract CIK from the Atom feed
+      const cikMatch = text.match(/CIK=(\d+)/);
+      return cikMatch?.[1] ?? null;
     } catch {
-      return [];
+      return null;
     }
   }
 

@@ -302,6 +302,8 @@ model IcpProfile {
   minEmployees     Int?
   maxEmployees     Int?
   techStackSignals String[]
+  intentKeywords   String[]
+  seedDomains      String[]
   createdAt        DateTime    @default(now())
   updatedAt        DateTime    @updatedAt
   scrapeJobs       ScrapeJob[]
