@@ -10,6 +10,7 @@ import { IntegrationsModule } from "./integrations/integrations.module";
 import { BillingModule } from "./billing/billing.module";
 import { RunsModule } from "./runs/runs.module";
 import { RuntimeModule } from "./runtime/runtime.module";
+import { LeadsModule } from "./leads/leads.module";
 import { RateLimitMiddleware } from "./common/rate-limit.middleware";
 import { OrgScopeGuard } from "./common/org-scope.guard";
 
@@ -25,6 +26,7 @@ import { OrgScopeGuard } from "./common/org-scope.guard";
     BillingModule,
     RunsModule,
     RuntimeModule,
+    LeadsModule,
   ],
   providers: [
     {
