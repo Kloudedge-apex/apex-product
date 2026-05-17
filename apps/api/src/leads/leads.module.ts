@@ -15,6 +15,8 @@ import { TeamPageScraper } from "./sources/team-page-scraper.service";
 import { RegistryScraper } from "./sources/registry-scraper.service";
 import { GithubEnrichment } from "./sources/github-enrichment.service";
 import { JobSignalService } from "./sources/job-signal.service";
+import { SerpDiscoveryService } from "./sources/serp-discovery.service";
+import { TheirStackService } from "./sources/theirstack.service";
 import { EmailPatternService } from "./enrichment/email-pattern.service";
 import { IdentityResolver } from "./enrichment/identity-resolver.service";
 import { LeadScorer } from "./scoring/lead-scorer.service";
@@ -28,6 +30,8 @@ import { LeadScorer } from "./scoring/lead-scorer.service";
     RegistryScraper,
     GithubEnrichment,
     JobSignalService,
+    SerpDiscoveryService,
+    TheirStackService,
     EmailPatternService,
     IdentityResolver,
     LeadScorer,

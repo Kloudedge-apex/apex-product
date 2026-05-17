@@ -115,6 +115,15 @@ export class LeadsController {
     return this.leads.listJobs(orgId);
   }
 
+  @Get("jobs/:id")
+  getJob(
+    @OrgId() orgId: string | undefined,
+    @Param("id") id: string,
+  ) {
+    if (!orgId) throw new BadRequestException("orgId required");
+    return this.leads.getJob(orgId, id);
+  }
+
   // ─── Stats ───────────────────────────────────────────
 
   @Get("stats")

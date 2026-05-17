@@ -5,6 +5,8 @@ import { TeamPageScraper } from "./sources/team-page-scraper.service";
 import { RegistryScraper } from "./sources/registry-scraper.service";
 import { GithubEnrichment } from "./sources/github-enrichment.service";
 import { JobSignalService } from "./sources/job-signal.service";
+import { SerpDiscoveryService } from "./sources/serp-discovery.service";
+import { TheirStackService } from "./sources/theirstack.service";
 import { EmailPatternService } from "./enrichment/email-pattern.service";
 import { IdentityResolver } from "./enrichment/identity-resolver.service";
 import { LeadScorer } from "./scoring/lead-scorer.service";
@@ -36,6 +38,8 @@ export class LeadsService {
     private readonly registryScraper: RegistryScraper,
     private readonly githubEnrichment: GithubEnrichment,
     private readonly jobSignalService: JobSignalService,
+    private readonly serpDiscovery: SerpDiscoveryService,
+    private readonly theirStack: TheirStackService,
     private readonly emailPatternService: EmailPatternService,
     private readonly identityResolver: IdentityResolver,
     private readonly leadScorer: LeadScorer,
@@ -106,7 +110,7 @@ export class LeadsService {
     const companyJobId = await this.createJob(orgId, icpProfileId, "COMPANY_DISCOVERY");
     try {
       await this.markJobRunning(companyJobId);
-      const companies = await this.discoverCompanies(orgId, icp);
+      const companies = await this.discoverCompanies(orgId, icp, companyJobId);
       await this.markJobCompleted(companyJobId, companies.length);
     } catch (err) {
       await this.markJobFailed(companyJobId, err);
@@ -116,7 +120,7 @@ export class LeadsService {
     const peopleJobId = await this.createJob(orgId, icpProfileId, "PEOPLE_DISCOVERY");
     try {
       await this.markJobRunning(peopleJobId);
-      const count = await this.discoverPeople(orgId);
+      const count = await this.discoverPeople(orgId, icp);
       await this.markJobCompleted(peopleJobId, count);
     } catch (err) {
       await this.markJobFailed(peopleJobId, err);
@@ -157,50 +161,136 @@ export class LeadsService {
 
   private async discoverCompanies(
     orgId: string,
-    icp: { targetIndustries: string[]; targetGeos: string[]; techStackSignals: string[]; seedDomains?: string[] },
+    icp: { targetTitles: string[]; targetIndustries: string[]; targetGeos: string[]; minEmployees?: number | null; maxEmployees?: number | null; techStackSignals: string[]; seedDomains?: string[]; intentKeywords?: string[] },
+    jobId?: string,
   ): Promise<string[]> {
     const companyIds: string[] = [];
+    const seenDomains = new Set<string>();
+    let processed = 0;
+    const totalSteps = 4;
 
-    // ATS scraping: look for companies with public job boards
-    const atsCompanies = await this.atsScraper.discoverCompanies(icp, icp.seedDomains);
-    for (const co of atsCompanies) {
+    const upsertCompany = async (co: { domain: string; name: string; industry?: string; country?: string; atsProvider?: string; atsSlug?: string; source?: string; linkedinCompanyUrl?: string }) => {
+      if (seenDomains.has(co.domain)) return;
+      seenDomains.add(co.domain);
       try {
+        const data = {
+          domain: co.domain,
+          name: co.name,
+          industry: co.industry,
+          country: co.country,
+          atsProvider: co.atsProvider,
+          atsSlug: co.atsSlug,
+        };
         const company = await this.prisma.company.upsert({
           where: { domain: co.domain },
-          create: { ...co, orgId },
-          update: { ...co },
+          create: { ...data, orgId },
+          update: data,
         });
         companyIds.push(company.id);
       } catch (err) {
         this.logger.warn(`Failed to upsert company ${co.domain}: ${err instanceof Error ? err.message : String(err)}`);
       }
-    }
+    };
 
-    // Registry scraping
-    const registryCompanies = await this.registryScraper.discoverCompanies(icp);
-    for (const co of registryCompanies) {
-      try {
-        const company = await this.prisma.company.upsert({
-          where: { domain: co.domain },
-          create: { ...co, orgId },
-          update: { ...co },
-        });
-        companyIds.push(company.id);
-      } catch (err) {
-        this.logger.warn(`Failed to upsert registry company ${co.domain}: ${err instanceof Error ? err.message : String(err)}`);
+    // Step 1: SERP discovery (primary)
+    const serpCompanies = await withRetry(() => this.serpDiscovery.discoverCompanies(icp));
+    for (const co of serpCompanies) {
+      await upsertCompany(co);
+    }
+    processed++;
+    if (jobId) await this.updateJobProgress(jobId, processed, totalSteps, { stage: "serp-complete", found: serpCompanies.length });
+
+    // Step 2: TheirStack (hiring intent)
+    const theirStackCompanies = await withRetry(() => this.theirStack.discoverHiringCompanies(icp));
+    for (const co of theirStackCompanies) {
+      await upsertCompany({ domain: co.domain, name: co.name, country: co.country, industry: co.industry });
+      // Score intent from TheirStack job data
+      if (co.jobTitles.length > 0) {
+        try {
+          const { intentScore, signals } = this.jobSignalService.scoreJobIntent(
+            co.jobTitles,
+            [],
+            icp.intentKeywords ?? [],
+            icp.targetTitles,
+          );
+          const finalScore = Math.max(co.intentScore, intentScore);
+          const finalSignals = [...new Set([...co.intentSignals, ...signals])];
+          await this.prisma.company.update({
+            where: { domain: co.domain },
+            data: { intentScore: finalScore, intentSignals: finalSignals },
+          });
+        } catch {
+          // non-critical
+        }
       }
     }
+    processed++;
+    if (jobId) await this.updateJobProgress(jobId, processed, totalSteps, { stage: "theirstack-complete", found: theirStackCompanies.length });
+
+    // Step 3: ATS slug detection for discovered companies
+    const atsCompanies = await withRetry(() => this.atsScraper.discoverCompanies(icp, icp.seedDomains));
+    for (const co of atsCompanies) {
+      await upsertCompany(co);
+    }
+    // Also probe ATS for SERP-discovered domains
+    const newDomains = serpCompanies.map((c) => c.domain).filter((d) => !atsCompanies.some((a) => a.domain === d));
+    if (newDomains.length > 0) {
+      const atsSlugs = await withRetry(() => this.atsScraper.discoverAtsSlugs(newDomains.slice(0, 20)));
+      for (const detected of atsSlugs) {
+        await this.prisma.company.updateMany({
+          where: { domain: detected.domain },
+          data: { atsProvider: detected.provider, atsSlug: detected.slug },
+        });
+      }
+    }
+    processed++;
+    if (jobId) await this.updateJobProgress(jobId, processed, totalSteps, { stage: "ats-complete" });
+
+    // Step 4: Registry enrichment
+    const registryCompanies = await withRetry(() => this.registryScraper.discoverCompanies(icp));
+    for (const co of registryCompanies) {
+      await upsertCompany(co);
+    }
+    processed++;
+    if (jobId) await this.updateJobProgress(jobId, processed, totalSteps, { stage: "registry-complete", found: registryCompanies.length });
 
     return companyIds;
   }
 
-  private async discoverPeople(orgId: string): Promise<number> {
+  private async discoverPeople(orgId: string, icp?: { targetTitles: string[]; targetIndustries: string[]; targetGeos: string[]; minEmployees?: number | null; maxEmployees?: number | null }): Promise<number> {
     const companies = await this.prisma.company.findMany({
       where: { orgId },
       select: { id: true, domain: true, atsProvider: true, atsSlug: true, teamPageUrl: true },
     });
 
     let count = 0;
+
+    // SERP-discovered people
+    if (icp) {
+      try {
+        const serpPeople = await withRetry(() => this.serpDiscovery.discoverPeopleViaSERP(icp));
+        for (const sp of serpPeople) {
+          // Try to match to an existing company or skip
+          if (sp.companyName) {
+            const company = await this.prisma.company.findFirst({
+              where: { orgId, name: { contains: sp.companyName, mode: "insensitive" } },
+            });
+            if (company) {
+              await this.upsertPerson(company.id, {
+                firstName: sp.firstName,
+                lastName: sp.lastName,
+                title: sp.title,
+                linkedinSlug: sp.linkedinSlug,
+                linkedinUrl: sp.linkedinUrl,
+              });
+              count++;
+            }
+          }
+        }
+      } catch (err) {
+        this.logger.warn(`SERP people discovery failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
 
     const processCompany = async (co: typeof companies[number]) => {
       try {
@@ -392,6 +482,27 @@ export class LeadsService {
     return count;
   }
 
+  // ─── Progress & Job Detail ───────────────────────────
+
+  private async updateJobProgress(jobId: string, processedItems: number, totalItems: number, metadata?: Record<string, unknown>) {
+    const progress = totalItems > 0 ? processedItems / totalItems : 0;
+    await this.prisma.scrapeJob.update({
+      where: { id: jobId },
+      data: {
+        processedItems,
+        totalItems,
+        progress: Math.min(1, progress),
+        metadata: metadata ? (metadata as Record<string, string | number | boolean>) : undefined,
+      },
+    });
+  }
+
+  async getJob(orgId: string, jobId: string) {
+    return this.prisma.scrapeJob.findFirstOrThrow({
+      where: { id: jobId, orgId },
+    });
+  }
+
   // ─── Job Helpers ─────────────────────────────────────
 
   private async createJob(orgId: string, icpProfileId: string, stage: ScrapeStage): Promise<string> {
@@ -509,6 +620,18 @@ export class LeadsService {
 
     return { companies, people, emails, qualifiedLeads: qualified };
   }
+}
+
+async function withRetry<T>(fn: () => Promise<T>, retries = 2, delayMs = 1000): Promise<T> {
+  for (let i = 0; i <= retries; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (i === retries) throw err;
+      await delay(delayMs * (i + 1));
+    }
+  }
+  throw new Error("unreachable");
 }
 
 function delay(ms: number): Promise<void> {

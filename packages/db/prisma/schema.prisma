@@ -421,6 +421,7 @@ model ScrapeJob {
   totalItems     Int          @default(0)
   processedItems Int          @default(0)
   failedItems    Int          @default(0)
+  progress       Float        @default(0)
   metadata       Json?
   startedAt      DateTime?
   completedAt    DateTime?
