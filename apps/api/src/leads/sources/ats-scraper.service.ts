@@ -40,10 +40,11 @@ interface AshbyJob {
   departmentName?: string;
 }
 
+// Strict name patterns: require exactly 2-3 capitalized words (case-sensitive, no 'i' flag)
+// This prevents matching phrases like "the People Governance" or "work in our Fincrime"
 const HIRING_MANAGER_PATTERNS = [
-  /reports?\s+to[:\s]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)/gi,
-  /hiring\s+manager[:\s]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)/gi,
-  /manager[:\s]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)/gi,
+  /[Rr]eports?\s+to[:\s]+([A-Z][a-z]{1,15}\s+[A-Z][a-z]{1,15}(?:\s+[A-Z][a-z]{1,15})?)\b/g,
+  /[Hh]iring\s+[Mm]anager[:\s]+([A-Z][a-z]{1,15}\s+[A-Z][a-z]{1,15}(?:\s+[A-Z][a-z]{1,15})?)\b/g,
 ];
 
 const SENIORITY_MAP: Record<string, Seniority> = {
@@ -252,7 +253,15 @@ export class AtsScraper {
           seen.add(key);
 
           const parts = fullName.split(/\s+/);
-          if (parts.length < 2) continue;
+          if (parts.length < 2 || parts.length > 3) continue;
+
+          // Validate each part looks like a real name (2-15 chars, starts with uppercase)
+          const isValidName = parts.every(p => /^[A-Z][a-z]{1,14}$/.test(p));
+          if (!isValidName) continue;
+
+          // Filter out common false positives
+          const lower = fullName.toLowerCase();
+          if (["hiring manager", "people manager", "team lead", "the team"].some(fp => lower.includes(fp))) continue;
 
           people.push({
             firstName: parts[0]!,

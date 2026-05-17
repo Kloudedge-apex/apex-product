@@ -200,7 +200,7 @@ export class SerpDiscoveryService {
         "X-API-KEY": this.apiKey,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ q: query, num }),
+      body: JSON.stringify({ q: query, num: Math.min(num, 10) }),
       signal: AbortSignal.timeout(15000),
     });
 
