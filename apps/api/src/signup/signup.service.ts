@@ -98,7 +98,7 @@ export class SignupService {
           targetTitles: body.icp.titles ?? [],
           techStackSignals: body.icp.signals ?? [],
           intentKeywords: [],
-          seedDomains: body.icp.exclusions ? body.icp.exclusions.split("\n").map((s: string) => s.trim()).filter(Boolean) : [],
+          seedDomains: Array.isArray(body.icp.exclusions) ? body.icp.exclusions : (typeof body.icp.exclusions === "string" && body.icp.exclusions ? body.icp.exclusions.split("\n").map((s: string) => s.trim()).filter(Boolean) : []),
         },
       });
     }
