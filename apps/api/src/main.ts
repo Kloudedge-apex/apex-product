@@ -44,15 +44,23 @@ async function bootstrap() {
   const allowedOrigins = [
     process.env.FRONTEND_URL || "http://localhost:3000",
     "http://localhost:3000",
+    "http://localhost:5173",
     "https://apex.kloudedge.com",
     "https://apex.kloudedge.xyz",
     "https://apex-v2.ashysmoke-fd2f7a7f.eastus.azurecontainerapps.io",
   ].filter(Boolean);
 
+  // Also allow any *.lovable.app and *.lovableproject.com origins
   app.enableCors({
-    origin: allowedOrigins,
+    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+      if (!origin) return callback(null, true); // allow non-browser requests
+      if (allowedOrigins.includes(origin)) return callback(null, true);
+      if (/\.lovable\.app$/.test(origin) || /\.lovableproject\.com$/.test(origin)) return callback(null, true);
+      if (/\.vercel\.app$/.test(origin) || /\.netlify\.app$/.test(origin)) return callback(null, true);
+      callback(null, false);
+    },
     methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    allowedHeaders: ["Content-Type", "Authorization", "x-org-id"],
     credentials: true,
   });
 

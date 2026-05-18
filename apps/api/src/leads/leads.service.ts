@@ -190,7 +190,7 @@ export class LeadsService {
           atsSlug: co.atsSlug,
         };
         const company = await this.prisma.company.upsert({
-          where: { domain: co.domain },
+          where: { orgId_domain: { orgId, domain: co.domain } },
           create: { ...data, orgId },
           update: data,
         });
@@ -224,7 +224,7 @@ export class LeadsService {
           const finalScore = Math.max(co.intentScore, intentScore);
           const finalSignals = [...new Set([...co.intentSignals, ...signals])];
           await this.prisma.company.update({
-            where: { domain: co.domain },
+            where: { orgId_domain: { orgId, domain: co.domain } },
             data: { intentScore: finalScore, intentSignals: finalSignals },
           });
         } catch {
@@ -246,7 +246,7 @@ export class LeadsService {
       const atsSlugs = await withRetry(() => this.atsScraper.discoverAtsSlugs(newDomains.slice(0, 20)));
       for (const detected of atsSlugs) {
         await this.prisma.company.updateMany({
-          where: { domain: detected.domain },
+          where: { orgId, domain: detected.domain },
           data: { atsProvider: detected.provider, atsSlug: detected.slug },
         });
       }
@@ -812,8 +812,11 @@ export class LeadsService {
       const score = p.scores[0]?.score ?? 0;
       const escapeCsv = (s: string | null | undefined) => {
         if (!s) return '';
-        if (s.includes(',') || s.includes('"') || s.includes('\n')) return `"${s.replace(/"/g, '""')}"`;
-        return s;
+        // Strip formula injection characters
+        let safe = s;
+        if (/^[=+\-@\t\r]/.test(safe)) safe = `'${safe}`;
+        if (safe.includes(',') || safe.includes('"') || safe.includes('\n')) return `"${safe.replace(/"/g, '""')}"`;
+        return safe;
       };
       return [
         escapeCsv(p.firstName), escapeCsv(p.lastName), escapeCsv(p.title),

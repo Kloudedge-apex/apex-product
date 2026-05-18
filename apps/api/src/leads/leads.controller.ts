@@ -39,7 +39,25 @@ export class LeadsController {
     },
   ) {
     if (!orgId) throw new BadRequestException("orgId required");
-    return this.leads.createIcpProfile(orgId, body);
+    if (!body.name || typeof body.name !== "string" || body.name.length > 200)
+      throw new BadRequestException("name is required (max 200 chars)");
+
+    // Cap array sizes to prevent abuse
+    const cap = (arr: string[] | undefined, max: number) =>
+      arr ? arr.slice(0, max).map((s) => String(s).slice(0, 200)) : [];
+
+    return this.leads.createIcpProfile(orgId, {
+      ...body,
+      name: body.name.slice(0, 200),
+      targetTitles: cap(body.targetTitles, 20),
+      targetIndustries: cap(body.targetIndustries, 10),
+      targetGeos: cap(body.targetGeos, 10),
+      techStackSignals: cap(body.techStackSignals, 20),
+      intentKeywords: cap(body.intentKeywords, 30),
+      seedDomains: cap(body.seedDomains, 50),
+      minEmployees: body.minEmployees ? Math.max(0, Math.min(body.minEmployees, 1000000)) : undefined,
+      maxEmployees: body.maxEmployees ? Math.max(0, Math.min(body.maxEmployees, 1000000)) : undefined,
+    });
   }
 
   @Get("icp")

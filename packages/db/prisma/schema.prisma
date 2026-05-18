@@ -315,7 +315,7 @@ model Company {
   id             String   @id @default(cuid())
   orgId          String?
   org            Org?     @relation(fields: [orgId], references: [id], onDelete: SetNull)
-  domain         String   @unique
+  domain         String
   name           String
   industry       String?
   employeeRange  String?
@@ -336,6 +336,7 @@ model Company {
   updatedAt      DateTime @updatedAt
   people         Person[]
 
+  @@unique([orgId, domain])
   @@index([domain])
   @@index([country])
   @@index([industry])
