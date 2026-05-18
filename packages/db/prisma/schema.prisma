@@ -95,12 +95,15 @@ model User {
   org       Org      @relation(fields: [orgId], references: [id], onDelete: Cascade)
   email     String   @unique
   name      String?
-  role      UserRole @default(MEMBER)
-  clerkId   String   @unique
-  createdAt DateTime @default(now())
+  role         UserRole @default(MEMBER)
+  clerkId      String?  @unique
+  apiKey       String?  @unique
+  passwordHash String?
+  createdAt    DateTime @default(now())
 
   @@index([orgId])
   @@index([clerkId])
+  @@index([apiKey])
 }
 
 model AgentTemplate {
