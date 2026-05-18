@@ -50,6 +50,30 @@ const OAUTH_CONFIGS: Record<string, OAuthConfig> = {
 export class IntegrationsService {
   constructor(private prisma: PrismaService) { }
 
+  getCatalog(): Array<{
+    provider: string;
+    name: string;
+    category: string;
+    description: string;
+    authType: "oauth" | "api_key" | "system";
+    status: "available" | "coming_soon";
+  }> {
+    return [
+      { provider: "google", category: "email", name: "Google Workspace (Gmail)", description: "Send and receive email via your Google Workspace mailbox.", authType: "oauth", status: "available" },
+      { provider: "microsoft365", category: "email", name: "Microsoft 365 (Outlook)", description: "Send and receive email via your M365 mailbox.", authType: "oauth", status: "available" },
+      { provider: "hubspot", category: "crm", name: "HubSpot", description: "Bi-directional CRM sync for contacts, deals, and companies.", authType: "oauth", status: "available" },
+      { provider: "salesforce", category: "crm", name: "Salesforce", description: "Bi-directional CRM sync.", authType: "oauth", status: "coming_soon" },
+      { provider: "pipedrive", category: "crm", name: "Pipedrive", description: "Bi-directional CRM sync.", authType: "oauth", status: "coming_soon" },
+      { provider: "apollo", category: "enrichment", name: "Apollo.io", description: "Lead sourcing and contact enrichment.", authType: "api_key", status: "available" },
+      { provider: "clay", category: "enrichment", name: "Clay", description: "Waterfall enrichment with custom signals.", authType: "api_key", status: "coming_soon" },
+      { provider: "google_calendar", category: "calendar", name: "Google Calendar", description: "Booking and availability lookup.", authType: "oauth", status: "available" },
+      { provider: "microsoft_calendar", category: "calendar", name: "Microsoft Calendar", description: "Booking and availability lookup.", authType: "oauth", status: "coming_soon" },
+      { provider: "slack", category: "communication", name: "Slack", description: "Notifications and reply alerts.", authType: "oauth", status: "available" },
+      { provider: "whatsapp", category: "communication", name: "WhatsApp Business", description: "Channel for booked-meeting confirmations.", authType: "oauth", status: "coming_soon" },
+      { provider: "elevenlabs", category: "voice", name: "ElevenLabs Voice", description: "AI voice for outbound calling.", authType: "api_key", status: "available" },
+    ];
+  }
+
   async findAll(orgId: string) {
     return this.prisma.integration.findMany({
       where: { orgId },

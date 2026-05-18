@@ -22,6 +22,11 @@ export class IntegrationsController {
     return this.integrationsService.disconnect(id);
   }
 
+  @Get("catalog")
+  getCatalog() {
+    return this.integrationsService.getCatalog();
+  }
+
   // OAuth flow endpoints
   @Get("gmail/auth")
   gmailAuth(@Query("orgId") orgId: string, @Res() res: Response) {
