@@ -636,9 +636,10 @@ export class LeadsService {
     if (filters.industry) where.industry = filters.industry;
     if (filters.country) where.country = filters.country;
 
-    const [data, total] = await Promise.all([
+    const [raw, total] = await Promise.all([
       this.prisma.company.findMany({
         where,
+        include: { _count: { select: { people: true } } },
         skip: (filters.page - 1) * filters.limit,
         take: filters.limit,
         orderBy: { createdAt: "desc" },
@@ -646,7 +647,46 @@ export class LeadsService {
       this.prisma.company.count({ where }),
     ]);
 
-    return { data, total, page: filters.page, limit: filters.limit };
+    const items = raw.map((c) => ({
+      id: c.id,
+      name: c.name,
+      domain: c.domain,
+      industry: c.industry,
+      country: c.country,
+      employeeRange: c.employeeRange,
+      atsProvider: c.atsProvider,
+      intentScore: c.intentScore,
+      peopleCount: c._count.people,
+    }));
+
+    return { items, total, page: filters.page, limit: filters.limit };
+  }
+
+  async listCompanyPeople(orgId: string, companyId: string) {
+    const raw = await this.prisma.person.findMany({
+      where: { companyId, company: { orgId } },
+      include: {
+        company: { select: { domain: true, name: true } },
+        scores: { where: { orgId }, select: { score: true, qualifiedAt: true } },
+        emails: { select: { email: true, confidence: true }, orderBy: { confidence: "desc" }, take: 1 },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+
+    return raw.map((p) => ({
+      id: p.id,
+      firstName: p.firstName,
+      lastName: p.lastName,
+      title: p.title,
+      company: p.company?.name ?? null,
+      companyDomain: p.company?.domain ?? null,
+      seniority: p.seniority,
+      department: p.department,
+      linkedinUrl: p.linkedinUrl,
+      bestEmail: p.emails[0]?.email ?? null,
+      score: p.scores[0]?.score ?? null,
+      qualifiedAt: p.scores[0]?.qualifiedAt ?? null,
+    }));
   }
 
   async listPeople(orgId: string, filters: PeopleFilters) {
@@ -663,13 +703,13 @@ export class LeadsService {
       };
     }
 
-    const [data, total] = await Promise.all([
+    const [raw, total] = await Promise.all([
       this.prisma.person.findMany({
         where,
         include: {
           company: { select: { domain: true, name: true } },
           scores: { where: { orgId }, select: { score: true, qualifiedAt: true } },
-          emails: { select: { email: true, verified: true, confidence: true } },
+          emails: { select: { email: true, verified: true, confidence: true }, orderBy: { confidence: "desc" }, take: 1 },
         },
         skip: (filters.page - 1) * filters.limit,
         take: filters.limit,
@@ -678,11 +718,26 @@ export class LeadsService {
       this.prisma.person.count({ where }),
     ]);
 
-    return { data, total, page: filters.page, limit: filters.limit };
+    const items = raw.map((p) => ({
+      id: p.id,
+      firstName: p.firstName,
+      lastName: p.lastName,
+      title: p.title,
+      company: p.company?.name ?? null,
+      companyDomain: p.company?.domain ?? null,
+      seniority: p.seniority,
+      department: p.department,
+      linkedinUrl: p.linkedinUrl,
+      bestEmail: p.emails[0]?.email ?? null,
+      score: p.scores[0]?.score ?? null,
+      qualifiedAt: p.scores[0]?.qualifiedAt ?? null,
+    }));
+
+    return { items, total, page: filters.page, limit: filters.limit };
   }
 
   async getPersonDetail(orgId: string, personId: string) {
-    return this.prisma.person.findFirstOrThrow({
+    const p = await this.prisma.person.findFirstOrThrow({
       where: { id: personId, company: { orgId } },
       include: {
         company: true,
@@ -690,14 +745,52 @@ export class LeadsService {
         scores: { where: { orgId } },
       },
     });
+
+    return {
+      id: p.id,
+      firstName: p.firstName,
+      lastName: p.lastName,
+      title: p.title,
+      company: p.company?.name ?? null,
+      companyDomain: p.company?.domain ?? null,
+      seniority: p.seniority,
+      department: p.department,
+      linkedinUrl: p.linkedinUrl,
+      location: null,
+      bio: null,
+      bestEmail: p.emails[0]?.email ?? null,
+      score: p.scores[0]?.score ?? null,
+      qualifiedAt: p.scores[0]?.qualifiedAt ?? null,
+      emails: p.emails.map((e) => ({
+        email: e.email,
+        pattern: e.pattern,
+        source: e.source,
+        confidence: e.confidence,
+        verified: e.verified,
+        verificationResult: e.verificationResult,
+      })),
+      scoreBreakdown: p.scores[0] ? [
+        { category: "Total", points: p.scores[0].score },
+      ] : [],
+    };
   }
 
   async listJobs(orgId: string) {
-    return this.prisma.scrapeJob.findMany({
+    const jobs = await this.prisma.scrapeJob.findMany({
       where: { orgId },
       orderBy: { createdAt: "desc" },
       take: 50,
     });
+
+    return jobs.map((j) => ({
+      id: j.id,
+      stage: j.stage,
+      status: j.status,
+      progress: j.status === "COMPLETED" ? 100 : j.status === "RUNNING" ? 50 : 0,
+      itemsProcessed: j.processedItems,
+      startedAt: j.startedAt,
+      completedAt: j.completedAt,
+    }));
   }
 
   async exportCsv(orgId: string): Promise<string> {
@@ -745,7 +838,7 @@ export class LeadsService {
       }),
     ]);
 
-    return { companies, people, emails, qualifiedLeads: qualified };
+    return { companiesFound: companies, peopleDiscovered: people, emailsFound: emails, qualifiedLeads: qualified };
   }
 }
 

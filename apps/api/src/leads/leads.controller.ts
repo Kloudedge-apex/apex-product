@@ -54,12 +54,13 @@ export class LeadsController {
   @HttpCode(HttpStatus.ACCEPTED)
   discover(
     @OrgId() orgId: string | undefined,
-    @Body() body: { icpProfileId: string },
+    @Body() body: { icpProfileId?: string; icpId?: string },
   ) {
     if (!orgId) throw new BadRequestException("orgId required");
-    if (!body.icpProfileId)
-      throw new BadRequestException("icpProfileId required");
-    return this.leads.triggerDiscovery(orgId, body.icpProfileId);
+    const profileId = body.icpProfileId ?? body.icpId;
+    if (!profileId)
+      throw new BadRequestException("icpProfileId or icpId required");
+    return this.leads.triggerDiscovery(orgId, profileId);
   }
 
   // ─── Companies ───────────────────────────────────────
@@ -79,6 +80,15 @@ export class LeadsController {
       industry,
       country,
     });
+  }
+
+  @Get("companies/:companyId/people")
+  listCompanyPeople(
+    @OrgId() orgId: string | undefined,
+    @Param("companyId") companyId: string,
+  ) {
+    if (!orgId) throw new BadRequestException("orgId required");
+    return this.leads.listCompanyPeople(orgId, companyId);
   }
 
   // ─── People ──────────────────────────────────────────
