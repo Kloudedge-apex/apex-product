@@ -71,7 +71,7 @@ export class SignupService {
         geos?: string[];
         titles?: string[];
         signals?: string[];
-        exclusions?: string[];
+        exclusions?: string | string[];
         description?: string;
       };
       emailProvider?: string;
@@ -98,7 +98,7 @@ export class SignupService {
           targetTitles: body.icp.titles ?? [],
           techStackSignals: body.icp.signals ?? [],
           intentKeywords: [],
-          seedDomains: Array.isArray(body.icp.exclusions) ? body.icp.exclusions : (typeof body.icp.exclusions === "string" && body.icp.exclusions ? body.icp.exclusions.split("\n").map((s: string) => s.trim()).filter(Boolean) : []),
+          seedDomains: Array.isArray(body.icp.exclusions) ? body.icp.exclusions : (typeof body.icp.exclusions === "string" ? (body.icp.exclusions as string).split("\n").map(s => s.trim()).filter(Boolean) : []),
         },
       });
     }
