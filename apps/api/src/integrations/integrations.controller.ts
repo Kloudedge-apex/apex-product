@@ -2,6 +2,7 @@ import { Controller, Get, Post, Delete, Param, Body, Query, Res, HttpStatus } fr
 import { Response } from "express";
 import { IntegrationsService } from "./integrations.service";
 import { CreateIntegrationDto, ConnectIntegrationDto } from "../common/dto/integrations.dto";
+import { SkipOrgGuard } from "../common/org-scope.guard";
 
 @Controller("integrations")
 export class IntegrationsController {
@@ -22,18 +23,21 @@ export class IntegrationsController {
     return this.integrationsService.disconnect(id);
   }
 
+  @SkipOrgGuard()
   @Get("catalog")
   getCatalog() {
     return this.integrationsService.getCatalog();
   }
 
   // OAuth flow endpoints
+  @SkipOrgGuard()
   @Get("gmail/auth")
   gmailAuth(@Query("orgId") orgId: string, @Res() res: Response) {
     const url = this.integrationsService.getOAuthUrl("gmail", orgId);
     return res.redirect(HttpStatus.FOUND, url);
   }
 
+  @SkipOrgGuard()
   @Get("gmail/callback")
   async gmailCallback(@Query("code") code: string, @Query("state") orgId: string, @Res() res: Response) {
     try {
@@ -46,12 +50,14 @@ export class IntegrationsController {
     }
   }
 
+  @SkipOrgGuard()
   @Get("outlook/auth")
   outlookAuth(@Query("orgId") orgId: string, @Res() res: Response) {
     const url = this.integrationsService.getOAuthUrl("outlook", orgId);
     return res.redirect(HttpStatus.FOUND, url);
   }
 
+  @SkipOrgGuard()
   @Get("outlook/callback")
   async outlookCallback(@Query("code") code: string, @Query("state") orgId: string, @Res() res: Response) {
     try {
@@ -64,12 +70,14 @@ export class IntegrationsController {
     }
   }
 
+  @SkipOrgGuard()
   @Get("hubspot/auth")
   hubspotAuth(@Query("orgId") orgId: string, @Res() res: Response) {
     const url = this.integrationsService.getOAuthUrl("hubspot", orgId);
     return res.redirect(HttpStatus.FOUND, url);
   }
 
+  @SkipOrgGuard()
   @Get("hubspot/callback")
   async hubspotCallback(@Query("code") code: string, @Query("state") orgId: string, @Res() res: Response) {
     try {
