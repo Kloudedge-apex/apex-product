@@ -84,6 +84,20 @@ export class LeadsService {
     });
   }
 
+  async updateIcpSchedule(orgId: string, icpId: string, enabled: boolean, intervalHours?: number) {
+    const icp = await this.prisma.icpProfile.findFirstOrThrow({
+      where: { id: icpId, orgId },
+    });
+
+    const data: Record<string, unknown> = { scheduleEnabled: enabled };
+    if (intervalHours !== undefined) data.scheduleInterval = intervalHours;
+
+    return this.prisma.icpProfile.update({
+      where: { id: icp.id },
+      data,
+    });
+  }
+
   // ─── Discovery Pipeline ──────────────────────────────
 
   async triggerDiscovery(orgId: string, icpProfileId: string) {
@@ -99,6 +113,12 @@ export class LeadsService {
     });
 
     this.logger.log(`Starting discovery pipeline for ICP "${icp.name}" (org: ${orgId})`);
+
+    // Update lastRunAt
+    await this.prisma.icpProfile.update({
+      where: { id: icpProfileId },
+      data: { lastRunAt: new Date() },
+    });
 
     // Fire and forget: run pipeline stages sequentially in background
     void this.runPipeline(orgId, icpProfileId, icp).catch((err: unknown) => {

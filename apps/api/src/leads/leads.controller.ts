@@ -66,6 +66,18 @@ export class LeadsController {
     return this.leads.listIcpProfiles(orgId);
   }
 
+  @Post("icp/:id/schedule")
+  @HttpCode(HttpStatus.OK)
+  updateIcpSchedule(
+    @OrgId() orgId: string | undefined,
+    @Param("id") id: string,
+    @Body() body: { enabled: boolean; intervalHours?: number },
+  ) {
+    if (!orgId) throw new BadRequestException("orgId required");
+    const interval = body.intervalHours ? Math.max(1, Math.min(body.intervalHours, 168)) : undefined; // 1h to 7 days
+    return this.leads.updateIcpSchedule(orgId, id, body.enabled, interval);
+  }
+
   // ─── Discovery ───────────────────────────────────────
 
   @Post("discover")
