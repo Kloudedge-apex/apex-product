@@ -2,9 +2,6 @@ import { IsString, IsOptional, IsInt, Min, Max } from "class-validator";
 import { Type } from "class-transformer";
 
 export class ListRunsQueryDto {
-  @IsString()
-  orgId!: string;
-
   @IsOptional()
   @Type(() => Number)
   @IsInt()
@@ -42,7 +39,4 @@ export class ListRunsQueryDto {
 export class CreateRunDto {
   @IsString()
   agentId!: string;
-
-  @IsString()
-  orgId!: string;
 }

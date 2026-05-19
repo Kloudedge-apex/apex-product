@@ -1,5 +1,8 @@
-import { IsString, IsOptional, IsEmail, MinLength, MaxLength } from "class-validator";
+import { IsString, IsOptional, MinLength, MaxLength } from "class-validator";
 
+// clerkUserId and email are NOT in this DTO on purpose — they come from the
+// verified Clerk JWT (req.headers.authorization), never the request body.
+// Accepting them from the body would let a caller spoof another user's identity.
 export class CreateOrgDto {
   @IsString()
   @MinLength(1)
@@ -9,12 +12,6 @@ export class CreateOrgDto {
   @IsOptional()
   @IsString()
   slug?: string;
-
-  @IsString()
-  clerkUserId!: string;
-
-  @IsEmail()
-  email!: string;
 
   @IsOptional()
   @IsString()

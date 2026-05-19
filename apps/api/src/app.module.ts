@@ -1,4 +1,4 @@
-import { Module, MiddlewareConsumer, NestModule } from "@nestjs/common";
+import { Module } from "@nestjs/common";
 import { APP_GUARD } from "@nestjs/core";
 import { ConfigModule } from "@nestjs/config";
 import { PrismaModule } from "./prisma/prisma.module";
@@ -11,10 +11,15 @@ import { BillingModule } from "./billing/billing.module";
 import { RunsModule } from "./runs/runs.module";
 import { RuntimeModule } from "./runtime/runtime.module";
 import { LeadsModule } from "./leads/leads.module";
-import { SignupModule } from "./signup/signup.module";
-import { RateLimitMiddleware } from "./common/rate-limit.middleware";
 import { OrgScopeGuard } from "./common/org-scope.guard";
+import { RateLimitGuard } from "./common/rate-limit.guard";
 
+/**
+ * Guards run in registration order. `OrgScopeGuard` must run first so that
+ * `request.orgId` is populated before `RateLimitGuard` reads it; otherwise
+ * the rate limiter would have to key on a client-controlled header, which
+ * lets any caller claim another org's quota.
+ */
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
@@ -28,17 +33,10 @@ import { OrgScopeGuard } from "./common/org-scope.guard";
     RunsModule,
     RuntimeModule,
     LeadsModule,
-    SignupModule,
   ],
   providers: [
-    {
-      provide: APP_GUARD,
-      useClass: OrgScopeGuard,
-    },
+    { provide: APP_GUARD, useClass: OrgScopeGuard },
+    { provide: APP_GUARD, useClass: RateLimitGuard },
   ],
 })
-export class AppModule implements NestModule {
-  configure(consumer: MiddlewareConsumer) {
-    consumer.apply(RateLimitMiddleware).forRoutes("*path");
-  }
-}
+export class AppModule {}

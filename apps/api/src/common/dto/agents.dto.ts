@@ -1,10 +1,13 @@
-import { IsString, IsOptional, IsIn, IsObject, ValidateNested, MinLength, MaxLength } from "class-validator";
-import { Type } from "class-transformer";
+import {
+  IsString,
+  IsOptional,
+  IsIn,
+  IsObject,
+  MinLength,
+  MaxLength,
+} from "class-validator";
 
 export class CreateAgentDto {
-  @IsString()
-  orgId!: string;
-
   @IsString()
   templateId!: string;
 
@@ -40,16 +43,7 @@ export class UpdateAgentDto {
   schedule?: string;
 }
 
-export class TriggerRunDto {
-  @IsOptional()
-  @IsString()
-  orgId?: string;
-}
-
 export class CreateFromTemplateDto {
-  @IsString()
-  orgId!: string;
-
   @IsString()
   @MinLength(1)
   templateSlug!: string;

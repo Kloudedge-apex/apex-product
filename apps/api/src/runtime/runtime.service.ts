@@ -1,4 +1,5 @@
 import { Injectable, ForbiddenException } from "@nestjs/common";
+import { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { QueueService } from "./queue.service";
 
@@ -14,47 +15,41 @@ export class RuntimeService {
   constructor(
     private prisma: PrismaService,
     private queue: QueueService,
-  ) { }
+  ) {}
 
   async triggerRun(agentId: string, orgId: string) {
-    // ── Enforce per-plan daily run limits ──────────────────────────────────
     const org = await this.prisma.org.findUnique({
       where: { id: orgId },
       select: { plan: true },
     });
-
     const plan = org?.plan || "TRIAL";
     const limit = DAILY_RUN_LIMITS[plan] ?? DAILY_RUN_LIMITS.TRIAL;
 
-    if (limit !== Infinity) {
-      const todayStart = new Date();
-      todayStart.setHours(0, 0, 0, 0);
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
 
-      const runsToday = await this.prisma.agentRun.count({
-        where: {
-          orgId,
-          startedAt: { gte: todayStart },
-        },
-      });
-
-      if (runsToday >= limit) {
-        throw new ForbiddenException(
-          `Daily run limit reached for your plan (${plan}: ${limit} runs/day). ` +
-          `Upgrade your plan to run more agents today.`,
-        );
-      }
-    }
-
-    // ── Create run record ─────────────────────────────────────────────────
-    const run = await this.prisma.agentRun.create({
-      data: {
-        agentId,
-        orgId,
-        status: "QUEUED",
+    // Atomic count + insert: a Serializable transaction prevents two
+    // concurrent triggers from each seeing N runs and both inserting (which
+    // would push the org over its plan limit).
+    const run = await this.prisma.$transaction(
+      async (tx) => {
+        if (limit !== Infinity) {
+          const runsToday = await tx.agentRun.count({
+            where: { orgId, startedAt: { gte: todayStart } },
+          });
+          if (runsToday >= limit) {
+            throw new ForbiddenException(
+              `Daily run limit reached for your plan (${plan}: ${limit} runs/day).`,
+            );
+          }
+        }
+        return tx.agentRun.create({
+          data: { agentId, orgId, status: "QUEUED" },
+        });
       },
-    });
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
 
-    // Enqueue the job
     this.queue.enqueue({
       id: `job_${run.id}`,
       agentId,
@@ -62,13 +57,8 @@ export class RuntimeService {
       runId: run.id,
     });
 
-    // Log
     await this.prisma.agentLog.create({
-      data: {
-        runId: run.id,
-        level: "INFO",
-        message: "Run queued for execution",
-      },
+      data: { runId: run.id, level: "INFO", message: "Run queued for execution" },
     });
 
     return run;
@@ -81,10 +71,7 @@ export class RuntimeService {
     if (cancelled) {
       await this.prisma.agentRun.update({
         where: { id: runId },
-        data: {
-          status: "CANCELLED",
-          completedAt: new Date(),
-        },
+        data: { status: "CANCELLED", completedAt: new Date() },
       });
     }
 

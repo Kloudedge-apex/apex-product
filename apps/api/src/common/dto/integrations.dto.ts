@@ -1,9 +1,6 @@
-import { IsString, IsObject, IsOptional } from "class-validator";
+import { IsString, IsObject } from "class-validator";
 
 export class CreateIntegrationDto {
-  @IsString()
-  orgId!: string;
-
   @IsString()
   provider!: string;
 
@@ -12,9 +9,6 @@ export class CreateIntegrationDto {
 }
 
 export class ConnectIntegrationDto {
-  @IsString()
-  orgId!: string;
-
   @IsString()
   provider!: string;
 }
