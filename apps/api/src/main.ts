@@ -77,7 +77,7 @@ async function bootstrap() {
       return callback(new Error(`Origin ${origin} not allowed by CORS`), false);
     },
     methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    allowedHeaders: ["Content-Type", "Authorization", "x-org-id"],
     credentials: true,
     maxAge: 600,
   });

@@ -40,6 +40,12 @@ export class IntegrationsController {
     return this.integrationsService.disconnect(id, orgId);
   }
 
+  @SkipOrgGuard()
+  @Get("catalog")
+  getCatalog() {
+    return this.integrationsService.getCatalog();
+  }
+
   // ── OAuth init: authenticated, orgId derived from JWT ───────────────────
   //
   // The legacy `/:provider/auth` route used `res.redirect(302, url)` so a

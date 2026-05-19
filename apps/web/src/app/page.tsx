@@ -6,14 +6,16 @@ import { OldVsNewComparison, CompetitorTable } from "@/components/landing/Compar
 import { ScrollReveal } from "@/components/landing/ScrollReveal";
 import { PricingSection } from "@/components/landing/PricingSection";
 
+export const revalidate = 60; // revalidate every 60 seconds (prevents year-long CDN caching)
+
 export const metadata: Metadata = {
-  title: "Apex AI Workforce Platform | Deploy AI Agents in Minutes",
+  title: "Apex — The Agentic OS for Your Business",
   description:
-    "Deploy autonomous AI agents for Sales, Marketing, and Operations. Configure once, deploy in minutes, scale without hiring. Start your free trial today.",
+    "The operating system for AI agents. Deploy autonomous agents across Sales, Marketing, and Operations with SRE-grade reliability. Start your free trial today.",
   openGraph: {
-    title: "Apex AI Workforce Platform",
+    title: "Apex — The Agentic OS for Your Business",
     description:
-      "Deploy autonomous AI agents for Sales, Marketing, and Operations.",
+      "The operating system for AI agents. Deploy, manage, and scale autonomous agents across your entire operation.",
     type: "website",
     url: "https://apex.kloudedge.com",
   },
@@ -56,8 +58,8 @@ const timelineSteps = [
 
 const faqs = [
   {
-    q: "How do AI agents work?",
-    a: "Each agent is powered by advanced LLMs with a specialized system prompt, configured for your specific use case. They connect to your tools via integrations and execute tasks on a schedule or on-demand.",
+    q: "What is an Agentic OS?",
+    a: "An Agentic OS is the foundational layer that runs AI agents across your business. Each agent is powered by advanced LLMs with a specialized prompt, connects to your tools via integrations, and executes tasks autonomously on a schedule or on-demand.",
   },
   {
     q: "Do I need technical knowledge?",
@@ -121,16 +123,16 @@ export default function LandingPage() {
             <div>
               <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-apex-indigo/10 border border-apex-indigo/20 text-apex-indigo-light text-sm mb-6">
                 <span className="w-2 h-2 rounded-full bg-apex-indigo animate-pulse" />
-                Trusted by 10+ teams in beta
+                The operating system for AI agents
               </div>
               <h1 className="text-4xl sm:text-5xl md:text-6xl font-bold tracking-tight mb-6 leading-[1.1]">
-                Your AI Workforce.
+                The Agentic OS
                 <br />
-                <span className="text-apex-indigo-light">Deployed in 5 Minutes.</span>
+                <span className="text-apex-indigo-light">for Your Business.</span>
               </h1>
               <p className="text-lg md:text-xl text-apex-muted max-w-lg mb-8">
-                Autonomous agents that research, email, post, report, and sync
-                — while you focus on closing deals.
+                An operating system that runs AI agents across your entire operation:
+                sales, marketing, ops, and support. Production-grade. Always on.
               </p>
               <div className="flex items-center gap-4 flex-wrap">
                 <Link href="/signup" className="btn-primary text-lg px-8 py-3.5">
@@ -180,7 +182,7 @@ export default function LandingPage() {
               The Old Way vs The Apex Way
             </h2>
             <p className="text-apex-muted text-center mb-16 max-w-2xl mx-auto">
-              Every growing team faces the same challenge: too many tasks, not enough people. Stop hiring for repetitive work.
+              Every growing team faces the same challenge: too many tasks, not enough people. Install the Agentic OS instead.
             </p>
           </ScrollReveal>
 
@@ -204,10 +206,10 @@ export default function LandingPage() {
           <div id="demo" className="max-w-7xl mx-auto px-6 py-24">
             <ScrollReveal>
               <h2 className="text-3xl md:text-4xl font-bold text-center mb-4">
-                Meet Your AI Agents
+                Meet Your Agents
               </h2>
               <p className="text-apex-muted text-center mb-12 max-w-2xl mx-auto">
-                Each agent is a specialized AI worker. Pick a template, connect your tools, and watch it work. Click a tab to see a simulated run.
+                The Agentic OS comes with specialized agents for every function. Pick a template, connect your tools, and deploy. Click a tab to see a simulated run.
               </p>
             </ScrollReveal>
             <AgentShowcase />
@@ -270,12 +272,12 @@ export default function LandingPage() {
           <div className="max-w-4xl mx-auto px-6 py-24">
             <ScrollReveal>
               <h2 className="text-3xl md:text-4xl font-bold text-center mb-4">
-                Not Just Another AI SDR
+                Not a Chatbot. An Operating System.
               </h2>
               <p className="text-apex-muted text-center mb-12 max-w-2xl mx-auto">
-                Other tools give you a single-purpose chatbot for $5,000/month.
-                Apex gives you a full AI workforce with real tool use, persistent memory,
-                and multi-step execution.
+                Other tools give you a single-purpose bot for $5,000/month.
+                Apex gives you a full Agentic OS with real tool use, persistent memory,
+                multi-agent orchestration, and SRE-grade reliability.
               </p>
             </ScrollReveal>
 
@@ -287,8 +289,8 @@ export default function LandingPage() {
 
             <ScrollReveal delay={200}>
               <p className="text-center text-apex-muted text-sm mt-8 max-w-xl mx-auto">
-                Full AI workforce with real tool use, persistent memory, and multi-step
-                execution — starting at <span className="text-apex-indigo-light font-semibold">$49/month</span>.
+                Full Agentic OS with real tool use, persistent memory, and production-grade
+                reliability — starting at <span className="text-apex-indigo-light font-semibold">$499/month</span>.
               </p>
             </ScrollReveal>
           </div>
@@ -308,7 +310,7 @@ export default function LandingPage() {
           </ScrollReveal>
           <PricingSection />
           <p className="text-center text-apex-muted text-sm mt-8">
-            All plans include: 3-day free trial · No credit card required · Cancel anytime
+            All plans include a free trial · Cancel anytime
           </p>
         </section>
 
@@ -322,8 +324,8 @@ export default function LandingPage() {
                 Built by practitioners
               </p>
               <h2 className="text-2xl md:text-3xl font-bold mb-6 max-w-2xl mx-auto">
-                &ldquo;We built Apex because we ran a 14-agent AI workforce ourselves.
-                It&apos;s not theoretical — it&apos;s battle-tested.&rdquo;
+                &ldquo;We built Apex because we run a 14-agent Agentic OS ourselves.
+                It&apos;s not theoretical. It&apos;s battle-tested.&rdquo;
               </h2>
               <div className="flex items-center justify-center gap-3">
                 <div className="w-10 h-10 rounded-full bg-apex-indigo/20 flex items-center justify-center text-sm font-bold text-apex-indigo-light">
@@ -373,10 +375,10 @@ export default function LandingPage() {
 
             <div className="relative border border-apex-indigo/20 rounded-2xl px-8 py-16 md:py-20 text-center">
               <h2 className="text-3xl md:text-4xl font-bold mb-4">
-                Deploy Your First Agent in 5 Minutes
+                Install the Agentic OS in 5 Minutes
               </h2>
               <p className="text-apex-muted mb-8 max-w-lg mx-auto">
-                Join teams already using Apex to automate sales, marketing, and operations.
+                Join teams already running their operations on the Agentic OS.
               </p>
               <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
                 <Link href="/signup" className="btn-primary text-lg px-10 py-4 w-full sm:w-auto">
@@ -405,7 +407,7 @@ export default function LandingPage() {
                 <span className="font-bold text-white">Apex</span>
               </div>
               <p className="text-sm text-apex-muted">
-                AI workforce platform
+                The Agentic OS
                 <br />
                 by Kloudedge.
               </p>
@@ -460,14 +462,15 @@ export default function LandingPage() {
           __html: JSON.stringify({
             "@context": "https://schema.org",
             "@type": "SoftwareApplication",
-            name: "Apex AI Workforce Platform",
+            name: "Apex — The Agentic OS",
             applicationCategory: "BusinessApplication",
             operatingSystem: "Web",
             description:
-              "Deploy autonomous AI agents for Sales, Marketing, and Operations. Autonomous agents that research, email, post, report, and sync.",
+              "The Agentic OS for your business. Deploy, manage, and scale autonomous AI agents across Sales, Marketing, and Operations with production-grade reliability.",
             offers: [
-              { "@type": "Offer", name: "Starter", price: "49", priceCurrency: "USD", billingIncrement: "P1M" },
-              { "@type": "Offer", name: "Growth", price: "149", priceCurrency: "USD", billingIncrement: "P1M" },
+              { "@type": "Offer", name: "Sales Engine", price: "499", priceCurrency: "USD", billingIncrement: "P1M" },
+              { "@type": "Offer", name: "Marketing Engine", price: "499", priceCurrency: "USD", billingIncrement: "P1M" },
+              { "@type": "Offer", name: "Full Stack", price: "899", priceCurrency: "USD", billingIncrement: "P1M" },
             ],
             creator: {
               "@type": "Organization",

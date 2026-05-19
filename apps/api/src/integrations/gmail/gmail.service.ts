@@ -244,6 +244,7 @@ export class GmailService {
     if (options.bcc) mimeLines.push(`Bcc: ${options.bcc}`);
     if (options.replyTo) mimeLines.push(`Reply-To: ${options.replyTo}`);
     mimeLines.push(`Subject: ${options.subject}`);
+    mimeLines.push("MIME-Version: 1.0");
 
     if (options.html) {
       const boundary = `boundary_${Date.now()}`;

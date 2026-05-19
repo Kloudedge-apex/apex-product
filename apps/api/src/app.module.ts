@@ -10,6 +10,7 @@ import { IntegrationsModule } from "./integrations/integrations.module";
 import { BillingModule } from "./billing/billing.module";
 import { RunsModule } from "./runs/runs.module";
 import { RuntimeModule } from "./runtime/runtime.module";
+import { LeadsModule } from "./leads/leads.module";
 import { OrgScopeGuard } from "./common/org-scope.guard";
 import { RateLimitGuard } from "./common/rate-limit.guard";
 
@@ -31,6 +32,7 @@ import { RateLimitGuard } from "./common/rate-limit.guard";
     BillingModule,
     RunsModule,
     RuntimeModule,
+    LeadsModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: OrgScopeGuard },

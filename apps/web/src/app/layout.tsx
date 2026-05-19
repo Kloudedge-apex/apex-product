@@ -5,9 +5,9 @@ import { ToastProvider } from "@/components/ui/toast";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Apex AI Workforce Platform",
+  title: "Apex — The Agentic OS for Your Business",
   description:
-    "Deploy autonomous AI agents for Sales, Marketing, and Operations. Self-serve SaaS platform.",
+    "The operating system for AI agents. Deploy, manage, and scale autonomous agents across your entire operation with production-grade reliability.",
   metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL || "https://apex.kloudedge.com"),
 };
 

@@ -66,7 +66,7 @@ export const api = {
       if (opts?.search) params.set("search", opts.search);
       return fetchAPI(`/runs?${params.toString()}`);
     },
-    listByAgent: (agentId: string, limit?: number) => fetchAPI(`/runs/agent/${agentId}${limit ? `&limit=${limit}` : ""}`),
+    listByAgent: (agentId: string, limit?: number) => fetchAPI(`/runs/agent/${agentId}${limit ? `?limit=${limit}` : ""}`),
     get: (id: string) => fetchAPI(`/runs/${id}`),
     trigger: (agentId: string, orgId: string) =>
       fetchAPI(`/agents/${agentId}/runs`, { method: "POST", body: JSON.stringify({ orgId }) }),

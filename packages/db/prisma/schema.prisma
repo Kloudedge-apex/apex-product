@@ -74,13 +74,17 @@ model Org {
   slug         String        @unique
   plan         Plan          @default(TRIAL)
   trialEndsAt  DateTime?
-  billingId    String?       // Razorpay subscription ID
+  billingId    String? // Razorpay subscription ID
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
   users        User[]
   agents       Agent[]
   integrations Integration[]
   runs         AgentRun[]
+  icpProfiles  IcpProfile[]
+  companies    Company[]
+  leadScores   LeadScore[]
+  scrapeJobs   ScrapeJob[]
 
   @@index([slug])
 }
@@ -91,12 +95,15 @@ model User {
   org       Org      @relation(fields: [orgId], references: [id], onDelete: Cascade)
   email     String   @unique
   name      String?
-  role      UserRole @default(MEMBER)
-  clerkId   String   @unique
-  createdAt DateTime @default(now())
+  role         UserRole @default(MEMBER)
+  clerkId      String?  @unique
+  apiKey       String?  @unique
+  passwordHash String?
+  createdAt    DateTime @default(now())
 
   @@index([orgId])
   @@index([clerkId])
+  @@index([apiKey])
 }
 
 model AgentTemplate {
@@ -125,7 +132,7 @@ model Agent {
   name       String
   domain     Domain
   config     Json
-  schedule   String?       // Cron expression
+  schedule   String? // Cron expression
   status     AgentStatus   @default(PAUSED)
   createdAt  DateTime      @default(now())
   updatedAt  DateTime      @updatedAt
@@ -142,11 +149,11 @@ model Integration {
   id                   String            @id @default(cuid())
   orgId                String
   org                  Org               @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  provider             String            // gmail, outlook, hubspot, linkedin, etc
-  credentials          Json              // Encrypted JSON blob
+  provider             String // gmail, outlook, hubspot, linkedin, etc
+  credentials          Json // Encrypted JSON blob
   encryptedCredentials String?           @db.Text // AES-256-GCM encrypted token string
   status               IntegrationStatus @default(PENDING)
-  scopes               String[]          // OAuth scopes granted
+  scopes               String[] // OAuth scopes granted
   lastSyncAt           DateTime?
   lastErrorAt          DateTime?
   lastErrorMessage     String?
@@ -160,22 +167,22 @@ model Integration {
 }
 
 model AgentRun {
-  id          String    @id @default(cuid())
-  agentId     String
-  agent       Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  orgId       String
-  org         Org       @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  startedAt   DateTime  @default(now())
-  completedAt DateTime?
-  status      RunStatus @default(RUNNING)
-  result      Json?
-  tokensUsed  Int       @default(0)
-  cost        Float     @default(0)
-  requiresApproval Boolean  @default(false)
-  approvedAt  DateTime?
-  approvedBy  String?   // Clerk user ID of the approver
-  logs        AgentLog[]
-  steps       RunStep[]
+  id               String     @id @default(cuid())
+  agentId          String
+  agent            Agent      @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  orgId            String
+  org              Org        @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  startedAt        DateTime   @default(now())
+  completedAt      DateTime?
+  status           RunStatus  @default(RUNNING)
+  result           Json?
+  tokensUsed       Int        @default(0)
+  cost             Float      @default(0)
+  requiresApproval Boolean    @default(false)
+  approvedAt       DateTime?
+  approvedBy       String? // Clerk user ID of the approver
+  logs             AgentLog[]
+  steps            RunStep[]
 
   @@index([agentId])
   @@index([orgId])
@@ -228,4 +235,208 @@ model AgentMemory {
 
   @@unique([agentId, key])
   @@index([agentId])
+}
+
+// ─── Lead Engine Enums ───────────────────────────────────
+
+enum Seniority {
+  C_LEVEL
+  VP
+  DIRECTOR
+  MANAGER
+  IC
+  UNKNOWN
+}
+
+enum Department {
+  SALES
+  MARKETING
+  ENGINEERING
+  FINANCE
+  OPERATIONS
+  HR
+  LEGAL
+  EXECUTIVE
+  OTHER
+  UNKNOWN
+}
+
+enum EmailSource {
+  TEAM_PAGE
+  GITHUB_COMMIT
+  PATTERN_GUESS
+  HUNTER
+  SEC_FILING
+  PRESS_RELEASE
+}
+
+enum VerificationResult {
+  VALID
+  INVALID
+  CATCH_ALL
+  UNKNOWN
+}
+
+enum ScrapeStage {
+  COMPANY_DISCOVERY
+  PEOPLE_DISCOVERY
+  IDENTITY_RESOLUTION
+  CONTACT_ENRICHMENT
+  SCORING
+}
+
+enum ScrapeStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+// ─── Lead Engine Models ──────────────────────────────────
+
+model IcpProfile {
+  id               String      @id @default(cuid())
+  orgId            String
+  org              Org         @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  name             String
+  targetTitles     String[]
+  targetIndustries String[]
+  targetGeos       String[]
+  minEmployees     Int?
+  maxEmployees     Int?
+  techStackSignals String[]
+  intentKeywords   String[]
+  seedDomains      String[]
+  scheduleEnabled  Boolean     @default(false)
+  scheduleInterval Int         @default(24)  // hours between runs
+  lastRunAt        DateTime?
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+  scrapeJobs       ScrapeJob[]
+
+  @@index([orgId])
+  @@index([scheduleEnabled, lastRunAt])
+}
+
+model Company {
+  id             String   @id @default(cuid())
+  orgId          String?
+  org            Org?     @relation(fields: [orgId], references: [id], onDelete: SetNull)
+  domain         String
+  name           String
+  industry       String?
+  employeeRange  String?
+  country        String?
+  city           String?
+  registryId     String?
+  registrySource String?
+  fundingStage   String?
+  techStack      String[]
+  atsProvider    String?
+  atsSlug        String?
+  teamPageUrl    String?
+  raw            Json?
+  confidence     Float    @default(0)
+  intentScore    Int      @default(0)
+  intentSignals  String[]
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  people         Person[]
+
+  @@unique([orgId, domain])
+  @@index([domain])
+  @@index([country])
+  @@index([industry])
+}
+
+model Person {
+  id            String           @id @default(cuid())
+  companyId     String
+  company       Company          @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  firstName     String
+  lastName      String
+  title         String?
+  seniority     Seniority        @default(UNKNOWN)
+  department    Department       @default(UNKNOWN)
+  linkedinSlug  String?
+  linkedinUrl   String?
+  githubHandle  String?
+  twitterHandle String?
+  location      String?
+  bio           String?
+  raw           Json?
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+  emails        EmailCandidate[]
+  scores        LeadScore[]
+
+  @@index([companyId])
+  @@index([linkedinSlug])
+  @@index([seniority])
+}
+
+model EmailCandidate {
+  id                 String             @id @default(cuid())
+  personId           String
+  person             Person             @relation(fields: [personId], references: [id], onDelete: Cascade)
+  email              String
+  pattern            String?
+  source             EmailSource
+  verified           Boolean            @default(false)
+  verificationResult VerificationResult @default(UNKNOWN)
+  confidence         Float              @default(0)
+  verifiedAt         DateTime?
+  createdAt          DateTime           @default(now())
+
+  @@unique([personId, email])
+  @@index([personId])
+}
+
+model PatternStore {
+  id          String   @id @default(cuid())
+  domain      String   @unique
+  patterns    Json
+  sampleSize  Int      @default(0)
+  lastUpdated DateTime @default(now())
+}
+
+model LeadScore {
+  id          String    @id @default(cuid())
+  orgId       String
+  org         Org       @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  personId    String
+  person      Person    @relation(fields: [personId], references: [id], onDelete: Cascade)
+  score       Int       @default(0)
+  breakdown   Json
+  qualifiedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([orgId, personId])
+  @@index([orgId])
+  @@index([personId])
+}
+
+model ScrapeJob {
+  id             String       @id @default(cuid())
+  orgId          String
+  org            Org          @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  icpProfileId   String
+  icpProfile     IcpProfile   @relation(fields: [icpProfileId], references: [id], onDelete: Cascade)
+  stage          ScrapeStage
+  status         ScrapeStatus @default(QUEUED)
+  source         String?
+  totalItems     Int          @default(0)
+  processedItems Int          @default(0)
+  failedItems    Int          @default(0)
+  progress       Float        @default(0)
+  metadata       Json?
+  startedAt      DateTime?
+  completedAt    DateTime?
+  error          String?
+  createdAt      DateTime     @default(now())
+
+  @@index([orgId])
+  @@index([stage])
+  @@index([status])
 }
