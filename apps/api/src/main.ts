@@ -47,6 +47,8 @@ async function bootstrap() {
     "http://localhost:5173",
     "https://apex.kloudedge.com",
     "https://apex.kloudedge.xyz",
+    "https://workforceos.xyz",
+    "https://www.workforceos.xyz",
     "https://apex-v2.ashysmoke-fd2f7a7f.eastus.azurecontainerapps.io",
   ].filter(Boolean);
 
@@ -60,7 +62,7 @@ async function bootstrap() {
       callback(null, false);
     },
     methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "x-org-id"],
+    allowedHeaders: ["Content-Type", "Authorization", "x-org-id", "X-API-Key"],
     credentials: true,
   });
 
