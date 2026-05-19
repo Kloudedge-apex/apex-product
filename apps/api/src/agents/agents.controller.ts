@@ -1,9 +1,27 @@
-import { Controller, Get, Post, Patch, Delete, Param, Body, Query, Inject, forwardRef, NotFoundException } from "@nestjs/common";
+import {
+  Controller,
+  Get,
+  Post,
+  Patch,
+  Delete,
+  Param,
+  Body,
+  Query,
+  Inject,
+  forwardRef,
+  NotFoundException,
+} from "@nestjs/common";
 import { AgentsService } from "./agents.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { RuntimeService } from "../runtime/runtime.service";
 import { MemoryService } from "../runtime/memory.service";
-import { CreateAgentDto, UpdateAgentDto, TriggerRunDto, SetMemoryDto, CreateFromTemplateDto } from "../common/dto/agents.dto";
+import { OrgId } from "../common/org-context.decorator";
+import {
+  CreateAgentDto,
+  UpdateAgentDto,
+  SetMemoryDto,
+  CreateFromTemplateDto,
+} from "../common/dto/agents.dto";
 
 @Controller("agents")
 export class AgentsController {
@@ -31,65 +49,92 @@ export class AgentsController {
   }
 
   @Post("from-template")
-  createFromTemplate(@Body() body: CreateFromTemplateDto) {
-    return this.agentsService.createFromTemplate(body);
+  createFromTemplate(@OrgId() orgId: string, @Body() body: CreateFromTemplateDto) {
+    return this.agentsService.createFromTemplate(orgId, {
+      templateSlug: body.templateSlug,
+      name: body.name,
+      configOverrides: body.configOverrides,
+      schedule: body.schedule,
+    });
   }
 
   @Get()
-  findAll(@Query("orgId") orgId: string) {
+  findAll(@OrgId() orgId: string) {
     return this.agentsService.findAll(orgId);
   }
 
   @Get(":id/analytics")
-  getAnalytics(@Param("id") id: string) {
-    return this.agentsService.getAnalytics(id);
+  getAnalytics(@OrgId() orgId: string, @Param("id") id: string) {
+    return this.agentsService.getAnalytics(id, orgId);
   }
 
   @Get(":id")
-  findOne(@Param("id") id: string) {
-    return this.agentsService.findOne(id);
+  findOne(@OrgId() orgId: string, @Param("id") id: string) {
+    return this.agentsService.findOne(id, orgId);
   }
 
   @Post()
-  create(@Body() body: CreateAgentDto) {
-    return this.agentsService.create(body);
+  create(@OrgId() orgId: string, @Body() body: CreateAgentDto) {
+    return this.agentsService.create(orgId, {
+      templateId: body.templateId,
+      name: body.name,
+      domain: body.domain,
+      config: body.config,
+      schedule: body.schedule,
+    });
   }
 
   @Patch(":id")
-  update(@Param("id") id: string, @Body() body: UpdateAgentDto) {
-    return this.agentsService.update(id, body);
+  update(
+    @OrgId() orgId: string,
+    @Param("id") id: string,
+    @Body() body: UpdateAgentDto,
+  ) {
+    return this.agentsService.update(id, orgId, body);
   }
 
   @Delete(":id")
-  remove(@Param("id") id: string) {
-    return this.agentsService.remove(id);
+  remove(@OrgId() orgId: string, @Param("id") id: string) {
+    return this.agentsService.remove(id, orgId);
   }
 
   @Post(":id/deploy")
-  deploy(@Param("id") id: string) {
-    return this.agentsService.deploy(id);
+  deploy(@OrgId() orgId: string, @Param("id") id: string) {
+    return this.agentsService.deploy(id, orgId);
   }
 
   @Post(":id/pause")
-  pause(@Param("id") id: string) {
-    return this.agentsService.pause(id);
+  pause(@OrgId() orgId: string, @Param("id") id: string) {
+    return this.agentsService.pause(id, orgId);
   }
 
   @Post(":id/runs")
-  async triggerRun(@Param("id") agentId: string, @Body() body: TriggerRunDto) {
-    const agent = await this.prisma.agent.findUnique({ where: { id: agentId } });
+  async triggerRun(@OrgId() orgId: string, @Param("id") agentId: string) {
+    const agent = await this.prisma.agent.findFirst({
+      where: { id: agentId, orgId },
+      select: { id: true },
+    });
     if (!agent) throw new NotFoundException("Agent not found");
-    const orgId = body.orgId || agent.orgId;
     return this.runtime.triggerRun(agentId, orgId);
   }
 
-  // Get runs for an agent
   @Get(":id/runs")
-  async getAgentRuns(@Param("id") agentId: string, @Query("limit") limit?: number) {
+  async getAgentRuns(
+    @OrgId() orgId: string,
+    @Param("id") agentId: string,
+    @Query("limit") limit?: number,
+  ) {
+    // Verify the agent belongs to the caller's org before listing its runs.
+    const owned = await this.prisma.agent.findFirst({
+      where: { id: agentId, orgId },
+      select: { id: true },
+    });
+    if (!owned) throw new NotFoundException("Agent not found");
+
     const take = Math.min(limit || 50, 100);
     const [runs, total] = await Promise.all([
       this.prisma.agentRun.findMany({
-        where: { agentId },
+        where: { agentId, orgId },
         include: {
           logs: { orderBy: { createdAt: "asc" } },
           steps: { orderBy: { stepIndex: "asc" } },
@@ -98,34 +143,51 @@ export class AgentsController {
         orderBy: { startedAt: "desc" },
         take,
       }),
-      this.prisma.agentRun.count({ where: { agentId } }),
+      this.prisma.agentRun.count({ where: { agentId, orgId } }),
     ]);
     return { runs, total };
   }
 
-  // Get agent memories
   @Get(":id/memories")
-  async getMemories(@Param("id") agentId: string) {
+  async getMemories(@OrgId() orgId: string, @Param("id") agentId: string) {
+    await this.ensureAgent(agentId, orgId);
     return this.memoryService.getAll(agentId);
   }
 
   @Post(":id/memories")
-  async setMemory(@Param("id") agentId: string, @Body() body: SetMemoryDto) {
+  async setMemory(
+    @OrgId() orgId: string,
+    @Param("id") agentId: string,
+    @Body() body: SetMemoryDto,
+  ) {
+    await this.ensureAgent(agentId, orgId);
     await this.memoryService.set(agentId, body.key, body.value);
     return { success: true };
   }
 
-  // Delete a memory entry
   @Delete(":id/memories/:key")
-  async deleteMemory(@Param("id") agentId: string, @Param("key") key: string) {
+  async deleteMemory(
+    @OrgId() orgId: string,
+    @Param("id") agentId: string,
+    @Param("key") key: string,
+  ) {
+    await this.ensureAgent(agentId, orgId);
     await this.memoryService.delete(agentId, key);
     return { success: true };
   }
 
-  // Clear all memories
   @Delete(":id/memories")
-  async clearMemories(@Param("id") agentId: string) {
+  async clearMemories(@OrgId() orgId: string, @Param("id") agentId: string) {
+    await this.ensureAgent(agentId, orgId);
     await this.memoryService.deleteAll(agentId);
     return { success: true };
+  }
+
+  private async ensureAgent(agentId: string, orgId: string): Promise<void> {
+    const found = await this.prisma.agent.findFirst({
+      where: { id: agentId, orgId },
+      select: { id: true },
+    });
+    if (!found) throw new NotFoundException("Agent not found");
   }
 }

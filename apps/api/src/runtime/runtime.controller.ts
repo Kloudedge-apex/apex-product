@@ -1,7 +1,13 @@
-import { Controller, Post, Get, Param, Body, Query, NotFoundException } from "@nestjs/common";
+import {
+  Controller,
+  Post,
+  Get,
+  Param,
+  NotFoundException,
+} from "@nestjs/common";
 import { RuntimeService } from "./runtime.service";
-import { TriggerRunBodyDto } from "../common/dto/runtime.dto";
 import { PrismaService } from "../prisma/prisma.service";
+import { OrgId } from "../common/org-context.decorator";
 
 @Controller("runtime")
 export class RuntimeController {
@@ -11,12 +17,28 @@ export class RuntimeController {
   ) {}
 
   @Post("trigger/:agentId")
-  triggerRun(@Param("agentId") agentId: string, @Body() body: TriggerRunBodyDto) {
-    return this.runtime.triggerRun(agentId, body.orgId);
+  async triggerRun(
+    @OrgId() orgId: string,
+    @Param("agentId") agentId: string,
+  ) {
+    const owned = await this.prisma.agent.findFirst({
+      where: { id: agentId, orgId },
+      select: { id: true },
+    });
+    if (!owned) throw new NotFoundException("Agent not found");
+    return this.runtime.triggerRun(agentId, orgId);
   }
 
   @Post("cancel/:runId")
-  cancelRun(@Param("runId") runId: string) {
+  async cancelRun(
+    @OrgId() orgId: string,
+    @Param("runId") runId: string,
+  ) {
+    const owned = await this.prisma.agentRun.findFirst({
+      where: { id: runId, orgId },
+      select: { id: true },
+    });
+    if (!owned) throw new NotFoundException("Run not found");
     return this.runtime.cancelRun(runId);
   }
 

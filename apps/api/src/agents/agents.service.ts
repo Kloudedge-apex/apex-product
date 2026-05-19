@@ -1,11 +1,26 @@
-import { Injectable, NotFoundException, ForbiddenException, BadRequestException } from "@nestjs/common";
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+} from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
-import { getAllTemplates, getTemplateBySlug, getTemplatesByDomain, AgentTemplateConfig } from "./templates";
+import {
+  getAllTemplates,
+  getTemplateBySlug,
+  getTemplatesByDomain,
+  AgentTemplateConfig,
+} from "./templates";
 
+/**
+ * Every method here is org-scoped: callers pass the verified `orgId` set by
+ * `OrgScopeGuard`, and lookups always include `orgId` in the `where` clause
+ * so a foreign agent id resolves to NotFound instead of returning another
+ * tenant's data.
+ */
 @Injectable()
 export class AgentsService {
-  constructor(private prisma: PrismaService) { }
+  constructor(private prisma: PrismaService) {}
 
   async findAll(orgId: string) {
     return this.prisma.agent.findMany({
@@ -15,34 +30,41 @@ export class AgentsService {
     });
   }
 
-  async findOne(id: string, orgId?: string) {
-    const agent = await this.prisma.agent.findUnique({
-      where: { id },
+  async findOne(id: string, orgId: string) {
+    const agent = await this.prisma.agent.findFirst({
+      where: { id, orgId },
       include: {
         template: true,
-        runs: { take: 10, orderBy: { startedAt: "desc" }, include: { logs: { take: 50, orderBy: { createdAt: "desc" } } } },
+        runs: {
+          take: 10,
+          orderBy: { startedAt: "desc" },
+          include: {
+            logs: { take: 50, orderBy: { createdAt: "desc" } },
+          },
+        },
       },
     });
     if (!agent) throw new NotFoundException("Agent not found");
-    if (orgId && agent.orgId !== orgId) throw new ForbiddenException();
     return agent;
   }
 
-  async create(data: {
-    orgId: string;
-    templateId: string;
-    name: string;
-    domain: "SALES" | "MARKETING" | "OPS";
-    config: Record<string, unknown>;
-    schedule?: string;
-  }) {
+  async create(
+    orgId: string,
+    data: {
+      templateId: string;
+      name: string;
+      domain: "SALES" | "MARKETING" | "OPS";
+      config: Record<string, unknown>;
+      schedule?: string;
+    },
+  ) {
     return this.prisma.agent.create({
       data: {
-        orgId: data.orgId,
+        orgId,
         templateId: data.templateId,
         name: data.name,
         domain: data.domain,
-        config: data.config as any,
+        config: data.config as unknown as Prisma.InputJsonValue,
         schedule: data.schedule,
         status: "PAUSED",
       },
@@ -50,29 +72,37 @@ export class AgentsService {
     });
   }
 
-  async update(id: string, data: { name?: string; config?: Record<string, unknown>; schedule?: string }) {
+  async update(
+    id: string,
+    orgId: string,
+    data: { name?: string; config?: Record<string, unknown>; schedule?: string },
+  ) {
+    await this.ensureOwned(id, orgId);
     return this.prisma.agent.update({
       where: { id },
       data: {
         ...(data.name && { name: data.name }),
-        ...(data.config && { config: data.config as any }),
+        ...(data.config && { config: data.config as unknown as Prisma.InputJsonValue }),
         ...(data.schedule && { schedule: data.schedule }),
       },
     });
   }
 
-  async remove(id: string) {
+  async remove(id: string, orgId: string) {
+    await this.ensureOwned(id, orgId);
     return this.prisma.agent.delete({ where: { id } });
   }
 
-  async deploy(id: string) {
+  async deploy(id: string, orgId: string) {
+    await this.ensureOwned(id, orgId);
     return this.prisma.agent.update({
       where: { id },
       data: { status: "ACTIVE" },
     });
   }
 
-  async pause(id: string) {
+  async pause(id: string, orgId: string) {
+    await this.ensureOwned(id, orgId);
     return this.prisma.agent.update({
       where: { id },
       data: { status: "PAUSED" },
@@ -80,17 +110,15 @@ export class AgentsService {
   }
 
   async getTemplates(domain?: string) {
-    // Auto-seed from in-code template definitions if the table is empty.
-    // This means onboarding works even before `prisma db seed` has been run.
     const count = await this.prisma.agentTemplate.count();
     if (count === 0) {
       const inCode = getAllTemplates();
       await this.prisma.agentTemplate.createMany({
         data: inCode.map((t) => ({
           name: t.name,
-          domain: t.domain as any,
+          domain: t.domain as "SALES" | "MARKETING" | "OPS",
           description: t.description,
-          defaultConfig: t.defaultConfig as any,
+          defaultConfig: t.defaultConfig as unknown as Prisma.InputJsonValue,
           requiredIntegrations: t.requiredIntegrations,
         })),
         skipDuplicates: true,
@@ -98,39 +126,36 @@ export class AgentsService {
     }
 
     return this.prisma.agentTemplate.findMany({
-      where: domain ? { domain: domain as any } : {},
+      where: domain ? { domain: domain as "SALES" | "MARKETING" | "OPS" } : {},
       orderBy: { name: "asc" },
     });
   }
 
-
-  /** Get all in-code template configs (with full system prompts, tools, etc.) */
   getTemplateConfigs(domain?: string): AgentTemplateConfig[] {
     if (domain) return getTemplatesByDomain(domain);
     return getAllTemplates();
   }
 
-  /** Get a single template config by slug */
   getTemplateConfig(slug: string): AgentTemplateConfig {
     const template = getTemplateBySlug(slug);
     if (!template) throw new NotFoundException(`Template "${slug}" not found`);
     return template;
   }
 
-  /** Create an agent from a template slug */
-  async createFromTemplate(data: {
-    orgId: string;
-    templateSlug: string;
-    name?: string;
-    configOverrides?: Record<string, unknown>;
-    schedule?: string;
-  }) {
+  async createFromTemplate(
+    orgId: string,
+    data: {
+      templateSlug: string;
+      name?: string;
+      configOverrides?: Record<string, unknown>;
+      schedule?: string;
+    },
+  ) {
     const templateConfig = getTemplateBySlug(data.templateSlug);
     if (!templateConfig) {
       throw new BadRequestException(`Unknown template slug: "${data.templateSlug}"`);
     }
 
-    // Find or create the DB template record
     let dbTemplate = await this.prisma.agentTemplate.findFirst({
       where: { name: templateConfig.name, domain: templateConfig.domain },
     });
@@ -156,7 +181,7 @@ export class AgentsService {
 
     return this.prisma.agent.create({
       data: {
-        orgId: data.orgId,
+        orgId,
         templateId: dbTemplate.id,
         name: data.name || templateConfig.name,
         domain: templateConfig.domain,
@@ -168,7 +193,9 @@ export class AgentsService {
     });
   }
 
-  async getAnalytics(agentId: string) {
+  async getAnalytics(agentId: string, orgId: string) {
+    await this.ensureOwned(agentId, orgId);
+
     const now = new Date();
     const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const weekStart = new Date(todayStart);
@@ -176,35 +203,54 @@ export class AgentsService {
     const monthStart = new Date(todayStart);
     monthStart.setDate(monthStart.getDate() - 30);
 
-    const [totalRuns, runsLast7, runsLast30, completedRuns, tokenAgg, costAgg, memoryCount] = await Promise.all([
-      this.prisma.agentRun.count({ where: { agentId } }),
-      this.prisma.agentRun.count({ where: { agentId, startedAt: { gte: weekStart } } }),
-      this.prisma.agentRun.count({ where: { agentId, startedAt: { gte: monthStart } } }),
-      this.prisma.agentRun.count({ where: { agentId, status: "COMPLETED" } }),
-      this.prisma.agentRun.aggregate({ where: { agentId }, _sum: { tokensUsed: true } }),
-      this.prisma.agentRun.aggregate({ where: { agentId }, _sum: { cost: true } }),
-      this.prisma.agentMemory.count({ where: { agentId } }),
-    ]);
+    const [totalRuns, runsLast7, runsLast30, completedRuns, tokenAgg, costAgg, memoryCount] =
+      await Promise.all([
+        this.prisma.agentRun.count({ where: { agentId, orgId } }),
+        this.prisma.agentRun.count({
+          where: { agentId, orgId, startedAt: { gte: weekStart } },
+        }),
+        this.prisma.agentRun.count({
+          where: { agentId, orgId, startedAt: { gte: monthStart } },
+        }),
+        this.prisma.agentRun.count({
+          where: { agentId, orgId, status: "COMPLETED" },
+        }),
+        this.prisma.agentRun.aggregate({
+          where: { agentId, orgId },
+          _sum: { tokensUsed: true },
+        }),
+        this.prisma.agentRun.aggregate({
+          where: { agentId, orgId },
+          _sum: { cost: true },
+        }),
+        this.prisma.agentMemory.count({ where: { agentId } }),
+      ]);
 
     const successRate = totalRuns > 0 ? Math.round((completedRuns / totalRuns) * 100) : 0;
 
-    // Average execution time (completed runs only)
-    const avgTimeRaw: Array<{ avg_ms: string }> = await this.prisma.$queryRawUnsafe(`
+    const avgTimeRaw: Array<{ avg_ms: string }> = await this.prisma.$queryRaw`
       SELECT COALESCE(AVG(EXTRACT(EPOCH FROM ("completedAt" - "startedAt")) * 1000), 0)::text as avg_ms
-      FROM "AgentRun" WHERE "agentId" = $1 AND status = 'COMPLETED' AND "completedAt" IS NOT NULL
-    `, agentId);
+      FROM "AgentRun"
+      WHERE "agentId" = ${agentId} AND "orgId" = ${orgId}
+        AND status = 'COMPLETED' AND "completedAt" IS NOT NULL
+    `;
     const avgExecutionTime = Math.round(parseFloat(avgTimeRaw[0]?.avg_ms || "0"));
 
-    const avgTokensPerRun = totalRuns > 0 ? Math.round((tokenAgg._sum.tokensUsed || 0) / totalRuns) : 0;
+    const avgTokensPerRun =
+      totalRuns > 0 ? Math.round((tokenAgg._sum.tokensUsed || 0) / totalRuns) : 0;
 
-    // Runs by day (last 7 days)
-    const runsByDayRaw: Array<{ day: string; status: string; cnt: string }> = await this.prisma.$queryRawUnsafe(`
+    const runsByDayRaw: Array<{ day: string; status: string; cnt: string }> = await this.prisma
+      .$queryRaw`
       SELECT date_trunc('day', "startedAt")::date::text as day, status, COUNT(*)::text as cnt
-      FROM "AgentRun" WHERE "agentId" = $1 AND "startedAt" >= $2
+      FROM "AgentRun"
+      WHERE "agentId" = ${agentId} AND "orgId" = ${orgId} AND "startedAt" >= ${weekStart}
       GROUP BY day, status ORDER BY day ASC
-    `, agentId, weekStart);
+    `;
 
-    const dayMap = new Map<string, { date: string; total: number; completed: number; failed: number }>();
+    const dayMap = new Map<
+      string,
+      { date: string; total: number; completed: number; failed: number }
+    >();
     for (let i = 6; i >= 0; i--) {
       const d = new Date(todayStart);
       d.setDate(d.getDate() - i);
@@ -222,42 +268,57 @@ export class AgentsService {
     }
     const runsByDay = Array.from(dayMap.values());
 
-    // Recent runs
     const recentRunsRaw = await this.prisma.agentRun.findMany({
-      where: { agentId },
+      where: { agentId, orgId },
       include: { _count: { select: { logs: true } } },
       orderBy: { startedAt: "desc" },
       take: 5,
     });
     const recentRuns = recentRunsRaw.map((r) => ({
-      id: r.id, status: r.status,
+      id: r.id,
+      status: r.status,
       startedAt: r.startedAt.toISOString(),
       completedAt: r.completedAt?.toISOString() || null,
       tokensUsed: r.tokensUsed,
       steps: r._count.logs,
     }));
 
-    // Tool usage: parse logs for "Tool call -> toolname"
-    const toolLogs: Array<{ message: string }> = await this.prisma.$queryRawUnsafe(`
-      SELECT l.message FROM "AgentLog" l
+    const toolLogs: Array<{ message: string }> = await this.prisma.$queryRaw`
+      SELECT l.message
+      FROM "AgentLog" l
       JOIN "AgentRun" r ON r.id = l."runId"
-      WHERE r."agentId" = $1 AND l.message LIKE 'Tool call%'
-    `, agentId);
+      WHERE r."agentId" = ${agentId} AND r."orgId" = ${orgId}
+        AND l.message LIKE 'Tool call%'
+    `;
 
     const toolUsage: Record<string, number> = {};
     for (const log of toolLogs) {
       const match = log.message.match(/Tool call -> (\w+)/);
-      if (match) {
-        toolUsage[match[1]] = (toolUsage[match[1]] || 0) + 1;
-      }
+      if (match) toolUsage[match[1]] = (toolUsage[match[1]] || 0) + 1;
     }
 
     return {
-      totalRuns, runsLast7Days: runsLast7, runsLast30Days: runsLast30,
-      successRate, avgExecutionTime, avgTokensPerRun,
+      totalRuns,
+      runsLast7Days: runsLast7,
+      runsLast30Days: runsLast30,
+      successRate,
+      avgExecutionTime,
+      avgTokensPerRun,
       totalTokens: tokenAgg._sum.tokensUsed || 0,
       totalCost: costAgg._sum.cost || 0,
-      runsByDay, memoryKeys: memoryCount, recentRuns, toolUsage,
+      runsByDay,
+      memoryKeys: memoryCount,
+      recentRuns,
+      toolUsage,
     };
+  }
+
+  /** Throws NotFoundException if `agentId` doesn't belong to `orgId`. */
+  private async ensureOwned(agentId: string, orgId: string): Promise<void> {
+    const found = await this.prisma.agent.findFirst({
+      where: { id: agentId, orgId },
+      select: { id: true },
+    });
+    if (!found) throw new NotFoundException("Agent not found");
   }
 }

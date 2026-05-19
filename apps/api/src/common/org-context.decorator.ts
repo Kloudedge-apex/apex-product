@@ -1,36 +1,37 @@
-import { createParamDecorator, ExecutionContext } from "@nestjs/common";
+import {
+  createParamDecorator,
+  ExecutionContext,
+  InternalServerErrorException,
+} from "@nestjs/common";
 import { Request } from "express";
 
 /**
- * Extracts orgId from the request. Checks (in order):
- * 1. x-org-id header
- * 2. query.orgId parameter
- * 3. body.orgId field
+ * Returns the authoritative orgId set by `OrgScopeGuard` after JWT verification.
  *
- * Usage: @OrgId() orgId: string
+ * Never reads from headers, query, or body — those are client-controlled and
+ * would defeat multi-tenant isolation. If the guard hasn't run (e.g. on a
+ * `@SkipOrgGuard()` endpoint that mistakenly uses this decorator), throws.
+ *
+ * Usage: `@OrgId() orgId: string`
  */
 export const OrgId = createParamDecorator(
+  (_data: unknown, ctx: ExecutionContext): string => {
+    const request = ctx.switchToHttp().getRequest<Request>();
+    const orgId = (request as unknown as Record<string, unknown>).orgId;
+    if (typeof orgId !== "string" || orgId.length === 0) {
+      throw new InternalServerErrorException(
+        "@OrgId() used on a route that did not pass OrgScopeGuard",
+      );
+    }
+    return orgId;
+  },
+);
+
+/** Returns the Clerk user id set by `OrgScopeGuard`, or undefined if absent. */
+export const ClerkUserId = createParamDecorator(
   (_data: unknown, ctx: ExecutionContext): string | undefined => {
     const request = ctx.switchToHttp().getRequest<Request>();
-
-    // Check header first (set by auth middleware/clerk)
-    const headerOrgId = request.headers["x-org-id"];
-    if (typeof headerOrgId === "string" && headerOrgId.length > 0) {
-      return headerOrgId;
-    }
-
-    // Check query params
-    const queryOrgId = request.query.orgId;
-    if (typeof queryOrgId === "string" && queryOrgId.length > 0) {
-      return queryOrgId;
-    }
-
-    // Check body
-    const body = request.body as Record<string, unknown> | undefined;
-    if (body && typeof body.orgId === "string" && body.orgId.length > 0) {
-      return body.orgId;
-    }
-
-    return undefined;
+    const id = (request as unknown as Record<string, unknown>).clerkUserId;
+    return typeof id === "string" ? id : undefined;
   },
 );

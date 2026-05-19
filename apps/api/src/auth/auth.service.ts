@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from "@nestjs/common";
+import { Injectable, Logger, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 
 interface ClerkUserCreatedEvent {
@@ -16,12 +16,14 @@ interface ClerkOrgCreatedEvent {
 
 interface ClerkWebhookEvent {
   type: string;
-  data: ClerkUserCreatedEvent | ClerkOrgCreatedEvent;
+  data: ClerkUserCreatedEvent | ClerkOrgCreatedEvent | Record<string, unknown>;
 }
 
 @Injectable()
 export class AuthService {
-  constructor(private prisma: PrismaService) { }
+  private readonly logger = new Logger(AuthService.name);
+
+  constructor(private prisma: PrismaService) {}
 
   async getUserByClerkId(clerkId: string) {
     const user = await this.prisma.user.findUnique({
@@ -36,56 +38,64 @@ export class AuthService {
     const event = body as ClerkWebhookEvent;
     if (!event?.type) return { received: true };
 
-    try {
-      switch (event.type) {
-        case "user.created": {
-          const data = event.data as ClerkUserCreatedEvent;
-          const email = data.email_addresses?.[0]?.email_address;
-          if (!email) break;
-          // User will be linked to an org when they join one via Clerk
-          // For now, just ensure we have a record if they already have an org
-          break;
+    switch (event.type) {
+      case "user.created":
+        // User<->org linkage happens on organizationMembership.created.
+        return { received: true };
+
+      case "organization.created": {
+        const data = event.data as ClerkOrgCreatedEvent;
+        if (!data.slug || !data.name) {
+          this.logger.warn("organization.created missing slug/name");
+          return { received: true };
         }
-
-        case "organization.created": {
-          const data = event.data as ClerkOrgCreatedEvent;
-          await this.prisma.org.upsert({
-            where: { slug: data.slug },
-            create: { name: data.name, slug: data.slug },
-            update: { name: data.name },
-          });
-          break;
-        }
-
-        case "organizationMembership.created": {
-          // When a user joins an org, create/link their User record
-          const raw = event.data as unknown as Record<string, unknown>;
-          const clerkUserId = (raw.public_user_data as Record<string, unknown>)?.user_id as string;
-          const orgSlug = (raw.organization as Record<string, unknown>)?.slug as string;
-          const email = ((raw.public_user_data as Record<string, unknown>)?.identifier as string) || "";
-          const role = (raw.role as string)?.toUpperCase() === "ORG:ADMIN" ? "ADMIN" : "MEMBER";
-
-          if (clerkUserId && orgSlug) {
-            const org = await this.prisma.org.findUnique({ where: { slug: orgSlug } });
-            if (org) {
-              await this.prisma.user.upsert({
-                where: { clerkId: clerkUserId },
-                create: { clerkId: clerkUserId, orgId: org.id, email, role: role as "ADMIN" | "MEMBER" },
-                update: { orgId: org.id, role: role as "ADMIN" | "MEMBER" },
-              });
-            }
-          }
-          break;
-        }
-
-        default:
-          // Unhandled event types are silently ignored
-          break;
+        await this.prisma.org.upsert({
+          where: { slug: data.slug },
+          create: { name: data.name, slug: data.slug },
+          update: { name: data.name },
+        });
+        return { received: true };
       }
-    } catch {
-      // Webhook handler errors should not return 5xx — Clerk will retry
-    }
 
-    return { received: true };
+      case "organizationMembership.created": {
+        const raw = event.data as Record<string, unknown>;
+        const publicUserData = raw.public_user_data as Record<string, unknown> | undefined;
+        const organization = raw.organization as Record<string, unknown> | undefined;
+
+        const clerkUserId =
+          (publicUserData?.user_id as string | undefined) ??
+          (raw.user_id as string | undefined);
+        const orgSlug = organization?.slug as string | undefined;
+        const email = (publicUserData?.identifier as string | undefined) ?? "";
+        const rawRole = (raw.role as string | undefined)?.toUpperCase() ?? "";
+        const role: "ADMIN" | "MEMBER" =
+          rawRole === "ORG:ADMIN" || rawRole === "ADMIN" ? "ADMIN" : "MEMBER";
+
+        if (!clerkUserId || !orgSlug) {
+          this.logger.warn(
+            "organizationMembership.created missing user_id or org slug; skipping",
+          );
+          return { received: true };
+        }
+
+        const org = await this.prisma.org.findUnique({ where: { slug: orgSlug } });
+        if (!org) {
+          this.logger.warn(
+            `organizationMembership.created references unknown org slug ${orgSlug}`,
+          );
+          return { received: true };
+        }
+
+        await this.prisma.user.upsert({
+          where: { clerkId: clerkUserId },
+          create: { clerkId: clerkUserId, orgId: org.id, email, role },
+          update: { orgId: org.id, role },
+        });
+        return { received: true };
+      }
+
+      default:
+        return { received: true };
+    }
   }
 }

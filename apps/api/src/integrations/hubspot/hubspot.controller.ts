@@ -1,159 +1,183 @@
 import {
+  BadRequestException,
+  Body,
   Controller,
   Get,
+  HttpCode,
+  HttpStatus,
+  Logger,
+  Param,
   Post,
   Put,
   Query,
-  Body,
-  Param,
-  Res,
-  HttpStatus,
-  HttpCode,
+  Req,
+  ServiceUnavailableException,
 } from "@nestjs/common";
-import { Response } from "express";
+import { Request } from "express";
 import { ConfigService } from "@nestjs/config";
 import { HubspotService } from "./hubspot.service";
+import { OrgId } from "../../common/org-context.decorator";
+import { SkipOrgGuard } from "../../common/org-scope.guard";
+import { verifyHubspotWebhookSignature } from "../../common/webhook-signature.util";
 
+/**
+ * Note: OAuth init (`auth`) and callback (`callback`) for HubSpot live in
+ * `IntegrationsController` so the signed-state flow is shared across providers.
+ * This controller only exposes CRM operations and the webhook receiver.
+ */
 @Controller("integrations/hubspot")
 export class HubspotController {
+  private readonly logger = new Logger(HubspotController.name);
+
   constructor(
     private readonly hubspotService: HubspotService,
     private readonly config: ConfigService,
   ) {}
 
-  // ─── OAuth ────────────────────────────────────────────
-
-  @Get("auth")
-  auth(@Query("orgId") orgId: string, @Res() res: Response) {
-    if (!orgId) {
-      return res.status(HttpStatus.BAD_REQUEST).json({ error: "orgId is required" });
-    }
-    const url = this.hubspotService.getAuthUrl(orgId);
-    return res.redirect(HttpStatus.FOUND, url);
-  }
-
-  @Get("callback")
-  async callback(
-    @Query("code") code: string,
-    @Query("state") orgId: string,
-    @Res() res: Response,
-  ) {
-    const frontendUrl = this.config.get<string>("FRONTEND_URL", "http://localhost:3000");
-    try {
-      await this.hubspotService.handleCallback(code, orgId);
-      return res.redirect(`${frontendUrl}/integrations?connected=hubspot`);
-    } catch {
-      return res.redirect(`${frontendUrl}/integrations?error=hubspot`);
-    }
-  }
-
   // ─── Contacts ─────────────────────────────────────────
 
   @Post("contacts")
   @HttpCode(HttpStatus.CREATED)
-  async createContact(
-    @Query("orgId") orgId: string,
-    @Body() body: Record<string, string>,
-  ) {
+  createContact(@OrgId() orgId: string, @Body() body: Record<string, string>) {
     return this.hubspotService.createContact(orgId, body);
   }
 
-  @Get("contacts/:contactId")
-  async getContact(
-    @Query("orgId") orgId: string,
-    @Param("contactId") contactId: string,
+  @Get("contacts/search")
+  searchContacts(
+    @OrgId() orgId: string,
+    @Query("q") query: string,
+    @Query("limit") limit?: string,
   ) {
+    return this.hubspotService.searchContacts(
+      orgId,
+      query,
+      limit ? parseInt(limit, 10) : undefined,
+    );
+  }
+
+  @Get("contacts/:contactId")
+  getContact(@OrgId() orgId: string, @Param("contactId") contactId: string) {
     return this.hubspotService.getContact(orgId, contactId);
   }
 
   @Put("contacts/:contactId")
-  async updateContact(
-    @Query("orgId") orgId: string,
+  updateContact(
+    @OrgId() orgId: string,
     @Param("contactId") contactId: string,
     @Body() body: Record<string, string>,
   ) {
     return this.hubspotService.updateContact(orgId, contactId, body);
   }
 
-  @Get("contacts/search")
-  async searchContacts(
-    @Query("orgId") orgId: string,
-    @Query("q") query: string,
-    @Query("limit") limit?: string,
-  ) {
-    return this.hubspotService.searchContacts(orgId, query, limit ? parseInt(limit, 10) : undefined);
-  }
-
   // ─── Deals ────────────────────────────────────────────
 
   @Post("deals")
   @HttpCode(HttpStatus.CREATED)
-  async createDeal(
-    @Query("orgId") orgId: string,
-    @Body() body: Record<string, string>,
-  ) {
+  createDeal(@OrgId() orgId: string, @Body() body: Record<string, string>) {
     return this.hubspotService.createDeal(orgId, body);
   }
 
-  @Get("deals/:dealId")
-  async getDeal(
-    @Query("orgId") orgId: string,
-    @Param("dealId") dealId: string,
+  @Get("deals/search")
+  searchDeals(
+    @OrgId() orgId: string,
+    @Query("q") query: string,
+    @Query("limit") limit?: string,
   ) {
+    return this.hubspotService.searchDeals(
+      orgId,
+      query,
+      limit ? parseInt(limit, 10) : undefined,
+    );
+  }
+
+  @Get("deals/:dealId")
+  getDeal(@OrgId() orgId: string, @Param("dealId") dealId: string) {
     return this.hubspotService.getDeal(orgId, dealId);
   }
 
   @Put("deals/:dealId")
-  async updateDeal(
-    @Query("orgId") orgId: string,
+  updateDeal(
+    @OrgId() orgId: string,
     @Param("dealId") dealId: string,
     @Body() body: Record<string, string>,
   ) {
     return this.hubspotService.updateDeal(orgId, dealId, body);
   }
 
-  @Get("deals/search")
-  async searchDeals(
-    @Query("orgId") orgId: string,
-    @Query("q") query: string,
-    @Query("limit") limit?: string,
-  ) {
-    return this.hubspotService.searchDeals(orgId, query, limit ? parseInt(limit, 10) : undefined);
-  }
-
   // ─── Companies ────────────────────────────────────────
 
   @Post("companies")
   @HttpCode(HttpStatus.CREATED)
-  async createCompany(
-    @Query("orgId") orgId: string,
-    @Body() body: Record<string, string>,
-  ) {
+  createCompany(@OrgId() orgId: string, @Body() body: Record<string, string>) {
     return this.hubspotService.createCompany(orgId, body);
   }
 
-  @Get("companies/:companyId")
-  async getCompany(
-    @Query("orgId") orgId: string,
-    @Param("companyId") companyId: string,
-  ) {
-    return this.hubspotService.getCompany(orgId, companyId);
-  }
-
   @Get("companies/search")
-  async searchCompanies(
-    @Query("orgId") orgId: string,
+  searchCompanies(
+    @OrgId() orgId: string,
     @Query("q") query: string,
     @Query("limit") limit?: string,
   ) {
-    return this.hubspotService.searchCompanies(orgId, query, limit ? parseInt(limit, 10) : undefined);
+    return this.hubspotService.searchCompanies(
+      orgId,
+      query,
+      limit ? parseInt(limit, 10) : undefined,
+    );
   }
 
-  // ─── Webhooks ─────────────────────────────────────────
+  @Get("companies/:companyId")
+  getCompany(@OrgId() orgId: string, @Param("companyId") companyId: string) {
+    return this.hubspotService.getCompany(orgId, companyId);
+  }
 
+  // ─── Webhook ──────────────────────────────────────────
+
+  /**
+   * HubSpot v3 webhook. No JWT (HubSpot calls us). The body+headers are
+   * HMAC-signed; we reject anything that doesn't verify.
+   */
   @Post("webhook")
+  @SkipOrgGuard()
   @HttpCode(HttpStatus.OK)
-  async handleWebhook(@Body() body: Array<Record<string, unknown>>) {
-    return this.hubspotService.handleWebhook(body);
+  async handleWebhook(@Req() req: Request, @Body() body: unknown) {
+    const secret = this.config.get<string>("HUBSPOT_CLIENT_SECRET");
+    if (!secret) {
+      this.logger.error("HUBSPOT_CLIENT_SECRET not configured");
+      throw new ServiceUnavailableException("Webhook not configured");
+    }
+
+    const rawBody = (req as Request & { rawBody?: Buffer }).rawBody;
+    if (!rawBody) {
+      throw new BadRequestException("Missing raw body");
+    }
+
+    const sig = req.headers["x-hubspot-signature-v3"];
+    const ts = req.headers["x-hubspot-request-timestamp"];
+    const proto = (req.headers["x-forwarded-proto"] as string) || req.protocol;
+    const host = req.headers["x-forwarded-host"] || req.headers.host;
+    const uri = `${proto}://${host}${req.originalUrl}`;
+
+    try {
+      verifyHubspotWebhookSignature({
+        method: req.method,
+        uri,
+        rawBody,
+        signatureHeader: Array.isArray(sig) ? sig[0] : sig,
+        timestampHeader: Array.isArray(ts) ? ts[0] : ts,
+        secret,
+      });
+    } catch (err) {
+      this.logger.warn(
+        `HubSpot webhook signature verification failed: ${
+          err instanceof Error ? err.message : "unknown"
+        }`,
+      );
+      throw new BadRequestException("Invalid signature");
+    }
+
+    const events = Array.isArray(body)
+      ? (body as Array<Record<string, unknown>>)
+      : [];
+    return this.hubspotService.handleWebhook(events);
   }
 }
