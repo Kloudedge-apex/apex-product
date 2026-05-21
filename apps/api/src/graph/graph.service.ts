@@ -8,6 +8,8 @@ import { Command, isInterrupted } from "@langchain/langgraph";
 import { PrismaService } from "../prisma/prisma.service";
 import { LeadsService } from "../leads/leads.service";
 import { RuntimeService } from "../runtime/runtime.service";
+import { LLMService } from "../runtime/llm.service";
+import { OutreachArtifactsService } from "../outreach/outreach-artifacts.service";
 import { PrismaCheckpointSaver } from "./prisma-checkpointer";
 import { buildPipelineGraph } from "./pipeline-graph";
 import { NODE, PipelineState } from "./state";
@@ -26,12 +28,16 @@ export class GraphService {
     private readonly prisma: PrismaService,
     private readonly leads: LeadsService,
     private readonly runtime: RuntimeService,
+    private readonly llm: LLMService,
+    private readonly outreachArtifacts: OutreachArtifactsService,
   ) {
     this.checkpointer = new PrismaCheckpointSaver(prisma);
     this.compiled = buildPipelineGraph({
       leads: this.leads,
       prisma: this.prisma,
       runtime: this.runtime,
+      llm: this.llm,
+      outreachArtifacts: this.outreachArtifacts,
     }).compile({ checkpointer: this.checkpointer });
   }
 

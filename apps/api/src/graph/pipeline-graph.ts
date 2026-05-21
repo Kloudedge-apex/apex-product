@@ -11,6 +11,12 @@ import { PipelineStateAnnotation, NODE, STAGE, type PipelineState } from "./stat
 import type { LeadsService } from "../leads/leads.service";
 import type { PrismaService } from "../prisma/prisma.service";
 import type { RuntimeService } from "../runtime/runtime.service";
+import type { LLMService } from "../runtime/llm.service";
+import type { OutreachArtifactsService } from "../outreach/outreach-artifacts.service";
+import {
+  runSdrOutreachSubgraph,
+  type SdrLeadInput,
+} from "./nodes/sdr-outreach-subgraph";
 
 const MAX_OUTREACH = 10;
 const log = new Logger("PipelineGraph");
@@ -19,6 +25,8 @@ interface Deps {
   leads: LeadsService;
   prisma: PrismaService;
   runtime: RuntimeService;
+  llm: LLMService;
+  outreachArtifacts: OutreachArtifactsService;
 }
 
 const nowMsg = (
@@ -200,42 +208,95 @@ export function buildPipelineGraph(deps: Deps) {
       };
     }
 
-    // Pick the SDR agent template — the existing executor handles the rest.
-    const sdrAgent = await deps.prisma.agent.findFirst({
-      where: { orgId: state.orgId, template: { name: { equals: "SDR Agent", mode: "insensitive" } } },
+    // Find this run's GraphRun row so the subgraph can attach artifacts to it.
+    const graphRun = await deps.prisma.graphRun.findFirst({
+      where: { orgId: state.orgId, threadId: state.runId },
       select: { id: true },
     });
 
-    if (!sdrAgent) {
-      return {
-        stagesCompleted: [STAGE.OUTREACH],
-        errors: [{ node: NODE.OUTREACH, error: "No SDR agent configured for org", ts: new Date().toISOString() }],
-        ...nowMsg(NODE.OUTREACH, "no SDR agent configured", "error"),
-      };
-    }
-
+    // Identify the top-tier leads we'll generate artifacts for.
     const targets = state.scoredLeads
       .filter((s) => s.tier === "A" || s.tier === "B")
       .slice(0, MAX_OUTREACH);
 
+    if (targets.length === 0) {
+      return {
+        stagesCompleted: [STAGE.OUTREACH],
+        ...nowMsg(NODE.OUTREACH, "no qualified leads to draft for", "warn"),
+      };
+    }
+
+    // Pull person + company context in one round-trip so the subgraph can
+    // skip per-lead DB lookups for fields we already have.
+    const people = await deps.prisma.person.findMany({
+      where: {
+        id: { in: targets.map((t) => t.personId) },
+        company: { orgId: state.orgId },
+      },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        title: true,
+        emails: { select: { email: true }, take: 1 },
+        company: { select: { name: true, domain: true } },
+      },
+    });
+
     const outreachResults: PipelineState["outreachResults"] = [];
-    for (const target of targets) {
+    for (const person of people) {
+      const email = person.emails[0]?.email;
+      if (!email) {
+        outreachResults.push({
+          personId: person.id,
+          status: "failed",
+          error: "no_email",
+        });
+        continue;
+      }
+      const lead: SdrLeadInput = {
+        orgId: state.orgId,
+        graphRunId: graphRun?.id ?? null,
+        personId: person.id,
+        email,
+        firstName: person.firstName,
+        lastName: person.lastName,
+        title: person.title,
+        companyName: person.company.name,
+        companyDomain: person.company.domain,
+      };
       try {
-        const run = await deps.runtime.triggerRun(sdrAgent.id, state.orgId);
-        outreachResults.push({ personId: target.personId, agentRunId: run.id, status: "queued" });
+        const result = await runSdrOutreachSubgraph(
+          {
+            prisma: deps.prisma,
+            llm: deps.llm,
+            outreachArtifacts: deps.outreachArtifacts,
+          },
+          lead,
+        );
+        outreachResults.push({
+          personId: person.id,
+          agentRunId: result.artifactId ?? undefined,
+          status: result.artifactId ? "queued" : "failed",
+          error: result.artifactId ? undefined : `qa_failed: ${result.qaIssues.join(",")}`,
+        });
       } catch (err) {
         outreachResults.push({
-          personId: target.personId,
+          personId: person.id,
           status: "failed",
           error: err instanceof Error ? err.message : "unknown",
         });
       }
     }
 
+    const queued = outreachResults.filter((r) => r.status === "queued").length;
     return {
       outreachResults,
       stagesCompleted: [STAGE.OUTREACH],
-      ...nowMsg(NODE.OUTREACH, `queued ${outreachResults.filter((r) => r.status === "queued").length} outreach run(s)`),
+      ...nowMsg(
+        NODE.OUTREACH,
+        `drafted ${queued}/${targets.length} reviewable artifact(s) — no external sends`,
+      ),
     };
   };
 

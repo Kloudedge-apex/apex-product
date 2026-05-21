@@ -19,6 +19,7 @@ describe("pipeline-graph (supervisor routing)", () => {
 
   beforeEach(() => {
     callLog = [];
+    let artifactCounter = 0;
     deps = {
       leads: {
         runSourcingStage: async () => {
@@ -36,10 +37,26 @@ describe("pipeline-graph (supervisor routing)", () => {
       } as unknown as Parameters<typeof buildPipelineGraph>[0]["leads"],
 
       prisma: {
-        company: { findMany: async () => [{ id: "c1", domain: "acme.io", name: "Acme" }] },
+        company: {
+          findMany: async () => [{ id: "c1", domain: "acme.io", name: "Acme" }],
+          findFirst: async () => ({
+            name: "Acme",
+            domain: "acme.io",
+            employeeRange: "50-200",
+            industry: "SaaS",
+          }),
+        },
         person: {
           findMany: async () => [
-            { id: "p1", companyId: "c1", firstName: "A", lastName: "B", title: "VP", emails: [{ email: "a@acme.io" }] },
+            {
+              id: "p1",
+              companyId: "c1",
+              firstName: "Alice",
+              lastName: "Smith",
+              title: "VP Sales",
+              emails: [{ email: "alice@acme.io" }],
+              company: { name: "Acme", domain: "acme.io" },
+            },
           ],
         },
         leadScore: {
@@ -52,6 +69,9 @@ describe("pipeline-graph (supervisor routing)", () => {
         agent: {
           findFirst: async () => ({ id: "agent_sdr" }),
         },
+        graphRun: {
+          findFirst: async () => ({ id: "graph_1" }),
+        },
       } as unknown as Parameters<typeof buildPipelineGraph>[0]["prisma"],
 
       runtime: {
@@ -60,6 +80,23 @@ describe("pipeline-graph (supervisor routing)", () => {
           return { id: `run_${callLog.length}` };
         },
       } as unknown as Parameters<typeof buildPipelineGraph>[0]["runtime"],
+
+      llm: {
+        chat: async () => ({
+          content: '{"subject":"Quick question about Acme growth","body":"Hi Alice, noticed Acme is at 50-200 headcount and scaling SaaS. Curious how you are handling SDR pipeline — we help teams at your stage. Worth a 15-min call next week?"}',
+          tokensUsed: 100,
+          model: "test",
+          cost: 0,
+        }),
+      } as unknown as Parameters<typeof buildPipelineGraph>[0]["llm"],
+
+      outreachArtifacts: {
+        recordDryRun: async () => {
+          artifactCounter += 1;
+          callLog.push(`artifact:${artifactCounter}`);
+          return { id: `art_${artifactCounter}` };
+        },
+      } as unknown as Parameters<typeof buildPipelineGraph>[0]["outreachArtifacts"],
     };
   });
 
@@ -95,7 +132,13 @@ describe("pipeline-graph (supervisor routing)", () => {
     expect(result.approved).toBe(true);
     expect(result.approvedBy).toBe("alice@acme.io");
     expect(result.outreachResults?.length ?? 0).toBeGreaterThan(0);
-    expect(callLog).toContain("runtime.trigger:agent_sdr");
+    // Phase 2.5: outreach must NOT invoke runtime.triggerRun — that path
+    // would bypass the SideEffectPolicy gate. The subgraph produces a
+    // reviewable artifact instead.
+    expect(callLog.filter((c) => c.startsWith("runtime.trigger"))).toHaveLength(0);
+    expect(callLog.filter((c) => c.startsWith("artifact:")).length).toBeGreaterThan(0);
+    expect(result.outreachResults?.[0]?.status).toBe("queued");
+    expect(result.outreachResults?.[0]?.agentRunId).toMatch(/^art_/);
     expect(result.stagesCompleted).toContain(STAGE.OUTREACH);
   });
 
@@ -112,8 +155,12 @@ describe("pipeline-graph (supervisor routing)", () => {
 
     expect(result.approved).toBe(false);
     expect(callLog.filter((c) => c.startsWith("runtime.trigger"))).toHaveLength(0);
+    expect(callLog.filter((c) => c.startsWith("artifact:"))).toHaveLength(0);
     expect(result.outreachResults ?? []).toHaveLength(0);
-    expect(result.stagesCompleted).toContain(STAGE.OUTREACH);
+    // Supervisor short-circuits to END when approved=false, so OUTREACH
+    // stage never runs.
+    expect(result.stagesCompleted).toContain(STAGE.APPROVAL);
+    expect(result.stagesCompleted).not.toContain(STAGE.OUTREACH);
   });
 
   it("supervisor honors NODE constants for routing", () => {
