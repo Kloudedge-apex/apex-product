@@ -10,6 +10,15 @@ interface RunJobData {
   runId: string;
 }
 
+/**
+ * Strict gating: only "true" (case-sensitive) enables the worker. Any other
+ * value, including unset, keeps it off. Defaults to disabled so an API
+ * container does not start consuming jobs unless explicitly opted in.
+ */
+export function isWorkerEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.WORKER_ENABLED === "true";
+}
+
 @Injectable()
 export class WorkerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(WorkerService.name);
@@ -29,6 +38,11 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   async onModuleInit() {
+    if (!isWorkerEnabled()) {
+      this.logger.log("Worker disabled in this process (set WORKER_ENABLED=true to enable)");
+      return;
+    }
+
     await this.recoverOrphanedRuns();
 
     if (this.queue.isBullMode()) {
@@ -51,11 +65,13 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
         this.logger.error(`BullMQ worker error: ${err.message}`);
       });
       this.logger.log(
-        `BullMQ Worker started (queue=${RUN_QUEUE_NAME}, concurrency=${this.maxConcurrency})`,
+        `Worker enabled with concurrency=${this.maxConcurrency} (BullMQ, queue=${RUN_QUEUE_NAME})`,
       );
     } else {
       this.intervalHandle = setInterval(() => this.processNext(), 2000);
-      this.logger.log("In-memory polling worker started (no Redis configured)");
+      this.logger.log(
+        `Worker enabled with concurrency=${this.maxConcurrency} (in-memory polling, no Redis)`,
+      );
     }
   }
 
