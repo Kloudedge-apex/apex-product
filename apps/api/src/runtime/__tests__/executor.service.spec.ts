@@ -4,6 +4,7 @@ import { LLMService } from "../llm.service";
 import { MemoryService } from "../memory.service";
 import { PrismaService } from "../../prisma/prisma.service";
 import { IntegrationsService } from "../../integrations/integrations.service";
+import { OutreachArtifactsService } from "../../outreach/outreach-artifacts.service";
 
 // Mock PrismaService
 function createMockPrisma() {
@@ -51,6 +52,12 @@ function createMockIntegrationsService() {
   } as unknown as IntegrationsService;
 }
 
+function createMockOutreachArtifacts() {
+  return {
+    recordDryRun: vi.fn().mockResolvedValue(null),
+  } as unknown as OutreachArtifactsService;
+}
+
 describe("ExecutorService", () => {
   let executor: ExecutorService;
   let mockPrisma: ReturnType<typeof createMockPrisma>;
@@ -90,6 +97,7 @@ describe("ExecutorService", () => {
       mockLLM as LLMService,
       mockMemory as MemoryService,
       mockIntegrations as IntegrationsService,
+      createMockOutreachArtifacts(),
     );
   });
 

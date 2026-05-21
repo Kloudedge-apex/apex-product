@@ -13,6 +13,7 @@ import { RuntimeModule } from "./runtime/runtime.module";
 import { LeadsModule } from "./leads/leads.module";
 import { PipelineModule } from "./pipeline/pipeline.module";
 import { GraphModule } from "./graph/graph.module";
+import { OutreachModule } from "./outreach/outreach.module";
 import { OrgScopeGuard } from "./common/org-scope.guard";
 import { RateLimitGuard } from "./common/rate-limit.guard";
 
@@ -37,6 +38,7 @@ import { RateLimitGuard } from "./common/rate-limit.guard";
     LeadsModule,
     PipelineModule,
     GraphModule,
+    OutreachModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: OrgScopeGuard },

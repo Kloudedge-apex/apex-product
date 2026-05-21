@@ -12,6 +12,7 @@ import {
 } from "./tools/side-effect";
 import { MemoryService } from "./memory.service";
 import { IntegrationsService } from "../integrations/integrations.service";
+import { OutreachArtifactsService } from "../outreach/outreach-artifacts.service";
 
 /**
  * Per-process default: when set to "dry_run", external_write tools that
@@ -97,6 +98,7 @@ export class ExecutorService {
     private llm: LLMService,
     private memoryService: MemoryService,
     private integrationsService: IntegrationsService,
+    private outreachArtifacts: OutreachArtifactsService,
   ) {
     this.toolRegistry = new ToolRegistry(memoryService);
   }
@@ -112,6 +114,15 @@ export class ExecutorService {
    */
   protected approvalEnvelopeForRun(_runId: string): ApprovalEnvelope | undefined {
     return undefined;
+  }
+
+  /**
+   * Resolve the GraphRun.id that owns this agent run, if any. Phase 2.5 has
+   * no link from AgentRun to GraphRun yet; artifacts are still queryable by
+   * orgId. Returns null for direct agent runs that aren't part of a graph.
+   */
+  protected graphRunIdForRun(_runId: string): string | null {
+    return null;
   }
 
   async executeAgent(agentId: string, runId: string): Promise<ExecutionResult> {
@@ -305,18 +316,35 @@ export class ExecutorService {
           // Dry-run short-circuit: policy allowed the call but routed it to
           // artifact generation instead of external execution. The synthetic
           // result lets the LLM continue its loop without touching the
-          // outside world. Real artifact persistence (Stage 4) attaches in
-          // the outreach subgraph; here we only emit a structured trace.
+          // outside world.
           if (policyDecision.mode === "dry_run") {
+            let artifactId: string | null = null;
+            try {
+              const artifact = await this.outreachArtifacts.recordDryRun({
+                orgId: agent.orgId,
+                graphRunId: this.graphRunIdForRun(runId),
+                toolName,
+                toolArgs,
+              });
+              artifactId = artifact?.id ?? null;
+            } catch (err) {
+              await this.addLog(
+                runId,
+                "WARN",
+                `dry_run: failed to persist artifact for ${toolName}: ${err instanceof Error ? err.message : "unknown error"}`,
+              );
+            }
+
             await this.addLog(
               runId,
               "INFO",
-              `dry_run: ${toolName} would have executed (args persisted as artifact for review)`,
+              `dry_run: ${toolName} captured as artifact${artifactId ? ` ${artifactId}` : " (none)"}`,
             );
             toolResult = {
               success: true,
               dryRun: true,
               wouldHaveSent: toolArgs,
+              artifactId,
               message: `Dry-run: ${toolName} did not execute externally`,
             };
             await this.persistStep(runId, dbStepIndex++, "TOOL_CALL", toolName, toolArgs, null, 0, 0);

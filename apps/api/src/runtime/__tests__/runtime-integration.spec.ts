@@ -7,6 +7,7 @@ import { LLMService } from "../llm.service";
 import { MemoryService } from "../memory.service";
 import { PrismaService } from "../../prisma/prisma.service";
 import { IntegrationsService } from "../../integrations/integrations.service";
+import { OutreachArtifactsService } from "../../outreach/outreach-artifacts.service";
 
 /**
  * Integration-level test for the runtime pipeline:
@@ -90,12 +91,16 @@ describe("Runtime Integration", () => {
     const integrationsService = {
       refreshTokenIfNeeded: vi.fn().mockResolvedValue(null),
     } as unknown as IntegrationsService;
+    const outreachArtifacts = {
+      recordDryRun: vi.fn().mockResolvedValue(null),
+    } as unknown as OutreachArtifactsService;
 
     executorService = new ExecutorService(
       mockPrisma as PrismaService,
       llmService,
       memoryService,
       integrationsService,
+      outreachArtifacts,
     );
 
     runtimeService = new RuntimeService(mockPrisma as PrismaService, queueService);
