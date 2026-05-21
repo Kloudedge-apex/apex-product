@@ -75,6 +75,18 @@ export function getComplexModel(): string {
   return process.env.ANTHROPIC_API_KEY ? "claude-3-5-sonnet-20241022" : "gpt-4o";
 }
 
+/**
+ * gpt-5/o-series Azure deployments reject `max_tokens` and require
+ * `max_completion_tokens`. gpt-4.x deployments still accept `max_tokens`.
+ */
+function maxTokensParamFor(deployment: string): "max_completion_tokens" | "max_tokens" {
+  const d = deployment.toLowerCase();
+  if (d.startsWith("gpt-5") || d.startsWith("o1") || d.startsWith("o3") || d.startsWith("o4")) {
+    return "max_completion_tokens";
+  }
+  return "max_tokens";
+}
+
 export interface ChatOptions {
   model?: string;
   maxTokens?: number;
@@ -163,7 +175,7 @@ export class LLMService {
 
     const body: Record<string, unknown> = {
       messages,
-      max_tokens: maxTokens,
+      [maxTokensParamFor(deployment)]: maxTokens,
       temperature: 0.7,
     };
     if (tools && tools.length > 0) {
