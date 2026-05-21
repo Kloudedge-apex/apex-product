@@ -90,6 +90,14 @@ enum OutreachChannel {
   HUBSPOT_NOTE
 }
 
+enum WorkflowRunStatus {
+  RUNNING
+  AWAITING_APPROVAL
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
 // ─── Models ──────────────────────────────────────────────
 
 model Org {
@@ -112,6 +120,7 @@ model Org {
   scrapeJobs   ScrapeJob[]
   graphRuns    GraphRun[]
   outreachArtifacts OutreachArtifact[]
+  workflowRuns WorkflowRun[]
 
   @@index([slug])
 }
@@ -618,4 +627,63 @@ model OutreachArtifact {
   @@index([orgId, status])
   @@index([graphRunId])
   @@index([orgId, createdAt])
+}
+
+// A versioned, declarative description of a multi-step workflow. The
+// runtime resolves a slug+version to the canonical config (which graph to
+// run, which inputs to expect, whether HITL is required). Templates are
+// org-agnostic: a single seed row backs every tenant's runs.
+model WorkflowTemplate {
+  id          String   @id @default(cuid())
+  // Stable identifier used by clients to start a workflow (e.g.
+  // "tenant_zero_sdr_outreach_artifact_v1"). Unique across versions so a
+  // v2 row is a separate template; older runs still resolve to v1.
+  slug        String   @unique
+  name        String
+  description String
+  version     Int      @default(1)
+  // Name of the graph the runtime should compile to execute this workflow
+  // (currently always "pipeline-supervisor"; here so future templates can
+  // target alternative graphs without a code change).
+  graphName   String
+  // Free-form config: input schema, defaults, HITL gates, feature flags.
+  // Kept as JSON so the schema doesn't churn with every workflow.
+  config      Json
+  // Phase 2.5 templates set requiresApproval=true and produce review
+  // artifacts only. A v2 release toggles this once policy allows.
+  requiresApproval Boolean  @default(true)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  runs        WorkflowRun[]
+
+  @@index([slug])
+  @@index([isActive])
+}
+
+// Concrete invocation of a WorkflowTemplate for one org. Maps 1:1 with the
+// underlying GraphRun for runs that go through the supervisor; standalone
+// workflows can leave graphRunId null.
+model WorkflowRun {
+  id                String              @id @default(cuid())
+  orgId             String
+  org               Org                 @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  templateId        String
+  template          WorkflowTemplate    @relation(fields: [templateId], references: [id])
+  graphRunId        String?             @unique
+  // Verbatim input values supplied at start time, after schema validation.
+  input             Json
+  status            WorkflowRunStatus   @default(RUNNING)
+  // Final state snapshot once the run completes; null while in-flight.
+  output            Json?
+  error             String?
+  startedBy         String?
+  startedAt         DateTime            @default(now())
+  completedAt       DateTime?
+
+  @@index([orgId])
+  @@index([orgId, status])
+  @@index([templateId])
+  @@index([orgId, startedAt])
 }
