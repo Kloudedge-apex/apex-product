@@ -98,6 +98,20 @@ enum WorkflowRunStatus {
   CANCELLED
 }
 
+enum MeetingStatus {
+  PROPOSED
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+  NO_SHOW
+}
+
+enum MeetingSource {
+  AGENT_PROPOSED
+  HUMAN_LOGGED
+  IMPORTED
+}
+
 // ─── Models ──────────────────────────────────────────────
 
 model Org {
@@ -121,6 +135,7 @@ model Org {
   graphRuns    GraphRun[]
   outreachArtifacts OutreachArtifact[]
   workflowRuns WorkflowRun[]
+  meetings     MeetingLedger[]
 
   @@index([slug])
 }
@@ -686,4 +701,51 @@ model WorkflowRun {
   @@index([orgId, status])
   @@index([templateId])
   @@index([orgId, startedAt])
+}
+
+// Tracks intended/scheduled meetings produced by the agent pipeline OR
+// logged manually by humans. Phase 2.5: agents never write to external
+// calendars directly — they create PROPOSED rows here, a human reviews
+// and confirms, and the user replicates in their actual calendar. The
+// ledger is the source of truth the dashboard reads from.
+model MeetingLedger {
+  id              String         @id @default(cuid())
+  orgId           String
+  org             Org            @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  // Optional link to the outreach artifact that produced this meeting
+  // proposal. Null for manually-logged meetings.
+  outreachArtifactId String?
+  // Optional link to the lead the meeting is with. Null when the meeting
+  // is with someone not (yet) persisted as a Person.
+  personId        String?
+  title           String
+  description     String?
+  // Wall-clock UTC. Stored as DateTime so we can sort and filter; the UI
+  // is responsible for rendering in the org's timezone.
+  scheduledFor    DateTime
+  durationMinutes Int            @default(30)
+  // Verbatim email addresses for attendees. Not FK'd to Person because
+  // many attendees are external counterparties whose data we don't store.
+  attendeeEmails  String[]
+  // Free-form notes from the agent (proposed agenda) or human reviewer.
+  notes           String?        @db.Text
+  status          MeetingStatus  @default(PROPOSED)
+  source          MeetingSource  @default(AGENT_PROPOSED)
+  // Who created this row — Clerk user id when human-logged, "agent" for
+  // pipeline-proposed entries. Free text by design.
+  createdBy       String?
+  // Set when status transitions from PROPOSED → CONFIRMED.
+  confirmedBy     String?
+  confirmedAt     DateTime?
+  // Set when status transitions to CANCELLED.
+  cancelledReason String?
+  cancelledAt     DateTime?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  @@index([orgId])
+  @@index([orgId, status])
+  @@index([orgId, scheduledFor])
+  @@index([outreachArtifactId])
+  @@index([personId])
 }
