@@ -5,8 +5,28 @@ import { LLMService, ChatMessage } from "./llm.service";
 import { getPromptForTemplate } from "./prompts";
 import { ToolRegistry } from "./tools/registry";
 import { ToolContext, toolToOpenAIFunction, IntegrationCredentials } from "./tools/tool.interface";
+import {
+  SideEffectPolicy,
+  type ApprovalEnvelope,
+  type PolicyDecision,
+} from "./tools/side-effect";
 import { MemoryService } from "./memory.service";
 import { IntegrationsService } from "../integrations/integrations.service";
+
+/**
+ * Per-process default: when set to "dry_run", external_write tools that
+ * support dry-run get a synthetic artifact result instead of executing. Any
+ * other value (including unset) treats external_write as policy-blocked
+ * unless an explicit ApprovalEnvelope is provided.
+ *
+ * For Phase 2.5 the default is dry_run on every container — autonomous
+ * external sending is not yet enabled.
+ */
+function getOutreachExecutionMode(): "dry_run" | "agent_run" | "external_send" {
+  const v = process.env.OUTREACH_EXECUTION_MODE;
+  if (v === "agent_run" || v === "external_send") return v;
+  return "dry_run";
+}
 
 const MAX_STEPS = 10;
 
@@ -79,6 +99,19 @@ export class ExecutorService {
     private integrationsService: IntegrationsService,
   ) {
     this.toolRegistry = new ToolRegistry(memoryService);
+  }
+
+  /**
+   * Resolve the active approval envelope for the run, if any. Phase 2.5 has
+   * no envelope source yet (graph approval gates only mark GraphRun.status,
+   * not individual agent runs), so this returns undefined and external_write
+   * tools fall through to the dry_run / blocked path.
+   *
+   * Future: read from GraphRun.approvalEnvelope JSON when the outreach
+   * subgraph passes an envelope down to the SDR agent run.
+   */
+  protected approvalEnvelopeForRun(_runId: string): ApprovalEnvelope | undefined {
+    return undefined;
   }
 
   async executeAgent(agentId: string, runId: string): Promise<ExecutionResult> {
@@ -228,6 +261,89 @@ export class ExecutorService {
           const isIdempotent = IDEMPOTENT_TOOLS.has(toolName);
           const inputHash = isIdempotent ? hashToolInput(toolArgs) : null;
           let replayed = false;
+
+          // Side-effect policy gate. Runs before idempotency replay so a
+          // tool that became disallowed since the last receipt cannot be
+          // re-served from cache.
+          const policyDecision: PolicyDecision = SideEffectPolicy.check(toolName, {
+            envelope: this.approvalEnvelopeForRun(runId),
+            defaultDryRun: getOutreachExecutionMode() === "dry_run",
+          });
+
+          if (!policyDecision.allow) {
+            await this.addLog(runId, "WARN", `policy_blocked: ${toolName} — ${policyDecision.reason}`);
+            toolResult = { success: false, error: policyDecision.reason, policy_blocked: true };
+            // Persist a TOOL_CALL + TOOL_RESULT pair flagged as policy_blocked
+            // so the trace surfaces what was attempted.
+            await this.persistStep(runId, dbStepIndex++, "TOOL_CALL", toolName, toolArgs, null, 0, 0);
+            await this.persistStep(
+              runId,
+              dbStepIndex++,
+              "TOOL_RESULT",
+              toolName,
+              null,
+              toolResult as Record<string, unknown>,
+              0,
+              0,
+              policyDecision.reason,
+            );
+            steps.push({
+              step: stepNum,
+              type: "tool_result",
+              toolName,
+              toolOutput: toolResult,
+              timestamp: Date.now(),
+            });
+            messages.push({
+              role: "tool",
+              tool_call_id: toolCall.id,
+              content: JSON.stringify(toolResult),
+            });
+            continue;
+          }
+
+          // Dry-run short-circuit: policy allowed the call but routed it to
+          // artifact generation instead of external execution. The synthetic
+          // result lets the LLM continue its loop without touching the
+          // outside world. Real artifact persistence (Stage 4) attaches in
+          // the outreach subgraph; here we only emit a structured trace.
+          if (policyDecision.mode === "dry_run") {
+            await this.addLog(
+              runId,
+              "INFO",
+              `dry_run: ${toolName} would have executed (args persisted as artifact for review)`,
+            );
+            toolResult = {
+              success: true,
+              dryRun: true,
+              wouldHaveSent: toolArgs,
+              message: `Dry-run: ${toolName} did not execute externally`,
+            };
+            await this.persistStep(runId, dbStepIndex++, "TOOL_CALL", toolName, toolArgs, null, 0, 0);
+            await this.persistStep(
+              runId,
+              dbStepIndex++,
+              "TOOL_RESULT",
+              toolName,
+              null,
+              toolResult as Record<string, unknown>,
+              0,
+              0,
+            );
+            steps.push({
+              step: stepNum,
+              type: "tool_result",
+              toolName,
+              toolOutput: toolResult,
+              timestamp: Date.now(),
+            });
+            messages.push({
+              role: "tool",
+              tool_call_id: toolCall.id,
+              content: JSON.stringify(toolResult),
+            });
+            continue;
+          }
 
           if (tool) {
             // Idempotency: if a receipt exists for (runId, toolName, inputHash),
