@@ -1,4 +1,5 @@
 import { Injectable } from "@nestjs/common";
+import * as crypto from "crypto";
 import { PrismaService } from "../prisma/prisma.service";
 import { LLMService, ChatMessage } from "./llm.service";
 import { getPromptForTemplate } from "./prompts";
@@ -8,6 +9,34 @@ import { MemoryService } from "./memory.service";
 import { IntegrationsService } from "../integrations/integrations.service";
 
 const MAX_STEPS = 10;
+
+/**
+ * Tools whose side effects must not be replayed if a run retries.
+ * Read-only tools (web_search, web_scrape, lead_score, company_research,
+ * memory) are intentionally NOT in this set — replaying them is free and
+ * gives the LLM a chance to re-observe whatever it needed.
+ */
+const IDEMPOTENT_TOOLS = new Set(["send_email", "hubspot"]);
+
+/** Stable hash of tool input args for the idempotency receipt key. */
+function hashToolInput(args: Record<string, unknown>): string {
+  return crypto
+    .createHash("sha256")
+    .update(canonicalJSON(args))
+    .digest("hex");
+}
+
+/** JSON stringify with sorted keys, so {a:1,b:2} and {b:2,a:1} hash the same. */
+function canonicalJSON(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJSON).join(",")}]`;
+  }
+  const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
+    a < b ? -1 : a > b ? 1 : 0,
+  );
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJSON(v)}`).join(",")}}`;
+}
 
 /** Per-run token budgets by plan */
 const TOKEN_BUDGETS: Record<string, number> = {
@@ -84,18 +113,25 @@ export class ExecutorService {
 
     await this.addLog(runId, "INFO", `Loaded ${tools.length} tools: ${tools.map((t) => t.name).join(", ")}`);
 
-    // Load agent memories
-    const memories = await this.memoryService.getAll(agent.id);
-    const memoryContext = this.buildMemoryContext(memories);
+    // Build user message early so we can use it as the semantic-retrieval query
+    const userMessage = this.buildUserMessage(agent.template.name, agent.config as Record<string, unknown>);
 
-    await this.addLog(runId, "DEBUG", `Loaded ${Object.keys(memories).length} memory entries`);
+    // Load agent memories — keep the legacy KV dump for last_run_summary /
+    // contacted_leads, but pull semantically-relevant chunks via pgvector
+    // instead of dumping every memory key into the prompt.
+    const memories = await this.memoryService.getAll(agent.id);
+    const semanticHits = await this.memoryService.searchSemantic(agent.id, userMessage, 5);
+    const memoryContext = this.buildMemoryContext(memories, semanticHits);
+
+    await this.addLog(
+      runId,
+      "DEBUG",
+      `Loaded ${Object.keys(memories).length} KV entries, ${semanticHits.length} semantic hits`,
+    );
 
     // Build system prompt with tool awareness and memory
     const basePrompt = getPromptForTemplate(agent.template.name, agent.config as Record<string, unknown>);
     const systemPrompt = this.buildToolAwarePrompt(basePrompt, tools) + memoryContext;
-
-    // Build user message
-    const userMessage = this.buildUserMessage(agent.template.name, agent.config as Record<string, unknown>);
 
     const messages: ChatMessage[] = [
       { role: "system", content: systemPrompt },
@@ -189,27 +225,71 @@ export class ExecutorService {
           const tool = this.toolRegistry.get(toolName);
           let toolResult: unknown;
           const toolStart = Date.now();
+          const isIdempotent = IDEMPOTENT_TOOLS.has(toolName);
+          const inputHash = isIdempotent ? hashToolInput(toolArgs) : null;
+          let replayed = false;
 
           if (tool) {
-            try {
-              const result = await tool.execute(toolArgs, toolContext);
-              toolResult = result;
-              await this.addLog(runId, "DEBUG", `${toolName} returned: success=${result.success}`);
-
-              // Track failures for critical tools
-              if (CRITICAL_TOOLS.has(toolName) && !result.success) {
-                const errMsg = `${toolName}: ${(result as unknown as Record<string, unknown>).error || "returned success=false"}`;
-                criticalToolFailures.push(errMsg);
-                await this.addLog(runId, "ERROR", `Critical tool failure: ${errMsg}`);
+            // Idempotency: if a receipt exists for (runId, toolName, inputHash),
+            // return the persisted output without re-invoking the tool.
+            if (isIdempotent && inputHash) {
+              try {
+                const existing = await this.prisma.toolCallReceipt.findUnique({
+                  where: { runId_toolName_inputHash: { runId, toolName, inputHash } },
+                });
+                if (existing) {
+                  toolResult = existing.output;
+                  replayed = true;
+                  await this.addLog(
+                    runId,
+                    "INFO",
+                    `${toolName} idempotent replay: returning cached receipt ${existing.id}`,
+                  );
+                }
+              } catch {
+                // Receipt lookup failure should not block tool execution
               }
-            } catch (error) {
-              toolResult = { success: false, error: error instanceof Error ? error.message : "Tool execution failed" };
-              await this.addLog(runId, "WARN", `${toolName} failed: ${error instanceof Error ? error.message : "unknown error"}`);
+            }
 
-              if (CRITICAL_TOOLS.has(toolName)) {
-                const errMsg = `${toolName}: ${error instanceof Error ? error.message : "unknown error"}`;
-                criticalToolFailures.push(errMsg);
-                await this.addLog(runId, "ERROR", `Critical tool failure: ${errMsg}`);
+            if (!replayed) {
+              try {
+                const result = await tool.execute(toolArgs, toolContext);
+                toolResult = result;
+                await this.addLog(runId, "DEBUG", `${toolName} returned: success=${result.success}`);
+
+                // Track failures for critical tools
+                if (CRITICAL_TOOLS.has(toolName) && !result.success) {
+                  const errMsg = `${toolName}: ${(result as unknown as Record<string, unknown>).error || "returned success=false"}`;
+                  criticalToolFailures.push(errMsg);
+                  await this.addLog(runId, "ERROR", `Critical tool failure: ${errMsg}`);
+                }
+
+                // Persist receipt only for successful idempotent tool calls
+                if (isIdempotent && inputHash && result.success) {
+                  try {
+                    await this.prisma.toolCallReceipt.create({
+                      data: {
+                        runId,
+                        orgId: agent.orgId,
+                        toolName,
+                        inputHash,
+                        output: toolResult as any,
+                        success: true,
+                      },
+                    });
+                  } catch {
+                    // Unique-constraint races are fine; receipt already exists
+                  }
+                }
+              } catch (error) {
+                toolResult = { success: false, error: error instanceof Error ? error.message : "Tool execution failed" };
+                await this.addLog(runId, "WARN", `${toolName} failed: ${error instanceof Error ? error.message : "unknown error"}`);
+
+                if (CRITICAL_TOOLS.has(toolName)) {
+                  const errMsg = `${toolName}: ${error instanceof Error ? error.message : "unknown error"}`;
+                  criticalToolFailures.push(errMsg);
+                  await this.addLog(runId, "ERROR", `Critical tool failure: ${errMsg}`);
+                }
               }
             }
           } else {
@@ -411,8 +491,11 @@ ${toolDescriptions}
     return complexTemplates.includes(templateName.toLowerCase());
   }
 
-  private buildMemoryContext(memories: Record<string, unknown>): string {
-    if (Object.keys(memories).length === 0) return "";
+  private buildMemoryContext(
+    memories: Record<string, unknown>,
+    semanticHits: import("./memory.service").SemanticMemoryHit[] = [],
+  ): string {
+    if (Object.keys(memories).length === 0 && semanticHits.length === 0) return "";
 
     const lines: string[] = ["\n\n## Your Memory (from previous runs)"];
 
@@ -425,11 +508,13 @@ ${toolDescriptions}
       lines.push(`Contacted leads (${leads.length}): ${leads.slice(-10).join(", ")}`);
     }
 
-    // Include other memory keys
-    for (const [key, value] of Object.entries(memories)) {
-      if (key === "last_run_summary" || key === "contacted_leads") continue;
-      const valueStr = typeof value === "string" ? value : JSON.stringify(value);
-      lines.push(`${key}: ${valueStr.slice(0, 200)}`);
+    if (semanticHits.length > 0) {
+      lines.push("\n### Relevant prior context (semantic match)");
+      for (const hit of semanticHits) {
+        // Cosine distance: lower = more similar. Skip weak matches.
+        if (hit.distance > 0.5) continue;
+        lines.push(`- (${hit.distance.toFixed(2)}) ${hit.content.slice(0, 300)}`);
+      }
     }
 
     lines.push("\nUse the memory tool to update your memories as you work. Avoid contacting leads you've already reached out to.");
@@ -448,9 +533,34 @@ ${toolDescriptions}
       if (output.to && typeof output.to === "string" && output.to.includes("@")) {
         await this.memoryService.addContactedLead(agentId, output.to as string);
       }
+
+      // Persist a semantic memory chunk capturing this run's outcome so
+      // future runs can retrieve it by similarity rather than dumping every
+      // KV entry into the prompt. Fire-and-forget; embedding failures must
+      // not break the run.
+      const semanticChunk = this.buildSemanticChunk(output, summary);
+      if (semanticChunk) {
+        await this.memoryService.addSemantic(agentId, semanticChunk, {
+          runId,
+          outputType: (output.type as string) ?? null,
+          toolsUsed,
+        });
+      }
     } catch (error) {
       // Memory save failures should not break the run
     }
+  }
+
+  /** Compose a short, embeddable description of what this run accomplished. */
+  private buildSemanticChunk(output: Record<string, unknown>, summary: string): string | null {
+    const pieces: string[] = [summary];
+    if (typeof output.to === "string") pieces.push(`Recipient: ${output.to}`);
+    if (typeof output.subject === "string") pieces.push(`Subject: ${output.subject}`);
+    if (typeof output.body === "string") pieces.push(`Body: ${output.body.slice(0, 500)}`);
+    if (typeof output.content === "string") pieces.push(`Content: ${output.content.slice(0, 500)}`);
+    if (typeof output.summary === "string") pieces.push(`Summary: ${output.summary.slice(0, 500)}`);
+    const joined = pieces.join("\n").trim();
+    return joined.length > 0 ? joined : null;
   }
 
   private async persistStep(

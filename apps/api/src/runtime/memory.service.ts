@@ -1,9 +1,23 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, Logger } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
+import { LLMService } from "./llm.service";
+
+export interface SemanticMemoryHit {
+  id: string;
+  content: string;
+  metadata: Record<string, unknown> | null;
+  distance: number;
+  createdAt: Date;
+}
 
 @Injectable()
 export class MemoryService {
-  constructor(private prisma: PrismaService) {}
+  private readonly logger = new Logger(MemoryService.name);
+
+  constructor(
+    private prisma: PrismaService,
+    private llm: LLMService,
+  ) {}
 
   async get(agentId: string, key: string): Promise<unknown | null> {
     const memory = await this.prisma.agentMemory.findUnique({
@@ -69,5 +83,88 @@ export class MemoryService {
   // Convenience: set last run summary
   async setLastRunSummary(agentId: string, summary: string): Promise<void> {
     await this.set(agentId, "last_run_summary", summary);
+  }
+
+  /**
+   * Persist a chunk of free-form text along with its embedding so future
+   * runs can retrieve it by semantic similarity. Silently no-ops when no
+   * embedding provider is configured (dev/test); production callers will
+   * have failed loud earlier when LLMService was constructed.
+   */
+  async addSemantic(
+    agentId: string,
+    content: string,
+    metadata: Record<string, unknown> | null = null,
+  ): Promise<void> {
+    const trimmed = content.trim();
+    if (!trimmed) return;
+
+    const embedding = await this.llm.embed(trimmed);
+    if (!embedding) return;
+
+    const vectorLiteral = `[${embedding.join(",")}]`;
+    try {
+      await this.prisma.$executeRaw`
+        INSERT INTO "AgentMemoryEmbedding" ("id", "agentId", "content", "embedding", "metadata", "createdAt")
+        VALUES (
+          ${`mem_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`},
+          ${agentId},
+          ${trimmed},
+          ${vectorLiteral}::vector,
+          ${metadata as any}::jsonb,
+          NOW()
+        )
+      `;
+    } catch (err) {
+      this.logger.warn(
+        `Failed to persist semantic memory for ${agentId}: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  /**
+   * Retrieve the top-K semantically similar memories for a given query text.
+   * Returns an empty array when no embedding provider is configured or when
+   * the agent has no semantic memory entries.
+   */
+  async searchSemantic(
+    agentId: string,
+    query: string,
+    topK: number = 5,
+  ): Promise<SemanticMemoryHit[]> {
+    const embedding = await this.llm.embed(query);
+    if (!embedding) return [];
+
+    const vectorLiteral = `[${embedding.join(",")}]`;
+    try {
+      const rows = await this.prisma.$queryRaw<
+        Array<{
+          id: string;
+          content: string;
+          metadata: Record<string, unknown> | null;
+          distance: number;
+          createdAt: Date;
+        }>
+      >`
+        SELECT "id", "content", "metadata", "createdAt",
+               ("embedding" <=> ${vectorLiteral}::vector) AS "distance"
+        FROM "AgentMemoryEmbedding"
+        WHERE "agentId" = ${agentId}
+        ORDER BY "embedding" <=> ${vectorLiteral}::vector
+        LIMIT ${topK}
+      `;
+      return rows.map((r) => ({
+        id: r.id,
+        content: r.content,
+        metadata: r.metadata,
+        distance: Number(r.distance),
+        createdAt: r.createdAt,
+      }));
+    } catch (err) {
+      this.logger.warn(
+        `Semantic search failed for ${agentId}: ${(err as Error).message}`,
+      );
+      return [];
+    }
   }
 }

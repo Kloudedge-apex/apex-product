@@ -1,10 +1,12 @@
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector]
 }
 
 // ─── Enums ───────────────────────────────────────────────
@@ -66,12 +68,21 @@ enum RunStepType {
   FINAL_OUTPUT
 }
 
+enum GraphRunStatus {
+  RUNNING
+  AWAITING_APPROVAL
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
 // ─── Models ──────────────────────────────────────────────
 
 model Org {
   id           String        @id @default(cuid())
   name         String
   slug         String        @unique
+  website      String? // company homepage URL (e.g. "acme.com") — used for auto-ICP generation
   plan         Plan          @default(TRIAL)
   trialEndsAt  DateTime?
   billingId    String? // Razorpay subscription ID
@@ -85,6 +96,7 @@ model Org {
   companies    Company[]
   leadScores   LeadScore[]
   scrapeJobs   ScrapeJob[]
+  graphRuns    GraphRun[]
 
   @@index([slug])
 }
@@ -136,8 +148,9 @@ model Agent {
   status     AgentStatus   @default(PAUSED)
   createdAt  DateTime      @default(now())
   updatedAt  DateTime      @updatedAt
-  runs       AgentRun[]
-  memories   AgentMemory[]
+  runs              AgentRun[]
+  memories          AgentMemory[]
+  memoryEmbeddings  AgentMemoryEmbedding[]
 
   @@index([orgId])
   @@index([orgId, domain])
@@ -183,12 +196,37 @@ model AgentRun {
   approvedBy       String? // Clerk user ID of the approver
   logs             AgentLog[]
   steps            RunStep[]
+  toolReceipts     ToolCallReceipt[]
 
   @@index([agentId])
   @@index([orgId])
   @@index([orgId, status])
   @@index([agentId, startedAt])
   @@index([startedAt])
+}
+
+/**
+ * Idempotency record for side-effecting tool calls (send_email, hubspot, etc.).
+ * Keyed on (runId, toolName, inputHash) — if a run is replayed (worker crash,
+ * BullMQ retry), the executor finds an existing receipt and returns the
+ * persisted output instead of re-invoking the tool.
+ *
+ * inputHash is a SHA-256 of a canonical JSON encoding of the tool's input
+ * arguments, so semantically-equal inputs collide and dedupe.
+ */
+model ToolCallReceipt {
+  id        String   @id @default(cuid())
+  runId     String
+  run       AgentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  orgId     String
+  toolName  String
+  inputHash String
+  output    Json
+  success   Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  @@unique([runId, toolName, inputHash])
+  @@index([orgId, toolName])
 }
 
 model AgentLog {
@@ -234,6 +272,27 @@ model AgentMemory {
   updatedAt DateTime @updatedAt
 
   @@unique([agentId, key])
+  @@index([agentId])
+}
+
+/**
+ * Semantic memory entries (pgvector-backed). Each row stores a chunk of
+ * free-form text plus its embedding so the executor can retrieve top-K
+ * relevant memories at run start instead of dumping every key into the prompt.
+ *
+ * The `embedding` column is declared as Unsupported because Prisma doesn't
+ * model the pgvector type natively. Reads/writes go through $queryRaw /
+ * $executeRaw in MemoryService.
+ */
+model AgentMemoryEmbedding {
+  id        String                       @id @default(cuid())
+  agentId   String
+  agent     Agent                        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  content   String                       @db.Text
+  embedding Unsupported("vector(3072)")
+  metadata  Json?
+  createdAt DateTime                     @default(now())
+
   @@index([agentId])
 }
 
@@ -439,4 +498,65 @@ model ScrapeJob {
   @@index([orgId])
   @@index([stage])
   @@index([status])
+}
+
+// ─── LangGraph runtime ───────────────────────────────────
+//
+// GraphRun is the high-level run row the application reads from (status,
+// current node, approval state, final output). LangGraph's own state for
+// resumability lives in GraphCheckpoint / GraphCheckpointWrite, written via
+// the PrismaCheckpointSaver (implements BaseCheckpointSaver).
+
+model GraphRun {
+  id            String         @id @default(cuid())
+  orgId         String
+  org           Org            @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  threadId      String         @unique
+  graphName     String         // e.g. "pipeline-supervisor"
+  status        GraphRunStatus @default(RUNNING)
+  currentNode   String?
+  state         Json?          // last snapshot of public state (for the UI)
+  needsApproval Boolean        @default(false)
+  approvedAt    DateTime?
+  approvedBy    String?
+  error         String?
+  startedAt     DateTime       @default(now())
+  completedAt   DateTime?
+
+  @@index([orgId])
+  @@index([status])
+  @@index([orgId, startedAt])
+}
+
+model GraphCheckpoint {
+  threadId             String
+  checkpointNamespace  String   @default("")
+  checkpointId         String
+  parentCheckpointId   String?
+  type                 String?  // serde format hint ("json", "msgpack", etc)
+  checkpoint           Bytes    // serialized Checkpoint object
+  metadata             Json?
+  createdAt            DateTime @default(now())
+
+  writes               GraphCheckpointWrite[]
+
+  @@id([threadId, checkpointNamespace, checkpointId])
+  @@index([threadId])
+}
+
+model GraphCheckpointWrite {
+  threadId            String
+  checkpointNamespace String   @default("")
+  checkpointId        String
+  taskId              String
+  idx                 Int
+  channel             String
+  type                String?
+  value               Bytes
+  createdAt           DateTime @default(now())
+
+  checkpoint          GraphCheckpoint @relation(fields: [threadId, checkpointNamespace, checkpointId], references: [threadId, checkpointNamespace, checkpointId], onDelete: Cascade)
+
+  @@id([threadId, checkpointNamespace, checkpointId, taskId, idx])
+  @@index([threadId])
 }

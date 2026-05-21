@@ -86,7 +86,7 @@ describe("Runtime Integration", () => {
     queueService = new QueueService();
 
     const llmService = new LLMService();
-    const memoryService = new MemoryService(mockPrisma as PrismaService);
+    const memoryService = new MemoryService(mockPrisma as PrismaService, llmService);
     const integrationsService = {
       refreshTokenIfNeeded: vi.fn().mockResolvedValue(null),
     } as unknown as IntegrationsService;
@@ -116,7 +116,7 @@ describe("Runtime Integration", () => {
     expect(run.orgId).toBe("org_1");
 
     // Queue should have one job
-    const stats = runtimeService.getQueueStats();
+    const stats = await runtimeService.getQueueStats();
     expect(stats.queued).toBe(1);
 
     // Log should have been created

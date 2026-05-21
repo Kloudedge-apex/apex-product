@@ -84,15 +84,32 @@ export class OrgScopeGuard implements CanActivate {
         throw new UnauthorizedException(msg);
       }
 
-      if (!payload.org_id) {
-        throw new ForbiddenException(
-          "Token has no org_id claim — use an org-scoped session token",
-        );
-      }
-
-      orgId = payload.org_id;
       clerkUserId = payload.sub;
       clerkOrgRole = payload.org_role;
+
+      if (payload.org_id) {
+        orgId = payload.org_id;
+      } else {
+        // Fallback: no Clerk Organization yet (common during onboarding before
+        // Clerk Org sync). Resolve the internal Org via the verified `sub`
+        // (clerkUserId). Safe because `sub` is signature-verified by Clerk and
+        // each user maps to exactly one internal Org via the User table.
+        const user = await this.prisma.user.findUnique({
+          where: { clerkId: clerkUserId },
+          select: { orgId: true },
+        });
+        if (user) {
+          orgId = user.orgId;
+        } else {
+          // No internal Org+User row yet. The dashboard bootstrap normally
+          // handles this via POST /api/orgs, but if the user lands directly on
+          // a protected route (or that call raced/failed), provision here so
+          // the request can proceed. Identity is taken solely from the
+          // signature-verified `sub` claim.
+          const provisioned = await this.autoProvisionOrg(payload);
+          orgId = provisioned.id;
+        }
+      }
     } else if (this.allowDevHeader) {
       const headerOrgId = request.headers["x-org-id"];
       if (typeof headerOrgId === "string" && headerOrgId.length > 0) {
@@ -135,6 +152,72 @@ export class OrgScopeGuard implements CanActivate {
       where: { slug: idOrSlug },
       select: { id: true },
     });
+  }
+
+  /**
+   * Create an internal Org+User on demand from a verified Clerk JWT payload.
+   * Used when a signed-in user hits a protected route before the frontend
+   * bootstrap (POST /api/orgs) has completed. Re-entrant: if a parallel
+   * request created the row in the meantime, the unique-clerkId constraint
+   * will surface that and we look up the existing org.
+   */
+  private async autoProvisionOrg(payload: {
+    sub: string;
+    email?: string;
+  }): Promise<{ id: string }> {
+    const clerkUserId = payload.sub;
+    const email =
+      payload.email && payload.email.length > 0
+        ? payload.email
+        : `${clerkUserId}@no-email.workforceos.local`;
+    const baseName =
+      payload.email && payload.email.includes("@")
+        ? payload.email.split("@")[1].split(".")[0]
+        : "Workspace";
+    const name = baseName.charAt(0).toUpperCase() + baseName.slice(1);
+    const slug =
+      name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") +
+      "-" +
+      Date.now().toString(36);
+
+    try {
+      const org = await this.prisma.org.create({
+        data: {
+          name,
+          slug,
+          plan: "TRIAL",
+          trialEndsAt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000),
+          users: {
+            create: {
+              email,
+              name: payload.email || name,
+              role: "OWNER",
+              clerkId: clerkUserId,
+            },
+          },
+        },
+        select: { id: true },
+      });
+      this.logger.log(
+        `Auto-provisioned org ${org.id} for clerkUser ${clerkUserId}`,
+      );
+      return org;
+    } catch (err) {
+      // Likely a race: another request created the row first. Re-fetch.
+      const user = await this.prisma.user.findUnique({
+        where: { clerkId: clerkUserId },
+        select: { orgId: true },
+      });
+      if (user) return { id: user.orgId };
+      this.logger.error(
+        `Auto-provision failed for clerkUser ${clerkUserId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      throw new ForbiddenException(
+        "Could not provision workspace for this user",
+      );
+    }
   }
 }
 
