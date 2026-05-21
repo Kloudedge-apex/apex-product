@@ -14,6 +14,7 @@ import { LeadsModule } from "./leads/leads.module";
 import { PipelineModule } from "./pipeline/pipeline.module";
 import { GraphModule } from "./graph/graph.module";
 import { OutreachModule } from "./outreach/outreach.module";
+import { WorkflowsModule } from "./workflows/workflows.module";
 import { OrgScopeGuard } from "./common/org-scope.guard";
 import { RateLimitGuard } from "./common/rate-limit.guard";
 
@@ -39,6 +40,7 @@ import { RateLimitGuard } from "./common/rate-limit.guard";
     PipelineModule,
     GraphModule,
     OutreachModule,
+    WorkflowsModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: OrgScopeGuard },

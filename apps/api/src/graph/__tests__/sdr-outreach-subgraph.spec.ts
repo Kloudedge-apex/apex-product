@@ -161,7 +161,7 @@ describe("SDR outreach subgraph", () => {
     // see what was attempted.
     expect(deps._recorded).toHaveBeenCalledTimes(1);
     const recordedArgs = deps._recorded.mock.calls[0][0].toolArgs;
-    expect(recordedArgs.qaIssues).toEqual(expect.arrayContaining(result.qaIssues));
+    expect(recordedArgs.qaIssues).toEqual(expect.arrayContaining([...result.qaIssues]));
   });
 
   it("does not call the real LLM when a drafter override is supplied", async () => {
