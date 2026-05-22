@@ -28,4 +28,9 @@ export class UpdateOrgDto {
   @IsOptional()
   @IsString()
   plan?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  website?: string;
 }

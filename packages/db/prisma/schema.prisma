@@ -1,10 +1,12 @@
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector]
 }
 
 // ─── Enums ───────────────────────────────────────────────
@@ -66,12 +68,57 @@ enum RunStepType {
   FINAL_OUTPUT
 }
 
+enum GraphRunStatus {
+  RUNNING
+  AWAITING_APPROVAL
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum OutreachArtifactStatus {
+  DRAFT
+  PENDING_REVIEW
+  APPROVED
+  REJECTED
+  SENT
+}
+
+enum OutreachChannel {
+  EMAIL
+  LINKEDIN
+  HUBSPOT_NOTE
+}
+
+enum WorkflowRunStatus {
+  RUNNING
+  AWAITING_APPROVAL
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum MeetingStatus {
+  PROPOSED
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+  NO_SHOW
+}
+
+enum MeetingSource {
+  AGENT_PROPOSED
+  HUMAN_LOGGED
+  IMPORTED
+}
+
 // ─── Models ──────────────────────────────────────────────
 
 model Org {
   id           String        @id @default(cuid())
   name         String
   slug         String        @unique
+  website      String? // company homepage URL (e.g. "acme.com") — used for auto-ICP generation
   plan         Plan          @default(TRIAL)
   trialEndsAt  DateTime?
   billingId    String? // Razorpay subscription ID
@@ -85,6 +132,10 @@ model Org {
   companies    Company[]
   leadScores   LeadScore[]
   scrapeJobs   ScrapeJob[]
+  graphRuns    GraphRun[]
+  outreachArtifacts OutreachArtifact[]
+  workflowRuns WorkflowRun[]
+  meetings     MeetingLedger[]
 
   @@index([slug])
 }
@@ -136,8 +187,9 @@ model Agent {
   status     AgentStatus   @default(PAUSED)
   createdAt  DateTime      @default(now())
   updatedAt  DateTime      @updatedAt
-  runs       AgentRun[]
-  memories   AgentMemory[]
+  runs              AgentRun[]
+  memories          AgentMemory[]
+  memoryEmbeddings  AgentMemoryEmbedding[]
 
   @@index([orgId])
   @@index([orgId, domain])
@@ -183,12 +235,37 @@ model AgentRun {
   approvedBy       String? // Clerk user ID of the approver
   logs             AgentLog[]
   steps            RunStep[]
+  toolReceipts     ToolCallReceipt[]
 
   @@index([agentId])
   @@index([orgId])
   @@index([orgId, status])
   @@index([agentId, startedAt])
   @@index([startedAt])
+}
+
+/**
+ * Idempotency record for side-effecting tool calls (send_email, hubspot, etc.).
+ * Keyed on (runId, toolName, inputHash) — if a run is replayed (worker crash,
+ * BullMQ retry), the executor finds an existing receipt and returns the
+ * persisted output instead of re-invoking the tool.
+ *
+ * inputHash is a SHA-256 of a canonical JSON encoding of the tool's input
+ * arguments, so semantically-equal inputs collide and dedupe.
+ */
+model ToolCallReceipt {
+  id        String   @id @default(cuid())
+  runId     String
+  run       AgentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  orgId     String
+  toolName  String
+  inputHash String
+  output    Json
+  success   Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  @@unique([runId, toolName, inputHash])
+  @@index([orgId, toolName])
 }
 
 model AgentLog {
@@ -234,6 +311,27 @@ model AgentMemory {
   updatedAt DateTime @updatedAt
 
   @@unique([agentId, key])
+  @@index([agentId])
+}
+
+/**
+ * Semantic memory entries (pgvector-backed). Each row stores a chunk of
+ * free-form text plus its embedding so the executor can retrieve top-K
+ * relevant memories at run start instead of dumping every key into the prompt.
+ *
+ * The `embedding` column is declared as Unsupported because Prisma doesn't
+ * model the pgvector type natively. Reads/writes go through $queryRaw /
+ * $executeRaw in MemoryService.
+ */
+model AgentMemoryEmbedding {
+  id        String                       @id @default(cuid())
+  agentId   String
+  agent     Agent                        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  content   String                       @db.Text
+  embedding Unsupported("vector(3072)")
+  metadata  Json?
+  createdAt DateTime                     @default(now())
+
   @@index([agentId])
 }
 
@@ -439,4 +537,215 @@ model ScrapeJob {
   @@index([orgId])
   @@index([stage])
   @@index([status])
+}
+
+// ─── LangGraph runtime ───────────────────────────────────
+//
+// GraphRun is the high-level run row the application reads from (status,
+// current node, approval state, final output). LangGraph's own state for
+// resumability lives in GraphCheckpoint / GraphCheckpointWrite, written via
+// the PrismaCheckpointSaver (implements BaseCheckpointSaver).
+
+model GraphRun {
+  id            String         @id @default(cuid())
+  orgId         String
+  org           Org            @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  threadId      String         @unique
+  graphName     String         // e.g. "pipeline-supervisor"
+  status        GraphRunStatus @default(RUNNING)
+  currentNode   String?
+  state         Json?          // last snapshot of public state (for the UI)
+  needsApproval Boolean        @default(false)
+  approvedAt    DateTime?
+  approvedBy    String?
+  error         String?
+  startedAt     DateTime       @default(now())
+  completedAt   DateTime?
+  outreachArtifacts OutreachArtifact[]
+
+  @@index([orgId])
+  @@index([status])
+  @@index([orgId, startedAt])
+}
+
+model GraphCheckpoint {
+  threadId             String
+  checkpointNamespace  String   @default("")
+  checkpointId         String
+  parentCheckpointId   String?
+  type                 String?  // serde format hint ("json", "msgpack", etc)
+  checkpoint           Bytes    // serialized Checkpoint object
+  metadata             Json?
+  createdAt            DateTime @default(now())
+
+  writes               GraphCheckpointWrite[]
+
+  @@id([threadId, checkpointNamespace, checkpointId])
+  @@index([threadId])
+}
+
+model GraphCheckpointWrite {
+  threadId            String
+  checkpointNamespace String   @default("")
+  checkpointId        String
+  taskId              String
+  idx                 Int
+  channel             String
+  type                String?
+  value               Bytes
+  createdAt           DateTime @default(now())
+
+  checkpoint          GraphCheckpoint @relation(fields: [threadId, checkpointNamespace, checkpointId], references: [threadId, checkpointNamespace, checkpointId], onDelete: Cascade)
+
+  @@id([threadId, checkpointNamespace, checkpointId, taskId, idx])
+  @@index([threadId])
+}
+
+// Reviewable outreach payload generated by the outreach subgraph. Phase 2.5
+// runs default to dry-run mode: artifacts are persisted in PENDING_REVIEW
+// state and never delivered until a human approves them. The original
+// dry-run payload is preserved in `payload` so reviewers see exactly what
+// would have been sent; if approved, the worker sends and writes back a
+// receipt + provider message id.
+model OutreachArtifact {
+  id            String                 @id @default(cuid())
+  orgId         String
+  org           Org                    @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  graphRunId    String?
+  graphRun      GraphRun?              @relation(fields: [graphRunId], references: [id], onDelete: SetNull)
+  // Tool that would have produced the external side effect (e.g. send_email).
+  toolName      String
+  channel       OutreachChannel
+  // Identifies the recipient/account on the outbound side without forcing
+  // a hard FK to Person/Company (the graph may produce artifacts for
+  // not-yet-persisted leads).
+  recipientRef  String?
+  subject       String?
+  bodyText      String?                @db.Text
+  bodyHtml      String?                @db.Text
+  // Verbatim tool args captured at the moment of the dry-run, so reviewers
+  // see what would have been sent. The shape mirrors the tool's input.
+  payload       Json
+  status        OutreachArtifactStatus @default(PENDING_REVIEW)
+  // Free-text reason from the reviewer when rejecting.
+  reviewerNote  String?
+  reviewedBy    String?
+  reviewedAt    DateTime?
+  // Set once the artifact is actually delivered. Together with sendReceiptId
+  // these prove a real send happened post-approval.
+  sentAt        DateTime?
+  sendReceiptId String?
+  createdAt     DateTime               @default(now())
+  updatedAt     DateTime               @updatedAt
+
+  @@index([orgId])
+  @@index([orgId, status])
+  @@index([graphRunId])
+  @@index([orgId, createdAt])
+}
+
+// A versioned, declarative description of a multi-step workflow. The
+// runtime resolves a slug+version to the canonical config (which graph to
+// run, which inputs to expect, whether HITL is required). Templates are
+// org-agnostic: a single seed row backs every tenant's runs.
+model WorkflowTemplate {
+  id          String   @id @default(cuid())
+  // Stable identifier used by clients to start a workflow (e.g.
+  // "tenant_zero_sdr_outreach_artifact_v1"). Unique across versions so a
+  // v2 row is a separate template; older runs still resolve to v1.
+  slug        String   @unique
+  name        String
+  description String
+  version     Int      @default(1)
+  // Name of the graph the runtime should compile to execute this workflow
+  // (currently always "pipeline-supervisor"; here so future templates can
+  // target alternative graphs without a code change).
+  graphName   String
+  // Free-form config: input schema, defaults, HITL gates, feature flags.
+  // Kept as JSON so the schema doesn't churn with every workflow.
+  config      Json
+  // Phase 2.5 templates set requiresApproval=true and produce review
+  // artifacts only. A v2 release toggles this once policy allows.
+  requiresApproval Boolean  @default(true)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  runs        WorkflowRun[]
+
+  @@index([slug])
+  @@index([isActive])
+}
+
+// Concrete invocation of a WorkflowTemplate for one org. Maps 1:1 with the
+// underlying GraphRun for runs that go through the supervisor; standalone
+// workflows can leave graphRunId null.
+model WorkflowRun {
+  id                String              @id @default(cuid())
+  orgId             String
+  org               Org                 @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  templateId        String
+  template          WorkflowTemplate    @relation(fields: [templateId], references: [id])
+  graphRunId        String?             @unique
+  // Verbatim input values supplied at start time, after schema validation.
+  input             Json
+  status            WorkflowRunStatus   @default(RUNNING)
+  // Final state snapshot once the run completes; null while in-flight.
+  output            Json?
+  error             String?
+  startedBy         String?
+  startedAt         DateTime            @default(now())
+  completedAt       DateTime?
+
+  @@index([orgId])
+  @@index([orgId, status])
+  @@index([templateId])
+  @@index([orgId, startedAt])
+}
+
+// Tracks intended/scheduled meetings produced by the agent pipeline OR
+// logged manually by humans. Phase 2.5: agents never write to external
+// calendars directly — they create PROPOSED rows here, a human reviews
+// and confirms, and the user replicates in their actual calendar. The
+// ledger is the source of truth the dashboard reads from.
+model MeetingLedger {
+  id              String         @id @default(cuid())
+  orgId           String
+  org             Org            @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  // Optional link to the outreach artifact that produced this meeting
+  // proposal. Null for manually-logged meetings.
+  outreachArtifactId String?
+  // Optional link to the lead the meeting is with. Null when the meeting
+  // is with someone not (yet) persisted as a Person.
+  personId        String?
+  title           String
+  description     String?
+  // Wall-clock UTC. Stored as DateTime so we can sort and filter; the UI
+  // is responsible for rendering in the org's timezone.
+  scheduledFor    DateTime
+  durationMinutes Int            @default(30)
+  // Verbatim email addresses for attendees. Not FK'd to Person because
+  // many attendees are external counterparties whose data we don't store.
+  attendeeEmails  String[]
+  // Free-form notes from the agent (proposed agenda) or human reviewer.
+  notes           String?        @db.Text
+  status          MeetingStatus  @default(PROPOSED)
+  source          MeetingSource  @default(AGENT_PROPOSED)
+  // Who created this row — Clerk user id when human-logged, "agent" for
+  // pipeline-proposed entries. Free text by design.
+  createdBy       String?
+  // Set when status transitions from PROPOSED → CONFIRMED.
+  confirmedBy     String?
+  confirmedAt     DateTime?
+  // Set when status transitions to CANCELLED.
+  cancelledReason String?
+  cancelledAt     DateTime?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  @@index([orgId])
+  @@index([orgId, status])
+  @@index([orgId, scheduledFor])
+  @@index([outreachArtifactId])
+  @@index([personId])
 }

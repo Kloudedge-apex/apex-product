@@ -30,6 +30,14 @@ export class OrgsService {
       return org;
     }
 
+    // Clerk's default JWT template omits the email claim, so `data.email` is
+    // often "". User.email is @unique, so reuse-of-empty-string would collide
+    // across users. Fall back to a deterministic per-user placeholder.
+    const email =
+      data.email && data.email.length > 0
+        ? data.email
+        : `${data.clerkUserId}@no-email.workforceos.local`;
+
     return this.prisma.org.create({
       data: {
         name: data.name,
@@ -38,7 +46,7 @@ export class OrgsService {
         trialEndsAt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000),
         users: {
           create: {
-            email: data.email,
+            email,
             name: data.userName || data.name,
             role: "OWNER",
             clerkId: data.clerkUserId,
@@ -67,12 +75,13 @@ export class OrgsService {
     return user.org;
   }
 
-  async update(id: string, data: { name?: string; plan?: string }) {
+  async update(id: string, data: { name?: string; plan?: string; website?: string }) {
     return this.prisma.org.update({
       where: { id },
       data: {
         ...(data.name && { name: data.name }),
         ...(data.plan && { plan: data.plan as Plan }),
+        ...(data.website !== undefined && { website: data.website || null }),
       },
     });
   }

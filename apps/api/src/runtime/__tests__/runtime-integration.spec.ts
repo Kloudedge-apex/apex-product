@@ -7,6 +7,7 @@ import { LLMService } from "../llm.service";
 import { MemoryService } from "../memory.service";
 import { PrismaService } from "../../prisma/prisma.service";
 import { IntegrationsService } from "../../integrations/integrations.service";
+import { OutreachArtifactsService } from "../../outreach/outreach-artifacts.service";
 
 /**
  * Integration-level test for the runtime pipeline:
@@ -86,16 +87,20 @@ describe("Runtime Integration", () => {
     queueService = new QueueService();
 
     const llmService = new LLMService();
-    const memoryService = new MemoryService(mockPrisma as PrismaService);
+    const memoryService = new MemoryService(mockPrisma as PrismaService, llmService);
     const integrationsService = {
       refreshTokenIfNeeded: vi.fn().mockResolvedValue(null),
     } as unknown as IntegrationsService;
+    const outreachArtifacts = {
+      recordDryRun: vi.fn().mockResolvedValue(null),
+    } as unknown as OutreachArtifactsService;
 
     executorService = new ExecutorService(
       mockPrisma as PrismaService,
       llmService,
       memoryService,
       integrationsService,
+      outreachArtifacts,
     );
 
     runtimeService = new RuntimeService(mockPrisma as PrismaService, queueService);
@@ -116,7 +121,7 @@ describe("Runtime Integration", () => {
     expect(run.orgId).toBe("org_1");
 
     // Queue should have one job
-    const stats = runtimeService.getQueueStats();
+    const stats = await runtimeService.getQueueStats();
     expect(stats.queued).toBe(1);
 
     // Log should have been created

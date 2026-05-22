@@ -113,6 +113,35 @@ export class IntegrationsController {
     return this.integrationsService.simulateConnect(orgId, body.provider);
   }
 
+  /**
+   * API-key connect for providers like Apollo / ElevenLabs / Clay.
+   * OAuth providers should use `/:provider/auth-url` instead.
+   */
+  @Post(":provider/connect")
+  connectApiKey(
+    @OrgId() orgId: string,
+    @Param("provider") provider: string,
+    @Body() body: { apiKey?: string },
+  ) {
+    return this.integrationsService.connectApiKey(orgId, provider, body.apiKey ?? "");
+  }
+
+  @Post(":provider/disconnect")
+  disconnectByProvider(
+    @OrgId() orgId: string,
+    @Param("provider") provider: string,
+  ) {
+    return this.integrationsService.disconnectByProvider(orgId, provider);
+  }
+
+  @Post(":provider/test")
+  testByProvider(
+    @OrgId() orgId: string,
+    @Param("provider") provider: string,
+  ) {
+    return this.integrationsService.testByProvider(orgId, provider);
+  }
+
   // ────────────────────────────────────────────────────────────────────────
 
   private async handleProviderCallback(
@@ -122,6 +151,7 @@ export class IntegrationsController {
     res: Response,
   ) {
     const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+    const returnPath = "/dashboard/integrations";
     let orgId: string;
     try {
       ({ orgId } = verifyOAuthState(state));
@@ -131,19 +161,19 @@ export class IntegrationsController {
           err instanceof Error ? err.message : "unknown"
         }`,
       );
-      return res.redirect(`${frontendUrl}/integrations?error=${provider}_state`);
+      return res.redirect(`${frontendUrl}${returnPath}?error=${provider}_state`);
     }
 
     try {
       await this.integrationsService.handleOAuthCallback(provider, code, orgId);
-      return res.redirect(`${frontendUrl}/integrations?connected=${provider}`);
+      return res.redirect(`${frontendUrl}${returnPath}?connected=${provider}`);
     } catch (err) {
       this.logger.warn(
         `OAuth callback failed for ${provider}: ${
           err instanceof Error ? err.message : "unknown"
         }`,
       );
-      return res.redirect(`${frontendUrl}/integrations?error=${provider}`);
+      return res.redirect(`${frontendUrl}${returnPath}?error=${provider}`);
     }
   }
 }

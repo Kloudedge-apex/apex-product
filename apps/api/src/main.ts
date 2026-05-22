@@ -5,9 +5,15 @@ import { SwaggerModule, DocumentBuilder } from "@nestjs/swagger";
 import helmet from "helmet";
 import { AppModule } from "./app.module";
 import { GlobalExceptionFilter } from "./common/http-exception.filter";
+import { validateEnvOrExit } from "./common/env-validation";
 
 async function bootstrap() {
   const logger = new Logger("Bootstrap");
+
+  // Validate env BEFORE Nest boots so a misconfigured container exits with a
+  // clear message instead of running with insecure state.
+  validateEnvOrExit(logger);
+
   const isProd = process.env.NODE_ENV === "production";
 
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {

@@ -75,8 +75,8 @@ export class IntegrationsService {
     status: "available" | "coming_soon";
   }> {
     return [
-      { provider: "google", category: "email", name: "Google Workspace (Gmail)", description: "Send and receive email via your Google Workspace mailbox.", authType: "oauth", status: "available" },
-      { provider: "microsoft365", category: "email", name: "Microsoft 365 (Outlook)", description: "Send and receive email via your M365 mailbox.", authType: "oauth", status: "available" },
+      { provider: "gmail", category: "email", name: "Google Workspace (Gmail)", description: "Send and receive email via your Google Workspace mailbox.", authType: "oauth", status: "available" },
+      { provider: "outlook", category: "email", name: "Microsoft 365 (Outlook)", description: "Send and receive email via your M365 mailbox.", authType: "oauth", status: "available" },
       { provider: "hubspot", category: "crm", name: "HubSpot", description: "Bi-directional CRM sync for contacts, deals, and companies.", authType: "oauth", status: "available" },
       { provider: "salesforce", category: "crm", name: "Salesforce", description: "Bi-directional CRM sync.", authType: "oauth", status: "coming_soon" },
       { provider: "pipedrive", category: "crm", name: "Pipedrive", description: "Bi-directional CRM sync.", authType: "oauth", status: "coming_soon" },
@@ -366,5 +366,44 @@ export class IntegrationsService {
   async disconnect(id: string, orgId: string) {
     const integration = await this.findOne(id, orgId);
     return this.prisma.integration.delete({ where: { id: integration.id } });
+  }
+
+  async disconnectByProvider(orgId: string, provider: string) {
+    const integration = await this.prisma.integration.findFirst({
+      where: { orgId, provider },
+    });
+    if (!integration) throw new NotFoundException("Integration not found");
+    return this.prisma.integration.delete({ where: { id: integration.id } });
+  }
+
+  /**
+   * API-key flow. Stores the key as encrypted credentials, mirroring how the
+   * OAuth flow stores tokens. The FE's `connectIntegration(provider, {apiKey})`
+   * lands here.
+   */
+  async connectApiKey(orgId: string, provider: string, apiKey: string) {
+    if (!apiKey || typeof apiKey !== "string") {
+      throw new NotFoundException("apiKey is required");
+    }
+    return this.create(orgId, { provider, credentials: { api_key: apiKey } });
+  }
+
+  /**
+   * Lightweight test: confirm we have stored, decryptable credentials and
+   * (for OAuth) the access token hasn't expired. Doesn't call the provider.
+   */
+  async testByProvider(
+    orgId: string,
+    provider: string,
+  ): Promise<{ ok: boolean; message: string }> {
+    const creds = await this.getDecryptedCredentials(orgId, provider);
+    if (!creds) {
+      return { ok: false, message: `${provider} is not connected.` };
+    }
+    const expiresAt = creds.expires_at as number | undefined;
+    if (expiresAt && Date.now() > expiresAt) {
+      return { ok: false, message: "Access token expired. Reconnect required." };
+    }
+    return { ok: true, message: `${provider} credentials are valid.` };
   }
 }
