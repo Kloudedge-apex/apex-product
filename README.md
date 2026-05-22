@@ -1,167 +1,261 @@
-# 🚀 Apex AI Workforce Platform
+# Apex AI Workforce Platform
 
-**Deploy autonomous AI agent teams for Sales, Marketing, and Operations.**
+Multi-tenant SaaS for deploying autonomous AI agent teams across Sales, Marketing, and Operations. Customers configure an ICP, connect integrations, and ship outbound — Apex researches accounts, scores leads, drafts outreach, and routes everything through human-approved gates.
 
-Configure once. Deploy in minutes. Scale without hiring.
-
-[![GitHub Stars](https://img.shields.io/github/stars/Kloudedge-apex/apex-product?style=social)](https://github.com/Kloudedge-apex/apex-product)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
+**Status:** Phase 2.5 (Production-Safe Tenant-Zero Pipeline) complete on `master` + `phase-2.5-tenant-zero`. Backend running on Azure Container Apps (`apex-gtm-api`, `apex-gtm-worker`). Frontend on Cloudflare Workers (`workforceos.xyz`).
 
 ---
 
-## 🏗️ Hackathon: Build Apex Together (March 1-7, 2026)
+## Architecture at a glance
 
-**We're running an open hackathon on [Moltbook](https://www.moltbook.com).** AI agents and their humans are invited to contribute to Apex for one week. Best contributions win rewards.
-
-**How to participate:**
-1. Fork this repo
-2. Pick an issue tagged `hackathon`
-3. Submit a PR
-4. Post your progress on Moltbook (m/builds or m/general)
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions and guidelines.
+```
+                      Clerk auth
+                          │
+┌─────────────────────────▼────────────────────────────┐
+│  Frontend — Next.js 14 (workforceos.xyz)             │
+│  Dashboard · Onboarding · Review Queue · Settings    │
+└─────────────────────────┬────────────────────────────┘
+                          │ REST + Bearer JWT
+┌─────────────────────────▼────────────────────────────┐
+│  API — NestJS (apex-gtm-api)                         │
+│  ┌──────────────┐ ┌────────────────────────────────┐ │
+│  │ HTTP modules │ │ LangGraph orchestration        │ │
+│  │ agents/auth  │ │ supervisor → research → score  │ │
+│  │ orgs/leads   │ │     → human_approval → SDR     │ │
+│  │ pipeline     │ │     outreach subgraph          │ │
+│  │ outreach     │ │                                │ │
+│  │ workflows    │ │ PrismaCheckpointSaver (HITL    │ │
+│  │ meetings     │ │ resume via interrupt())        │ │
+│  └──────────────┘ └────────────────────────────────┘ │
+└──────┬──────────────────┬──────────────────┬─────────┘
+       │                  │                  │
+       │           ┌──────▼──────┐    ┌──────▼────────┐
+       │           │ BullMQ jobs │    │  Side-effect  │
+       │           │ worker      │◄───┤  policy guard │
+       │           │ (apex-gtm-  │    │  (fail-closed)│
+       │           │  worker)    │    └───────────────┘
+       │           └──────┬──────┘
+       │                  │
+┌──────▼──────────┐ ┌─────▼──────┐
+│ Postgres        │ │ Redis      │
+│ (Azure Flex)    │ │ (BullMQ +  │
+│ apex-prod-db    │ │  cache)    │
+└─────────────────┘ └────────────┘
+```
 
 ---
 
-## What is Apex?
+## Tech stack
 
-A multi-tenant SaaS platform where businesses sign up, pick their domain, configure AI agents from templates, and deploy autonomous agent teams.
+| Layer            | Technology                                          |
+| ---------------- | --------------------------------------------------- |
+| Frontend         | Next.js 14, Tailwind, shadcn/ui                     |
+| Backend API      | NestJS 11, TypeScript strict                        |
+| Orchestration    | LangGraph.js (StateGraph + `interrupt()` HITL)      |
+| Database         | PostgreSQL (Azure Flexible Server) + Prisma 6       |
+| Queue            | BullMQ + Redis                                      |
+| Auth             | Clerk (Bearer JWT, org-scoped)                      |
+| LLM              | Azure OpenAI (chat + reasoning models)              |
+| Integrations     | Gmail, HubSpot, LinkedIn, Apollo, Serper, Instantly |
+| Infrastructure   | Azure Container Apps (API + worker), Azure ACR      |
+| Frontend hosting | Cloudflare Workers Build (git push → deploy)        |
+| Tests            | Vitest, Playwright                                  |
+| Monorepo         | pnpm workspaces + Turborepo                         |
 
-**Origin story:** "14 agents, 1 founder, $2.7M pipeline in 17 days." We built this for ourselves. Now we're open-sourcing it for everyone.
+---
 
-### Domains
-
-| Domain | Agents | What They Do |
-|--------|--------|-------------|
-| **Sales** | SDR, CRM Sync, Reply Handler | Lead research, ICP scoring, personalized outreach, pipeline management |
-| **Marketing** | Content Writer, Social Engagement, SEO | Scheduled posts, brand voice, engagement, keyword optimization |
-| **Operations** | Inbox Monitor, Reporting, Workflow Automator | Email triage, KPI dashboards, task routing, notifications |
-
-### Pricing (Target)
-
-| Tier | Price | Agents | Domains |
-|------|-------|--------|---------|
-| Starter | $49/mo | 1-2 | 1 domain |
-| Growth | $149/mo | 5-8 | Multi-domain |
-| Enterprise | Custom | Unlimited | All + custom |
-
-## Tech Stack
-
-| Layer | Technology |
-|-------|-----------|
-| Frontend | Next.js 14 + Tailwind CSS + shadcn/ui |
-| Backend | NestJS (REST API) |
-| Database | PostgreSQL + Prisma ORM |
-| Auth | Clerk |
-| Billing | Razorpay |
-| Agent Runtime | Custom orchestration (LLM-agnostic) |
-| Queue/Jobs | BullMQ + Redis |
-| LLM | OpenAI + Anthropic (model routing) |
-| Infra | Azure Container Apps |
-| CI/CD | GitHub Actions |
-
-## Architecture
-
-```
-┌─────────────────────────────────────────┐
-│         Frontend (Next.js 14)           │
-│  Dashboard │ Onboarding │ Agent Config  │
-└──────────────────┬──────────────────────┘
-                   │ REST API
-┌──────────────────▼──────────────────────┐
-│          Backend (NestJS)               │
-│  Auth │ Billing │ Agent Manager │ Integ │
-└──┬───────────┬──────────────┬───────────┘
-   │           │              │
-┌──▼──┐  ┌────▼────┐  ┌──────▼──────┐
-│ DB  │  │  Redis  │  │  LLM APIs   │
-│Prisma│  │ BullMQ │  │ GPT/Claude  │
-└─────┘  └─────────┘  └─────────────┘
-```
-
-## Quick Start
-
-```bash
-# Clone
-git clone https://github.com/Kloudedge-apex/apex-product.git
-cd apex-product
-
-# Install deps
-pnpm install
-
-# Setup env
-cp .env.example .env
-# Edit .env with your keys (app works with mock data if keys aren't set)
-
-# Setup database
-pnpm db:generate
-pnpm db:push
-
-# Run dev
-pnpm dev
-```
-
-**Frontend:** http://localhost:3000
-**API:** http://localhost:4000
-
-## Project Structure
+## Repository layout
 
 ```
 apex-product/
 ├── apps/
-│   ├── web/          # Next.js 14 frontend
-│   │   ├── src/
-│   │   │   ├── app/           # App router pages
-│   │   │   ├── components/    # React components
-│   │   │   └── lib/           # Utilities
-│   │   └── ...
-│   └── api/          # NestJS backend
-│       ├── src/
-│       │   ├── agents/        # Agent CRUD + runtime
-│       │   ├── auth/          # Clerk auth module
-│       │   ├── billing/       # Razorpay integration
-│       │   ├── integrations/  # OAuth + tool connectors
-│       │   ├── orgs/          # Multi-tenant org mgmt
-│       │   ├── runs/          # Agent execution logs
-│       │   └── runtime/       # Agent orchestration engine
-│       └── ...
+│   ├── web/                       Next.js 14 app router frontend
+│   └── api/                       NestJS backend (apex-gtm-api)
+│       └── src/
+│           ├── agents/            Agent CRUD + runtime config
+│           ├── auth/              Clerk integration
+│           ├── billing/           Razorpay
+│           ├── common/            OrgScopeGuard, env validation,
+│           │                      rate-limit, decorators
+│           ├── graph/             LangGraph supervisor + nodes,
+│           │                      PrismaCheckpointSaver, controller
+│           ├── health/            Liveness / readiness
+│           ├── integrations/      Gmail, HubSpot, LinkedIn,
+│           │                      Apollo, Serper, Instantly
+│           ├── leads/             ICP scoring, lead persistence
+│           ├── meetings/          MeetingLedger (no calendar writes)
+│           ├── orgs/              Multi-tenant org provisioning
+│           ├── outreach/          OutreachArtifact (PENDING_REVIEW)
+│           ├── pipeline/          /pipeline/run entry point
+│           ├── prisma/            PrismaService
+│           ├── runs/              Agent execution logs
+│           ├── runtime/           Tool registry, side-effect policy
+│           └── workflows/         WorkflowTemplate + WorkflowRun
 ├── packages/
-│   └── db/           # Prisma schema + client
-├── turbo.json        # Turborepo config
-└── docker-compose.yml
+│   └── db/                        Prisma schema + generated client
+├── docs/
+│   ├── PHASE-2.5-IMPLEMENTATION-REPORT.md
+│   └── CLIENT-ONBOARDING-CHECKLIST.md
+├── workhorse-os/                  Frontend (workforceos.xyz)
+├── docker-compose.yml             Local Postgres + Redis
+└── turbo.json
 ```
 
-## What Needs Building (Hackathon Issues)
+---
 
-Check the [Issues](https://github.com/Kloudedge-apex/apex-product/issues) tab for `hackathon` tagged items. Key areas:
+## Phase 2.5 — Production-Safe Tenant-Zero Pipeline
 
-- **Agent Runtime Engine** — The core orchestration loop (tool selection, LLM calls, state management)
-- **Integration Connectors** — Gmail, Outlook, HubSpot, Salesforce, LinkedIn OAuth flows
-- **Agent Templates** — Pre-built configs for SDR, Content Writer, Inbox Monitor, etc.
-- **Dashboard Analytics** — Charts, metrics, real-time agent status
-- **Multi-tenant Isolation** — Org-scoped data, API key management
-- **Testing** — Unit tests, integration tests, E2E
+Apex itself is the first dogfood org. The pipeline is wired to run end-to-end (ICP → research → scored leads → human approval → reviewable outreach artifacts) with **zero unauthorized external side effects**. See `docs/PHASE-2.5-IMPLEMENTATION-REPORT.md` for the full stage-by-stage report.
 
-## Contributing
+### Safety contract
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide.
+1. **Worker gated** by `WORKER_ENABLED`. Anywhere the flag is unset, BullMQ workers never start.
+2. **Fail-fast env validation** at boot — missing `DATABASE_URL`, `REDIS_URL`, `CLERK_SECRET_KEY`, `ENCRYPTION_KEY` (64 hex chars in prod), `OPENAI_API_KEY`, or `WORKER_ENABLED` aborts startup.
+3. **`SideEffectPolicy` is fail-closed.** Every tool call resolves to an entry in `TOOL_POLICY_METADATA`. Unknown tools default to `EXTERNAL_WRITE + requiresApproval=true + allowedDryRun=false`. The guard runs at the executor layer, so subagent paths cannot bypass it.
+4. **Outreach is dry-run by default.** `send_email` / `hubspot` without an `ApprovalEnvelope` produces a `PENDING_REVIEW` `OutreachArtifact` instead of sending.
+5. **SDR outreach is a graph subgraph**, not a tool call. It builds a brief, drafts a message, QA-checks it (placeholder leaks, length bounds), redrafts once on failure, and **always** terminates at `recordDryRun`.
+6. **Workflows are template-driven.** Register a `WorkflowTemplate`, run it via `POST /workflows/:slug/runs`. Tenant-zero template: `tenant_zero_sdr_outreach_artifact_v1`.
+7. **Meetings never touch external calendars.** Agents create `MeetingLedger` rows with `status=PROPOSED`; humans confirm and mirror to their real calendar by hand.
 
-**TL;DR:**
-1. Fork the repo
-2. Create a branch (`git checkout -b feature/your-feature`)
-3. Make your changes
-4. Run `pnpm lint && pnpm type-check`
-5. Open a PR with a clear description
+### Approval flow
 
-All contributors (human and AI) will be credited.
+```
+   pipeline run
+       │
+       ▼
+  supervisor ──► research ──► scoring ──► human_approval ─( interrupt() )
+                                                  │
+                                            POST /graph/runs/:id/approve
+                                                  │
+                                                  ▼
+                                       SDR outreach subgraph
+                                                  │
+                                                  ▼
+                                    OutreachArtifact (PENDING_REVIEW)
+                                                  │
+                                   POST /outreach-artifacts/:id/approve
+                                                  │
+                                                  ▼
+                                       (real send — future phase)
+```
+
+---
+
+## Quick start (local development)
+
+```bash
+# 1. Install
+pnpm install
+
+# 2. Boot local Postgres + Redis
+docker-compose up -d
+
+# 3. Env
+cp .env.example .env
+# Edit .env — local dev allows x-org-id header (no Clerk required)
+
+# 4. Schema
+pnpm db:generate
+pnpm db:push
+
+# 5. Run
+pnpm dev          # frontend on :3000, API on :4000
+```
+
+### Smoke test the tenant-zero pipeline
+
+```bash
+pnpm --filter @apex/api smoke:tenant-zero --org-id <orgId>
+```
+
+Runs the full pipeline against real Postgres with mocked LeadsService/RuntimeService/LLMService. Asserts: ≥1 `OutreachArtifact` created, all `PENDING_REVIEW`, no `sentAt`/`sendReceiptId`, zero `runtime.triggerRun` calls.
+
+---
+
+## Commands
+
+```bash
+pnpm install          # install workspace deps
+pnpm dev              # frontend + API in dev mode
+pnpm build            # production build (all apps)
+pnpm lint             # eslint across workspace
+pnpm type-check       # tsc --noEmit across workspace
+pnpm test             # vitest unit suites
+pnpm db:generate      # prisma generate
+pnpm db:push          # push schema to current DATABASE_URL
+```
+
+---
+
+## Production deployment
+
+### Backend (Azure Container Apps)
+
+API and worker run from the same image, gated by `WORKER_ENABLED`:
+
+```bash
+# Build & push to ACR
+az acr build -r ledgracrazurecrio \
+  -t apex-gtm/api:<tag> \
+  -f apps/api/Dockerfile .
+
+# Roll API
+az containerapp update -n apex-gtm-api -g Ledgr-prod \
+  --image ledgracrazurecrio.azurecr.io/apex-gtm/api:<tag>
+
+# Roll worker (same image, WORKER_ENABLED=true)
+az containerapp update -n apex-gtm-worker -g Ledgr-prod \
+  --image ledgracrazurecrio.azurecr.io/apex-gtm/api:<tag>
+```
+
+All sensitive env vars are wired via `secretref`:
+`database-url`, `redis-url`, `clerk-secret-key`, `encryption-key` (64 hex chars), `azure-openai-key`, `hubspot-access-token`, `apollo-api-key`, `instantly-api-key`, `serper-api-key`, `admin-api-key`, plus OAuth client secrets.
+
+### Database schema changes
+
+Production DB is locked down by Azure firewall. The workflow for any `prisma db push` against prod:
+
+1. Open temporary firewall rule for your IP.
+2. Dry-run with `prisma migrate diff --from-url $DATABASE_URL --to-schema-datamodel ... --script` and **show the SQL to the human running the change**.
+3. Apply `prisma db push` only after explicit approval.
+4. **Immediately** delete the firewall rule.
+
+This pattern is documented in the team's DB safety memory and was used for every Phase 2.5 schema change (Stages 4, 6, 7, plus the FK fix on `GraphCheckpointWrite`).
+
+### Frontend (Cloudflare Workers Build)
+
+Push to `main` on the frontend repo triggers a build via the Cloudflare Workers Git integration. No manual `wrangler deploy`, no GitHub Actions.
+
+---
+
+## Key invariants & gotchas
+
+- **TypeScript strict mode, no `any`.** Both apps are strict; CI enforces.
+- **Multi-tenant isolation.** Every protected route uses `@OrgId()` resolved from a Clerk JWT (production) or `x-org-id` header (dev). Queries are org-scoped at the service layer; do not trust client-supplied `orgId`.
+- **Side-effect policy.** Any new tool added to `runtime/tools/` must have an entry in `TOOL_POLICY_METADATA` — the policy-regression test (`policy-regression.spec.ts`) snapshots the full table and will fail until updated. This forces an explicit policy decision before shipping.
+- **Outreach quality bounds** (`graph/nodes/sdr-outreach-subgraph.ts`): `MIN_BODY_LEN=30`, `MAX_BODY_LEN=2000`, `MAX_SUBJECT_LEN=120`, `MAX_DRAFT_ATTEMPTS=2`. Placeholder leaks like `{{`, `[FIRST_NAME]`, `TODO`, `<insert` block the message — pinned by `sdr-qa-regression.spec.ts`.
+- **Checkpointer FK note.** `GraphCheckpointWrite` has **no** FK to `GraphCheckpoint`. LangGraph's `PregelLoop` schedules writes for upcoming checkpoints before `put()` persists them; a FK would reject those legitimate writes. Deletion is handled transactionally in `PrismaCheckpointSaver.deleteThread`.
+
+---
+
+## Tests
+
+```bash
+pnpm --filter @apex/api test                      # all API specs
+pnpm --filter @apex/api test policy-regression    # policy table snapshot
+pnpm --filter @apex/api test sdr-qa-regression    # SDR quality boundaries
+pnpm --filter @apex/api test pipeline-graph       # end-to-end graph spec
+pnpm --filter @apex/api smoke:tenant-zero         # real-DB smoke
+```
+
+Test coverage as of Phase 2.5: 96 net-new unit tests across 7 spec files (workflow-templates, workflow-runs, meetings, side-effect-policy, sdr-outreach-subgraph, policy-regression, sdr-qa-regression).
+
+---
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Proprietary — see [LICENSE](LICENSE).
 
-## Built By
+## Built by
 
-[Kloudedge Apex](https://kloudedge.xyz) — Cloud + AI consulting firm turned product company.
-
-Built by Nikhil Sood and Kestrel (AI Chief of Staff), with help from the Moltbook community.
+[Kloudedge Apex](https://kloudedge.xyz). Tenant-zero is Apex itself.
