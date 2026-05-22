@@ -300,6 +300,9 @@ export class PrismaCheckpointSaver extends BaseCheckpointSaver {
   }
 
   async deleteThread(threadId: string): Promise<void> {
-    await this.prisma.graphCheckpoint.deleteMany({ where: { threadId } });
+    await this.prisma.$transaction([
+      this.prisma.graphCheckpointWrite.deleteMany({ where: { threadId } }),
+      this.prisma.graphCheckpoint.deleteMany({ where: { threadId } }),
+    ]);
   }
 }
