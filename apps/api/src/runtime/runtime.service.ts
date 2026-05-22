@@ -50,7 +50,7 @@ export class RuntimeService {
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
     );
 
-    this.queue.enqueue({
+    await this.queue.enqueue({
       id: `job_${run.id}`,
       agentId,
       orgId,
@@ -66,7 +66,7 @@ export class RuntimeService {
 
   async cancelRun(runId: string) {
     const jobId = `job_${runId}`;
-    const cancelled = this.queue.cancel(jobId);
+    const cancelled = await this.queue.cancel(jobId);
 
     if (cancelled) {
       await this.prisma.agentRun.update({
@@ -78,10 +78,10 @@ export class RuntimeService {
     return { cancelled };
   }
 
-  getQueueStats() {
+  async getQueueStats() {
     return {
-      queued: this.queue.getQueueLength(),
-      processing: this.queue.getProcessingCount(),
+      queued: await this.queue.getQueueLength(),
+      processing: await this.queue.getProcessingCount(),
     };
   }
 }

@@ -1,4 +1,4 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, Logger } from "@nestjs/common";
 import { OpenAIFunctionDef } from "./tools/tool.interface";
 
 export interface ChatMessage {
@@ -38,6 +38,8 @@ const COST_PER_1K: Record<string, number> = {
 };
 
 const LLM_TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS) || 60_000;
+const AZURE_OPENAI_API_VERSION =
+  process.env.AZURE_OPENAI_API_VERSION || "2024-08-01-preview";
 
 async function fetchWithTimeout(
   url: string,
@@ -53,9 +55,36 @@ async function fetchWithTimeout(
   }
 }
 
+/**
+ * Map a public OpenAI model name to its Azure deployment name. Azure routes
+ * by deployment name, not model name, so callers can keep using "gpt-4o" etc.
+ * Returns null if Azure isn't configured or no deployment is mapped.
+ */
+function azureDeploymentFor(model: string): string | null {
+  if (!process.env.AZURE_OPENAI_ENDPOINT || !process.env.AZURE_OPENAI_KEY) {
+    return null;
+  }
+  if (model === "gpt-4o-mini") return process.env.AZURE_OPENAI_FAST_DEPLOYMENT || null;
+  if (model === "gpt-4o") return process.env.AZURE_OPENAI_DEPLOYMENT || null;
+  // Unknown model — let it fall through to public OpenAI rather than guessing.
+  return null;
+}
+
 /** Default model for complex tasks — uses Claude when key available, else GPT-4o */
 export function getComplexModel(): string {
   return process.env.ANTHROPIC_API_KEY ? "claude-3-5-sonnet-20241022" : "gpt-4o";
+}
+
+/**
+ * gpt-5/o-series Azure deployments reject `max_tokens` and require
+ * `max_completion_tokens`. gpt-4.x deployments still accept `max_tokens`.
+ */
+function maxTokensParamFor(deployment: string): "max_completion_tokens" | "max_tokens" {
+  const d = deployment.toLowerCase();
+  if (d.startsWith("gpt-5") || d.startsWith("o1") || d.startsWith("o3") || d.startsWith("o4")) {
+    return "max_completion_tokens";
+  }
+  return "max_tokens";
 }
 
 export interface ChatOptions {
@@ -68,7 +97,27 @@ export interface ChatOptions {
 
 @Injectable()
 export class LLMService {
+  private readonly logger = new Logger(LLMService.name);
   private apiKey = process.env.OPENAI_API_KEY;
+  private readonly azureKey = process.env.AZURE_OPENAI_KEY;
+  private readonly azureEndpoint = process.env.AZURE_OPENAI_ENDPOINT;
+
+  constructor() {
+    if (process.env.NODE_ENV === "production") {
+      const hasAzure = !!(this.azureKey && this.azureEndpoint);
+      const hasOpenAI = !!this.apiKey;
+      const hasAnthropic = !!process.env.ANTHROPIC_API_KEY;
+      if (!hasAzure && !hasOpenAI && !hasAnthropic) {
+        throw new Error(
+          "LLMService: no provider configured in production. " +
+            "Set AZURE_OPENAI_ENDPOINT+AZURE_OPENAI_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY.",
+        );
+      }
+      this.logger.log(
+        `LLM providers — azure:${hasAzure} openai:${hasOpenAI} anthropic:${hasAnthropic}`,
+      );
+    }
+  }
 
   async chat(messages: ChatMessage[], options?: ChatOptions): Promise<LLMResponse> {
     const model = options?.model || "gpt-4o-mini";
@@ -95,10 +144,83 @@ export class LLMService {
     tools?: OpenAIFunctionDef[],
     toolChoice?: string,
   ): Promise<LLMResponse> {
+    const azureDeployment = azureDeploymentFor(model);
+    if (azureDeployment) {
+      return this.callAzureOpenAI(messages, model, azureDeployment, maxTokens, tools, toolChoice);
+    }
     if (this.apiKey) {
       return this.callOpenAI(messages, model, maxTokens, tools, toolChoice);
     }
+    if (process.env.NODE_ENV === "production") {
+      // Constructor guard should have caught this, but defend-in-depth: refuse
+      // to return mock data in prod — that's how fake emails get sent.
+      throw new Error(
+        `LLMService: no provider available for model "${model}" in production.`,
+      );
+    }
     return this.mockResponse(messages, model, maxTokens, tools);
+  }
+
+  private async callAzureOpenAI(
+    messages: ChatMessage[],
+    model: string,
+    deployment: string,
+    maxTokens: number,
+    tools?: OpenAIFunctionDef[],
+    toolChoice?: string,
+  ): Promise<LLMResponse> {
+    const url = `${this.azureEndpoint!.replace(/\/$/, "")}/openai/deployments/${encodeURIComponent(
+      deployment,
+    )}/chat/completions?api-version=${AZURE_OPENAI_API_VERSION}`;
+
+    const body: Record<string, unknown> = {
+      messages,
+      [maxTokensParamFor(deployment)]: maxTokens,
+      temperature: 0.7,
+    };
+    if (tools && tools.length > 0) {
+      body.tools = tools;
+      body.tool_choice = toolChoice || "auto";
+    }
+
+    const response = await fetchWithTimeout(
+      url,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "api-key": this.azureKey!,
+        },
+        body: JSON.stringify(body),
+      },
+      LLM_TIMEOUT_MS,
+    );
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      throw new Error(`Azure OpenAI ${response.status}: ${text.slice(0, 200)}`);
+    }
+
+    const data = (await response.json()) as {
+      choices: Array<{
+        message: { content: string | null; tool_calls?: ToolCallMessage[] };
+        finish_reason: string;
+      }>;
+      usage: { total_tokens: number };
+    };
+
+    const choice = data.choices[0];
+    const tokensUsed = data.usage?.total_tokens || 0;
+    const costPer1K = COST_PER_1K[model] || COST_PER_1K["gpt-4o-mini"];
+
+    return {
+      content: choice?.message?.content || "",
+      tokensUsed,
+      model,
+      cost: (tokensUsed / 1000) * costPer1K,
+      toolCalls: choice?.message?.tool_calls,
+      finishReason: choice?.finish_reason,
+    };
   }
 
   private async callOpenAI(
@@ -391,5 +513,69 @@ export class LLMService {
 
   getTokenLimit(plan: string): number {
     return TOKEN_LIMITS[plan] || TOKEN_LIMITS.TRIAL;
+  }
+
+  /**
+   * Generate an embedding vector for a piece of text. Used by MemoryService
+   * for semantic retrieval. Returns null when no embedding provider is
+   * configured (dev/test without keys); callers must handle null gracefully.
+   *
+   * Provider order: Azure OpenAI (if AZURE_OPENAI_EMBEDDING_DEPLOYMENT is set)
+   * → OpenAI public API → null.
+   */
+  async embed(text: string): Promise<number[] | null> {
+    const trimmed = text.trim().slice(0, 8000);
+    if (!trimmed) return null;
+
+    const azureDeployment = process.env.AZURE_OPENAI_EMBEDDING_DEPLOYMENT;
+    if (this.azureEndpoint && this.azureKey && azureDeployment) {
+      const url = `${this.azureEndpoint.replace(/\/$/, "")}/openai/deployments/${azureDeployment}/embeddings?api-version=${AZURE_OPENAI_API_VERSION}`;
+      const response = await fetchWithTimeout(
+        url,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "api-key": this.azureKey },
+          body: JSON.stringify({ input: trimmed }),
+        },
+        LLM_TIMEOUT_MS,
+      );
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(`Azure embedding failed: ${response.status} ${body}`);
+      }
+      const data = (await response.json()) as { data: { embedding: number[] }[] };
+      return data.data[0]?.embedding ?? null;
+    }
+
+    if (this.apiKey) {
+      const response = await fetchWithTimeout(
+        "https://api.openai.com/v1/embeddings",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${this.apiKey}`,
+          },
+          body: JSON.stringify({ model: "text-embedding-3-large", input: trimmed }),
+        },
+        LLM_TIMEOUT_MS,
+      );
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(`OpenAI embedding failed: ${response.status} ${body}`);
+      }
+      const data = (await response.json()) as { data: { embedding: number[] }[] };
+      return data.data[0]?.embedding ?? null;
+    }
+
+    if (process.env.NODE_ENV === "production") {
+      throw new Error(
+        "LLMService.embed: no embedding provider configured. " +
+          "Set AZURE_OPENAI_EMBEDDING_DEPLOYMENT or OPENAI_API_KEY.",
+      );
+    }
+
+    this.logger.warn("embed() called without an embedding provider — returning null (dev only)");
+    return null;
   }
 }

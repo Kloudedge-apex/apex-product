@@ -598,6 +598,85 @@ export class LeadsService {
 
   // ─── Progress & Job Detail ───────────────────────────
 
+  // ─── Stage Runners (used by the LangGraph pipeline) ──────────────────────
+  //
+  // Each runner owns its own ScrapeJob lifecycle and calls the same
+  // private stage logic that `runPipeline` does. The graph supervisor invokes
+  // these one at a time so each stage gets its own checkpoint + UI row.
+
+  async runSourcingStage(orgId: string, icpProfileId: string): Promise<{ companies: number; people: number }> {
+    const icp = await this.prisma.icpProfile.findFirstOrThrow({
+      where: { id: icpProfileId, orgId },
+    });
+
+    const companyJobId = await this.createJob(orgId, icpProfileId, "COMPANY_DISCOVERY");
+    let companies = 0;
+    try {
+      await this.markJobRunning(companyJobId);
+      const ids = await this.discoverCompanies(orgId, icp, companyJobId);
+      companies = ids.length;
+      await this.markJobCompleted(companyJobId, companies);
+    } catch (err) {
+      await this.markJobFailed(companyJobId, err);
+      throw err;
+    }
+
+    const peopleJobId = await this.createJob(orgId, icpProfileId, "PEOPLE_DISCOVERY");
+    let people = 0;
+    try {
+      await this.markJobRunning(peopleJobId);
+      people = await this.discoverPeople(orgId, icp);
+      await this.markJobCompleted(peopleJobId, people);
+    } catch (err) {
+      await this.markJobFailed(peopleJobId, err);
+      throw err;
+    }
+
+    return { companies, people };
+  }
+
+  async runEnrichmentStage(orgId: string, icpProfileId: string): Promise<{ merged: number; enriched: number }> {
+    const identityJobId = await this.createJob(orgId, icpProfileId, "IDENTITY_RESOLUTION");
+    let merged = 0;
+    try {
+      await this.markJobRunning(identityJobId);
+      merged = await this.identityResolver.resolveAll(orgId);
+      await this.markJobCompleted(identityJobId, merged);
+    } catch (err) {
+      await this.markJobFailed(identityJobId, err);
+      throw err;
+    }
+
+    const contactJobId = await this.createJob(orgId, icpProfileId, "CONTACT_ENRICHMENT");
+    let enriched = 0;
+    try {
+      await this.markJobRunning(contactJobId);
+      enriched = await this.enrichContacts(orgId);
+      await this.markJobCompleted(contactJobId, enriched);
+    } catch (err) {
+      await this.markJobFailed(contactJobId, err);
+      throw err;
+    }
+
+    return { merged, enriched };
+  }
+
+  async runScoringStage(orgId: string, icpProfileId: string): Promise<{ scored: number }> {
+    const icp = await this.prisma.icpProfile.findFirstOrThrow({
+      where: { id: icpProfileId, orgId },
+    });
+    const jobId = await this.createJob(orgId, icpProfileId, "SCORING");
+    try {
+      await this.markJobRunning(jobId);
+      const scored = await this.scoreLeads(orgId, icp);
+      await this.markJobCompleted(jobId, scored);
+      return { scored };
+    } catch (err) {
+      await this.markJobFailed(jobId, err);
+      throw err;
+    }
+  }
+
   private async updateJobProgress(jobId: string, processedItems: number, totalItems: number, metadata?: Record<string, unknown>) {
     const progress = totalItems > 0 ? processedItems / totalItems : 0;
     await this.prisma.scrapeJob.update({
