@@ -54,8 +54,8 @@ definitions:
           - >
             az acr build
             --registry ledgracr
-            --image apex-gtm-api:$BITBUCKET_COMMIT
-            --image apex-gtm-api:latest
+            --image apex-api:$BITBUCKET_COMMIT
+            --image apex-api:latest
             --file apps/api/Dockerfile
             .
 
@@ -69,7 +69,7 @@ definitions:
             az containerapp update
             --name apex-gtm-api
             --resource-group Ledgr-prod
-            --image ledgracr.azurecr.io/apex-gtm-api:$BITBUCKET_COMMIT
+            --image ledgracr.azurecr.io/apex-api:$BITBUCKET_COMMIT
             --output none
           - echo "Rolled apex-gtm-api to $BITBUCKET_COMMIT"
 
@@ -83,7 +83,7 @@ definitions:
             az containerapp update
             --name apex-gtm-worker
             --resource-group Ledgr-prod
-            --image ledgracr.azurecr.io/apex-gtm-api:$BITBUCKET_COMMIT
+            --image ledgracr.azurecr.io/apex-api:$BITBUCKET_COMMIT
             --output none
           - echo "Rolled apex-gtm-worker to $BITBUCKET_COMMIT"
 
@@ -109,9 +109,9 @@ pipelines:
   custom:
     redeploy-current-master:
       - step:
-          name: Roll API + worker to apex-gtm/api:latest
+          name: Roll API + worker to apex-api:latest
           image: mcr.microsoft.com/azure-cli:latest
           script:
             - az login --service-principal -u $AZURE_SP_APP_ID -p $AZURE_SP_PASSWORD --tenant $AZURE_TENANT_ID --output none
-            - az containerapp update -n apex-gtm-api -g Ledgr-prod --image ledgracr.azurecr.io/apex-gtm-api:latest --output none
-            - az containerapp update -n apex-gtm-worker -g Ledgr-prod --image ledgracr.azurecr.io/apex-gtm-api:latest --output none
+            - az containerapp update -n apex-gtm-api -g Ledgr-prod --image ledgracr.azurecr.io/apex-api:latest --output none
+            - az containerapp update -n apex-gtm-worker -g Ledgr-prod --image ledgracr.azurecr.io/apex-api:latest --output none

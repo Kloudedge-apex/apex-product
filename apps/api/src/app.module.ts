@@ -17,6 +17,7 @@ import { OutreachModule } from "./outreach/outreach.module";
 import { WorkflowsModule } from "./workflows/workflows.module";
 import { MeetingsModule } from "./meetings/meetings.module";
 import { DashboardModule } from "./dashboard/dashboard.module";
+import { PolicyEventsModule } from "./policy-events/policy-events.module";
 import { OrgScopeGuard } from "./common/org-scope.guard";
 import { RateLimitGuard } from "./common/rate-limit.guard";
 
@@ -45,6 +46,7 @@ import { RateLimitGuard } from "./common/rate-limit.guard";
     WorkflowsModule,
     MeetingsModule,
     DashboardModule,
+    PolicyEventsModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: OrgScopeGuard },

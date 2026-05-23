@@ -928,6 +928,168 @@ export class LeadsService {
     return [header, ...rows].join('\n');
   }
 
+  async listLeadsForUi(
+    orgId: string,
+    opts: {
+      stage?: "sourced" | "enriched" | "qualified" | "in_crm" | "contacted" | "replied" | "meeting";
+      minScore?: number;
+      page: number;
+      perPage: number;
+      search?: string;
+    },
+  ): Promise<{
+    leads: Array<{
+      id: string;
+      name: string;
+      title: string;
+      company: string;
+      domain: string;
+      email: string;
+      industry: string;
+      companySize: string;
+      techStack: string[];
+      score: number;
+      scoreBreakdown: Array<{ label: string; value: number }>;
+      stage: "sourced" | "enriched" | "qualified" | "in_crm" | "contacted" | "replied" | "meeting";
+      source: string;
+      emailStatus: "not_sent" | "sent" | "opened" | "replied" | "bounced";
+      timeline: Array<{ stage: string; at: string }>;
+      createdAt: string;
+    }>;
+    total: number;
+  }> {
+    const where: Record<string, unknown> = { company: { orgId } };
+    if (opts.minScore !== undefined) {
+      where.scores = { some: { orgId, score: { gte: opts.minScore } } };
+    }
+    if (opts.search && opts.search.trim()) {
+      const q = opts.search.trim().slice(0, 100);
+      where.OR = [
+        { firstName: { contains: q, mode: "insensitive" } },
+        { lastName: { contains: q, mode: "insensitive" } },
+        { title: { contains: q, mode: "insensitive" } },
+        { company: { is: { name: { contains: q, mode: "insensitive" } } } },
+      ];
+    }
+
+    const [raw, total] = await Promise.all([
+      this.prisma.person.findMany({
+        where,
+        include: {
+          company: {
+            select: { name: true, domain: true, industry: true, employeeRange: true, techStack: true },
+          },
+          scores: { where: { orgId }, select: { score: true, breakdown: true, qualifiedAt: true } },
+          emails: {
+            select: { email: true, verified: true, confidence: true },
+            orderBy: { confidence: "desc" },
+            take: 1,
+          },
+        },
+        skip: (opts.page - 1) * opts.perPage,
+        take: opts.perPage,
+        orderBy: { createdAt: "desc" },
+      }),
+      this.prisma.person.count({ where }),
+    ]);
+
+    const personIds = raw.map((p) => p.id);
+
+    const [artifactsByRecipient, meetingsByPerson] = await Promise.all([
+      personIds.length
+        ? this.prisma.outreachArtifact.findMany({
+            where: { orgId, recipientRef: { in: personIds } },
+            select: { recipientRef: true, status: true, sentAt: true },
+          })
+        : Promise.resolve([]),
+      personIds.length
+        ? this.prisma.meetingLedger.findMany({
+            where: { orgId, personId: { in: personIds } },
+            select: { personId: true, status: true },
+          })
+        : Promise.resolve([]),
+    ]);
+
+    const contactedSet = new Set<string>();
+    for (const a of artifactsByRecipient) {
+      if (a.recipientRef && a.sentAt) contactedSet.add(a.recipientRef);
+    }
+    const meetingSet = new Set<string>();
+    for (const m of meetingsByPerson) {
+      if (m.personId) meetingSet.add(m.personId);
+    }
+
+    type Stage = "sourced" | "enriched" | "qualified" | "in_crm" | "contacted" | "replied" | "meeting";
+    const deriveStage = (
+      personId: string,
+      hasEmail: boolean,
+      qualifiedAt: Date | null | undefined,
+    ): Stage => {
+      if (meetingSet.has(personId)) return "meeting";
+      if (contactedSet.has(personId)) return "contacted";
+      if (qualifiedAt) return "qualified";
+      if (hasEmail) return "enriched";
+      return "sourced";
+    };
+
+    const normalizeBreakdown = (
+      raw: unknown,
+    ): Array<{ label: string; value: number }> => {
+      if (Array.isArray(raw)) {
+        return raw
+          .filter((b): b is Record<string, unknown> => !!b && typeof b === "object")
+          .map((b) => ({
+            label: typeof b.label === "string" ? b.label : typeof b.category === "string" ? b.category : "Score",
+            value:
+              typeof b.value === "number"
+                ? b.value
+                : typeof b.points === "number"
+                  ? b.points
+                  : 0,
+          }));
+      }
+      if (raw && typeof raw === "object") {
+        return Object.entries(raw as Record<string, unknown>).map(([k, v]) => ({
+          label: k,
+          value: typeof v === "number" ? v : 0,
+        }));
+      }
+      return [];
+    };
+
+    const leads = raw.map((p) => {
+      const email = p.emails[0]?.email ?? "";
+      const score = p.scores[0]?.score ?? 0;
+      const stage = deriveStage(p.id, !!email, p.scores[0]?.qualifiedAt);
+      return {
+        id: p.id,
+        name: `${p.firstName} ${p.lastName}`.trim(),
+        title: p.title ?? "",
+        company: p.company?.name ?? "",
+        domain: p.company?.domain ?? "",
+        email,
+        industry: p.company?.industry ?? "",
+        companySize: p.company?.employeeRange ?? "",
+        techStack: p.company?.techStack ?? [],
+        score,
+        scoreBreakdown: normalizeBreakdown(p.scores[0]?.breakdown),
+        stage,
+        source: "discovery",
+        emailStatus: (stage === "contacted" || stage === "meeting" ? "sent" : "not_sent") as
+          | "not_sent"
+          | "sent"
+          | "opened"
+          | "replied"
+          | "bounced",
+        timeline: [],
+        createdAt: p.createdAt.toISOString(),
+      };
+    });
+
+    const filtered = opts.stage ? leads.filter((l) => l.stage === opts.stage) : leads;
+    return { leads: filtered, total };
+  }
+
   async getStats(orgId: string) {
     const [companies, people, emails, qualified] = await Promise.all([
       this.prisma.company.count({ where: { orgId } }),

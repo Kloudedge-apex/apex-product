@@ -15,9 +15,51 @@ import { OrgId } from "../common/org-context.decorator";
 import { LeadsService } from "./leads.service";
 import type { Seniority, Department } from "@prisma/client";
 
+type LeadsUiStage =
+  | "sourced"
+  | "enriched"
+  | "qualified"
+  | "in_crm"
+  | "contacted"
+  | "replied"
+  | "meeting";
+
+const LEAD_UI_STAGES: ReadonlySet<LeadsUiStage> = new Set([
+  "sourced",
+  "enriched",
+  "qualified",
+  "in_crm",
+  "contacted",
+  "replied",
+  "meeting",
+]);
+
 @Controller("leads")
 export class LeadsController {
   constructor(private readonly leads: LeadsService) {}
+
+  // ─── Unified UI list ─────────────────────────────────
+
+  @Get()
+  listLeads(
+    @OrgId() orgId: string | undefined,
+    @Query("stage") stage?: string,
+    @Query("min_score") minScore?: string,
+    @Query("page") page?: string,
+    @Query("per_page") perPage?: string,
+    @Query("search") search?: string,
+  ) {
+    if (!orgId) throw new BadRequestException("orgId required");
+    const stageNarrow: LeadsUiStage | undefined =
+      stage && LEAD_UI_STAGES.has(stage as LeadsUiStage) ? (stage as LeadsUiStage) : undefined;
+    return this.leads.listLeadsForUi(orgId, {
+      stage: stageNarrow,
+      minScore: minScore ? Math.max(0, parseInt(minScore, 10)) : undefined,
+      page: Math.max(1, parseInt(page ?? "1", 10)),
+      perPage: Math.min(100, Math.max(1, parseInt(perPage ?? "50", 10))),
+      search: search?.trim() || undefined,
+    });
+  }
 
   // ─── ICP ─────────────────────────────────────────────
 
