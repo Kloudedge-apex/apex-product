@@ -12,7 +12,7 @@
 #   AZURE_TENANT_ID         Azure AD tenant id
 #
 # The SP needs:
-#   - AcrPush on ledgracrazurecrio (for `az acr build`)
+#   - AcrPush on ledgracr (for `az acr build`)
 #   - Contributor on resource group Ledgr-prod (for `az containerapp update`)
 #
 # DB schema changes are NOT touched by CI — keep the existing
@@ -53,9 +53,9 @@ definitions:
           - az login --service-principal -u $AZURE_SP_APP_ID -p $AZURE_SP_PASSWORD --tenant $AZURE_TENANT_ID --output none
           - >
             az acr build
-            --registry ledgracrazurecrio
-            --image apex-gtm/api:$BITBUCKET_COMMIT
-            --image apex-gtm/api:latest
+            --registry ledgracr
+            --image apex-gtm-api:$BITBUCKET_COMMIT
+            --image apex-gtm-api:latest
             --file apps/api/Dockerfile
             .
 
@@ -69,7 +69,7 @@ definitions:
             az containerapp update
             --name apex-gtm-api
             --resource-group Ledgr-prod
-            --image ledgracrazurecrio.azurecr.io/apex-gtm/api:$BITBUCKET_COMMIT
+            --image ledgracr.azurecr.io/apex-gtm-api:$BITBUCKET_COMMIT
             --output none
           - echo "Rolled apex-gtm-api to $BITBUCKET_COMMIT"
 
@@ -83,7 +83,7 @@ definitions:
             az containerapp update
             --name apex-gtm-worker
             --resource-group Ledgr-prod
-            --image ledgracrazurecrio.azurecr.io/apex-gtm/api:$BITBUCKET_COMMIT
+            --image ledgracr.azurecr.io/apex-gtm-api:$BITBUCKET_COMMIT
             --output none
           - echo "Rolled apex-gtm-worker to $BITBUCKET_COMMIT"
 
@@ -113,5 +113,5 @@ pipelines:
           image: mcr.microsoft.com/azure-cli:latest
           script:
             - az login --service-principal -u $AZURE_SP_APP_ID -p $AZURE_SP_PASSWORD --tenant $AZURE_TENANT_ID --output none
-            - az containerapp update -n apex-gtm-api -g Ledgr-prod --image ledgracrazurecrio.azurecr.io/apex-gtm/api:latest --output none
-            - az containerapp update -n apex-gtm-worker -g Ledgr-prod --image ledgracrazurecrio.azurecr.io/apex-gtm/api:latest --output none
+            - az containerapp update -n apex-gtm-api -g Ledgr-prod --image ledgracr.azurecr.io/apex-gtm-api:latest --output none
+            - az containerapp update -n apex-gtm-worker -g Ledgr-prod --image ledgracr.azurecr.io/apex-gtm-api:latest --output none
