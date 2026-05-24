@@ -13,6 +13,24 @@ import {
 } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { EvidenceLedgerService } from "../observability/evidence-ledger.service";
+import { LangSmithService } from "../observability/langsmith.service";
+import { OutreachSendQueueService } from "./outreach-send-queue.service";
+
+/** Dataset name for the regression set of rejected SDR drafts. */
+const BAD_SDR_DRAFTS_DATASET = "apex-bad-sdr-drafts";
+
+/**
+ * Extract the LangSmith run id stashed on the artifact at create-time.
+ * Today this lives in `payload.langsmith_run_id` because OutreachArtifact has
+ * no first-class column for it; if/when that column is added, prefer it and
+ * fall back here for legacy rows. Returns null for legacy artifacts created
+ * before runId capture was wired up.
+ */
+function extractLangsmithRunId(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") return null;
+  const candidate = (payload as Record<string, unknown>).langsmith_run_id;
+  return typeof candidate === "string" && candidate.length > 0 ? candidate : null;
+}
 
 /**
  * Maps the tool name reported by the executor to the channel enum we store
@@ -44,6 +62,8 @@ export class OutreachArtifactsService {
   constructor(
     private readonly prisma: PrismaService,
     @Optional() private readonly evidenceLedger?: EvidenceLedgerService,
+    @Optional() private readonly sendQueue?: OutreachSendQueueService,
+    @Optional() private readonly langsmith?: LangSmithService,
   ) {}
 
   /**
@@ -128,7 +148,7 @@ export class OutreachArtifactsService {
         `Artifact ${id} is ${artifact.status}; only PENDING_REVIEW can be approved`,
       );
     }
-    return this.prisma.outreachArtifact.update({
+    const updated = await this.prisma.outreachArtifact.update({
       where: { id },
       data: {
         status: OutreachArtifactStatus.APPROVED,
@@ -136,6 +156,28 @@ export class OutreachArtifactsService {
         reviewedAt: new Date(),
       },
     });
+
+    // Hand off to the send worker. Best-effort: a queue outage must not
+    // poison the approve API — the in-memory poller in dev and a future
+    // recovery sweep can pick up APPROVED rows that never made it onto the
+    // queue. We swallow the error here and log; SendOutreachWorker's polling
+    // mode would also pick this up on its next tick.
+    if (this.sendQueue) {
+      try {
+        await this.sendQueue.enqueue({
+          artifactId: updated.id,
+          orgId: updated.orgId,
+        });
+      } catch (err) {
+        this.logger.error(
+          `Failed to enqueue artifact ${updated.id} for send: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+
+    return updated;
   }
 
   async reject(
@@ -150,7 +192,7 @@ export class OutreachArtifactsService {
         `Artifact ${id} is ${artifact.status}; only PENDING_REVIEW can be rejected`,
       );
     }
-    return this.prisma.outreachArtifact.update({
+    const updated = await this.prisma.outreachArtifact.update({
       where: { id },
       data: {
         status: OutreachArtifactStatus.REJECTED,
@@ -159,6 +201,36 @@ export class OutreachArtifactsService {
         reviewerNote: reviewerNote ?? null,
       },
     });
+
+    // Best-effort: append the generating LangSmith run to the bad-drafts
+    // regression dataset so evaluators can be tested against real human
+    // judgments. Never throws — dataset upload must not block the reject API.
+    const runId = extractLangsmithRunId(artifact.payload);
+    if (!runId) {
+      this.logger.debug(
+        `Artifact ${id} has no langsmith_run_id — skipping dataset append (legacy or tracing-disabled)`,
+      );
+    } else if (this.langsmith) {
+      void this.langsmith
+        .addRunToDataset(BAD_SDR_DRAFTS_DATASET, runId, {
+          artifact_id: updated.id,
+          org_id: updated.orgId,
+          graph_run_id: updated.graphRunId,
+          channel: updated.channel,
+          recipient_ref: updated.recipientRef,
+          reviewer_note: reviewerNote ?? null,
+          reviewed_by: reviewedBy,
+        })
+        .catch((err) => {
+          this.logger.warn(
+            `addRunToDataset threw for artifact=${updated.id} runId=${runId}: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        });
+    }
+
+    return updated;
   }
 }
 

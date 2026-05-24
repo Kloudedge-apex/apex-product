@@ -9,6 +9,7 @@ import {
   HttpCode,
   HttpStatus,
   BadRequestException,
+  Logger,
 } from "@nestjs/common";
 import type { Response } from "express";
 import { OrgId } from "../common/org-context.decorator";
@@ -36,6 +37,8 @@ const LEAD_UI_STAGES: ReadonlySet<LeadsUiStage> = new Set([
 
 @Controller("leads")
 export class LeadsController {
+  private readonly logger = new Logger(LeadsController.name);
+
   constructor(private readonly leads: LeadsService) {}
 
   // ─── Unified UI list ─────────────────────────────────
@@ -132,6 +135,11 @@ export class LeadsController {
     const profileId = body.icpProfileId ?? body.icpId;
     if (!profileId)
       throw new BadRequestException("icpProfileId or icpId required");
+    if (process.env.LEGACY_TRIGGER_DISCOVERY_ENABLED !== "true") {
+      this.logger.warn(
+        "triggerDiscovery is deprecated — set LEGACY_TRIGGER_DISCOVERY_ENABLED=true to opt back in; graph supervisor is now the single entry point",
+      );
+    }
     return this.leads.triggerDiscovery(orgId, profileId);
   }
 

@@ -103,6 +103,54 @@ describe("ToolRegistry", () => {
 
       expect(tools1.map((t) => t.name)).toEqual(tools2.map((t) => t.name));
     });
+
+    it("should scope Reply Handler to research + memory + reply-only send_email", () => {
+      const tools = registry.getForTemplate("Reply Handler");
+      const names = tools.map((t) => t.name);
+
+      expect(names).toContain("web_search");
+      expect(names).toContain("web_scrape");
+      expect(names).toContain("send_email");
+      // memory tool is only registered when MemoryService is wired in
+      expect(names).not.toContain("hubspot");
+      expect(names).not.toContain("lead_score");
+      expect(names).not.toContain("company_research");
+    });
+
+    it("should scope SEO Agent to research-only tools (no send_email, no hubspot)", () => {
+      const tools = registry.getForTemplate("SEO Agent");
+      const names = tools.map((t) => t.name);
+
+      expect(names).toContain("web_search");
+      expect(names).toContain("web_scrape");
+      expect(names).toContain("company_research");
+      expect(names).not.toContain("send_email");
+      expect(names).not.toContain("hubspot");
+      expect(names).not.toContain("lead_score");
+    });
+  });
+
+  describe("getAllowedToolNames", () => {
+    it("should return the exclusive whitelist for a known template", () => {
+      const allowed = registry.getAllowedToolNames("Reply Handler");
+      expect(allowed).toEqual(["web_search", "web_scrape", "memory", "send_email"]);
+    });
+
+    it("should return the exclusive whitelist for SEO Agent", () => {
+      const allowed = registry.getAllowedToolNames("SEO Agent");
+      expect(allowed).toEqual(["web_search", "web_scrape", "company_research", "memory"]);
+    });
+
+    it("should return null for an unknown template (fallback = unrestricted)", () => {
+      const allowed = registry.getAllowedToolNames("Unknown Template");
+      expect(allowed).toBeNull();
+    });
+
+    it("should be case-insensitive", () => {
+      const a = registry.getAllowedToolNames("REPLY HANDLER");
+      const b = registry.getAllowedToolNames("reply handler");
+      expect(a).toEqual(b);
+    });
   });
 });
 

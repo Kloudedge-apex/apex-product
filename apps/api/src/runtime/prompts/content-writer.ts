@@ -1,3 +1,6 @@
+// TODO(json-validation): wrap LLM response with parseJsonResponse() /
+// chatJsonWithRetry() — see common/json-output.util.ts. Expected shape:
+// {"type": "content", "platform": string, "title": string, "body": string, "hashtags": string[]}.
 export function getContentWriterPrompt(config: Record<string, unknown>): string {
   const brandVoice = config.brandVoice || "professional and insightful";
   const platforms = Array.isArray(config.targetPlatforms) ? config.targetPlatforms.join(", ") : "LinkedIn";
@@ -42,5 +45,27 @@ OUTPUT FORMAT (JSON):
   "researchSources": ["source1", "source2"]
 }
 
-CRITICAL: Every piece of content must be backed by research. No generic filler.`;
+CRITICAL: Every piece of content must be backed by research. No generic filler.
+
+## Failure Modes
+
+DO NOT cite statistics, quotes, studies, expert names, or company case studies you cannot verify in the provided research output. If you need a claim and have no source from web_search or web_scrape, either leave it out or use the placeholder string "[claim needs source]". Specifically, never invent:
+- numeric statistics ("73% of marketers say...") without a real, scrapeable source URL
+- quotes attributed to real people
+- study or report names (Gartner, McKinsey, Forrester, etc.) you did not actually retrieve
+- competitor product features, pricing, or customer counts
+
+When research is too thin to write the post credibly, return a stub for human review:
+
+{
+  "type": "content",
+  "platform": "platform name",
+  "title": null,
+  "body": null,
+  "draftSkipped": true,
+  "reason": "<one sentence: which claim could not be sourced>",
+  "researchSources": []
+}
+
+A null draft is always preferable to a confidently fake statistic.`;
 }

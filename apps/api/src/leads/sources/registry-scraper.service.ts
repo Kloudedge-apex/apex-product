@@ -1,5 +1,6 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+import { fetchWithRetry, withCircuitBreaker } from "../../common/http-retry.util";
 
 interface DiscoveredCompany {
   domain: string;
@@ -58,15 +59,18 @@ export class RegistryScraper {
   /** Search EDGAR full-text search for companies */
   private async searchEdgarCompanies(query: string): Promise<DiscoveredCompany[]> {
     try {
-      const res = await fetch(
-        `https://efts.sec.gov/LATEST/search-index?q=${encodeURIComponent(`"${query}"`)}&forms=10-K&dateRange=custom&startdt=2024-01-01`,
-        {
-          headers: {
-            "User-Agent": "WorkforceOS lead-engine support@workforceos.com",
-            Accept: "application/json",
+      const res = await withCircuitBreaker("edgar", () =>
+        fetchWithRetry(
+          `https://efts.sec.gov/LATEST/search-index?q=${encodeURIComponent(`"${query}"`)}&forms=10-K&dateRange=custom&startdt=2024-01-01`,
+          {
+            headers: {
+              "User-Agent": "WorkforceOS lead-engine support@workforceos.com",
+              Accept: "application/json",
+            },
+            signal: AbortSignal.timeout(10000),
           },
-          signal: AbortSignal.timeout(10000),
-        },
+          { provider: "edgar" },
+        ),
       );
 
       if (!res.ok) return [];
@@ -103,14 +107,17 @@ export class RegistryScraper {
     }
 
     try {
-      const res = await fetch(
-        `https://api.company-information.service.gov.uk/company/${companyNumber}/officers`,
-        {
-          headers: {
-            Authorization: `Basic ${Buffer.from(this.companiesHouseKey + ":").toString("base64")}`,
+      const res = await withCircuitBreaker("companies-house", () =>
+        fetchWithRetry(
+          `https://api.company-information.service.gov.uk/company/${companyNumber}/officers`,
+          {
+            headers: {
+              Authorization: `Basic ${Buffer.from(this.companiesHouseKey + ":").toString("base64")}`,
+            },
+            signal: AbortSignal.timeout(10000),
           },
-          signal: AbortSignal.timeout(10000),
-        },
+          { provider: "companies-house" },
+        ),
       );
 
       if (!res.ok) return [];
@@ -150,15 +157,18 @@ export class RegistryScraper {
     // Fetch company submissions which include officer info
     try {
       const paddedCik = cik.padStart(10, "0");
-      const res = await fetch(
-        `https://data.sec.gov/submissions/CIK${paddedCik}.json`,
-        {
-          headers: {
-            "User-Agent": "WorkforceOS lead-engine support@workforceos.com",
-            Accept: "application/json",
+      const res = await withCircuitBreaker("edgar", () =>
+        fetchWithRetry(
+          `https://data.sec.gov/submissions/CIK${paddedCik}.json`,
+          {
+            headers: {
+              "User-Agent": "WorkforceOS lead-engine support@workforceos.com",
+              Accept: "application/json",
+            },
+            signal: AbortSignal.timeout(10000),
           },
-          signal: AbortSignal.timeout(10000),
-        },
+          { provider: "edgar" },
+        ),
       );
 
       if (!res.ok) return [];
@@ -178,15 +188,18 @@ export class RegistryScraper {
   /** Find a company's CIK number via EDGAR company search */
   private async findEdgarCik(companyName: string): Promise<string | null> {
     try {
-      const res = await fetch(
-        `https://www.sec.gov/cgi-bin/browse-edgar?company=${encodeURIComponent(companyName)}&CIK=&type=10-K&dateb=&owner=include&count=1&search_text=&action=getcompany&output=atom`,
-        {
-          headers: {
-            "User-Agent": "WorkforceOS lead-engine support@workforceos.com",
-            Accept: "application/atom+xml",
+      const res = await withCircuitBreaker("edgar", () =>
+        fetchWithRetry(
+          `https://www.sec.gov/cgi-bin/browse-edgar?company=${encodeURIComponent(companyName)}&CIK=&type=10-K&dateb=&owner=include&count=1&search_text=&action=getcompany&output=atom`,
+          {
+            headers: {
+              "User-Agent": "WorkforceOS lead-engine support@workforceos.com",
+              Accept: "application/atom+xml",
+            },
+            signal: AbortSignal.timeout(10000),
           },
-          signal: AbortSignal.timeout(10000),
-        },
+          { provider: "edgar" },
+        ),
       );
 
       if (!res.ok) return null;
@@ -203,12 +216,15 @@ export class RegistryScraper {
   /** Search OpenCorporates for basic company info */
   async searchOpenCorporates(companyName: string): Promise<DiscoveredCompany[]> {
     try {
-      const res = await fetch(
-        `https://api.opencorporates.com/v0.4/companies/search?q=${encodeURIComponent(companyName)}&per_page=5`,
-        {
-          headers: { "User-Agent": "WorkforceOS/1.0" },
-          signal: AbortSignal.timeout(10000),
-        },
+      const res = await withCircuitBreaker("opencorporates", () =>
+        fetchWithRetry(
+          `https://api.opencorporates.com/v0.4/companies/search?q=${encodeURIComponent(companyName)}&per_page=5`,
+          {
+            headers: { "User-Agent": "WorkforceOS/1.0" },
+            signal: AbortSignal.timeout(10000),
+          },
+          { provider: "opencorporates" },
+        ),
       );
 
       if (!res.ok) return [];

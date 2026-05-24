@@ -1,4 +1,6 @@
+import { EvidenceLedgerService } from "../../observability/evidence-ledger.service";
 import { Tool, ToolContext, ToolResult } from "./tool.interface";
+import { fetchWithRetry, withCircuitBreaker } from "../../common/http-retry.util";
 
 export class SendEmailTool implements Tool {
   name = "send_email";
@@ -9,6 +11,8 @@ export class SendEmailTool implements Tool {
     body: { type: "string", description: "Email body (plain text or HTML)", required: true },
     from: { type: "string", description: "Sender email address (optional, uses default)", required: false },
   };
+
+  constructor(private readonly evidenceLedger?: EvidenceLedgerService) {}
 
   async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
     const to = params.to as string;
@@ -24,34 +28,88 @@ export class SendEmailTool implements Tool {
     const gmailCreds = context.integrations.get("gmail");
 
     if (outlookCreds?.accessToken && !outlookCreds.accessToken.startsWith("mock_")) {
-      return this.sendViaGraph(to, subject, body, outlookCreds.accessToken);
+      const result = await this.sendViaGraph(to, subject, body, outlookCreds.accessToken);
+      if (result.success) {
+        this.emitMessageSent(context, {
+          to,
+          subject,
+          provider: "outlook",
+          messageId: extractMessageId(result),
+        });
+      }
+      return result;
     }
 
     if (gmailCreds?.accessToken && !gmailCreds.accessToken.startsWith("mock_")) {
-      return this.sendViaGmail(to, subject, body, gmailCreds.accessToken);
+      const result = await this.sendViaGmail(to, subject, body, gmailCreds.accessToken);
+      if (result.success) {
+        this.emitMessageSent(context, {
+          to,
+          subject,
+          provider: "gmail",
+          messageId: extractMessageId(result),
+        });
+      }
+      return result;
     }
 
-    // Mock mode
+    // Mock mode — no real send occurred, no evidence emitted.
     return this.mockSend(to, subject, body, context);
+  }
+
+  /**
+   * Fire-and-forget append to the evidence ledger. Only invoked on the
+   * real-provider success path — mock sends do not produce evidence because
+   * no message actually left the building.
+   */
+  private emitMessageSent(
+    context: ToolContext,
+    payload: {
+      readonly to: string;
+      readonly subject: string;
+      readonly provider: "outlook" | "gmail";
+      readonly messageId: string | null;
+    },
+  ): void {
+    if (!this.evidenceLedger) return;
+    const refId = payload.messageId ?? `${payload.provider}:${Date.now()}`;
+    void this.evidenceLedger.messageSent({
+      orgId: context.orgId,
+      runId: context.runId ?? null,
+      artifactId: null,
+      channel: "EMAIL",
+      recipientRef: payload.to,
+      subject: payload.subject,
+      sendReceiptId: payload.messageId ?? null,
+      provider: payload.provider,
+      refType: "outreach_tool_call",
+      refId,
+    });
   }
 
   private async sendViaGraph(to: string, subject: string, body: string, accessToken: string): Promise<ToolResult> {
     try {
-      const response = await fetch("https://graph.microsoft.com/v1.0/me/sendMail", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          message: {
-            subject,
-            body: { contentType: "HTML", content: body },
-            toRecipients: [{ emailAddress: { address: to } }],
+      const response = await withCircuitBreaker("graph", () =>
+        fetchWithRetry(
+          "https://graph.microsoft.com/v1.0/me/sendMail",
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              message: {
+                subject,
+                body: { contentType: "HTML", content: body },
+                toRecipients: [{ emailAddress: { address: to } }],
+              },
+              saveToSentItems: true,
+            }),
           },
-          saveToSentItems: true,
-        }),
-      });
+          { provider: "graph" },
+        ),
+      );
 
       if (!response.ok) {
         const errorData = await response.text();
@@ -81,14 +139,20 @@ export class SendEmailTool implements Tool {
         .replace(/\//g, "_")
         .replace(/=+$/, "");
 
-      const response = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ raw }),
-      });
+      const response = await withCircuitBreaker("gmail", () =>
+        fetchWithRetry(
+          "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ raw }),
+          },
+          { provider: "gmail" },
+        ),
+      );
 
       if (!response.ok) {
         throw new Error(`Gmail API error ${response.status}`);
@@ -123,4 +187,18 @@ export class SendEmailTool implements Tool {
       },
     };
   }
+}
+
+/**
+ * Pulls a provider message id off a successful send result. Outlook's
+ * sendMail endpoint returns 202 with no body, so the id may be absent;
+ * Gmail returns `{id: string}`. Returns null when no id is recoverable.
+ */
+function extractMessageId(result: ToolResult): string | null {
+  const data = result.data;
+  if (data && typeof data === "object" && !Array.isArray(data)) {
+    const maybeId = (data as Record<string, unknown>).messageId;
+    if (typeof maybeId === "string" && maybeId.length > 0) return maybeId;
+  }
+  return null;
 }

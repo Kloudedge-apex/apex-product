@@ -1,10 +1,13 @@
 import { Tool, ToolContext, ToolResult } from "./tool.interface";
 import { WebSearchTool } from "./web-search.tool";
 import { WebScrapeTool } from "./web-scrape.tool";
+import { MOCK_DISCLAIMER_SUFFIX, markMocked, markMockedItem } from "./mock-metadata";
 
 export class CompanyResearchTool implements Tool {
   name = "company_research";
-  description = "Research a company by combining web search and website scraping. Returns a structured company profile including industry, size, description, recent news, and key people.";
+  description =
+    "Research a company by combining web search and website scraping. Returns a structured company profile including industry, size, description, recent news, and key people." +
+    MOCK_DISCLAIMER_SUFFIX;
   parameters = {
     company_name: { type: "string", description: "Name of the company to research", required: true },
     domain: { type: "string", description: "Company website domain (e.g. acme.com)", required: false },
@@ -46,16 +49,17 @@ export class CompanyResearchTool implements Tool {
       );
 
       // Build company profile from gathered data
-      const searchData = searchResult.data as { results: Array<{ title: string; snippet: string; content: string }>; answer?: string } | null;
-      const newsData = newsResult.data as { results: Array<{ title: string; url: string; snippet: string }> } | null;
+      const searchData = searchResult.data as { results: Array<{ title: string; snippet: string; content: string; source?: string; confidence?: number; reason?: string }>; answer?: string } | null;
+      const newsData = newsResult.data as { results: Array<{ title: string; url: string; snippet: string; source?: string; confidence?: number; reason?: string }> } | null;
 
       const profile = this.buildProfile(companyName, domain, searchData, websiteContent, newsData);
 
       return { success: true, data: profile };
     } catch (error) {
+      const reason = `company_research aggregation failed: ${error instanceof Error ? error.message : String(error)}`;
       return {
         success: true,
-        data: this.mockProfile(companyName, domain),
+        data: markMocked(this.mockProfile(companyName, domain), reason),
       };
     }
   }
@@ -63,9 +67,9 @@ export class CompanyResearchTool implements Tool {
   private buildProfile(
     companyName: string,
     domain: string | undefined,
-    searchData: { results: Array<{ title: string; snippet: string; content: string }>; answer?: string } | null,
+    searchData: { results: Array<{ title: string; snippet: string; content: string; source?: string; confidence?: number; reason?: string }>; answer?: string } | null,
     websiteContent: { title: string; content: string; links: string[] } | null,
-    newsData: { results: Array<{ title: string; url: string; snippet: string }> } | null,
+    newsData: { results: Array<{ title: string; url: string; snippet: string; source?: string; confidence?: number; reason?: string }> } | null,
   ) {
     const allContent = [
       searchData?.answer || "",
@@ -121,13 +125,28 @@ export class CompanyResearchTool implements Tool {
       industry,
       size,
       description: searchData?.answer || searchData?.results?.[0]?.snippet || `${companyName} is a technology company.`,
-      recent_news: newsData?.results?.map((n) => ({ title: n.title, url: n.url, snippet: n.snippet })) || [],
+      recent_news: newsData?.results?.map((n) => {
+        const base: { title: string; url: string; snippet: string; source?: string; confidence?: number; reason?: string } = {
+          title: n.title,
+          url: n.url,
+          snippet: n.snippet,
+        };
+        // Preserve inline mock-tagging so downstream LLMs see fixture flags
+        // even on aggregated fields.
+        if (n.source === "mock") {
+          base.source = "mock";
+          base.confidence = 0;
+          base.reason = n.reason || "propagated from web_search mock";
+        }
+        return base;
+      }) || [],
       key_people: [],
       website_summary: websiteContent?.content?.slice(0, 300) || null,
     };
   }
 
   private mockProfile(companyName: string, domain?: string) {
+    const reason = "fixture profile";
     return {
       name: companyName,
       domain: domain || `${companyName.toLowerCase().replace(/\s+/g, "")}.com`,
@@ -135,12 +154,18 @@ export class CompanyResearchTool implements Tool {
       size: "100-500",
       description: `${companyName} is a growing technology company specializing in innovative SaaS solutions for enterprise clients. The company has been rapidly scaling its operations and recently secured significant funding to expand its product offerings.`,
       recent_news: [
-        { title: `${companyName} Raises Series B Funding`, url: "#", snippet: `${companyName} announced a $45M Series B round led by top-tier VCs.` },
-        { title: `${companyName} Launches AI-Powered Features`, url: "#", snippet: `The company unveiled new AI capabilities in its flagship product.` },
+        markMockedItem(
+          { title: `${companyName} Raises Series B Funding`, url: "#", snippet: `${companyName} announced a $45M Series B round led by top-tier VCs.` },
+          reason,
+        ),
+        markMockedItem(
+          { title: `${companyName} Launches AI-Powered Features`, url: "#", snippet: `The company unveiled new AI capabilities in its flagship product.` },
+          reason,
+        ),
       ],
       key_people: [
-        { name: "CEO", role: "Chief Executive Officer" },
-        { name: "CTO", role: "Chief Technology Officer" },
+        markMockedItem({ name: "CEO", role: "Chief Executive Officer" }, reason),
+        markMockedItem({ name: "CTO", role: "Chief Technology Officer" }, reason),
       ],
       website_summary: `${companyName} provides enterprise-grade solutions that help teams work more efficiently. Their platform integrates with major business tools and offers advanced analytics capabilities.`,
     };

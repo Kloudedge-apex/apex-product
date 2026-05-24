@@ -4,6 +4,7 @@ import { PrismaService } from "../../prisma/prisma.service";
 import { promises as dns } from "dns";
 import * as net from "net";
 import type { EmailSource } from "@prisma/client";
+import { fetchWithRetry, withCircuitBreaker } from "../../common/http-retry.util";
 
 interface SmtpVerifyResult {
   valid: boolean;
@@ -198,7 +199,9 @@ export class EmailPatternService {
 
     const url = `https://api.hunter.io/v2/email-finder?domain=${encodeURIComponent(domain)}&first_name=${encodeURIComponent(firstName)}&last_name=${encodeURIComponent(lastName)}&api_key=${this.hunterKey}`;
 
-    const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+    const res = await withCircuitBreaker("hunter", () =>
+      fetchWithRetry(url, { signal: AbortSignal.timeout(10000) }, { provider: "hunter" }),
+    );
     if (!res.ok) return null;
 
     const data = await res.json() as {

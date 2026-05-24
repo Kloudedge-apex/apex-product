@@ -1,5 +1,6 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+import { fetchWithRetry, withCircuitBreaker } from "../../common/http-retry.util";
 
 interface IcpInput {
   targetTitles: string[];
@@ -194,15 +195,21 @@ export class SerpDiscoveryService {
   // ─── API Execution ──────────────────────────────────
 
   private async executeSearch(query: string, num: number): Promise<SerperResult[]> {
-    const res = await fetch("https://google.serper.dev/search", {
-      method: "POST",
-      headers: {
-        "X-API-KEY": this.apiKey,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ q: query, num: Math.min(num, 10) }),
-      signal: AbortSignal.timeout(15000),
-    });
+    const res = await withCircuitBreaker("serper", () =>
+      fetchWithRetry(
+        "https://google.serper.dev/search",
+        {
+          method: "POST",
+          headers: {
+            "X-API-KEY": this.apiKey,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ q: query, num: Math.min(num, 10) }),
+          signal: AbortSignal.timeout(15000),
+        },
+        { provider: "serper" },
+      ),
+    );
 
     if (!res.ok) {
       throw new Error(`Serper API error: ${res.status} ${res.statusText}`);

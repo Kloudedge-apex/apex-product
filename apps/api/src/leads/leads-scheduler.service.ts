@@ -16,9 +16,22 @@ export class LeadsSchedulerService {
   /**
    * Runs every hour. Checks for ICP profiles with scheduled discovery enabled
    * whose last run was longer ago than their interval.
+   *
+   * @deprecated Wires the legacy {@link LeadsService.triggerDiscovery} direct
+   * executor. Gated behind `LEGACY_TRIGGER_DISCOVERY_ENABLED=true` (default OFF).
+   * The LangGraph supervisor in `GraphService.runPipelineGraph` is now the
+   * single canonical entry point for pipeline runs.
    */
   @Cron(CronExpression.EVERY_HOUR)
   async handleScheduledDiscovery(): Promise<void> {
+    if (process.env.LEGACY_TRIGGER_DISCOVERY_ENABLED !== "true") {
+      this.logger.warn(
+        "triggerDiscovery is deprecated — set LEGACY_TRIGGER_DISCOVERY_ENABLED=true to opt back in; graph supervisor is now the single entry point",
+      );
+      this.logger.log("skipped: legacy disabled");
+      return;
+    }
+
     if (this.running) {
       this.logger.debug("Scheduler already running, skipping");
       return;

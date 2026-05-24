@@ -84,6 +84,11 @@ describe("TOOL_POLICY_METADATA — pinned contents", () => {
         requiresApproval: true,
         allowedDryRun: true,
       },
+      linkedin_send_message: {
+        level: ToolSideEffectLevel.EXTERNAL_WRITE,
+        requiresApproval: true,
+        allowedDryRun: true,
+      },
     });
   });
 

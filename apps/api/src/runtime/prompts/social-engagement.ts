@@ -1,3 +1,6 @@
+// TODO(json-validation): wrap LLM response with parseJsonResponse() /
+// chatJsonWithRetry() — see common/json-output.util.ts. Expected shape:
+// {"type": "social_engagement", "monitored": number, "engaged": number, "actions": [...]}.
 export function getSocialEngagementPrompt(config: Record<string, unknown>): string {
   const keywords = Array.isArray(config.keywords) ? config.keywords.join(", ") : "AI, automation, SaaS";
   const responseStyle = config.responseStyle || "helpful and professional";
@@ -47,5 +50,26 @@ OUTPUT FORMAT (JSON):
   ]
 }
 
-CRITICAL: Quality over quantity. Only engage when you can add real value.`;
+CRITICAL: Quality over quantity. Only engage when you can add real value.
+
+## Failure Modes
+
+If a post's content or sentiment is ambiguous, return action "skip" with a reason — DO NOT engage based on an incomplete read. Specifically, never invent:
+- the author's stance, role, company, or seniority when not stated in the scraped post
+- statistics, customer counts, or product capabilities in your engagement response
+- shared connections, mutual customers, or prior interactions
+- sarcasm or sentiment direction when the post text is short or context-free
+
+Skip shape inside actions:
+
+{
+  "platform": "platform name",
+  "action": "skip",
+  "post": "description of original post",
+  "postUrl": "url if available",
+  "response": null,
+  "reasoning": "<one sentence: why the post was ambiguous or off-topic>"
+}
+
+Skipping a post is always preferable to a generic or speculative engagement.`;
 }

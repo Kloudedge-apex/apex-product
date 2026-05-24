@@ -1,9 +1,10 @@
-import { Injectable, OnModuleInit, OnModuleDestroy } from "@nestjs/common";
+import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import { RuntimeService } from "./runtime.service";
 
 @Injectable()
 export class SchedulerService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(SchedulerService.name);
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
 
   constructor(
@@ -38,18 +39,61 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
         },
       });
 
+      this.logger.debug(`scheduler.tick schedulesChecked=${agents.length}`);
+
+      let hitlSkips = 0;
+      let activeSkips = 0;
+
       for (const agent of agents) {
         if (!agent.schedule) continue;
 
         const lastRun = agent.runs[0];
         const shouldRun = this.shouldRunNow(agent.schedule, lastRun?.startedAt || null);
 
-        if (shouldRun) {
-          await this.runtime.triggerRun(agent.id, agent.orgId);
+        if (!shouldRun) continue;
+
+        // HITL safety: do not fire a new scheduled step when this agent's
+        // org has a GraphRun paused for human review. Re-triggering would
+        // bypass the approval gate. Scope by orgId because Phase 2.5 does
+        // not link AgentRun → GraphRun yet (see executor.graphRunIdForRun).
+        const blockingGraphRun = await this.prisma.graphRun.findFirst({
+          where: {
+            orgId: agent.orgId,
+            status: { in: ["AWAITING_APPROVAL", "RUNNING"] },
+          },
+          select: { id: true, status: true },
+          orderBy: { startedAt: "desc" },
+        });
+
+        if (blockingGraphRun?.status === "AWAITING_APPROVAL") {
+          this.logger.debug("skipping scheduled run — graph awaiting approval", {
+            agentId: agent.id,
+            graphRunId: blockingGraphRun.id,
+          });
+          hitlSkips++;
+          continue;
         }
+
+        if (blockingGraphRun?.status === "RUNNING") {
+          this.logger.debug("skipping scheduled run — graph already running", {
+            agentId: agent.id,
+            graphRunId: blockingGraphRun.id,
+          });
+          activeSkips++;
+          continue;
+        }
+
+        await this.runtime.triggerRun(agent.id, agent.orgId);
       }
-    } catch {
-      // Silently handle schedule check errors
+
+      this.logger.debug(
+        `scheduler.tick hitl_skips=${hitlSkips} active_skips=${activeSkips}`,
+      );
+    } catch (err) {
+      this.logger.warn(
+        "Scheduler tick failed",
+        err instanceof Error ? err.stack : String(err),
+      );
     }
   }
 

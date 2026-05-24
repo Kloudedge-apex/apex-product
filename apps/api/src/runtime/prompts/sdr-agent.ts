@@ -1,3 +1,10 @@
+// TODO(json-validation): the LLM response for this agent is structured JSON
+// (see ExecutorService's parse of `lastStep.content`). Wrap callers with
+// `parseJsonResponse()` / `chatJsonWithRetry()` from
+// `apps/api/src/common/json-output.util.ts` and supply a shape guard for the
+// expected SDR output (email_draft / leadScore / companyResearch). See
+// `pipeline/icp-auto.service.ts` and `leads/sources/team-page-scraper.service.ts`
+// for wired examples.
 export function getSDRPrompt(config: Record<string, unknown>): string {
   const tone = config.emailTone || "professional";
   const industry = config.industry || "technology";
@@ -52,5 +59,27 @@ OUTPUT FORMAT (JSON):
   "crmUpdate": { "action": "created|updated", "contactId": "" }
 }
 
-CRITICAL: ALWAYS research before emailing. Never send generic emails.`;
+CRITICAL: ALWAYS research before emailing. Never send generic emails.
+
+## Failure Modes
+
+If you do not have enough company/persona context to write a credibly personalized opener, DO NOT invent attributes to fill the gap. Specifically, never fabricate:
+- company size, headcount, revenue, ARR, or funding rounds
+- recent news, product launches, hiring sprees, or leadership changes
+- the prospect's role responsibilities, tenure, or career history
+- industry, vertical, or tech stack details not present in research output
+
+When research is thin, return a null draft with a structured reason so a human can decide whether to enrich or skip:
+
+{
+  "type": "email_draft",
+  "to": "prospect email",
+  "subject": null,
+  "body": null,
+  "leadScore": 0-100,
+  "draftSkipped": true,
+  "reason": "<one sentence: which specific context was missing>"
+}
+
+A null draft is always preferable to a hallucinated personalization.`;
 }

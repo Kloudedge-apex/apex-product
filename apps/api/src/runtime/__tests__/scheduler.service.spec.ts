@@ -8,6 +8,9 @@ function createMockPrisma() {
     agent: {
       findMany: vi.fn().mockResolvedValue([]),
     },
+    graphRun: {
+      findFirst: vi.fn().mockResolvedValue(null),
+    },
   } as unknown as PrismaService;
 }
 
@@ -146,5 +149,71 @@ describe("SchedulerService", () => {
     await vi.advanceTimersByTimeAsync(60000);
 
     expect(mockRuntime.triggerRun).not.toHaveBeenCalled();
+  });
+
+  it("should skip tick when the org's GraphRun is AWAITING_APPROVAL (HITL gate)", async () => {
+    const agent = {
+      id: "agent_1",
+      orgId: "org_1",
+      schedule: "every_hour",
+      runs: [], // due for execution
+    };
+
+    (mockPrisma.agent.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([agent]);
+    (mockPrisma.graphRun.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: "graph_run_1",
+      status: "AWAITING_APPROVAL",
+    });
+
+    scheduler.onModuleInit();
+    await vi.advanceTimersByTimeAsync(60000);
+
+    expect(mockPrisma.graphRun.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          orgId: "org_1",
+          status: { in: ["AWAITING_APPROVAL", "RUNNING"] },
+        }),
+      }),
+    );
+    expect(mockRuntime.triggerRun).not.toHaveBeenCalled();
+  });
+
+  it("should skip tick when the org already has a RUNNING GraphRun", async () => {
+    const agent = {
+      id: "agent_1",
+      orgId: "org_1",
+      schedule: "every_hour",
+      runs: [],
+    };
+
+    (mockPrisma.agent.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([agent]);
+    (mockPrisma.graphRun.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: "graph_run_2",
+      status: "RUNNING",
+    });
+
+    scheduler.onModuleInit();
+    await vi.advanceTimersByTimeAsync(60000);
+
+    expect(mockRuntime.triggerRun).not.toHaveBeenCalled();
+  });
+
+  it("should proceed when no active GraphRun blocks the agent", async () => {
+    const agent = {
+      id: "agent_1",
+      orgId: "org_1",
+      schedule: "every_hour",
+      runs: [], // first ever run
+    };
+
+    (mockPrisma.agent.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([agent]);
+    // No blocking GraphRun (COMPLETED runs aren't returned by the filter)
+    (mockPrisma.graphRun.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+
+    scheduler.onModuleInit();
+    await vi.advanceTimersByTimeAsync(60000);
+
+    expect(mockRuntime.triggerRun).toHaveBeenCalledWith("agent_1", "org_1");
   });
 });

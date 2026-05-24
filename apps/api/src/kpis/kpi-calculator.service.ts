@@ -3,6 +3,11 @@ import { OutreachArtifactStatus } from "@prisma/client";
 import type { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import {
+  HIGH_PRIORITY_THRESHOLD,
+  LOW_PRIORITY_THRESHOLD,
+  QUALIFIED_THRESHOLD,
+} from "../common/qualification.constants";
+import {
   whereEvidenceEventsInWindow,
   whereGraphRunsInWindow,
   whereLeadScores,
@@ -42,6 +47,17 @@ export interface OperationalKpi {
     readonly lead_scored: Percentiles;
     readonly message_drafted: Percentiles;
     readonly qa: Percentiles;
+  };
+  /**
+   * Counts of live agent-tool activity within the window. Sourced from
+   * EvidenceEvent rows emitted by send_email and hubspot tool calls (refType
+   * `outreach_tool_call` / `crm_object`) — independent of OutreachArtifact
+   * status, so the dashboard reflects in-loop sends even when no artifact
+   * was approved through the post-review pipeline.
+   */
+  readonly activity: {
+    readonly messages_sent: number;
+    readonly crm_syncs: number;
   };
 }
 
@@ -155,24 +171,33 @@ export class KpiCalculatorService {
       }),
     ]);
 
-    const [leadSourced, leadScored, messageDrafted, qa] = await Promise.all([
-      this.prisma.evidenceEvent.findMany({
-        where: whereEvidenceEventsInWindow(orgId, since, ["lead.sourced"]),
-        select: { payload: true },
-      }),
-      this.prisma.evidenceEvent.findMany({
-        where: whereEvidenceEventsInWindow(orgId, since, ["lead.scored"]),
-        select: { payload: true },
-      }),
-      this.prisma.evidenceEvent.findMany({
-        where: whereEvidenceEventsInWindow(orgId, since, ["message.drafted"]),
-        select: { payload: true },
-      }),
-      this.prisma.evidenceEvent.findMany({
-        where: whereEvidenceEventsInWindow(orgId, since, ["qa.pass", "qa.fail"]),
-        select: { payload: true },
-      }),
-    ]);
+    const [leadSourced, leadScored, messageDrafted, qa, messageSent, crmSynced] =
+      await Promise.all([
+        this.prisma.evidenceEvent.findMany({
+          where: whereEvidenceEventsInWindow(orgId, since, ["lead.sourced"]),
+          select: { payload: true },
+        }),
+        this.prisma.evidenceEvent.findMany({
+          where: whereEvidenceEventsInWindow(orgId, since, ["lead.scored"]),
+          select: { payload: true },
+        }),
+        this.prisma.evidenceEvent.findMany({
+          where: whereEvidenceEventsInWindow(orgId, since, ["message.drafted"]),
+          select: { payload: true },
+        }),
+        this.prisma.evidenceEvent.findMany({
+          where: whereEvidenceEventsInWindow(orgId, since, ["qa.pass", "qa.fail"]),
+          select: { payload: true },
+        }),
+        this.prisma.evidenceEvent.findMany({
+          where: whereEvidenceEventsInWindow(orgId, since, ["message.sent"]),
+          select: { payload: true },
+        }),
+        this.prisma.evidenceEvent.findMany({
+          where: whereEvidenceEventsInWindow(orgId, since, ["crm.synced"]),
+          select: { payload: true },
+        }),
+      ]);
 
     const errorRate = graphRunsTotal > 0 ? graphRunsFailed / graphRunsTotal : 0;
 
@@ -186,6 +211,10 @@ export class KpiCalculatorService {
         lead_scored: percentiles(durationsFromEvidenceEvents(leadScored)),
         message_drafted: percentiles(durationsFromEvidenceEvents(messageDrafted)),
         qa: percentiles(durationsFromEvidenceEvents(qa)),
+      },
+      activity: {
+        messages_sent: messageSent.length,
+        crm_syncs: crmSynced.length,
       },
     };
   }
@@ -225,8 +254,8 @@ export class KpiCalculatorService {
     let b = 0;
     let c = 0;
     for (const s of scores) {
-      if (s.score >= 75) a += 1;
-      else if (s.score >= 50) b += 1;
+      if (s.score >= HIGH_PRIORITY_THRESHOLD) a += 1;
+      else if (s.score >= LOW_PRIORITY_THRESHOLD) b += 1;
       else c += 1;
     }
 
@@ -256,7 +285,7 @@ export class KpiCalculatorService {
       this.prisma.leadScore.count({
         where: {
           ...whereLeadScores(orgId),
-          score: { gte: 50 },
+          score: { gte: QUALIFIED_THRESHOLD },
           updatedAt: { gte: since },
         },
       }),

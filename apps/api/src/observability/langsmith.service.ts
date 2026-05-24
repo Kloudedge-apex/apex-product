@@ -2,6 +2,19 @@ import { Injectable, Logger, OnModuleDestroy } from "@nestjs/common";
 import { createHash } from "node:crypto";
 import { getLangSmithConfig } from "./langsmith.config";
 
+interface EvaluatorRunnerLike {
+  run(ctx: {
+    readonly runId: string;
+    readonly agent?: string;
+    readonly node?: string;
+    readonly model: string;
+    readonly inputs: unknown;
+    readonly outputs: unknown;
+    readonly metadata?: Readonly<Record<string, unknown>>;
+    readonly tags?: readonly string[];
+  }): Promise<void>;
+}
+
 type JsonSafe =
   | null
   | boolean
@@ -105,14 +118,50 @@ function redactInputsAndOutputs(
 type LangSmithClient = import("langsmith").Client;
 type LangSmithRunTree = import("langsmith").RunTree;
 
+export interface WrapLlmInput {
+  readonly name: string;
+  readonly model: string;
+  readonly inputs: unknown;
+  readonly parentRunId?: string;
+  /** Logical agent identifier — when set, overrides `name` as the LangSmith run name so traces are agent-scoped instead of provider-scoped. e.g. "sdr_agent.draft_message". */
+  readonly agent?: string;
+  /** Graph node identifier — emitted as metadata.node for filtering. e.g. "sdr_outreach.qa_message". */
+  readonly node?: string;
+  /** Free-form tags attached to the run for LangSmith filtering. */
+  readonly tags?: readonly string[];
+  /** Extra metadata merged into the run's metadata field. */
+  readonly metadata?: Readonly<Record<string, unknown>>;
+  /** Optional callback fired after the run is created on the server, with the runId. Used by evaluators to attach feedback. */
+  readonly onRunStart?: (runId: string) => void;
+}
+
+export interface FeedbackInput {
+  readonly runId: string;
+  readonly key: string;
+  readonly score?: number;
+  readonly value?: string | number | boolean;
+  readonly comment?: string;
+  readonly correction?: Readonly<Record<string, unknown>>;
+}
+
 @Injectable()
 export class LangSmithService implements OnModuleDestroy {
   private readonly logger = new Logger(LangSmithService.name);
   private clientPromise: Promise<LangSmithClient> | undefined;
   private bootLogged = false;
+  private evaluatorRunner: EvaluatorRunnerLike | undefined;
 
   static async loadSdk(): Promise<typeof import("langsmith")> {
     return import("langsmith");
+  }
+
+  /**
+   * Setter-injected to avoid a circular DI graph between LangSmithService and
+   * EvaluatorRunnerService (which itself depends on LLMService → LangSmithService).
+   * Module wires this up at bootstrap via onModuleInit.
+   */
+  setEvaluatorRunner(runner: EvaluatorRunnerLike): void {
+    this.evaluatorRunner = runner;
   }
 
   private async getClient(apiKey: string): Promise<LangSmithClient> {
@@ -149,13 +198,134 @@ export class LangSmithService implements OnModuleDestroy {
     }
   }
 
+  /**
+   * Append a LangSmith run to a named dataset as a new example, creating the
+   * dataset on first call. Used by the HITL reject flow to build a regression
+   * corpus of bad agent outputs (e.g. "apex-bad-sdr-drafts") that evaluators
+   * can be tested against later.
+   *
+   * Fire-and-forget by design — failures log a warning but never throw, since
+   * dataset upload is best-effort training data, not part of the user-facing
+   * reject path.
+   */
+  async addRunToDataset(
+    datasetName: string,
+    runId: string,
+    metadata: Readonly<Record<string, unknown>>,
+  ): Promise<void> {
+    const config = getLangSmithConfig();
+    if (!config.apiKey || config.tracing === false) return;
+    if (!runId) return;
+    try {
+      const client = (await this.getClient(config.apiKey)) as LangSmithClient & {
+        hasDataset?: (args: { datasetName?: string; datasetId?: string }) => Promise<boolean>;
+        createDataset?: (
+          name: string,
+          opts?: { description?: string },
+        ) => Promise<unknown>;
+        createExample?: (update: {
+          inputs: Record<string, unknown>;
+          outputs?: Record<string, unknown>;
+          metadata?: Record<string, unknown>;
+          dataset_name?: string;
+          source_run_id?: string;
+          use_source_run_io?: boolean;
+        }) => Promise<unknown>;
+      };
+
+      if (
+        typeof client.hasDataset !== "function" ||
+        typeof client.createDataset !== "function" ||
+        typeof client.createExample !== "function"
+      ) {
+        this.logger.warn(
+          `LangSmith client missing dataset APIs — skipping addRunToDataset(${datasetName}, runId=${runId})`,
+        );
+        return;
+      }
+
+      // Idempotent dataset bootstrap. hasDataset throws if the dataset is
+      // missing in some SDK versions, so we also catch "already exists" on
+      // create as a belt-and-braces fallback.
+      let exists = false;
+      try {
+        exists = await client.hasDataset({ datasetName });
+      } catch {
+        exists = false;
+      }
+      if (!exists) {
+        try {
+          await client.createDataset(datasetName, {
+            description:
+              "Apex auto-collected regression set — bad agent outputs flagged by HITL reviewers.",
+          });
+        } catch (createErr) {
+          const msg = createErr instanceof Error ? createErr.message : String(createErr);
+          // Race: another worker created it between hasDataset and createDataset.
+          if (!/already.?exists|409/i.test(msg)) {
+            throw createErr;
+          }
+        }
+      }
+
+      // source_run_id + use_source_run_io copies the run's inputs/outputs
+      // into the example, so the dataset stays useful even after the run TTL
+      // expires on LangSmith's side.
+      await client.createExample({
+        inputs: {},
+        dataset_name: datasetName,
+        source_run_id: runId,
+        use_source_run_io: true,
+        metadata: { ...metadata, source_run_id: runId },
+      });
+    } catch (err) {
+      this.logger.warn(
+        `LangSmith addRunToDataset failed (dataset=${datasetName} runId=${runId}): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  /**
+   * Post run-level feedback (e.g. evaluator scores) to LangSmith. Non-blocking
+   * by design — failures log a warning but never throw, since evaluator
+   * feedback must not break the agent loop.
+   */
+  async createFeedback(input: FeedbackInput): Promise<void> {
+    const config = getLangSmithConfig();
+    if (!config.apiKey || config.tracing === false) return;
+    try {
+      const client = (await this.getClient(config.apiKey)) as LangSmithClient & {
+        createFeedback?: (
+          runId: string,
+          key: string,
+          opts: {
+            score?: number;
+            value?: string | number | boolean;
+            comment?: string;
+            correction?: Readonly<Record<string, unknown>>;
+          },
+        ) => Promise<void>;
+      };
+      if (typeof client.createFeedback !== "function") return;
+      await client.createFeedback(input.runId, input.key, {
+        score: input.score,
+        value: input.value,
+        comment: input.comment,
+        correction: input.correction,
+      });
+    } catch (err) {
+      this.logger.warn(
+        `LangSmith createFeedback failed (key=${input.key} runId=${input.runId}): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
   async wrapLlm<TResult>(
-    input: {
-      readonly name: string;
-      readonly model: string;
-      readonly inputs: unknown;
-      readonly parentRunId?: string;
-    },
+    input: WrapLlmInput,
     fn: () => Promise<TResult>,
   ): Promise<TResult> {
     const config = getLangSmithConfig();
@@ -163,21 +333,39 @@ export class LangSmithService implements OnModuleDestroy {
 
     if (!shouldAttemptTracing) return await fn();
 
+    // Prefer the caller-supplied `agent` tag as the run name so traces are
+    // agent-scoped (e.g. "sdr_agent.draft_message") instead of provider-scoped
+    // ("openai.chat"). Original `name` is preserved as metadata.provider_name.
+    const runName = input.agent ?? input.name;
+    const tags = [
+      ...(input.tags ?? []),
+      ...(input.agent ? [`agent:${input.agent}`] : []),
+      ...(input.node ? [`node:${input.node}`] : []),
+      `model:${input.model}`,
+      `provider:${input.name}`,
+    ];
+    const metadata: Record<string, unknown> = {
+      model: input.model,
+      provider_name: input.name,
+      ...(input.agent ? { agent: input.agent } : {}),
+      ...(input.node ? { node: input.node } : {}),
+      ...(input.metadata ?? {}),
+    };
+
     let runTree: LangSmithRunTree | undefined;
     try {
       const { RunTree } = await LangSmithService.loadSdk();
       const client = await this.getClient(config.apiKey as string);
 
       runTree = new RunTree({
-        name: input.name,
+        name: runName,
         run_type: "llm",
         project_name: config.project,
         parent_run_id: input.parentRunId,
         tracingEnabled: config.tracing ?? true,
         client,
-        metadata: {
-          model: input.model,
-        },
+        tags,
+        metadata,
         inputs: config.capturePrompts === true
           ? {
               model: input.model,
@@ -190,9 +378,23 @@ export class LangSmithService implements OnModuleDestroy {
       });
 
       await runTree.postRun();
+      if (input.onRunStart) {
+        const runId = (runTree as unknown as { id?: string }).id;
+        if (typeof runId === "string" && runId.length > 0) {
+          try {
+            input.onRunStart(runId);
+          } catch (cbErr) {
+            this.logger.warn(
+              `onRunStart callback threw for ${runName}: ${
+                cbErr instanceof Error ? cbErr.message : String(cbErr)
+              }`,
+            );
+          }
+        }
+      }
     } catch (err) {
       this.logger.warn(
-        `LangSmith tracing failed to initialize for name=${input.name} model=${input.model}: ${
+        `LangSmith tracing failed to initialize for name=${runName} model=${input.model}: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
@@ -223,11 +425,23 @@ export class LangSmithService implements OnModuleDestroy {
         }
       } catch (innerErr) {
         this.logger.warn(
-          `LangSmith finalize (success) failed for ${input.name}: ${
+          `LangSmith finalize (success) failed for ${runName}: ${
             innerErr instanceof Error ? innerErr.message : String(innerErr)
           }`,
         );
       }
+
+      this.fireEvaluators({
+        runTree,
+        agent: input.agent,
+        node: input.node,
+        model: input.model,
+        inputs: input.inputs,
+        outputs: result,
+        metadata,
+        tags,
+      });
+
       return result;
     } catch (err) {
       const durationMs = Date.now() - startedAt;
@@ -242,12 +456,46 @@ export class LangSmithService implements OnModuleDestroy {
         }
       } catch (innerErr) {
         this.logger.warn(
-          `LangSmith finalize (error) failed for ${input.name}: ${
+          `LangSmith finalize (error) failed for ${runName}: ${
             innerErr instanceof Error ? innerErr.message : String(innerErr)
           }`,
         );
       }
       throw err;
     }
+  }
+
+  private fireEvaluators(args: {
+    readonly runTree: LangSmithRunTree;
+    readonly agent?: string;
+    readonly node?: string;
+    readonly model: string;
+    readonly inputs: unknown;
+    readonly outputs: unknown;
+    readonly metadata: Readonly<Record<string, unknown>>;
+    readonly tags: readonly string[];
+  }): void {
+    if (!this.evaluatorRunner) return;
+    const runId = (args.runTree as unknown as { id?: string }).id;
+    if (typeof runId !== "string" || runId.length === 0) return;
+    // Fire-and-forget; evaluators must never block the agent loop.
+    void this.evaluatorRunner
+      .run({
+        runId,
+        agent: args.agent,
+        node: args.node,
+        model: args.model,
+        inputs: args.inputs,
+        outputs: args.outputs,
+        metadata: args.metadata,
+        tags: args.tags,
+      })
+      .catch((err) => {
+        this.logger.warn(
+          `Evaluator runner threw for runId=${runId}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      });
   }
 }

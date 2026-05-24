@@ -10,6 +10,8 @@ export const EVIDENCE_EVENT_KIND = {
   approvalGranted: "approval.granted",
   approvalDenied: "approval.denied",
   artifactPersisted: "artifact.persisted",
+  messageSent: "message.sent",
+  crmSynced: "crm.synced",
 } as const;
 
 export type EvidenceEventKind =
@@ -20,7 +22,9 @@ export type EvidenceRefType =
   | "graph_run"
   | "org"
   | "person"
-  | "outreach_artifact";
+  | "outreach_artifact"
+  | "outreach_tool_call"
+  | "crm_object";
 
 export interface LeadSourcedPayload extends Prisma.InputJsonObject {
   readonly kind: typeof EVIDENCE_EVENT_KIND.leadSourced;
@@ -75,6 +79,31 @@ export interface ArtifactPersistedPayload extends Prisma.InputJsonObject {
   readonly channel: "EMAIL" | "LINKEDIN" | "HUBSPOT_NOTE";
 }
 
+export interface MessageSentPayload extends Prisma.InputJsonObject {
+  readonly kind: typeof EVIDENCE_EVENT_KIND.messageSent;
+  /**
+   * Optional: present when the send originated from an approved
+   * OutreachArtifact. Null/absent when the send was emitted directly from an
+   * in-loop agent tool call (no artifact intermediary).
+   */
+  readonly artifact_id?: string | null;
+  readonly channel: "EMAIL" | "LINKEDIN" | "HUBSPOT_NOTE";
+  readonly recipient_ref?: string;
+  readonly subject?: string;
+  readonly send_receipt_id?: string;
+  readonly provider?: string;
+}
+
+export interface CrmSyncedPayload extends Prisma.InputJsonObject {
+  readonly kind: typeof EVIDENCE_EVENT_KIND.crmSynced;
+  readonly provider: "hubspot" | "salesforce";
+  readonly entity_type: "contact" | "deal" | "note";
+  readonly entity_id: string;
+  readonly operation: "create" | "update" | "delete";
+  readonly org_id_external?: string;
+  readonly fields_changed?: readonly string[];
+}
+
 export type EvidenceEventPayload =
   | LeadSourcedPayload
   | LeadScoredPayload
@@ -84,4 +113,6 @@ export type EvidenceEventPayload =
   | ApprovalRequestedPayload
   | ApprovalGrantedPayload
   | ApprovalDeniedPayload
-  | ArtifactPersistedPayload;
+  | ArtifactPersistedPayload
+  | MessageSentPayload
+  | CrmSyncedPayload;

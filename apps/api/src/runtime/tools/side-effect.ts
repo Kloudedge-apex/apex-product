@@ -90,6 +90,12 @@ export const TOOL_POLICY_METADATA: Readonly<Record<string, ToolPolicyMetadata>> 
     requiresApproval: true,
     allowedDryRun: true,
   },
+  linkedin_send_message: {
+    toolName: "linkedin_send_message",
+    sideEffectLevel: ToolSideEffectLevel.EXTERNAL_WRITE,
+    requiresApproval: true,
+    allowedDryRun: true,
+  },
 };
 
 export function getToolPolicy(toolName: string): ToolPolicyMetadata {

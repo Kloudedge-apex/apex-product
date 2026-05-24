@@ -11,9 +11,11 @@ import { RuntimeService } from "../runtime/runtime.service";
 import { LLMService } from "../runtime/llm.service";
 import { OutreachArtifactsService } from "../outreach/outreach-artifacts.service";
 import { EvidenceLedgerService } from "../observability/evidence-ledger.service";
+import { RunLevelEvaluatorService } from "../observability/run-level-evaluator.service";
 import { PrismaCheckpointSaver } from "./prisma-checkpointer";
 import { buildPipelineGraph } from "./pipeline-graph";
 import { NODE, PipelineState } from "./state";
+import { GraphRunQueueService } from "./graph-run-queue.service";
 
 const GRAPH_NAME = "pipeline-supervisor";
 
@@ -32,6 +34,8 @@ export class GraphService {
     private readonly llm: LLMService,
     private readonly outreachArtifacts: OutreachArtifactsService,
     private readonly evidenceLedger: EvidenceLedgerService,
+    private readonly graphRunQueue: GraphRunQueueService,
+    private readonly runLevelEvaluator: RunLevelEvaluatorService,
   ) {
     this.checkpointer = new PrismaCheckpointSaver(prisma);
     this.compiled = buildPipelineGraph({
@@ -87,16 +91,18 @@ export class GraphService {
       data: { threadId: run.id },
     });
 
-    // Fire-and-forget. Errors land in GraphRun.error / status=FAILED.
-    void this.invokeUntilCheckpoint(run.id, {
+    // Persisted execution: hand off to the graph-runs queue so the worker
+    // pod owns the run. Pod restart mid-flight no longer abandons the run —
+    // the boot-time crash-recovery sweep re-enqueues orphans, and BullMQ /
+    // PrismaCheckpointSaver between them guarantee resumption from the last
+    // checkpoint. HTTP response semantics are unchanged: this returns the
+    // runId immediately and execution happens out-of-band.
+    await this.graphRunQueue.enqueueGraphRun({
+      kind: "start",
+      graphRunId: run.id,
       orgId,
-      runId: run.id,
       icpProfileIds,
-    }).catch((err) =>
-      this.logger.error(
-        `Graph run ${run.id} crashed: ${err instanceof Error ? err.message : err}`,
-      ),
-    );
+    });
 
     return { runId: run.id, threadId: run.id };
   }
@@ -146,14 +152,12 @@ export class GraphService {
       });
     }
 
-    void this.invokeUntilCheckpoint(
-      runId,
-      new Command({ resume: decision }),
-    ).catch((err) =>
-      this.logger.error(
-        `Graph resume ${runId} crashed: ${err instanceof Error ? err.message : err}`,
-      ),
-    );
+    await this.graphRunQueue.enqueueGraphRun({
+      kind: "resume",
+      graphRunId: runId,
+      orgId,
+      resume: decision,
+    });
 
     return { status: "resuming" };
   }
@@ -174,9 +178,22 @@ export class GraphService {
     });
   }
 
-  // ── Internal ─────────────────────────────────────────────────────────────
+  // ── Worker-facing API ────────────────────────────────────────────────────
 
-  private async invokeUntilCheckpoint(
+  /**
+   * Drive the compiled LangGraph until it either completes or hits the next
+   * checkpoint (typically the human_approval interrupt). Called by
+   * GraphRunWorker after dequeuing a job — NOT by the HTTP controller path.
+   *
+   * Idempotency: the LangGraph thread_id is `runId`, and PrismaCheckpointSaver
+   * persists every checkpoint, so re-invoking with the same runId picks up
+   * from the last successful checkpoint. For a brand-new run the partial
+   * PipelineState input seeds the entry state; for a resume the caller
+   * supplies a Command({ resume }) and LangGraph hydrates from the saved
+   * checkpoint. The worker is responsible for not re-invoking runs that are
+   * already in a terminal status (see GraphRunWorker.processGraphRun).
+   */
+  async processGraphRun(
     runId: string,
     input: Partial<PipelineState> | Command,
   ): Promise<void> {
@@ -225,6 +242,7 @@ export class GraphService {
         },
       });
       this.logger.log(`Graph ${runId} completed`);
+      this.fireRunLevelEvaluator(runId);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       await this.prisma.graphRun.update({
@@ -235,8 +253,24 @@ export class GraphService {
           error: msg.slice(0, 1000),
         },
       });
+      this.fireRunLevelEvaluator(runId);
       throw err;
     }
+  }
+
+  /**
+   * Fire-and-forget run-level evaluator. MUST NOT block the GraphRun's main
+   * path — failures log a warning and otherwise vanish, mirroring the
+   * per-LLM-call evaluator runner's contract.
+   */
+  private fireRunLevelEvaluator(runId: string): void {
+    void this.runLevelEvaluator.evaluateGraphRun(runId).catch((err) => {
+      this.logger.warn(
+        `Run-level evaluator threw for graphRun=${runId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    });
   }
 
   private snapshotPublicState(state: PipelineState): object {

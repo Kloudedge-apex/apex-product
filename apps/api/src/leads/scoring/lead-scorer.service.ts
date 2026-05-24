@@ -1,5 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import type { Seniority, EmailSource } from "@prisma/client";
+import { QUALIFIED_THRESHOLD } from "../../common/qualification.constants";
 
 interface PersonForScoring {
   firstName: string;
@@ -33,8 +34,6 @@ interface ScoreResult {
   score: number;
   breakdown: Record<string, number>;
 }
-
-const QUALIFICATION_THRESHOLD = 100;
 
 const SOURCE_CONFIRMED: EmailSource[] = ["TEAM_PAGE", "GITHUB_COMMIT", "SEC_FILING", "PRESS_RELEASE"];
 
@@ -110,6 +109,6 @@ export class LeadScorer {
   }
 
   isQualified(score: number): boolean {
-    return score >= QUALIFICATION_THRESHOLD;
+    return score >= QUALIFIED_THRESHOLD;
   }
 }

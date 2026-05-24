@@ -1,6 +1,7 @@
 import { Injectable, Logger, BadRequestException } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import { LLMService } from "../runtime/llm.service";
+import { chatJsonWithRetry } from "../common/json-output.util";
 
 const FETCH_TIMEOUT_MS = 15_000;
 const MAX_HTML_BYTES = 500_000;
@@ -175,15 +176,37 @@ export class IcpAutoService {
 
     const user = `Source URL: ${url}\n\nHomepage text:\n${text}`;
 
-    const resp = await this.llm.chat(
-      [
+    // Single retry on parse/shape failure: appends the validation error to
+    // the conversation so the model can self-correct. Returns null if both
+    // attempts fail — we surface that as a BadRequest with manual-fallback
+    // guidance rather than throwing on the LLM transport layer.
+    const parsed = await chatJsonWithRetry<IcpLlmPayload>(this.llm, {
+      messages: [
         { role: "system", content: system },
         { role: "user", content: user },
       ],
-      { model: "gpt-4o-mini", maxTokens: 800 },
-    );
+      chatOptions: {
+        // System pipeline (no agent template): resolve the model from env so
+        // ops can swap without code changes. SYSTEM_MODEL_MINI is the cheap
+        // tier used for short structured-extraction calls; falls back to the
+        // historical default of gpt-4o-mini if unset.
+        model: process.env.SYSTEM_MODEL_MINI ?? "gpt-4o-mini",
+        maxTokens: 800,
+        agent: "icp_auto_extractor.extract",
+        tags: ["pipeline", "icp_auto_extractor"],
+        metadata: { source_url: url },
+      },
+      guard: isIcpLlmPayload,
+      schemaDescription:
+        '{"productSummary": string, "industry": string, "targetTitles": string[], ' +
+        '"targetIndustries": string[], "targetGeos": string[], "intentKeywords": string[], ' +
+        '"minEmployees": number|null, "maxEmployees": number|null}',
+      onRetry: (err) =>
+        this.logger.warn(`ICP auto-extract: retrying after parse failure: ${err}`),
+      onFailure: (err) =>
+        this.logger.warn(`ICP auto-extract: both attempts failed: ${err}`),
+    });
 
-    const parsed = safeParseJson(resp.content);
     if (!parsed) {
       throw new BadRequestException(
         "Could not parse ICP from website. Please define one manually.",
@@ -201,6 +224,48 @@ export class IcpAutoService {
       maxEmployees: numberOrUndefined(parsed.maxEmployees),
     };
   }
+}
+
+/**
+ * Shape of the raw LLM payload before we coerce it into ExtractedIcp.
+ * Kept permissive (unknown for arrays) because the guard only ensures the
+ * top-level keys are present with the right primitive types — the per-field
+ * cleanup happens in `stringArray` / `numberOrUndefined`.
+ */
+interface IcpLlmPayload {
+  productSummary?: unknown;
+  industry?: unknown;
+  targetTitles?: unknown;
+  targetIndustries?: unknown;
+  targetGeos?: unknown;
+  intentKeywords?: unknown;
+  minEmployees?: unknown;
+  maxEmployees?: unknown;
+}
+
+function isIcpLlmPayload(value: unknown): value is IcpLlmPayload {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const obj = value as Record<string, unknown>;
+  // Required: at least one of targetTitles / targetIndustries / intentKeywords
+  // must be a non-empty string[]. Otherwise the ICP is unusable downstream.
+  const isStringArray = (v: unknown): boolean =>
+    Array.isArray(v) && v.every((x) => typeof x === "string");
+  const titlesOk = isStringArray(obj.targetTitles);
+  const industriesOk = isStringArray(obj.targetIndustries);
+  const keywordsOk = isStringArray(obj.intentKeywords);
+  if (!titlesOk && !industriesOk && !keywordsOk) return false;
+  // productSummary, when present, must be a string (the model often omits it
+  // entirely; we tolerate that and clip to empty downstream).
+  if (
+    obj.productSummary !== undefined &&
+    obj.productSummary !== null &&
+    typeof obj.productSummary !== "string"
+  ) {
+    return false;
+  }
+  return true;
 }
 
 function normalizeUrl(input: string): string {
@@ -224,25 +289,6 @@ function htmlToText(html: string): string {
     .replace(/&#39;/gi, "'")
     .replace(/\s+/g, " ")
     .trim();
-}
-
-function safeParseJson(s: string): Record<string, unknown> | null {
-  if (!s) return null;
-  // Tolerate models that wrap output in ```json … ```
-  const stripped = s.replace(/^```(?:json)?\s*|\s*```$/g, "").trim();
-  try {
-    const v = JSON.parse(stripped);
-    return typeof v === "object" && v ? (v as Record<string, unknown>) : null;
-  } catch {
-    // Try to extract the first {...} block
-    const m = stripped.match(/\{[\s\S]*\}/);
-    if (!m) return null;
-    try {
-      return JSON.parse(m[0]) as Record<string, unknown>;
-    } catch {
-      return null;
-    }
-  }
 }
 
 function stringArray(v: unknown): string[] {

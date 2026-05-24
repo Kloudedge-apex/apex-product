@@ -1,7 +1,16 @@
-import { Injectable, UnauthorizedException, BadRequestException } from "@nestjs/common";
+import {
+  Injectable,
+  Logger,
+  UnauthorizedException,
+  BadRequestException,
+  Inject,
+  forwardRef,
+} from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { google, gmail_v1, Auth } from "googleapis";
+import { Prisma } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
+import { RuntimeService } from "../../runtime/runtime.service";
 import { encrypt, decrypt } from "../crypto.util";
 
 interface GmailTokens {
@@ -42,6 +51,28 @@ interface GmailThread {
   messages: GmailMessage[];
 }
 
+interface GmailPushPayload {
+  emailAddress: string;
+  historyId: string;
+}
+
+interface ReplyDispatchContext {
+  gmailMessageId: string;
+  threadId: string;
+  from: string;
+  subject: string;
+  bodyPreview: string;
+}
+
+// Phase 1 watermark: the GmailIntegration row in the Prisma schema does NOT yet
+// have a `lastHistoryId` column. Until that field is added + migrated, we keep
+// the watermark in-memory keyed by orgId. This is lossy across process
+// restarts; the dispatcher tolerates that by falling back to "scan from the
+// supplied historyId" when there's no stored value.
+// TODO(schema): add `lastHistoryId String?` to Integration (or a sibling
+// GmailIntegration table) and migrate; then replace this in-memory map.
+const HISTORY_WATERMARK = new Map<string, string>();
+
 const GMAIL_SCOPES = [
   "https://www.googleapis.com/auth/gmail.send",
   "https://www.googleapis.com/auth/gmail.readonly",
@@ -51,13 +82,17 @@ const GMAIL_SCOPES = [
 
 @Injectable()
 export class GmailService {
+  private readonly logger = new Logger(GmailService.name);
   private readonly clientId: string;
   private readonly clientSecret: string;
   private readonly redirectUri: string;
+  private readonly pushVerificationToken: string;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    @Inject(forwardRef(() => RuntimeService))
+    private readonly runtime: RuntimeService,
   ) {
     this.clientId = this.config.get<string>("GOOGLE_CLIENT_ID", "");
     this.clientSecret = this.config.get<string>("GOOGLE_CLIENT_SECRET", "");
@@ -65,6 +100,187 @@ export class GmailService {
       "GOOGLE_REDIRECT_URI",
       "http://localhost:4000/api/integrations/gmail/callback",
     );
+    this.pushVerificationToken = this.config.get<string>(
+      "GMAIL_PUSH_VERIFICATION_TOKEN",
+      "",
+    );
+  }
+
+  /**
+   * Verifies that an inbound push request came from Google.
+   *
+   * Phase 1 — simple shared bearer token sent in the `Authorization` header.
+   * Configure Google Pub/Sub to attach this token via the subscription's
+   * `pushConfig.attributes` or `authentication_method.token`.
+   *
+   * TODO(security): upgrade to OIDC JWT verification — Google signs each push
+   * with a Google-issued JWT; we should verify the signature against
+   * https://www.googleapis.com/oauth2/v1/certs and check `aud` matches our
+   * push endpoint. The bearer approach is acceptable for hackathon timeline
+   * but MUST be hardened before production traffic.
+   */
+  verifyPushAuth(authorizationHeader: string | undefined): boolean {
+    if (!this.pushVerificationToken) {
+      // Fail-closed: if no token is configured, refuse all push traffic.
+      return false;
+    }
+    if (!authorizationHeader) return false;
+    const expected = `Bearer ${this.pushVerificationToken}`;
+    return authorizationHeader === expected;
+  }
+
+  /**
+   * Entry point for Gmail Pub/Sub push notifications. Decodes the watermark,
+   * fetches history since the last seen `historyId`, and dispatches each new
+   * inbound reply to the org's Reply Handler agent.
+   *
+   * Idempotency: the History API is monotonic and we update the watermark
+   * after processing. Duplicate deliveries from Pub/Sub will produce an empty
+   * history page and no-op.
+   */
+  async handlePushNotification(payload: GmailPushPayload): Promise<void> {
+    const { emailAddress, historyId } = payload;
+    if (!emailAddress || !historyId) {
+      this.logger.warn("gmail.push missing emailAddress/historyId", { payload });
+      return;
+    }
+
+    const integration = await this.findIntegrationByEmail(emailAddress);
+    if (!integration) {
+      this.logger.warn("gmail.push no integration for emailAddress", {
+        emailAddress,
+      });
+      return;
+    }
+
+    const orgId = integration.orgId;
+    const gmail = await this.getGmailClient(orgId);
+
+    const startHistoryId = HISTORY_WATERMARK.get(orgId) ?? historyId;
+
+    let newMessageIds: string[] = [];
+    try {
+      const history = await gmail.users.history.list({
+        userId: "me",
+        startHistoryId,
+        historyTypes: ["messageAdded"],
+      });
+      for (const record of history.data.history ?? []) {
+        for (const added of record.messagesAdded ?? []) {
+          if (added.message?.id) newMessageIds.push(added.message.id);
+        }
+      }
+    } catch (err) {
+      // Common case: startHistoryId is too old → Gmail returns 404. Skip and
+      // reset the watermark to the latest so we don't refetch forever.
+      this.logger.warn("gmail.history.list failed; resetting watermark", {
+        orgId,
+        startHistoryId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      HISTORY_WATERMARK.set(orgId, historyId);
+      return;
+    }
+
+    // De-duplicate (history can repeat ids across pages).
+    newMessageIds = Array.from(new Set(newMessageIds));
+
+    for (const messageId of newMessageIds) {
+      try {
+        const message = await this.getMessage(orgId, messageId, gmail);
+        await this.maybeDispatchReply(orgId, emailAddress, message);
+      } catch (err) {
+        this.logger.warn("gmail.push message processing failed", {
+          orgId,
+          messageId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    HISTORY_WATERMARK.set(orgId, historyId);
+  }
+
+  private async maybeDispatchReply(
+    orgId: string,
+    integrationEmail: string,
+    message: GmailMessage,
+  ): Promise<void> {
+    // Skip messages sent by us — Gmail surfaces SENT alongside INBOX changes.
+    if (message.labelIds.includes("SENT")) return;
+    if (!message.labelIds.includes("INBOX")) return;
+
+    // Defense in depth: if the From header matches the integration owner,
+    // it's our own outbound — don't loop.
+    if (
+      integrationEmail &&
+      message.from.toLowerCase().includes(integrationEmail.toLowerCase())
+    ) {
+      return;
+    }
+
+    // Look up the Reply Handler agent for this org. Template slug is
+    // "reply-handler"; the seeded AgentTemplate row has name "Reply Handler".
+    const agent = await this.prisma.agent.findFirst({
+      where: {
+        orgId,
+        template: { name: "Reply Handler" },
+      },
+      select: { id: true, orgId: true },
+    });
+
+    if (!agent) {
+      this.logger.log("gmail.push no Reply Handler configured — skipping", {
+        orgId,
+        messageId: message.id,
+      });
+      return;
+    }
+
+    const context: ReplyDispatchContext = {
+      gmailMessageId: message.id,
+      threadId: message.threadId,
+      from: message.from,
+      subject: message.subject,
+      bodyPreview: (message.body ?? message.snippet).slice(0, 280),
+    };
+
+    const run = await this.runtime.triggerRun(agent.id, agent.orgId);
+
+    // RuntimeService.triggerRun does not accept a payload today; log the
+    // inbound context against the new run so the executor can pick it up.
+    await this.prisma.agentLog.create({
+      data: {
+        runId: run.id,
+        level: "INFO",
+        message: "Reply Handler triggered by Gmail push notification",
+        metadata: context as unknown as Prisma.InputJsonValue,
+      },
+    });
+  }
+
+  private async findIntegrationByEmail(emailAddress: string): Promise<{
+    orgId: string;
+  } | null> {
+    // We stash the authenticated Gmail address inside the (non-secret)
+    // `credentials` JSON column during handleCallback. Until a first-class
+    // column lands, query via Prisma's Json `path` filter.
+    //
+    // TODO(schema): promote `accountEmail` to a first-class indexed column on
+    // Integration (or split into a GmailIntegration sibling). Same migration
+    // should add `lastHistoryId` for durable watermarking.
+    const match = await this.prisma.integration.findFirst({
+      where: {
+        provider: "gmail",
+        status: "CONNECTED",
+        credentials: {
+          path: ["accountEmail"],
+          equals: emailAddress,
+        },
+      },
+      select: { orgId: true },
+    });
+    return match;
   }
 
   getAuthUrl(orgId: string): string {
@@ -95,19 +311,37 @@ export class GmailService {
 
     const encryptedCreds = encrypt(JSON.stringify(tokenData));
 
+    // Resolve the authenticated Gmail address so push deliveries can map
+    // `emailAddress` → orgId without a schema migration. We stash it in the
+    // (non-secret) `credentials` JSON column.
+    let accountEmail = "";
+    try {
+      const oauthForProfile = this.createOAuth2Client();
+      oauthForProfile.setCredentials({
+        access_token: tokenData.access_token,
+        refresh_token: tokenData.refresh_token,
+        expiry_date: tokenData.expiry_date,
+      });
+      const gmail = google.gmail({ version: "v1", auth: oauthForProfile });
+      const profile = await gmail.users.getProfile({ userId: "me" });
+      accountEmail = profile.data.emailAddress ?? "";
+    } catch {
+      // Non-fatal — push routing will degrade but OAuth still succeeds.
+    }
+
     await this.prisma.integration.upsert({
       where: { orgId_provider: { orgId, provider: "gmail" } },
       create: {
         orgId,
         provider: "gmail",
-        credentials: {},
+        credentials: { accountEmail },
         encryptedCredentials: encryptedCreds,
         status: "CONNECTED",
         scopes: GMAIL_SCOPES,
       },
       update: {
         encryptedCredentials: encryptedCreds,
-        credentials: {},
+        credentials: { accountEmail },
         status: "CONNECTED",
         scopes: GMAIL_SCOPES,
         lastSyncAt: new Date(),

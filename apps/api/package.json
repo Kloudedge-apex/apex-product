@@ -13,6 +13,7 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "smoke:tenant-zero": "tsx scripts/smoke-tenant-zero-pipeline.ts",
+    "datasets:upload": "tsx datasets/upload-to-langsmith.ts",
     "clean": "rm -rf dist .turbo node_modules"
   },
   "dependencies": {

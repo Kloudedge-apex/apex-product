@@ -9,6 +9,7 @@
  */
 import { Module } from "@nestjs/common";
 import { ScheduleModule } from "@nestjs/schedule";
+import { RuntimeModule } from "../runtime/runtime.module";
 import { LeadsController } from "./leads.controller";
 import { LeadsService } from "./leads.service";
 import { LeadsSchedulerService } from "./leads-scheduler.service";
@@ -24,7 +25,7 @@ import { IdentityResolver } from "./enrichment/identity-resolver.service";
 import { LeadScorer } from "./scoring/lead-scorer.service";
 
 @Module({
-  imports: [ScheduleModule.forRoot()],
+  imports: [ScheduleModule.forRoot(), RuntimeModule],
   controllers: [LeadsController],
   providers: [
     LeadsService,

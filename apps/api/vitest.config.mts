@@ -3,14 +3,14 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     globals: true,
-    root: "./src",
+    root: ".",
     environment: "node",
-    include: ["**/*.spec.ts"],
-    setupFiles: ["../vitest.setup.ts"],
+    include: ["src/**/*.spec.ts", "datasets/**/*.spec.ts"],
+    setupFiles: ["./vitest.setup.ts"],
     coverage: {
       provider: "v8",
       reporter: ["text", "lcov"],
-      include: ["**/*.service.ts", "**/*.controller.ts"],
+      include: ["src/**/*.service.ts", "src/**/*.controller.ts"],
     },
   },
 });

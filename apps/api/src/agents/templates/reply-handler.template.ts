@@ -51,11 +51,15 @@ CRITICAL RULES:
 
   requiredIntegrations: ["email", "crm"],
   defaultSchedule: "*/15 * * * *",
+  // Templates are the source of truth for tool whitelisting — the ToolRegistry derives its TEMPLATE_TOOL_MAP from these arrays at startup and bootstrap-fails if any name is unknown.
+  // Reply Handler is customer-facing: read-only research + memory + reply-only send_email. No hubspot/crm write, no lead_score, no initiating new outbound.
   availableTools: [
-    { name: "email_read", description: "Read and scan for new prospect replies across connected inboxes" },
-    { name: "intent_classify", description: "Classify reply intent using NLP: interested, objection, not_now, unsubscribe, etc." },
-    { name: "email_draft", description: "Draft contextual response emails based on intent classification" },
-    { name: "crm_update", description: "Update CRM contacts, deal stages, and activity logs based on reply outcomes" },
+    { name: "web_search", description: "Search the web for context to back up objection responses (case studies, ROI data)" },
+    { name: "web_scrape", description: "Scrape referenced URLs (competitor pages, source articles) for objection context" },
+    { name: "memory", description: "Read and write durable agent memory (active campaigns, conversation context, intent stats)" },
+    { name: "send_email", description: "Send a reply-only response to an existing prospect thread (no new outbound)" },
+    // TODO: add email_read to registry (reply ingestion currently driven by upstream webhook, not pulled here)
+    // TODO: add intent_classify to registry (intent currently inferred by the LLM directly from the reply text)
   ],
   exampleTasks: [
     "Process all new prospect replies from the last hour and classify intent",

@@ -233,5 +233,78 @@ export class EvidenceLedgerService {
       },
     });
   }
+
+  async messageSent(input: {
+    readonly orgId: string;
+    readonly runId?: string | null;
+    /**
+     * Required when emitting from the post-approval send path (artifact-driven).
+     * Omit/leave null for in-loop tool-call emissions, where there is no
+     * approved artifact backing the send — refType+refId must then be set to
+     * "outreach_tool_call" and the provider message id, respectively.
+     */
+    readonly artifactId?: string | null;
+    readonly channel: "EMAIL" | "LINKEDIN" | "HUBSPOT_NOTE";
+    readonly recipientRef?: string | null;
+    readonly subject?: string | null;
+    readonly sendReceiptId?: string | null;
+    readonly provider?: string | null;
+    readonly refType?: "outreach_artifact" | "outreach_tool_call";
+    readonly refId?: string | null;
+  }): Promise<void> {
+    const refType: "outreach_artifact" | "outreach_tool_call" =
+      input.refType ?? "outreach_artifact";
+    const refId =
+      input.refId ??
+      input.artifactId ??
+      input.sendReceiptId ??
+      "unknown";
+    return this.append({
+      orgId: input.orgId,
+      runId: input.runId ?? null,
+      kind: EVIDENCE_EVENT_KIND.messageSent,
+      refType,
+      refId,
+      payload: {
+        kind: EVIDENCE_EVENT_KIND.messageSent,
+        ...(input.artifactId ? { artifact_id: input.artifactId } : { artifact_id: null }),
+        channel: input.channel,
+        ...(input.recipientRef ? { recipient_ref: input.recipientRef } : {}),
+        ...(input.subject ? { subject: input.subject } : {}),
+        ...(input.sendReceiptId ? { send_receipt_id: input.sendReceiptId } : {}),
+        ...(input.provider ? { provider: input.provider } : {}),
+      },
+    });
+  }
+
+  async crmSynced(input: {
+    readonly orgId: string;
+    readonly runId?: string | null;
+    readonly provider: "hubspot" | "salesforce";
+    readonly entityType: "contact" | "deal" | "note";
+    readonly entityId: string;
+    readonly operation: "create" | "update" | "delete";
+    readonly orgIdExternal?: string | null;
+    readonly fieldsChanged?: readonly string[];
+  }): Promise<void> {
+    return this.append({
+      orgId: input.orgId,
+      runId: input.runId ?? null,
+      kind: EVIDENCE_EVENT_KIND.crmSynced,
+      refType: "crm_object",
+      refId: input.entityId,
+      payload: {
+        kind: EVIDENCE_EVENT_KIND.crmSynced,
+        provider: input.provider,
+        entity_type: input.entityType,
+        entity_id: input.entityId,
+        operation: input.operation,
+        ...(input.orgIdExternal ? { org_id_external: input.orgIdExternal } : {}),
+        ...(input.fieldsChanged && input.fieldsChanged.length > 0
+          ? { fields_changed: input.fieldsChanged }
+          : {}),
+      },
+    });
+  }
 }
 

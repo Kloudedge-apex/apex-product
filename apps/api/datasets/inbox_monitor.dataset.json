@@ -1,0 +1,304 @@
+[
+  {
+    "id": "inbox_001",
+    "input": {
+      "subject": "Quick question — pricing for 50 seats?",
+      "body": "Hi team, we're evaluating WorkforceOS for our RevOps org of about 50 reps. Could you share annual pricing and what's included in the Enterprise tier? Looking to make a decision by end of next week.",
+      "sender_email": "ben.howard@acmecrm.example.com"
+    },
+    "ground_truth": {
+      "category": "pricing_inquiry",
+      "priority": 2,
+      "suggestedReply": "Hi Ben, thanks for the interest. I'll send over our Enterprise pricing sheet and can set up a 20-minute call this week to walk through what's included. What times work for you?",
+      "autoReplied": false
+    },
+    "tags": ["pricing_inquiry", "warm_lead"]
+  },
+  {
+    "id": "inbox_002",
+    "input": {
+      "subject": "Meeting request — demo for next Tuesday",
+      "body": "Hello, would love to set up a product demo. Tuesday at 2pm PT works for me. Please confirm or suggest alternatives.",
+      "sender_email": "sara.lin@ledgerly.example.io"
+    },
+    "ground_truth": {
+      "category": "meeting_request",
+      "priority": 2,
+      "suggestedReply": "Hi Sara, Tuesday 2pm PT works on my side. I'll send a calendar invite with the demo link.",
+      "autoReplied": true
+    },
+    "tags": ["meeting_request", "auto_reply"]
+  },
+  {
+    "id": "inbox_003",
+    "input": {
+      "subject": "Unsubscribe",
+      "body": "Please remove me from your mailing list immediately. I am no longer interested in receiving emails from your company.",
+      "sender_email": "rachel.k@example.com"
+    },
+    "ground_truth": {
+      "category": "unsubscribe",
+      "priority": 4,
+      "suggestedReply": null,
+      "autoReplied": false
+    },
+    "tags": ["unsubscribe", "compliance"]
+  },
+  {
+    "id": "inbox_004",
+    "input": {
+      "subject": "Re: Your proposal — concerns about pricing",
+      "body": "Thanks for sending the proposal. Honestly, the per-seat cost is 2x what we're paying our current vendor and the security review will take 6 weeks. I don't think we can move forward this quarter.",
+      "sender_email": "dmitri.volkov@carepath.example.health"
+    },
+    "ground_truth": {
+      "category": "objection",
+      "priority": 1,
+      "suggestedReply": "Hi Dmitri, appreciate the candor. Let's hop on a 15-minute call so I can understand the pricing gap and walk you through our SOC 2 package — it may shorten the security review materially. Available tomorrow?",
+      "autoReplied": false
+    },
+    "tags": ["objection", "high_priority"]
+  },
+  {
+    "id": "inbox_005",
+    "input": {
+      "subject": "[Newsletter] This Week in RevOps — Issue 142",
+      "body": "Welcome to this week's newsletter. In this issue: 5 trends shaping outbound in 2026, a deep-dive on AI SDRs, and our reader Q&A. Click here to read more.",
+      "sender_email": "newsletter@revopsdigest.example.com"
+    },
+    "ground_truth": {
+      "category": "newsletter",
+      "priority": 5,
+      "suggestedReply": null,
+      "autoReplied": false
+    },
+    "tags": ["newsletter", "auto_archive"]
+  },
+  {
+    "id": "inbox_006",
+    "input": {
+      "subject": "URGENT: Production outage affecting our team",
+      "body": "Our team can't access the dashboard since 09:14 UTC — getting a 503 error. We have a board demo in 90 minutes. Please escalate immediately.",
+      "sender_email": "cto@shopstack.example.com"
+    },
+    "ground_truth": {
+      "category": "urgent",
+      "priority": 1,
+      "suggestedReply": "Acknowledged — escalating to on-call now. I'll send an update within 10 minutes with a status and ETA.",
+      "autoReplied": false
+    },
+    "tags": ["urgent", "support", "high_priority"]
+  },
+  {
+    "id": "inbox_007",
+    "input": {
+      "subject": "Following up on our conversation",
+      "body": "Hi — just following up on our chat last Thursday. Let me know when you have a moment.",
+      "sender_email": "unknown.contact@example.org"
+    },
+    "ground_truth": {
+      "category": "unclear",
+      "priority": 3,
+      "suggestedReply": null,
+      "autoReplied": false,
+      "reason": "Vague follow-up with no prior thread context; cannot determine sender intent or original request."
+    },
+    "tags": ["unclear", "edge_case", "failure_mode"]
+  },
+  {
+    "id": "inbox_008",
+    "input": {
+      "subject": "Congratulations! You've won a $500 gift card",
+      "body": "Click this link to claim your prize. Reply with your bank details to expedite payout. Limited time offer ends today.",
+      "sender_email": "rewards@suspicious-domain.example.tld"
+    },
+    "ground_truth": {
+      "category": "spam",
+      "priority": 5,
+      "suggestedReply": null,
+      "autoReplied": false
+    },
+    "tags": ["spam", "phishing", "auto_archive"]
+  },
+  {
+    "id": "inbox_009",
+    "input": {
+      "subject": "Can we reschedule Thursday?",
+      "body": "Hi, conflict came up on my end. Can we move our Thursday 3pm to Friday at 10am or Monday afternoon?",
+      "sender_email": "marcus.lee@northforge.example.com"
+    },
+    "ground_truth": {
+      "category": "meeting_request",
+      "priority": 2,
+      "suggestedReply": "Hi Marcus, Friday 10am works. I'll send the updated invite.",
+      "autoReplied": false
+    },
+    "tags": ["meeting_request", "reschedule"]
+  },
+  {
+    "id": "inbox_010",
+    "input": {
+      "subject": "Loved the demo — sending to procurement",
+      "body": "Great call today. I'm forwarding the deck to our procurement lead, Anita. She'll reach out about MSA and security review. Targeting signature by month-end.",
+      "sender_email": "head.of.ops@pulsehr.example.app"
+    },
+    "ground_truth": {
+      "category": "follow-up",
+      "priority": 2,
+      "suggestedReply": "Thanks for the kind words. I'll be ready when Anita reaches out — happy to send our standard MSA and SOC 2 package proactively. Just say the word.",
+      "autoReplied": false
+    },
+    "tags": ["follow-up", "deal_progression"]
+  },
+  {
+    "id": "inbox_011",
+    "input": {
+      "subject": "STOP sending me emails",
+      "body": "I have asked three times to be removed. This is the last warning before I report your company.",
+      "sender_email": "annoyed.user@example.net"
+    },
+    "ground_truth": {
+      "category": "unsubscribe",
+      "priority": 1,
+      "suggestedReply": null,
+      "autoReplied": false
+    },
+    "tags": ["unsubscribe", "compliance", "high_priority"]
+  },
+  {
+    "id": "inbox_012",
+    "input": {
+      "subject": "Question about your API rate limits",
+      "body": "Hi, we're a current customer evaluating an upgrade. Can someone explain the rate limits on the v2 API and whether they scale with the Enterprise plan?",
+      "sender_email": "platform.team@routeiq.example.com"
+    },
+    "ground_truth": {
+      "category": "support",
+      "priority": 3,
+      "suggestedReply": "Happy to walk through our rate limits — short answer: v2 default is 1,000 req/min, Enterprise is configurable. I'll loop in our solutions engineer who can tailor specifics to your workload.",
+      "autoReplied": false
+    },
+    "tags": ["support", "customer"]
+  },
+  {
+    "id": "inbox_013",
+    "input": {
+      "subject": "Quote needed by EOD Friday",
+      "body": "Need pricing for 200 users on Enterprise, with SSO and audit logs. Procurement requires a written quote by end of day Friday to lock budget.",
+      "sender_email": "procurement@growloop.example.io"
+    },
+    "ground_truth": {
+      "category": "pricing_inquiry",
+      "priority": 1,
+      "suggestedReply": "Acknowledged — I'll have a formal quote with 200 Enterprise seats, SSO, and audit logs in your inbox by Thursday EOD so you have a buffer day.",
+      "autoReplied": false
+    },
+    "tags": ["pricing_inquiry", "deadline", "high_priority"]
+  },
+  {
+    "id": "inbox_014",
+    "input": {
+      "subject": "When you can",
+      "body": "Hey — wondering if you had thoughts. Soon would be ideal.",
+      "sender_email": "person.unknown@example.com"
+    },
+    "ground_truth": {
+      "category": "unclear",
+      "priority": 3,
+      "suggestedReply": null,
+      "autoReplied": false,
+      "reason": "Body contains no actionable subject, no referenced thread, and vague urgency words; insufficient signal to classify."
+    },
+    "tags": ["unclear", "edge_case", "vague_language", "failure_mode"]
+  },
+  {
+    "id": "inbox_015",
+    "input": {
+      "subject": "Re: Re: Re: Contract redlines",
+      "body": "Legal pushed back on Section 9.2 (liability cap). Can we agree on 1.5x annual fees instead of 1x? If yes I can get this signed today.",
+      "sender_email": "legal@verdantfields.example.farm"
+    },
+    "ground_truth": {
+      "category": "follow-up",
+      "priority": 1,
+      "suggestedReply": "Looping in our legal — we have flexibility on 9.2. Will revert within 2 hours so we can keep today's signature target.",
+      "autoReplied": false
+    },
+    "tags": ["follow-up", "contract", "high_priority"]
+  },
+  {
+    "id": "inbox_016",
+    "input": {
+      "subject": "Free webinar: Scaling outbound in 2026",
+      "body": "Join our free 45-minute webinar on Thursday at 11am ET. Industry experts share what's working. Save your seat now.",
+      "sender_email": "events@martechweekly.example.com"
+    },
+    "ground_truth": {
+      "category": "newsletter",
+      "priority": 5,
+      "suggestedReply": null,
+      "autoReplied": false
+    },
+    "tags": ["newsletter", "marketing", "auto_archive"]
+  },
+  {
+    "id": "inbox_017",
+    "input": {
+      "subject": "Demo slot",
+      "body": "30 mins this week? I run growth at Atlas.",
+      "sender_email": "growth@atlasrev.example.com"
+    },
+    "ground_truth": {
+      "category": "meeting_request",
+      "priority": 2,
+      "suggestedReply": "Sure — does Wednesday at 11am or Thursday at 3pm work? I'll send a calendar hold for whichever you prefer.",
+      "autoReplied": true
+    },
+    "tags": ["meeting_request", "short_email", "auto_reply"]
+  },
+  {
+    "id": "inbox_018",
+    "input": {
+      "subject": "Pricing is too high — we'll pass",
+      "body": "Thanks for the proposal. Your annual cost is 3x what BetaCorp is offering for similar features. We're going with them. Best of luck.",
+      "sender_email": "decision.maker@kindredpet.example.shop"
+    },
+    "ground_truth": {
+      "category": "objection",
+      "priority": 2,
+      "suggestedReply": "Appreciate you letting me know. Before you sign, can I send a one-page comparison of where we typically outperform BetaCorp on retention and SLAs? If the gap still doesn't justify the cost, no hard feelings.",
+      "autoReplied": false
+    },
+    "tags": ["objection", "competitive_loss"]
+  },
+  {
+    "id": "inbox_019",
+    "input": {
+      "subject": "Bug report: dashboard returns 500 on weekly reports",
+      "body": "Since last Friday, the Weekly Reports tab returns a 500 error consistently. Tried multiple browsers and a different user. Org slug: clinicaledge-prod.",
+      "sender_email": "ops@clinicaledge.example.com"
+    },
+    "ground_truth": {
+      "category": "support",
+      "priority": 1,
+      "suggestedReply": "Sorry for the disruption — escalating to our platform team now. I'll send a status update within the hour with a workaround or ETA on a fix.",
+      "autoReplied": false
+    },
+    "tags": ["support", "bug_report", "high_priority"]
+  },
+  {
+    "id": "inbox_020",
+    "input": {
+      "subject": "Re: Following up after our meeting",
+      "body": "Quick sync — yes the team likes the platform but security review is the blocker. Can you share your latest SOC 2 Type II report? Would help unblock procurement.",
+      "sender_email": "security.review@sentinelguard.example.io"
+    },
+    "ground_truth": {
+      "category": "follow-up",
+      "priority": 2,
+      "suggestedReply": "Absolutely — sending our SOC 2 Type II and pen-test summary via secure link in the next 30 minutes. Let me know what other docs procurement needs.",
+      "autoReplied": false
+    },
+    "tags": ["follow-up", "security_review"]
+  }
+]

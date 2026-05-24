@@ -1,3 +1,6 @@
+// TODO(json-validation): wrap LLM response with parseJsonResponse() /
+// chatJsonWithRetry() — see common/json-output.util.ts. Expected shape:
+// {"type": "report", "reportType": string, "period": string, "metrics": {...}, "summary": string}.
 export function getReportingPrompt(config: Record<string, unknown>): string {
   const reportType = config.reportType || "weekly";
   const metrics = Array.isArray(config.metricsToTrack) ? config.metricsToTrack.join(", ") : "emails sent, response rate, meetings booked, pipeline value";
@@ -58,5 +61,22 @@ OUTPUT FORMAT (JSON):
   "summary": "executive summary paragraph"
 }
 
-CRITICAL: Focus on actionable insights, not just numbers.`;
+CRITICAL: Focus on actionable insights, not just numbers.
+
+## Failure Modes
+
+Only cite metrics that appear in the provided dataset or tool output. If a requested metric is missing, write the literal string "not available in current dataset" and DO NOT extrapolate. Specifically, never fabricate:
+- numeric values (counts, percentages, dollar amounts) not observed in the data
+- benchmark figures, industry averages, or competitor numbers without a real source URL
+- trend direction when there is no prior period in memory to compare against
+- top performer names, deal IDs, or contact IDs not in the queried CRM result
+
+Missing-metric shape:
+
+{
+  "metricName": "not available in current dataset",
+  "reason": "<one sentence: why the value is missing>"
+}
+
+Set trend to "unknown" rather than "up|down|flat" when no historical comparison exists. An honest gap beats a confident invention.`;
 }

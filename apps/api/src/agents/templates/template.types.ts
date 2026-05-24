@@ -11,7 +11,14 @@ export interface TemplateTool {
 export interface TemplateDefaultConfig {
   maxIterations: number;
   timeoutMs: number;
+  /** Primary model used for complex reasoning steps (e.g. "gpt-4o"). */
   model: string;
+  /**
+   * Optional cheaper/faster model used for simple steps. Falls back to
+   * "gpt-4o-mini" in the executor when omitted. Templates that want a
+   * single-tier model can leave this unset.
+   */
+  fastModel?: string;
   [key: string]: unknown;
 }
 

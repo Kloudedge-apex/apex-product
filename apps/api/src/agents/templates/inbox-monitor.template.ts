@@ -44,11 +44,14 @@ CRITICAL RULES:
 
   requiredIntegrations: ["email"],
   defaultSchedule: "*/5 * * * *",
+  // Templates are the source of truth for tool whitelisting — the ToolRegistry derives its TEMPLATE_TOOL_MAP from these arrays at startup and bootstrap-fails if any name is unknown.
   availableTools: [
-    { name: "email_read", description: "Read unread emails from the connected inbox with full metadata" },
-    { name: "email_categorize", description: "Apply categories, labels, and priority tags to emails" },
-    { name: "email_draft", description: "Create draft replies for emails requiring responses" },
-    { name: "notification_send", description: "Send notifications to team members about urgent items via Slack or email" },
+    { name: "send_email", description: "Send draft replies or notifications to team members via the connected email provider" },
+    { name: "memory", description: "Read and write durable agent memory (VIP contacts, routing rules, triage history)" },
+    // TODO: add email_read to registry (currently inbox scan is mocked from memory cache)
+    // TODO: add email_categorize to registry (labelling delegated to email provider rules for now)
+    // TODO: add email_draft to registry (drafts currently piggyback on send_email with dry_run)
+    // TODO: add notification_send (Slack) to registry
   ],
   exampleTasks: [
     "Triage the last 50 unread emails and categorize by urgency",

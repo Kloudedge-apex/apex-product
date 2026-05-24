@@ -3,6 +3,7 @@ import { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { encryptCredentials, decryptCredentials } from "./crypto.util";
 import { signOAuthState } from "../common/webhook-signature.util";
+import { fetchWithRetry, withCircuitBreaker } from "../common/http-retry.util";
 
 interface OAuthConfig {
   clientId?: string;
@@ -188,11 +189,17 @@ export class IntegrationsService {
         client_id: config.clientId,
         client_secret: config.clientSecret,
       });
-      const response = await fetch(config.tokenUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: body.toString(),
-      });
+      const response = await withCircuitBreaker(`oauth-${provider}`, () =>
+        fetchWithRetry(
+          config.tokenUrl,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: body.toString(),
+          },
+          { provider: `oauth-${provider}` },
+        ),
+      );
       if (!response.ok) return creds;
       tokens = (await response.json()) as Record<string, unknown>;
     } catch {
@@ -276,11 +283,17 @@ export class IntegrationsService {
         client_id: config.clientId,
         client_secret: config.clientSecret || "",
       });
-      const response = await fetch(config.tokenUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: body.toString(),
-      });
+      const response = await withCircuitBreaker(`oauth-${provider}`, () =>
+        fetchWithRetry(
+          config.tokenUrl,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: body.toString(),
+          },
+          { provider: `oauth-${provider}` },
+        ),
+      );
       if (!response.ok) {
         throw new Error(`Token exchange failed: ${response.status}`);
       }

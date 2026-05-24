@@ -1,5 +1,8 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable, Logger, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+import { LLMService } from "../../runtime/llm.service";
+import { fetchWithRetry, withCircuitBreaker } from "../../common/http-retry.util";
+import { chatJsonWithRetry } from "../../common/json-output.util";
 
 interface DiscoveredPerson {
   firstName: string;
@@ -36,7 +39,10 @@ export class TeamPageScraper {
   private readonly logger = new Logger(TeamPageScraper.name);
   private readonly openaiKey: string | undefined;
 
-  constructor(private readonly config: ConfigService) {
+  constructor(
+    private readonly config: ConfigService,
+    @Optional() private readonly llm?: LLMService,
+  ) {
     this.openaiKey = this.config.get<string>("OPENAI_API_KEY");
   }
 
@@ -50,11 +56,18 @@ export class TeamPageScraper {
 
     for (const url of urls) {
       try {
-        const res = await fetch(url, {
-          headers: { "User-Agent": "WorkforceOS/1.0 (lead-engine)" },
-          signal: AbortSignal.timeout(10000),
-          redirect: "follow",
-        });
+        // Hitting arbitrary tenant team-pages — keep retries modest. No
+        // circuit breaker: a single bad customer site must not poison the
+        // pool for every other scrape.
+        const res = await fetchWithRetry(
+          url,
+          {
+            headers: { "User-Agent": "WorkforceOS/1.0 (lead-engine)" },
+            signal: AbortSignal.timeout(10000),
+            redirect: "follow",
+          },
+          { provider: "team-page", maxAttempts: 3 },
+        );
 
         if (!res.ok) continue;
 
@@ -196,7 +209,7 @@ export class TeamPageScraper {
   }
 
   private async extractWithLlm(html: string, url: string): Promise<DiscoveredPerson[]> {
-    if (!this.openaiKey) return [];
+    if (!this.llm || !this.openaiKey) return [];
 
     // Truncate HTML to save tokens
     const stripped = html.replace(/<script[\s\S]*?<\/script>/gi, "")
@@ -206,39 +219,48 @@ export class TeamPageScraper {
       .slice(0, 8000);
 
     try {
-      const res = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${this.openaiKey}`,
-          "Content-Type": "application/json",
+      // Single retry on parse/shape failure: re-prompts the model with the
+      // validation error appended. Returns null after two failed attempts —
+      // we treat that as "no people found" and the caller falls through to
+      // the next URL in the team-page list.
+      const parsed = await chatJsonWithRetry<TeamPagePayload>(this.llm, {
+        messages: [
+          {
+            role: "system",
+            content:
+              "Extract people (team members, leadership) from this web page text. Return a JSON object {\"people\": [{firstName, lastName, title, linkedinUrl}]}. Only include people who clearly work at this company. Return {\"people\":[]} if none found.",
+          },
+          {
+            role: "user",
+            content: `URL: ${url}\n\nPage text:\n${stripped}`,
+          },
+        ],
+        chatOptions: {
+          // System pipeline (no agent template): resolve model from env so
+          // ops can swap without code changes. SYSTEM_MODEL_MINI is the cheap
+          // tier shared with icp-auto. Falls back to the historical default.
+          model: process.env.SYSTEM_MODEL_MINI ?? "gpt-4o-mini",
+          maxTokens: 1500,
+          agent: "team_page_extractor.extract",
+          tags: ["pipeline", "team_page_extractor"],
+          metadata: { source_url: url },
         },
-        body: JSON.stringify({
-          model: "gpt-4o-mini",
-          temperature: 0,
-          messages: [
-            {
-              role: "system",
-              content:
-                "Extract people (team members, leadership) from this web page text. Return JSON array of {firstName, lastName, title, linkedinUrl}. Only include people who clearly work at this company. Return [] if none found.",
-            },
-            {
-              role: "user",
-              content: `URL: ${url}\n\nPage text:\n${stripped}`,
-            },
-          ],
-          response_format: { type: "json_object" },
-        }),
-        signal: AbortSignal.timeout(30000),
+        guard: isTeamPagePayload,
+        schemaDescription:
+          '{"people": [{"firstName": string, "lastName": string, "title"?: string, "linkedinUrl"?: string}]}',
+        onRetry: (err) =>
+          this.logger.warn(
+            `Team-page LLM extract: retrying after parse failure for ${url}: ${err}`,
+          ),
+        onFailure: (err) =>
+          this.logger.warn(
+            `Team-page LLM extract: both attempts failed for ${url}: ${err}`,
+          ),
       });
 
-      if (!res.ok) return [];
+      if (!parsed) return [];
 
-      const data = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
-      const content = data.choices?.[0]?.message?.content;
-      if (!content) return [];
-
-      const parsed = JSON.parse(content) as { people?: DiscoveredPerson[] } | DiscoveredPerson[];
-      const arr = Array.isArray(parsed) ? parsed : (parsed.people ?? []);
+      const arr: DiscoveredPerson[] = Array.isArray(parsed) ? parsed : parsed.people;
 
       return arr
         .filter((p): p is DiscoveredPerson => Boolean(p.firstName && p.lastName))
@@ -262,4 +284,36 @@ export class TeamPageScraper {
     const match = /linkedin\.com\/in\/([^/?]+)/.exec(url);
     return match?.[1];
   }
+}
+
+/**
+ * Accepted LLM payload shapes for the team-page extractor:
+ *   1. `{ people: [...] }` (preferred — matches the prompt).
+ *   2. Bare array `[...]` (some models drop the wrapper; we accept it).
+ */
+type TeamPagePayload = { people: DiscoveredPerson[] } | DiscoveredPerson[];
+
+function isDiscoveredPerson(value: unknown): value is DiscoveredPerson {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const obj = value as Record<string, unknown>;
+  if (typeof obj.firstName !== "string" || typeof obj.lastName !== "string") {
+    return false;
+  }
+  // Optional fields must be string when present (or undefined).
+  if (obj.title !== undefined && typeof obj.title !== "string") return false;
+  if (obj.linkedinUrl !== undefined && typeof obj.linkedinUrl !== "string") return false;
+  return true;
+}
+
+function isTeamPagePayload(value: unknown): value is TeamPagePayload {
+  if (Array.isArray(value)) {
+    // Tolerate the bare-array variant — every entry must look like a person.
+    return value.every(isDiscoveredPerson);
+  }
+  if (typeof value !== "object" || value === null) return false;
+  const obj = value as Record<string, unknown>;
+  if (!Array.isArray(obj.people)) return false;
+  return obj.people.every(isDiscoveredPerson);
 }

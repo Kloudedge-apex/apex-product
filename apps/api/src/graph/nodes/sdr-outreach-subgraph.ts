@@ -54,13 +54,21 @@ export interface SdrLeadResult {
 /**
  * Optional drafter override so tests can run the subgraph without hitting
  * a real LLM. Production wires LLMService.chat via the default drafter.
+ *
+ * The optional `onRunId` callback fires when the LLM call has a LangSmith
+ * run id available. We use it to stash the runId on the OutreachArtifact so
+ * a reviewer rejecting the draft can later append that run to a regression
+ * dataset (see OutreachArtifactsService.reject).
  */
-export type DrafterFn = (input: DrafterInput) => Promise<{ subject: string; body: string }>;
+export type DrafterFn = (
+  input: DrafterInput,
+) => Promise<{ subject: string; body: string }>;
 
 export interface DrafterInput {
   readonly researchBrief: string;
   readonly lead: SdrLeadInput;
   readonly previousAttempt?: { subject: string; body: string; issues: readonly string[] };
+  readonly onRunId?: (runId: string) => void;
 }
 
 export interface SubgraphDeps {
@@ -108,6 +116,14 @@ const SdrStateAnnotation = Annotation.Root({
     default: () => [],
   }),
   artifactId: Annotation<string | null>({
+    reducer: (_p, n) => n,
+    default: () => null,
+  }),
+  // LangSmith run id of the most recent draft_message LLM call. Captured via
+  // LLMService.onRunStart and stashed on the artifact so a HITL reject can
+  // append the run to a regression dataset. Best-effort: empty if tracing is
+  // disabled or the SDK is unavailable.
+  langsmithRunId: Annotation<string | null>({
     reducer: (_p, n) => n,
     default: () => null,
   }),
@@ -163,7 +179,26 @@ ${input.researchBrief}${previous}`;
       { role: "system", content: systemPrompt },
       { role: "user", content: userPrompt },
     ],
-    { maxTokens: 600 },
+    {
+      maxTokens: 600,
+      agent: "sdr_agent.draft_message",
+      node: "sdr_outreach.draft_message",
+      tags: ["sdr_outreach", "draft_message", "customer_facing"],
+      metadata: {
+        org_id: input.lead.orgId,
+        person_id: input.lead.personId,
+        graph_run_id: input.lead.graphRunId ?? null,
+        draft_attempt: input.previousAttempt ? "retry" : "first",
+      },
+      // Capture the LangSmith runId so the artifact can be linked back to its
+      // generating trace. We record only the latest attempt's runId — that's
+      // the draft a human actually reviews.
+      onRunStart: input.onRunId
+        ? (runId): void => {
+            input.onRunId?.(runId);
+          }
+        : undefined,
+    },
   );
 
   void evidenceLedger.messageDrafted({
@@ -247,16 +282,21 @@ export function buildSdrOutreachSubgraph(deps: SubgraphDeps) {
             ? { subject: state.subject, body: state.body, issues: state.qaIssues }
             : undefined;
 
+        let capturedRunId: string | null = null;
         try {
           const { subject, body } = await drafter({
             researchBrief: state.researchBrief,
             lead: state.lead,
             previousAttempt: previous,
+            onRunId: (runId): void => {
+              capturedRunId = runId;
+            },
           });
           return {
             subject,
             body,
             draftAttempts: state.draftAttempts + 1,
+            langsmithRunId: capturedRunId,
           };
         } catch (err) {
           log.warn(
@@ -266,6 +306,7 @@ export function buildSdrOutreachSubgraph(deps: SubgraphDeps) {
             subject: "",
             body: "",
             draftAttempts: state.draftAttempts + 1,
+            langsmithRunId: capturedRunId,
           };
         }
       },
@@ -317,6 +358,9 @@ export function buildSdrOutreachSubgraph(deps: SubgraphDeps) {
         "apex.lead.person_id": state.lead.personId,
       },
       async () => {
+        // TODO(schema): promote `langsmith_run_id` to a first-class column on
+        // OutreachArtifact so we can index/query rejected drafts by trace.
+        // Today we stash it in the payload JSON to avoid a prod migration.
         const toolArgs: Record<string, unknown> = {
           to: state.lead.email,
           subject: state.subject,
@@ -324,6 +368,9 @@ export function buildSdrOutreachSubgraph(deps: SubgraphDeps) {
           personId: state.lead.personId,
           qaIssues: state.qaIssues,
           draftAttempts: state.draftAttempts,
+          ...(state.langsmithRunId
+            ? { langsmith_run_id: state.langsmithRunId }
+            : {}),
         };
 
         const artifact = await deps.outreachArtifacts.recordDryRun({

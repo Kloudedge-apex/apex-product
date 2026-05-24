@@ -1,5 +1,6 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+import { fetchWithRetry, withCircuitBreaker } from "../../common/http-retry.util";
 
 interface DiscoveredPerson {
   firstName: string;
@@ -159,14 +160,20 @@ export class GithubEnrichment {
     if (wait > 0) await new Promise((r) => setTimeout(r, wait));
     this.lastRequestTime = Date.now();
 
-    return fetch(url, {
-      headers: {
-        Authorization: `Bearer ${this.token}`,
-        Accept: "application/vnd.github+json",
-        "User-Agent": "WorkforceOS/1.0",
-        "X-GitHub-Api-Version": "2022-11-28",
-      },
-      signal: AbortSignal.timeout(10000),
-    });
+    return withCircuitBreaker("github", () =>
+      fetchWithRetry(
+        url,
+        {
+          headers: {
+            Authorization: `Bearer ${this.token}`,
+            Accept: "application/vnd.github+json",
+            "User-Agent": "WorkforceOS/1.0",
+            "X-GitHub-Api-Version": "2022-11-28",
+          },
+          signal: AbortSignal.timeout(10000),
+        },
+        { provider: "github" },
+      ),
+    );
   }
 }

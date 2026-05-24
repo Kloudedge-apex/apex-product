@@ -1,10 +1,22 @@
 import { Module } from "@nestjs/common";
 import { OutreachArtifactsService } from "./outreach-artifacts.service";
 import { OutreachArtifactsController } from "./outreach-artifacts.controller";
+import { OutreachSendQueueService } from "./outreach-send-queue.service";
+import { SendOutreachWorker } from "./send-outreach.worker";
+import { IntegrationsModule } from "../integrations/integrations.module";
+import { ObservabilityModule } from "../observability/observability.module";
 
 @Module({
+  // ObservabilityModule is @Global so LangSmithService is already injectable,
+  // but importing it here makes the dependency explicit and survives any
+  // future de-globalization.
+  imports: [IntegrationsModule, ObservabilityModule],
   controllers: [OutreachArtifactsController],
-  providers: [OutreachArtifactsService],
-  exports: [OutreachArtifactsService],
+  providers: [
+    OutreachArtifactsService,
+    OutreachSendQueueService,
+    SendOutreachWorker,
+  ],
+  exports: [OutreachArtifactsService, OutreachSendQueueService],
 })
 export class OutreachModule {}

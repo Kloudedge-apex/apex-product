@@ -1,4 +1,16 @@
+import { EvidenceLedgerService } from "../../observability/evidence-ledger.service";
 import { Tool, ToolContext, ToolResult } from "./tool.interface";
+import { fetchWithRetry, withCircuitBreaker } from "../../common/http-retry.util";
+
+type HubspotEntityType = "contact" | "deal" | "note";
+type HubspotOperation = "create" | "update" | "delete";
+
+/** Single helper to wrap every HubSpot REST call uniformly with retry + CB. */
+function hubspotFetch(url: string, init: RequestInit): Promise<Response> {
+  return withCircuitBreaker("hubspot", () =>
+    fetchWithRetry(url, init, { provider: "hubspot" }),
+  );
+}
 
 export class HubSpotTool implements Tool {
   name = "hubspot";
@@ -16,6 +28,8 @@ export class HubSpotTool implements Tool {
     },
   };
 
+  constructor(private readonly evidenceLedger?: EvidenceLedgerService) {}
+
   async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
     const action = params.action as string;
     const data = params.data as Record<string, unknown>;
@@ -27,13 +41,18 @@ export class HubSpotTool implements Tool {
     const creds = context.integrations.get("hubspot");
 
     if (creds?.accessToken && !creds.accessToken.startsWith("mock_")) {
-      return this.executeReal(action, data, creds.accessToken);
+      return this.executeReal(action, data, creds.accessToken, context);
     }
 
     return this.executeMock(action, data);
   }
 
-  private async executeReal(action: string, data: Record<string, unknown>, accessToken: string): Promise<ToolResult> {
+  private async executeReal(
+    action: string,
+    data: Record<string, unknown>,
+    accessToken: string,
+    context: ToolContext,
+  ): Promise<ToolResult> {
     const baseUrl = "https://api.hubapi.com";
     const headers = {
       Authorization: `Bearer ${accessToken}`,
@@ -43,30 +62,42 @@ export class HubSpotTool implements Tool {
     try {
       switch (action) {
         case "create_contact": {
-          const response = await fetch(`${baseUrl}/crm/v3/objects/contacts`, {
+          const response = await hubspotFetch(`${baseUrl}/crm/v3/objects/contacts`, {
             method: "POST",
             headers,
             body: JSON.stringify({ properties: data }),
           });
           if (!response.ok) throw new Error(`HubSpot API error: ${response.status}`);
-          const result = await response.json();
+          const result = (await response.json()) as { id?: string };
+          this.emitCrmSynced(context, {
+            entityType: "contact",
+            entityId: result.id,
+            operation: "create",
+            fieldsChanged: Object.keys(data),
+          });
           return { success: true, data: { action: "contact_created", contact: result } };
         }
         case "update_contact": {
           const contactId = data.id as string;
           const properties = { ...data };
           delete properties.id;
-          const response = await fetch(`${baseUrl}/crm/v3/objects/contacts/${contactId}`, {
+          const response = await hubspotFetch(`${baseUrl}/crm/v3/objects/contacts/${contactId}`, {
             method: "PATCH",
             headers,
             body: JSON.stringify({ properties }),
           });
           if (!response.ok) throw new Error(`HubSpot API error: ${response.status}`);
-          const result = await response.json();
+          const result = (await response.json()) as { id?: string };
+          this.emitCrmSynced(context, {
+            entityType: "contact",
+            entityId: result.id ?? contactId,
+            operation: "update",
+            fieldsChanged: Object.keys(properties),
+          });
           return { success: true, data: { action: "contact_updated", contact: result } };
         }
         case "search_contacts": {
-          const response = await fetch(`${baseUrl}/crm/v3/objects/contacts/search`, {
+          const response = await hubspotFetch(`${baseUrl}/crm/v3/objects/contacts/search`, {
             method: "POST",
             headers,
             body: JSON.stringify({
@@ -84,33 +115,46 @@ export class HubSpotTool implements Tool {
           });
           if (!response.ok) throw new Error(`HubSpot API error: ${response.status}`);
           const result = (await response.json()) as { results: unknown[] };
+          // search_contacts is a read; no crm.synced emission.
           return { success: true, data: { action: "contacts_found", contacts: result.results } };
         }
         case "create_deal": {
-          const response = await fetch(`${baseUrl}/crm/v3/objects/deals`, {
+          const response = await hubspotFetch(`${baseUrl}/crm/v3/objects/deals`, {
             method: "POST",
             headers,
             body: JSON.stringify({ properties: data }),
           });
           if (!response.ok) throw new Error(`HubSpot API error: ${response.status}`);
-          const result = await response.json();
+          const result = (await response.json()) as { id?: string };
+          this.emitCrmSynced(context, {
+            entityType: "deal",
+            entityId: result.id,
+            operation: "create",
+            fieldsChanged: Object.keys(data),
+          });
           return { success: true, data: { action: "deal_created", deal: result } };
         }
         case "update_deal": {
           const dealId = data.id as string;
           const properties = { ...data };
           delete properties.id;
-          const response = await fetch(`${baseUrl}/crm/v3/objects/deals/${dealId}`, {
+          const response = await hubspotFetch(`${baseUrl}/crm/v3/objects/deals/${dealId}`, {
             method: "PATCH",
             headers,
             body: JSON.stringify({ properties }),
           });
           if (!response.ok) throw new Error(`HubSpot API error: ${response.status}`);
-          const result = await response.json();
+          const result = (await response.json()) as { id?: string };
+          this.emitCrmSynced(context, {
+            entityType: "deal",
+            entityId: result.id ?? dealId,
+            operation: "update",
+            fieldsChanged: Object.keys(properties),
+          });
           return { success: true, data: { action: "deal_updated", deal: result } };
         }
         case "log_activity": {
-          const response = await fetch(`${baseUrl}/crm/v3/objects/notes`, {
+          const response = await hubspotFetch(`${baseUrl}/crm/v3/objects/notes`, {
             method: "POST",
             headers,
             body: JSON.stringify({
@@ -121,7 +165,13 @@ export class HubSpotTool implements Tool {
             }),
           });
           if (!response.ok) throw new Error(`HubSpot API error: ${response.status}`);
-          const result = await response.json();
+          const result = (await response.json()) as { id?: string };
+          this.emitCrmSynced(context, {
+            entityType: "note",
+            entityId: result.id,
+            operation: "create",
+            fieldsChanged: ["hs_note_body", "hs_timestamp"],
+          });
           return { success: true, data: { action: "activity_logged", note: result } };
         }
         default:
@@ -134,6 +184,36 @@ export class HubSpotTool implements Tool {
         error: error instanceof Error ? error.message : "HubSpot API error",
       };
     }
+  }
+
+  /**
+   * Fire-and-forget append to the evidence ledger. Only invoked when the real
+   * HubSpot API returns 2xx — failures and mock responses never produce an
+   * event. Missing ids fall back to a synthetic placeholder so the ref column
+   * is never empty (downstream KPI joins require a non-null refId).
+   */
+  private emitCrmSynced(
+    context: ToolContext,
+    args: {
+      readonly entityType: HubspotEntityType;
+      readonly entityId: string | undefined;
+      readonly operation: HubspotOperation;
+      readonly fieldsChanged: readonly string[];
+    },
+  ): void {
+    if (!this.evidenceLedger) return;
+    const entityId = args.entityId && args.entityId.length > 0
+      ? args.entityId
+      : `hubspot:${args.entityType}:unknown:${Date.now()}`;
+    void this.evidenceLedger.crmSynced({
+      orgId: context.orgId,
+      runId: context.runId ?? null,
+      provider: "hubspot",
+      entityType: args.entityType,
+      entityId,
+      operation: args.operation,
+      fieldsChanged: args.fieldsChanged,
+    });
   }
 
   private executeMock(action: string, data: Record<string, unknown>): ToolResult {
