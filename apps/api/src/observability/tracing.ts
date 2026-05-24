@@ -1,6 +1,5 @@
 import { NodeSDK } from "@opentelemetry/sdk-node";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
-import { ConsoleSpanExporter } from "@opentelemetry/sdk-trace-base";
 import { BatchSpanProcessor } from "@opentelemetry/sdk-trace-base";
 import type { ReadableSpan, SpanProcessor } from "@opentelemetry/sdk-trace-base";
 import type { Context } from "@opentelemetry/api";
@@ -41,19 +40,23 @@ export class ForbiddenAttributesSpanProcessor implements SpanProcessor {
 
 let sdk: NodeSDK | undefined;
 
-function getTraceExporter(): ConsoleSpanExporter | OTLPTraceExporter {
+function getTraceExporter(): OTLPTraceExporter | undefined {
   const endpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
   if (endpoint && endpoint.trim().length > 0) {
     return new OTLPTraceExporter({ url: endpoint });
   }
-  return new ConsoleSpanExporter();
+  return undefined;
 }
 
 export function startTracing(): void {
   if (sdk) return;
   if (process.env.NODE_ENV === "test") return;
 
+  const spanProcessors: SpanProcessor[] = [new ForbiddenAttributesSpanProcessor()];
   const exporter = getTraceExporter();
+  if (exporter) {
+    spanProcessors.push(new BatchSpanProcessor(exporter));
+  }
 
   sdk = new NodeSDK({
     serviceName: "apex-api",
@@ -62,10 +65,7 @@ export function startTracing(): void {
       new NestInstrumentation(),
       new PrismaInstrumentation(),
     ],
-    spanProcessors: [
-      new ForbiddenAttributesSpanProcessor(),
-      new BatchSpanProcessor(exporter),
-    ],
+    spanProcessors,
   });
 
   sdk.start();
