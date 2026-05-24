@@ -97,6 +97,18 @@ describe("pipeline-graph (supervisor routing)", () => {
           return { id: `art_${artifactCounter}` };
         },
       } as unknown as Parameters<typeof buildPipelineGraph>[0]["outreachArtifacts"],
+
+      evidenceLedger: {
+        leadSourced: async () => undefined,
+        leadScored: async () => undefined,
+        messageDrafted: async () => undefined,
+        qaPass: async () => undefined,
+        qaFail: async () => undefined,
+        approvalRequested: async () => undefined,
+        approvalGranted: async () => undefined,
+        approvalDenied: async () => undefined,
+        artifactPersisted: async () => undefined,
+      } as unknown as Parameters<typeof buildPipelineGraph>[0]["evidenceLedger"],
     };
   });
 

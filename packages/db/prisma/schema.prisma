@@ -136,8 +136,27 @@ model Org {
   outreachArtifacts OutreachArtifact[]
   workflowRuns WorkflowRun[]
   meetings     MeetingLedger[]
+  evidenceEvents EvidenceEvent[]
 
   @@index([slug])
+}
+
+model EvidenceEvent {
+  id        String   @id @default(cuid())
+  orgId     String
+  org       Org      @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  runId     String?
+  traceId   String?
+  kind      String
+  refType   String
+  refId     String
+  payload   Json
+  createdAt DateTime @default(now())
+
+  @@index([orgId, createdAt])
+  @@index([orgId, kind])
+  @@index([runId])
+  @@map("evidence_event")
 }
 
 model User {

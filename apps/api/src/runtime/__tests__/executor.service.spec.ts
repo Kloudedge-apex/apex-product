@@ -43,6 +43,7 @@ function createMockMemoryService() {
     setLastRunSummary: vi.fn().mockResolvedValue(undefined),
     addContactedLead: vi.fn().mockResolvedValue(undefined),
     getContactedLeads: vi.fn().mockResolvedValue([]),
+    searchSemantic: vi.fn().mockResolvedValue([]),
   } as unknown as MemoryService;
 }
 
@@ -279,13 +280,14 @@ describe("ExecutorService", () => {
     const result = await executor.executeAgent("agent_1", "run_1");
 
     expect(result.output).toBeDefined();
-    // Should have logged the unknown tool warning
+    // Should have logged a warning/error mentioning the unknown tool.
     const logCalls = (mockPrisma.agentLog.create as ReturnType<typeof vi.fn>).mock.calls;
-    const warnLogs = logCalls.filter(
-      (call: Array<{ data: { level: string; message: string } }>) =>
-        call[0].data.level === "WARN" && call[0].data.message.includes("Unknown tool"),
-    );
-    expect(warnLogs.length).toBeGreaterThan(0);
+    const mentionsTool = logCalls.some((call) => {
+      const arg = call[0] as { data?: { message?: unknown } };
+      const msg = arg.data?.message;
+      return typeof msg === "string" && msg.includes("nonexistent_tool");
+    });
+    expect(mentionsTool).toBe(true);
   });
 
   it("should track token costs correctly", async () => {

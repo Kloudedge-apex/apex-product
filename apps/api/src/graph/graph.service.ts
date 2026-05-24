@@ -10,6 +10,7 @@ import { LeadsService } from "../leads/leads.service";
 import { RuntimeService } from "../runtime/runtime.service";
 import { LLMService } from "../runtime/llm.service";
 import { OutreachArtifactsService } from "../outreach/outreach-artifacts.service";
+import { EvidenceLedgerService } from "../observability/evidence-ledger.service";
 import { PrismaCheckpointSaver } from "./prisma-checkpointer";
 import { buildPipelineGraph } from "./pipeline-graph";
 import { NODE, PipelineState } from "./state";
@@ -30,6 +31,7 @@ export class GraphService {
     private readonly runtime: RuntimeService,
     private readonly llm: LLMService,
     private readonly outreachArtifacts: OutreachArtifactsService,
+    private readonly evidenceLedger: EvidenceLedgerService,
   ) {
     this.checkpointer = new PrismaCheckpointSaver(prisma);
     this.compiled = buildPipelineGraph({
@@ -38,6 +40,7 @@ export class GraphService {
       runtime: this.runtime,
       llm: this.llm,
       outreachArtifacts: this.outreachArtifacts,
+      evidenceLedger: this.evidenceLedger,
     }).compile({ checkpointer: this.checkpointer });
   }
 
@@ -118,6 +121,20 @@ export class GraphService {
     }
 
     if (decision.approved) {
+      void this.evidenceLedger.approvalGranted({
+        orgId,
+        runId,
+        approvedBy: decision.approvedBy,
+      });
+    } else {
+      void this.evidenceLedger.approvalDenied({
+        orgId,
+        runId,
+        deniedBy: decision.approvedBy,
+      });
+    }
+
+    if (decision.approved) {
       await this.prisma.graphRun.update({
         where: { id: runId },
         data: {
@@ -175,6 +192,15 @@ export class GraphService {
       const pending = snapshot.tasks?.some((t) => t.interrupts?.length);
 
       if (pending || isInterrupted(result)) {
+        const candidateCount = (result.scoredLeads ?? [])
+          .filter((s) => s.tier === "A" || s.tier === "B")
+          .slice(0, 10).length;
+        void this.evidenceLedger.approvalRequested({
+          orgId: result.orgId,
+          runId,
+          candidateCount,
+        });
+
         await this.prisma.graphRun.update({
           where: { id: runId },
           data: {

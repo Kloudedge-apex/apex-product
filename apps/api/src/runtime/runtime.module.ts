@@ -9,9 +9,10 @@ import { RuntimeController } from "./runtime.controller";
 import { MemoryService } from "./memory.service";
 import { IntegrationsModule } from "../integrations/integrations.module";
 import { OutreachModule } from "../outreach/outreach.module";
+import { ObservabilityModule } from "../observability/observability.module";
 
 @Module({
-  imports: [IntegrationsModule, OutreachModule],
+  imports: [IntegrationsModule, OutreachModule, ObservabilityModule],
   controllers: [RuntimeController],
   providers: [
     RuntimeService,

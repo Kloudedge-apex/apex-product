@@ -17,6 +17,8 @@ import { Annotation, StateGraph, START, END } from "@langchain/langgraph";
 import type { PrismaService } from "../../prisma/prisma.service";
 import type { LLMService } from "../../runtime/llm.service";
 import type { OutreachArtifactsService } from "../../outreach/outreach-artifacts.service";
+import type { EvidenceLedgerService } from "../../observability/evidence-ledger.service";
+import { withNodeSpan } from "../../observability/graph-tracing";
 
 const log = new Logger("SdrOutreachSubgraph");
 
@@ -65,6 +67,7 @@ export interface SubgraphDeps {
   readonly prisma: PrismaService;
   readonly llm: LLMService;
   readonly outreachArtifacts: OutreachArtifactsService;
+  readonly evidenceLedger: EvidenceLedgerService;
   readonly drafter?: DrafterFn;
 }
 
@@ -139,6 +142,7 @@ function qaCheck(subject: string, body: string): string[] {
 async function defaultDrafter(
   llm: LLMService,
   input: DrafterInput,
+  evidenceLedger: EvidenceLedgerService,
 ): Promise<{ subject: string; body: string }> {
   const previous = input.previousAttempt
     ? `\nPrevious draft was flagged for: ${input.previousAttempt.issues.join(", ")}. Fix those issues.`
@@ -153,6 +157,7 @@ async function defaultDrafter(
 Research brief:
 ${input.researchBrief}${previous}`;
 
+  const startedAt = Date.now();
   const resp = await llm.chat(
     [
       { role: "system", content: systemPrompt },
@@ -160,6 +165,16 @@ ${input.researchBrief}${previous}`;
     ],
     { maxTokens: 600 },
   );
+
+  void evidenceLedger.messageDrafted({
+    orgId: input.lead.orgId,
+    runId: input.lead.graphRunId ?? null,
+    personId: input.lead.personId,
+    model: resp.model,
+    tokensUsed: resp.tokensUsed,
+    costUsd: resp.cost,
+    durationMs: Date.now() - startedAt,
+  });
 
   return parseDrafterJson(resp.content);
 }
@@ -185,79 +200,142 @@ function parseDrafterJson(raw: string): { subject: string; body: string } {
 
 export function buildSdrOutreachSubgraph(deps: SubgraphDeps) {
   const drafter: DrafterFn =
-    deps.drafter ?? ((input) => defaultDrafter(deps.llm, input));
+    deps.drafter ?? ((input) => defaultDrafter(deps.llm, input, deps.evidenceLedger));
 
   const buildResearchBrief = async (state: SdrState): Promise<Partial<SdrState>> => {
-    // Pull a small amount of context. The brief is rendered as plain text the
-    // drafter sees; richer signals (firmographics, news) can attach later
-    // without changing the subgraph shape.
-    const company = await deps.prisma.company.findFirst({
-      where: { orgId: state.lead.orgId, domain: state.lead.companyDomain },
-      select: { name: true, domain: true, employeeRange: true, industry: true },
-    });
+    return withNodeSpan(
+      SDR_NODE.BRIEF,
+      {
+        "apex.run_id": state.lead.graphRunId ?? "unknown",
+        "apex.org_id": state.lead.orgId,
+        "apex.node": SDR_NODE.BRIEF,
+        "apex.lead.person_id": state.lead.personId,
+      },
+      async () => {
+        // Pull a small amount of context. The brief is rendered as plain text the
+        // drafter sees; richer signals (firmographics, news) can attach later
+        // without changing the subgraph shape.
+        const company = await deps.prisma.company.findFirst({
+          where: { orgId: state.lead.orgId, domain: state.lead.companyDomain },
+          select: { name: true, domain: true, employeeRange: true, industry: true },
+        });
 
-    const briefLines = [
-      `Company: ${state.lead.companyName} (${state.lead.companyDomain}).`,
-      company?.industry ? `Industry: ${company.industry}.` : null,
-      company?.employeeRange ? `Headcount: ${company.employeeRange}.` : null,
-      `Contact: ${state.lead.firstName} ${state.lead.lastName}, ${state.lead.title ?? "title unknown"}.`,
-    ].filter(Boolean);
+        const briefLines = [
+          `Company: ${state.lead.companyName} (${state.lead.companyDomain}).`,
+          company?.industry ? `Industry: ${company.industry}.` : null,
+          company?.employeeRange ? `Headcount: ${company.employeeRange}.` : null,
+          `Contact: ${state.lead.firstName} ${state.lead.lastName}, ${state.lead.title ?? "title unknown"}.`,
+        ].filter(Boolean);
 
-    return { researchBrief: briefLines.join(" ") };
+        return { researchBrief: briefLines.join(" ") };
+      },
+    );
   };
 
   const draftMessage = async (state: SdrState): Promise<Partial<SdrState>> => {
-    const previous =
-      state.draftAttempts > 0 && state.qaIssues.length > 0
-        ? { subject: state.subject, body: state.body, issues: state.qaIssues }
-        : undefined;
+    return withNodeSpan(
+      SDR_NODE.DRAFT,
+      {
+        "apex.run_id": state.lead.graphRunId ?? "unknown",
+        "apex.org_id": state.lead.orgId,
+        "apex.node": SDR_NODE.DRAFT,
+        "apex.lead.person_id": state.lead.personId,
+      },
+      async () => {
+        const previous =
+          state.draftAttempts > 0 && state.qaIssues.length > 0
+            ? { subject: state.subject, body: state.body, issues: state.qaIssues }
+            : undefined;
 
-    try {
-      const { subject, body } = await drafter({
-        researchBrief: state.researchBrief,
-        lead: state.lead,
-        previousAttempt: previous,
-      });
-      return {
-        subject,
-        body,
-        draftAttempts: state.draftAttempts + 1,
-      };
-    } catch (err) {
-      log.warn(
-        `drafter failed for person=${state.lead.personId}: ${err instanceof Error ? err.message : "unknown"}`,
-      );
-      return {
-        subject: "",
-        body: "",
-        draftAttempts: state.draftAttempts + 1,
-      };
-    }
+        try {
+          const { subject, body } = await drafter({
+            researchBrief: state.researchBrief,
+            lead: state.lead,
+            previousAttempt: previous,
+          });
+          return {
+            subject,
+            body,
+            draftAttempts: state.draftAttempts + 1,
+          };
+        } catch (err) {
+          log.warn(
+            `drafter failed for person=${state.lead.personId}: ${err instanceof Error ? err.message : "unknown"}`,
+          );
+          return {
+            subject: "",
+            body: "",
+            draftAttempts: state.draftAttempts + 1,
+          };
+        }
+      },
+    );
   };
 
   const qaMessage = async (state: SdrState): Promise<Partial<SdrState>> => {
-    const issues = qaCheck(state.subject, state.body);
-    return { qaIssues: issues };
+    return withNodeSpan(
+      SDR_NODE.QA,
+      {
+        "apex.run_id": state.lead.graphRunId ?? "unknown",
+        "apex.org_id": state.lead.orgId,
+        "apex.node": SDR_NODE.QA,
+        "apex.lead.person_id": state.lead.personId,
+      },
+      async () => {
+        const startedAt = Date.now();
+        const issues = qaCheck(state.subject, state.body);
+
+        if (issues.length === 0) {
+          void deps.evidenceLedger.qaPass({
+            orgId: state.lead.orgId,
+            runId: state.lead.graphRunId ?? null,
+            personId: state.lead.personId,
+            durationMs: Date.now() - startedAt,
+          });
+        } else {
+          void deps.evidenceLedger.qaFail({
+            orgId: state.lead.orgId,
+            runId: state.lead.graphRunId ?? null,
+            personId: state.lead.personId,
+            issues,
+            durationMs: Date.now() - startedAt,
+          });
+        }
+
+        return { qaIssues: issues };
+      },
+    );
   };
 
   const requireHumanReview = async (state: SdrState): Promise<Partial<SdrState>> => {
-    const toolArgs: Record<string, unknown> = {
-      to: state.lead.email,
-      subject: state.subject,
-      body: state.body,
-      personId: state.lead.personId,
-      qaIssues: state.qaIssues,
-      draftAttempts: state.draftAttempts,
-    };
+    return withNodeSpan(
+      SDR_NODE.REVIEW,
+      {
+        "apex.run_id": state.lead.graphRunId ?? "unknown",
+        "apex.org_id": state.lead.orgId,
+        "apex.node": SDR_NODE.REVIEW,
+        "apex.lead.person_id": state.lead.personId,
+      },
+      async () => {
+        const toolArgs: Record<string, unknown> = {
+          to: state.lead.email,
+          subject: state.subject,
+          body: state.body,
+          personId: state.lead.personId,
+          qaIssues: state.qaIssues,
+          draftAttempts: state.draftAttempts,
+        };
 
-    const artifact = await deps.outreachArtifacts.recordDryRun({
-      orgId: state.lead.orgId,
-      graphRunId: state.lead.graphRunId ?? null,
-      toolName: "send_email",
-      toolArgs,
-    });
+        const artifact = await deps.outreachArtifacts.recordDryRun({
+          orgId: state.lead.orgId,
+          graphRunId: state.lead.graphRunId ?? null,
+          toolName: "send_email",
+          toolArgs,
+        });
 
-    return { artifactId: artifact?.id ?? null };
+        return { artifactId: artifact?.id ?? null };
+      },
+    );
   };
 
   // QA → DRAFT if issues remain AND we have attempts left; else QA → REVIEW.

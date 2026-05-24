@@ -3,6 +3,7 @@ import {
   Logger,
   NotFoundException,
   BadRequestException,
+  Optional,
 } from "@nestjs/common";
 import {
   OutreachArtifact,
@@ -11,6 +12,7 @@ import {
   Prisma,
 } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
+import { EvidenceLedgerService } from "../observability/evidence-ledger.service";
 
 /**
  * Maps the tool name reported by the executor to the channel enum we store
@@ -39,7 +41,10 @@ export interface CreateDryRunArtifactInput {
 export class OutreachArtifactsService {
   private readonly logger = new Logger(OutreachArtifactsService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Optional() private readonly evidenceLedger?: EvidenceLedgerService,
+  ) {}
 
   /**
    * Persist a dry-run capture of what would have been sent. Returns null
@@ -60,7 +65,7 @@ export class OutreachArtifactsService {
       input.toolArgs,
     );
 
-    return this.prisma.outreachArtifact.create({
+    const artifact = await this.prisma.outreachArtifact.create({
       data: {
         orgId: input.orgId,
         graphRunId: input.graphRunId ?? null,
@@ -74,6 +79,16 @@ export class OutreachArtifactsService {
         status: OutreachArtifactStatus.PENDING_REVIEW,
       },
     });
+
+    void this.evidenceLedger?.artifactPersisted({
+      orgId: input.orgId,
+      runId: input.graphRunId ?? null,
+      artifactId: artifact.id,
+      status: artifact.status,
+      channel: artifact.channel,
+    });
+
+    return artifact;
   }
 
   async listForOrg(orgId: string, opts: { status?: OutreachArtifactStatus } = {}) {

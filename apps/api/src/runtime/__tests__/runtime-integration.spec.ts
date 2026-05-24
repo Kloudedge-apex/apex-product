@@ -19,7 +19,7 @@ function createMockPrisma() {
   const logs: any[] = [];
   const steps: any[] = [];
 
-  return {
+  const prisma = {
     org: {
       findUnique: vi.fn().mockResolvedValue({ id: "org_1", plan: "TRIAL" }),
     },
@@ -69,10 +69,13 @@ function createMockPrisma() {
       findUnique: vi.fn().mockResolvedValue(null),
       upsert: vi.fn().mockResolvedValue({}),
     },
+    $transaction: vi.fn().mockImplementation(async (fn) => fn(prisma)),
     _runs: runs,
     _logs: logs,
     _steps: steps,
   } as unknown as PrismaService & { _runs: Map<string, any>; _logs: any[]; _steps: any[] };
+
+  return prisma;
 }
 
 describe("Runtime Integration", () => {
@@ -83,6 +86,12 @@ describe("Runtime Integration", () => {
   let mockPrisma: ReturnType<typeof createMockPrisma>;
 
   beforeEach(() => {
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.AZURE_OPENAI_KEY;
+    delete process.env.AZURE_OPENAI_ENDPOINT;
+    delete process.env.AZURE_OPENAI_EMBEDDING_DEPLOYMENT;
+    delete process.env.ANTHROPIC_API_KEY;
+
     mockPrisma = createMockPrisma();
     queueService = new QueueService();
 
@@ -169,7 +178,8 @@ describe("Runtime Integration", () => {
     expect(result.tokensUsed).toBeGreaterThan(0);
     expect(result.cost).toBeGreaterThan(0);
     expect(result.steps.length).toBeGreaterThan(0);
-    expect(result.model).toContain("mock");
+    // ExecutorService reports the selected model name, not the mock provider suffix.
+    expect(result.model).toBe("gpt-4o");
 
     // Should have tool calls (mock mode simulates multi-step for SDR)
     const toolCalls = result.steps.filter((s) => s.type === "tool_call");
