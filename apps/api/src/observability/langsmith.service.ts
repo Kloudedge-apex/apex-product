@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable, Logger, OnModuleDestroy } from "@nestjs/common";
 import { createHash } from "node:crypto";
 import { getLangSmithConfig } from "./langsmith.config";
 
@@ -102,12 +102,51 @@ function redactInputsAndOutputs(
   return redactForLangSmith(value, opts, new WeakSet<object>());
 }
 
+type LangSmithClient = import("langsmith").Client;
+type LangSmithRunTree = import("langsmith").RunTree;
+
 @Injectable()
-export class LangSmithService {
+export class LangSmithService implements OnModuleDestroy {
   private readonly logger = new Logger(LangSmithService.name);
+  private clientPromise: Promise<LangSmithClient> | undefined;
+  private bootLogged = false;
 
   static async loadSdk(): Promise<typeof import("langsmith")> {
     return import("langsmith");
+  }
+
+  private async getClient(apiKey: string): Promise<LangSmithClient> {
+    if (!this.clientPromise) {
+      this.clientPromise = (async () => {
+        const { Client } = await LangSmithService.loadSdk();
+        const client = new Client({ apiKey });
+        if (!this.bootLogged) {
+          const cfg = getLangSmithConfig();
+          this.logger.log(
+            `LangSmith tracing enabled (project=${cfg.project ?? "default"}, capturePrompts=${cfg.capturePrompts === true})`,
+          );
+          this.bootLogged = true;
+        }
+        return client;
+      })();
+    }
+    return this.clientPromise;
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    if (!this.clientPromise) return;
+    try {
+      const client = (await this.clientPromise) as LangSmithClient & {
+        awaitPendingTraceBatches?: () => Promise<void>;
+      };
+      if (typeof client.awaitPendingTraceBatches === "function") {
+        await client.awaitPendingTraceBatches();
+      }
+    } catch (err) {
+      this.logger.warn(
+        `LangSmith shutdown flush failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   async wrapLlm<TResult>(
@@ -124,11 +163,12 @@ export class LangSmithService {
 
     if (!shouldAttemptTracing) return await fn();
 
+    let runTree: LangSmithRunTree | undefined;
     try {
-      const { Client, RunTree } = await LangSmithService.loadSdk();
-      const client = new Client({ apiKey: config.apiKey });
+      const { RunTree } = await LangSmithService.loadSdk();
+      const client = await this.getClient(config.apiKey as string);
 
-      const runTree = new RunTree({
+      runTree = new RunTree({
         name: input.name,
         run_type: "llm",
         project_name: config.project,
@@ -149,35 +189,7 @@ export class LangSmithService {
           : { model: input.model },
       });
 
-      // Fire-and-forget: never block or throw on observability side-effects.
-      void runTree.postRun().catch(() => undefined);
-
-      const startedAt = Date.now();
-      try {
-        const result = await fn();
-
-        const durationMs = Date.now() - startedAt;
-        const outputs =
-          config.capturePrompts === true
-            ? {
-                outputs: redactInputsAndOutputs(result, {
-                  maxChars: config.maxContentChars,
-                  capturePrompts: true,
-                }),
-                duration_ms: durationMs,
-              }
-            : { duration_ms: durationMs };
-
-        void runTree.end(outputs).catch(() => undefined);
-        return result;
-      } catch (err) {
-        const durationMs = Date.now() - startedAt;
-        void runTree.end(
-          { duration_ms: durationMs },
-          err instanceof Error ? err.message : String(err),
-        ).catch(() => undefined);
-        throw err;
-      }
+      await runTree.postRun();
     } catch (err) {
       this.logger.warn(
         `LangSmith tracing failed to initialize for name=${input.name} model=${input.model}: ${
@@ -185,6 +197,57 @@ export class LangSmithService {
         }`,
       );
       return await fn();
+    }
+
+    const startedAt = Date.now();
+    try {
+      const result = await fn();
+
+      const durationMs = Date.now() - startedAt;
+      const outputs =
+        config.capturePrompts === true
+          ? {
+              outputs: redactInputsAndOutputs(result, {
+                maxChars: config.maxContentChars,
+                capturePrompts: true,
+              }),
+              duration_ms: durationMs,
+            }
+          : { duration_ms: durationMs };
+
+      try {
+        await runTree.end(outputs);
+        const patch = (runTree as { patchRun?: () => Promise<void> }).patchRun;
+        if (typeof patch === "function") {
+          await patch.call(runTree);
+        }
+      } catch (innerErr) {
+        this.logger.warn(
+          `LangSmith finalize (success) failed for ${input.name}: ${
+            innerErr instanceof Error ? innerErr.message : String(innerErr)
+          }`,
+        );
+      }
+      return result;
+    } catch (err) {
+      const durationMs = Date.now() - startedAt;
+      try {
+        await runTree.end(
+          { duration_ms: durationMs },
+          err instanceof Error ? err.message : String(err),
+        );
+        const patch = (runTree as { patchRun?: () => Promise<void> }).patchRun;
+        if (typeof patch === "function") {
+          await patch.call(runTree);
+        }
+      } catch (innerErr) {
+        this.logger.warn(
+          `LangSmith finalize (error) failed for ${input.name}: ${
+            innerErr instanceof Error ? innerErr.message : String(innerErr)
+          }`,
+        );
+      }
+      throw err;
     }
   }
 }
