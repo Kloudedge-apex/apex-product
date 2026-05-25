@@ -1,5 +1,7 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable, Logger, Optional } from "@nestjs/common";
 import { OpenAIFunctionDef } from "./tools/tool.interface";
+import { LangSmithService } from "../observability/langsmith.service";
+import { withCircuitBreaker } from "../common/http-retry.util";
 
 export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
@@ -40,6 +42,29 @@ const COST_PER_1K: Record<string, number> = {
 const LLM_TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS) || 60_000;
 const AZURE_OPENAI_API_VERSION =
   process.env.AZURE_OPENAI_API_VERSION || "2024-08-01-preview";
+
+/*
+ * Model selection env vars (all optional; sensible defaults baked in):
+ *
+ *   DEFAULT_MODEL          — last-resort fallback when neither template nor
+ *                            caller specifies a model. Read here in
+ *                            LLMService.chat(). Default: "gpt-4o-mini".
+ *
+ *   SYSTEM_MODEL_MINI      — model used by system pipelines that have no
+ *                            agent template (icp-auto, team-page-scraper)
+ *                            and by ExecutorService for simple-task
+ *                            templates (template.fastModel fallback).
+ *                            Default: "gpt-4o-mini".
+ *
+ *   LANGSMITH_JUDGE_MODEL  — model used by evaluator judges (PII, toxicity,
+ *                            bias, etc.). Judges are system-level, not
+ *                            template-driven. Read in evaluators/judge.ts.
+ *                            Default: "gpt-4o-mini".
+ *
+ * Templates declare their own primary `model` and optional `fastModel` in
+ * `defaultConfig`; ExecutorService prefers those over DEFAULT_MODEL /
+ * SYSTEM_MODEL_MINI when a template is present.
+ */
 
 async function fetchWithTimeout(
   url: string,
@@ -87,12 +112,32 @@ function maxTokensParamFor(deployment: string): "max_completion_tokens" | "max_t
   return "max_tokens";
 }
 
+interface LlmAttribution {
+  parentRunId?: string;
+  agent?: string;
+  node?: string;
+  tags?: readonly string[];
+  metadata?: Readonly<Record<string, unknown>>;
+  onRunStart?: (runId: string) => void;
+}
+
 export interface ChatOptions {
   model?: string;
   maxTokens?: number;
   plan?: string;
   tools?: OpenAIFunctionDef[];
   toolChoice?: "auto" | "none" | "required";
+  parentRunId?: string;
+  /** Logical agent name for LangSmith attribution, e.g. "sdr_agent.draft_message". */
+  agent?: string;
+  /** Graph node name, e.g. "sdr_outreach.qa_message". */
+  node?: string;
+  /** Free-form tags attached to the LangSmith run. */
+  tags?: readonly string[];
+  /** Extra metadata merged into the LangSmith run. */
+  metadata?: Readonly<Record<string, unknown>>;
+  /** Fires after the LangSmith run is created on the server, with the runId. */
+  onRunStart?: (runId: string) => void;
 }
 
 @Injectable()
@@ -102,7 +147,9 @@ export class LLMService {
   private readonly azureKey = process.env.AZURE_OPENAI_KEY;
   private readonly azureEndpoint = process.env.AZURE_OPENAI_ENDPOINT;
 
-  constructor() {
+  constructor(
+    @Optional() private readonly langsmith?: LangSmithService,
+  ) {
     if (process.env.NODE_ENV === "production") {
       const hasAzure = !!(this.azureKey && this.azureEndpoint);
       const hasOpenAI = !!this.apiKey;
@@ -120,21 +167,46 @@ export class LLMService {
   }
 
   async chat(messages: ChatMessage[], options?: ChatOptions): Promise<LLMResponse> {
-    const model = options?.model || "gpt-4o-mini";
+    // Last-resort default when neither caller nor env specifies a model.
+    // DEFAULT_MODEL lets ops re-point all unspecified callers without code
+    // changes (matches the env knob used by ExecutorService).
+    const model = options?.model || process.env.DEFAULT_MODEL || "gpt-4o-mini";
     const plan = options?.plan || "TRIAL";
     const tokenLimit = TOKEN_LIMITS[plan] || TOKEN_LIMITS.TRIAL;
     const maxTokens = Math.min(options?.maxTokens || 4000, tokenLimit);
+    const attribution: LlmAttribution = {
+      parentRunId: options?.parentRunId,
+      agent: options?.agent,
+      node: options?.node,
+      tags: options?.tags,
+      metadata: options?.metadata,
+      onRunStart: options?.onRunStart,
+    };
 
     // Route Claude models to Anthropic API
     if (model.startsWith("claude-")) {
       if (process.env.ANTHROPIC_API_KEY) {
-        return this.callAnthropic(messages, model, maxTokens, options?.tools);
+        return this.callAnthropic(messages, model, maxTokens, options?.tools, attribution);
       }
       // Fall back to GPT-4o if no Anthropic key
-      return this.callOpenAIOrMock(messages, "gpt-4o", maxTokens, options?.tools, options?.toolChoice);
+      return this.callOpenAIOrMock(
+        messages,
+        "gpt-4o",
+        maxTokens,
+        options?.tools,
+        options?.toolChoice,
+        attribution,
+      );
     }
 
-    return this.callOpenAIOrMock(messages, model, maxTokens, options?.tools, options?.toolChoice);
+    return this.callOpenAIOrMock(
+      messages,
+      model,
+      maxTokens,
+      options?.tools,
+      options?.toolChoice,
+      attribution,
+    );
   }
 
   private async callOpenAIOrMock(
@@ -143,13 +215,22 @@ export class LLMService {
     maxTokens: number,
     tools?: OpenAIFunctionDef[],
     toolChoice?: string,
+    attribution?: LlmAttribution,
   ): Promise<LLMResponse> {
     const azureDeployment = azureDeploymentFor(model);
     if (azureDeployment) {
-      return this.callAzureOpenAI(messages, model, azureDeployment, maxTokens, tools, toolChoice);
+      return this.callAzureOpenAI(
+        messages,
+        model,
+        azureDeployment,
+        maxTokens,
+        tools,
+        toolChoice,
+        attribution,
+      );
     }
     if (this.apiKey) {
-      return this.callOpenAI(messages, model, maxTokens, tools, toolChoice);
+      return this.callOpenAI(messages, model, maxTokens, tools, toolChoice, attribution);
     }
     if (process.env.NODE_ENV === "production") {
       // Constructor guard should have caught this, but defend-in-depth: refuse
@@ -161,6 +242,32 @@ export class LLMService {
     return this.mockResponse(messages, model, maxTokens, tools);
   }
 
+  private async wrapWithLangSmith<TResult>(
+    input: {
+      readonly name: string;
+      readonly model: string;
+      readonly inputs: unknown;
+      readonly attribution?: LlmAttribution;
+    },
+    fn: () => Promise<TResult>,
+  ): Promise<TResult> {
+    if (!this.langsmith) return await fn();
+    return this.langsmith.wrapLlm(
+      {
+        name: input.name,
+        model: input.model,
+        inputs: input.inputs,
+        parentRunId: input.attribution?.parentRunId,
+        agent: input.attribution?.agent,
+        node: input.attribution?.node,
+        tags: input.attribution?.tags,
+        metadata: input.attribution?.metadata,
+        onRunStart: input.attribution?.onRunStart,
+      },
+      fn,
+    );
+  }
+
   private async callAzureOpenAI(
     messages: ChatMessage[],
     model: string,
@@ -168,59 +275,72 @@ export class LLMService {
     maxTokens: number,
     tools?: OpenAIFunctionDef[],
     toolChoice?: string,
+    attribution?: LlmAttribution,
   ): Promise<LLMResponse> {
-    const url = `${this.azureEndpoint!.replace(/\/$/, "")}/openai/deployments/${encodeURIComponent(
-      deployment,
-    )}/chat/completions?api-version=${AZURE_OPENAI_API_VERSION}`;
+    return this.wrapWithLangSmith(
+      { name: "azure.chat", model, inputs: messages, attribution },
+      async () => {
+        const url = `${this.azureEndpoint!.replace(/\/$/, "")}/openai/deployments/${encodeURIComponent(
+          deployment,
+        )}/chat/completions?api-version=${AZURE_OPENAI_API_VERSION}`;
 
-    const body: Record<string, unknown> = {
-      messages,
-      [maxTokensParamFor(deployment)]: maxTokens,
-      temperature: 0.7,
-    };
-    if (tools && tools.length > 0) {
-      body.tools = tools;
-      body.tool_choice = toolChoice || "auto";
-    }
+        const body: Record<string, unknown> = {
+          messages,
+          [maxTokensParamFor(deployment)]: maxTokens,
+          temperature: 0.7,
+        };
+        if (tools && tools.length > 0) {
+          body.tools = tools;
+          body.tool_choice = toolChoice || "auto";
+        }
 
-    const response = await fetchWithTimeout(
-      url,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "api-key": this.azureKey!,
-        },
-        body: JSON.stringify(body),
+        // Circuit-breaker only (no retry layer): the Azure deployment owns
+        // its own throttle behavior, and LLM calls are expensive — duplicate
+        // requests on a 429 risk double-billing if the upstream actually did
+        // process the first request. The breaker still protects us from a
+        // sustained outage.
+        const response = await withCircuitBreaker("azure-openai", () =>
+          fetchWithTimeout(
+            url,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "api-key": this.azureKey!,
+              },
+              body: JSON.stringify(body),
+            },
+            LLM_TIMEOUT_MS,
+          ),
+        );
+
+        if (!response.ok) {
+          const text = await response.text().catch(() => "");
+          throw new Error(`Azure OpenAI ${response.status}: ${text.slice(0, 200)}`);
+        }
+
+        const data = (await response.json()) as {
+          choices: Array<{
+            message: { content: string | null; tool_calls?: ToolCallMessage[] };
+            finish_reason: string;
+          }>;
+          usage: { total_tokens: number };
+        };
+
+        const choice = data.choices[0];
+        const tokensUsed = data.usage?.total_tokens || 0;
+        const costPer1K = COST_PER_1K[model] || COST_PER_1K["gpt-4o-mini"];
+
+        return {
+          content: choice?.message?.content || "",
+          tokensUsed,
+          model,
+          cost: (tokensUsed / 1000) * costPer1K,
+          toolCalls: choice?.message?.tool_calls,
+          finishReason: choice?.finish_reason,
+        };
       },
-      LLM_TIMEOUT_MS,
     );
-
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(`Azure OpenAI ${response.status}: ${text.slice(0, 200)}`);
-    }
-
-    const data = (await response.json()) as {
-      choices: Array<{
-        message: { content: string | null; tool_calls?: ToolCallMessage[] };
-        finish_reason: string;
-      }>;
-      usage: { total_tokens: number };
-    };
-
-    const choice = data.choices[0];
-    const tokensUsed = data.usage?.total_tokens || 0;
-    const costPer1K = COST_PER_1K[model] || COST_PER_1K["gpt-4o-mini"];
-
-    return {
-      content: choice?.message?.content || "",
-      tokensUsed,
-      model,
-      cost: (tokensUsed / 1000) * costPer1K,
-      toolCalls: choice?.message?.tool_calls,
-      finishReason: choice?.finish_reason,
-    };
   }
 
   private async callOpenAI(
@@ -229,57 +349,66 @@ export class LLMService {
     maxTokens: number,
     tools?: OpenAIFunctionDef[],
     toolChoice?: string,
+    attribution?: LlmAttribution,
   ): Promise<LLMResponse> {
     try {
-      const body: Record<string, unknown> = {
-        model,
-        messages,
-        max_tokens: maxTokens,
-        temperature: 0.7,
-      };
+      return await this.wrapWithLangSmith(
+        { name: "openai.chat", model, inputs: messages, attribution },
+        async () => {
+          const body: Record<string, unknown> = {
+            model,
+            messages,
+            max_tokens: maxTokens,
+            temperature: 0.7,
+          };
 
-      if (tools && tools.length > 0) {
-        body.tools = tools;
-        body.tool_choice = toolChoice || "auto";
-      }
+          if (tools && tools.length > 0) {
+            body.tools = tools;
+            body.tool_choice = toolChoice || "auto";
+          }
 
-      const response = await fetchWithTimeout(
-        "https://api.openai.com/v1/chat/completions",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${this.apiKey}`,
-          },
-          body: JSON.stringify(body),
+          // CB-only — see note in callAzureOpenAI.
+          const response = await withCircuitBreaker("openai", () =>
+            fetchWithTimeout(
+              "https://api.openai.com/v1/chat/completions",
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  Authorization: `Bearer ${this.apiKey}`,
+                },
+                body: JSON.stringify(body),
+              },
+              LLM_TIMEOUT_MS,
+            ),
+          );
+
+          if (!response.ok) {
+            throw new Error(`OpenAI API error: ${response.status}`);
+          }
+
+          const data = (await response.json()) as {
+            choices: Array<{
+              message: { content: string | null; tool_calls?: ToolCallMessage[] };
+              finish_reason: string;
+            }>;
+            usage: { total_tokens: number };
+          };
+
+          const choice = data.choices[0];
+          const tokensUsed = data.usage?.total_tokens || 0;
+          const costPer1K = COST_PER_1K[model] || COST_PER_1K["gpt-4o-mini"];
+
+          return {
+            content: choice?.message?.content || "",
+            tokensUsed,
+            model,
+            cost: (tokensUsed / 1000) * costPer1K,
+            toolCalls: choice?.message?.tool_calls,
+            finishReason: choice?.finish_reason,
+          };
         },
-        LLM_TIMEOUT_MS,
       );
-
-      if (!response.ok) {
-        throw new Error(`OpenAI API error: ${response.status}`);
-      }
-
-      const data = (await response.json()) as {
-        choices: Array<{
-          message: { content: string | null; tool_calls?: ToolCallMessage[] };
-          finish_reason: string;
-        }>;
-        usage: { total_tokens: number };
-      };
-
-      const choice = data.choices[0];
-      const tokensUsed = data.usage?.total_tokens || 0;
-      const costPer1K = COST_PER_1K[model] || COST_PER_1K["gpt-4o-mini"];
-
-      return {
-        content: choice?.message?.content || "",
-        tokensUsed,
-        model,
-        cost: (tokensUsed / 1000) * costPer1K,
-        toolCalls: choice?.message?.tool_calls,
-        finishReason: choice?.finish_reason,
-      };
     } catch (error) {
       throw error instanceof Error ? error : new Error("OpenAI API call failed");
     }
@@ -290,80 +419,89 @@ export class LLMService {
     model: string,
     maxTokens: number,
     tools?: OpenAIFunctionDef[],
+    attribution?: LlmAttribution,
   ): Promise<LLMResponse> {
     const anthropicKey = process.env.ANTHROPIC_API_KEY;
     if (!anthropicKey) return this.mockResponse(messages, model, maxTokens, tools);
 
     try {
-      // Extract system message (Anthropic takes it as a top-level param)
-      const systemMsg = messages.find((m) => m.role === "system")?.content || "";
-      const nonSystemMessages = messages.filter((m) => m.role !== "system").map((m) => ({
-        role: m.role === "tool" ? "user" : m.role,
-        content: m.role === "tool"
-          ? [{ type: "tool_result", tool_use_id: m.tool_call_id, content: m.content || "" }]
-          : m.content || "",
-      }));
+      return await this.wrapWithLangSmith(
+        { name: "anthropic.chat", model, inputs: messages, attribution },
+        async () => {
+          // Extract system message (Anthropic takes it as a top-level param)
+          const systemMsg = messages.find((m) => m.role === "system")?.content || "";
+          const nonSystemMessages = messages.filter((m) => m.role !== "system").map((m) => ({
+            role: m.role === "tool" ? "user" : m.role,
+            content: m.role === "tool"
+              ? [{ type: "tool_result", tool_use_id: m.tool_call_id, content: m.content || "" }]
+              : m.content || "",
+          }));
 
-      const body: Record<string, unknown> = {
-        model,
-        max_tokens: maxTokens,
-        system: systemMsg,
-        messages: nonSystemMessages,
-      };
+          const body: Record<string, unknown> = {
+            model,
+            max_tokens: maxTokens,
+            system: systemMsg,
+            messages: nonSystemMessages,
+          };
 
-      if (tools && tools.length > 0) {
-        body.tools = tools.map((t) => ({
-          name: t.function.name,
-          description: t.function.description,
-          input_schema: t.function.parameters,
-        }));
-      }
+          if (tools && tools.length > 0) {
+            body.tools = tools.map((t) => ({
+              name: t.function.name,
+              description: t.function.description,
+              input_schema: t.function.parameters,
+            }));
+          }
 
-      const response = await fetchWithTimeout(
-        "https://api.anthropic.com/v1/messages",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-api-key": anthropicKey,
-            "anthropic-version": "2023-06-01",
-          },
-          body: JSON.stringify(body),
+          // CB-only — see note in callAzureOpenAI.
+          const response = await withCircuitBreaker("anthropic", () =>
+            fetchWithTimeout(
+              "https://api.anthropic.com/v1/messages",
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "x-api-key": anthropicKey,
+                  "anthropic-version": "2023-06-01",
+                },
+                body: JSON.stringify(body),
+              },
+              LLM_TIMEOUT_MS,
+            ),
+          );
+
+          if (!response.ok) {
+            throw new Error(`Anthropic API error: ${response.status}`);
+          }
+
+          const data = (await response.json()) as {
+            content: Array<{ type: string; text?: string; id?: string; name?: string; input?: unknown }>;
+            usage: { input_tokens: number; output_tokens: number };
+            stop_reason: string;
+          };
+
+          const tokensUsed = (data.usage?.input_tokens || 0) + (data.usage?.output_tokens || 0);
+          const costPer1K = COST_PER_1K[model] || COST_PER_1K["claude-3-5-sonnet-20241022"];
+
+          // Map tool_use blocks to OpenAI-style tool_calls
+          const toolUseBlocks = data.content.filter((b) => b.type === "tool_use");
+          const openAIToolCalls: ToolCallMessage[] = toolUseBlocks.map((b) => ({
+            id: b.id || `call_${Date.now()}`,
+            type: "function" as const,
+            function: { name: b.name || "", arguments: JSON.stringify(b.input || {}) },
+          }));
+
+          const textBlock = data.content.find((b) => b.type === "text");
+
+          return {
+            content: textBlock?.text || "",
+            tokensUsed,
+            model,
+            cost: (tokensUsed / 1000) * costPer1K,
+            toolCalls: openAIToolCalls.length > 0 ? openAIToolCalls : undefined,
+            finishReason: data.stop_reason,
+          };
         },
-        LLM_TIMEOUT_MS,
       );
-
-      if (!response.ok) {
-        throw new Error(`Anthropic API error: ${response.status}`);
-      }
-
-      const data = (await response.json()) as {
-        content: Array<{ type: string; text?: string; id?: string; name?: string; input?: unknown }>;
-        usage: { input_tokens: number; output_tokens: number };
-        stop_reason: string;
-      };
-
-      const tokensUsed = (data.usage?.input_tokens || 0) + (data.usage?.output_tokens || 0);
-      const costPer1K = COST_PER_1K[model] || COST_PER_1K["claude-3-5-sonnet-20241022"];
-
-      // Map tool_use blocks to OpenAI-style tool_calls
-      const toolUseBlocks = data.content.filter((b) => b.type === "tool_use");
-      const openAIToolCalls: ToolCallMessage[] = toolUseBlocks.map((b) => ({
-        id: b.id || `call_${Date.now()}`,
-        type: "function" as const,
-        function: { name: b.name || "", arguments: JSON.stringify(b.input || {}) },
-      }));
-
-      const textBlock = data.content.find((b) => b.type === "text");
-
-      return {
-        content: textBlock?.text || "",
-        tokensUsed,
-        model,
-        cost: (tokensUsed / 1000) * costPer1K,
-        toolCalls: openAIToolCalls.length > 0 ? openAIToolCalls : undefined,
-        finishReason: data.stop_reason,
-      };
     } catch (error) {
       throw error instanceof Error ? error : new Error("Anthropic API call failed");
     }
@@ -530,14 +668,17 @@ export class LLMService {
     const azureDeployment = process.env.AZURE_OPENAI_EMBEDDING_DEPLOYMENT;
     if (this.azureEndpoint && this.azureKey && azureDeployment) {
       const url = `${this.azureEndpoint.replace(/\/$/, "")}/openai/deployments/${azureDeployment}/embeddings?api-version=${AZURE_OPENAI_API_VERSION}`;
-      const response = await fetchWithTimeout(
-        url,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "api-key": this.azureKey },
-          body: JSON.stringify({ input: trimmed }),
-        },
-        LLM_TIMEOUT_MS,
+      const azureKey = this.azureKey; // capture for closure (TS narrowing)
+      const response = await withCircuitBreaker("azure-openai-embed", () =>
+        fetchWithTimeout(
+          url,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "api-key": azureKey },
+            body: JSON.stringify({ input: trimmed }),
+          },
+          LLM_TIMEOUT_MS,
+        ),
       );
       if (!response.ok) {
         const body = await response.text();
@@ -548,17 +689,19 @@ export class LLMService {
     }
 
     if (this.apiKey) {
-      const response = await fetchWithTimeout(
-        "https://api.openai.com/v1/embeddings",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${this.apiKey}`,
+      const response = await withCircuitBreaker("openai-embed", () =>
+        fetchWithTimeout(
+          "https://api.openai.com/v1/embeddings",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${this.apiKey}`,
+            },
+            body: JSON.stringify({ model: "text-embedding-3-large", input: trimmed }),
           },
-          body: JSON.stringify({ model: "text-embedding-3-large", input: trimmed }),
-        },
-        LLM_TIMEOUT_MS,
+          LLM_TIMEOUT_MS,
+        ),
       );
       if (!response.ok) {
         const body = await response.text();

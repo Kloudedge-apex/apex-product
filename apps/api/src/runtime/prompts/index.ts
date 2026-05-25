@@ -4,10 +4,15 @@ import { getContentWriterPrompt } from "./content-writer";
 import { getSocialEngagementPrompt } from "./social-engagement";
 import { getInboxMonitorPrompt } from "./inbox-monitor";
 import { getReportingPrompt } from "./reporting-agent";
+import { getReplyHandlerPrompt } from "./reply-handler";
+import { getSEOAgentPrompt } from "./seo-agent";
 
 export function getPromptForTemplate(templateName: string, config: Record<string, unknown>): string {
   const name = templateName.toLowerCase();
 
+  // Order matters: more specific matches must come before broader ones.
+  if (name.includes("reply")) return getReplyHandlerPrompt(config);
+  if (name.includes("seo")) return getSEOAgentPrompt(config);
   if (name.includes("sdr")) return getSDRPrompt(config);
   if (name.includes("crm")) return getCRMSyncPrompt(config);
   if (name.includes("content")) return getContentWriterPrompt(config);

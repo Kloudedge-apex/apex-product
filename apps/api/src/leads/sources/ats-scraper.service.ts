@@ -1,5 +1,6 @@
 import { Injectable, Logger } from "@nestjs/common";
 import type { Seniority } from "@prisma/client";
+import { fetchWithRetry, withCircuitBreaker } from "../../common/http-retry.util";
 
 interface DiscoveredCompany {
   domain: string;
@@ -65,17 +66,33 @@ const SENIORITY_MAP: Record<string, Seniority> = {
   analyst: "IC",
 };
 
-/** Rate-limited fetch wrapper */
+/**
+ * Rate-limited fetch wrapper. Picks the circuit breaker by URL prefix so a
+ * single sick ATS provider (e.g. Lever down) does not poison the others.
+ */
 async function rateLimitedFetch(url: string, options?: RequestInit): Promise<Response> {
   await new Promise((r) => setTimeout(r, 200));
-  return fetch(url, {
-    ...options,
-    headers: {
-      "User-Agent": "WorkforceOS/1.0 (lead-engine)",
-      ...options?.headers,
-    },
-    signal: AbortSignal.timeout(15000),
-  });
+  const provider = url.includes("greenhouse.io")
+    ? "ats-greenhouse"
+    : url.includes("lever.co")
+    ? "ats-lever"
+    : url.includes("ashbyhq.com")
+    ? "ats-ashby"
+    : "ats";
+  return withCircuitBreaker(provider, () =>
+    fetchWithRetry(
+      url,
+      {
+        ...options,
+        headers: {
+          "User-Agent": "WorkforceOS/1.0 (lead-engine)",
+          ...options?.headers,
+        },
+        signal: AbortSignal.timeout(15000),
+      },
+      { provider },
+    ),
+  );
 }
 
 @Injectable()

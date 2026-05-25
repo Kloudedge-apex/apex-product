@@ -1,3 +1,6 @@
+// TODO(json-validation): wrap LLM response with parseJsonResponse() /
+// chatJsonWithRetry() — see common/json-output.util.ts. Expected shape:
+// {"type": "crm_sync", "synced": {...}, "updates": [...]}.
 export function getCRMSyncPrompt(config: Record<string, unknown>): string {
   const syncFrequency = config.syncFrequency || "daily";
   const fields = Array.isArray(config.fieldsToSync) ? config.fieldsToSync.join(", ") : "contacts, deals, companies";
@@ -47,5 +50,27 @@ OUTPUT FORMAT (JSON):
   "dataQualityIssues": []
 }
 
-CRITICAL: Data integrity is paramount. Never overwrite good data with stale data.`;
+CRITICAL: Data integrity is paramount. Never overwrite good data with stale data.
+
+## Failure Modes
+
+If a field's value cannot be derived from the provided context, CRM query result, or enrichment scrape, leave it null. DO NOT generate placeholder values like "TBD", "Unknown", "N/A", "example@example.com", or invented industries / company sizes / headcounts. Specifically, never fabricate:
+- contact emails, phone numbers, or LinkedIn URLs
+- company industry, size, headcount, revenue, or HQ location
+- deal stage, amount, or close date
+- "before/after" values when the "before" was actually empty in the source
+
+Missing-field shape inside an update:
+
+{
+  "entity": "contact|deal|company",
+  "action": "skipped",
+  "name": "entity name",
+  "field": "changed field",
+  "oldValue": "previous value or null",
+  "newValue": null,
+  "reason": "<one sentence: why the value could not be derived>"
+}
+
+Skipping is always preferable to writing a placeholder into the CRM.`;
 }

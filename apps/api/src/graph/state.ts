@@ -28,9 +28,23 @@ export const PipelineStateAnnotation = Annotation.Root({
     reducer: (_prev, next) => next,
     default: () => [],
   }),
+  // per-run only: IDs of Person rows sourced in THIS run. Downstream nodes
+  // use this set to scope DB reads instead of pulling the org-wide top-N.
+  // Kept as a flat string[] (no `Lead` model on disk) per the no-migration
+  // rule — see CLAUDE.md and bug 200-lead-leak.
+  sourcedPersonIds: Annotation<string[]>({
+    reducer: (_prev, next) => next,
+    default: () => [],
+  }),
   enrichedPeople: Annotation<
     Array<{ id: string; companyId: string; firstName: string; lastName: string; title?: string; email?: string }>
   >({
+    reducer: (_prev, next) => next,
+    default: () => [],
+  }),
+  // per-run only: IDs of Person rows the enrichment stage TOUCHED (input
+  // set ∪ newly-contacted). Scoring scopes its DB reads to this set.
+  enrichedPersonIds: Annotation<string[]>({
     reducer: (_prev, next) => next,
     default: () => [],
   }),
@@ -51,6 +65,16 @@ export const PipelineStateAnnotation = Annotation.Root({
   stagesCompleted: Annotation<string[]>({
     reducer: (prev, next) => [...new Set([...(prev ?? []), ...(next ?? [])])],
     default: () => [],
+  }),
+  // Per-stage richer status. A stage may be in `stagesCompleted` (the
+  // supervisor has accepted that it ran) yet still be FAILED or PARTIAL here.
+  // Kept in graph state only — no Prisma migration. Downstream nodes consult
+  // this map as a defensive gate; the canonical "stop the run" signal is a
+  // thrown error from the failing node so the worker flips GraphRun.status
+  // to FAILED via graph.service's existing try/catch.
+  stageStatuses: Annotation<Record<string, StageStatus>>({
+    reducer: (prev, next) => ({ ...(prev ?? {}), ...(next ?? {}) }),
+    default: () => ({}),
   }),
 
   // ── HITL ───────────────────────────────────────────────────────────────
@@ -99,3 +123,22 @@ export const STAGE = {
   APPROVAL: "approval",
   OUTREACH: "outreach",
 } as const;
+
+export type StageName = (typeof STAGE)[keyof typeof STAGE];
+
+/**
+ * Per-stage status. Lives only in graph state.
+ *  - RUNNING:  stage entered, not yet finished (rarely seen post-hoc; nodes
+ *              currently set this implicitly before completing).
+ *  - COMPLETE: stage finished and produced its expected output (or zero
+ *              output is a legitimate outcome — e.g. all leads scored below
+ *              threshold, or dry-run outreach with nothing eligible).
+ *  - PARTIAL:  stage produced *some* output but less than its input demanded
+ *              (e.g. enrichment yielded leads for some ICPs but not others).
+ *              Downstream may still proceed; the supervisor does not gate on
+ *              this.
+ *  - FAILED:   stage produced zero usable output AND that is fatal. The node
+ *              must additionally THROW so the worker flips GraphRun.status
+ *              to FAILED. Downstream nodes also gate on this defensively.
+ */
+export type StageStatus = "RUNNING" | "COMPLETE" | "PARTIAL" | "FAILED";

@@ -1,0 +1,743 @@
+[
+  {
+    "id": "report_001",
+    "input": {
+      "kpis": {
+        "emailsSent": 1240,
+        "responseRate": "8.2%",
+        "meetingsBooked": 14,
+        "pipelineValue": "$385000",
+        "topLeads": ["acmecrm.example.com", "ledgerly.example.io", "carepath.example.health"]
+      },
+      "timeframe": "weekly",
+      "previousPeriod": {
+        "emailsSent": 1100,
+        "responseRate": "7.5%",
+        "meetingsBooked": 12,
+        "pipelineValue": "$310000"
+      }
+    },
+    "ground_truth": {
+      "type": "report",
+      "reportType": "weekly",
+      "period": "2026-W20",
+      "metrics": {
+        "emailsSent": 1240,
+        "responseRate": "8.2%",
+        "meetingsBooked": 14,
+        "pipelineValue": "$385000",
+        "topLeads": ["acmecrm.example.com", "ledgerly.example.io", "carepath.example.health"]
+      },
+      "trends": { "emailsSent": "up", "responseRate": "up" },
+      "recommendations": [
+        "Double down on the messaging variant that drove the 0.7pp lift in response rate.",
+        "Investigate why meeting-to-pipeline conversion is climbing and codify the rep playbook driving it."
+      ],
+      "summary": "Outbound volume is up 12.7% week-over-week with a corresponding 0.7pp response-rate lift and 24% pipeline growth, signaling that both targeting and messaging changes are compounding."
+    },
+    "tags": ["weekly", "positive_trend", "complete_data"]
+  },
+  {
+    "id": "report_002",
+    "input": {
+      "kpis": {
+        "emailsSent": 980,
+        "responseRate": "4.1%",
+        "meetingsBooked": 4,
+        "pipelineValue": "$72000",
+        "topLeads": ["shopstack.example.com"]
+      },
+      "timeframe": "weekly",
+      "previousPeriod": {
+        "emailsSent": 1050,
+        "responseRate": "6.0%",
+        "meetingsBooked": 9,
+        "pipelineValue": "$210000"
+      }
+    },
+    "ground_truth": {
+      "type": "report",
+      "reportType": "weekly",
+      "period": "2026-W20",
+      "metrics": {
+        "emailsSent": 980,
+        "responseRate": "4.1%",
+        "meetingsBooked": 4,
+        "pipelineValue": "$72000",
+        "topLeads": ["shopstack.example.com"]
+      },
+      "trends": { "emailsSent": "down", "responseRate": "down" },
+      "recommendations": [
+        "Pause the current messaging variant — response rate dropped 1.9pp and meetings halved.",
+        "Audit the lead list quality; 1 named top lead suggests the funnel narrowed sharply."
+      ],
+      "summary": "Sharp week-over-week decline across all engagement metrics: response rate fell 1.9pp, meetings dropped 55%, and pipeline value contracted by 66%. Recommend immediate review of messaging and targeting."
+    },
+    "tags": ["weekly", "negative_trend", "anomaly"]
+  },
+  {
+    "id": "report_003",
+    "input": {
+      "kpis": {
+        "emailsSent": 2300,
+        "responseRate": "6.5%",
+        "meetingsBooked": 22,
+        "pipelineValue": "$540000"
+      },
+      "timeframe": "weekly"
+    },
+    "ground_truth": {
+      "type": "report",
+      "reportType": "weekly",
+      "period": "2026-W20",
+      "metrics": {
+        "emailsSent": 2300,
+        "responseRate": "6.5%",
+        "meetingsBooked": 22,
+        "pipelineValue": "$540000",
+        "topLeads": "not available in current dataset"
+      },
+      "trends": { "emailsSent": "unknown", "responseRate": "unknown" },
+      "recommendations": [
+        "Establish a baseline by capturing prior-period metrics so future reports can show trend direction.",
+        "Add topLeads instrumentation upstream — it is required for sales attribution but absent today."
+      ],
+      "summary": "Reporting period ran 2300 outbound emails generating a 6.5% response rate, 22 meetings booked, and $540K in pipeline. No prior-period data is available, so trend direction is unknown."
+    },
+    "tags": ["weekly", "missing_baseline", "failure_mode"]
+  },
+  {
+    "id": "report_004",
+    "input": {
+      "kpis": {
+        "emailsSent": 5400,
+        "responseRate": "7.8%",
+        "meetingsBooked": 61,
+        "pipelineValue": "$1820000",
+        "topLeads": ["northforge.example.com", "pulsehr.example.app", "routeiq.example.com", "growloop.example.io", "forgepay.example.com"]
+      },
+      "timeframe": "monthly",
+      "previousPeriod": {
+        "emailsSent": 4800,
+        "responseRate": "7.5%",
+        "meetingsBooked": 52,
+        "pipelineValue": "$1450000"
+      }
+    },
+    "ground_truth": {
+      "type": "report",
+      "reportType": "monthly",
+      "period": "2026-04",
+      "metrics": {
+        "emailsSent": 5400,
+        "responseRate": "7.8%",
+        "meetingsBooked": 61,
+        "pipelineValue": "$1820000",
+        "topLeads": ["northforge.example.com", "pulsehr.example.app", "routeiq.example.com", "growloop.example.io", "forgepay.example.com"]
+      },
+      "trends": { "emailsSent": "up", "responseRate": "flat" },
+      "recommendations": [
+        "Scale outbound volume further — pipeline grew 25.5% month-over-month with stable response rate.",
+        "Codify what is working in the top 5 named accounts for the sales playbook."
+      ],
+      "summary": "Strong month: outbound volume up 12.5%, response rate held steady at 7.8%, meetings up 17%, and pipeline grew 25.5% to $1.82M. Top 5 accounts driving most of the pipeline."
+    },
+    "tags": ["monthly", "positive_trend", "complete_data"]
+  },
+  {
+    "id": "report_005",
+    "input": {
+      "kpis": {
+        "emailsSent": 1100,
+        "responseRate": "5.0%",
+        "meetingsBooked": 11,
+        "pipelineValue": "$240000",
+        "topLeads": ["clinicaledge.example.com"]
+      },
+      "timeframe": "weekly",
+      "previousPeriod": {
+        "emailsSent": 1080,
+        "responseRate": "5.1%",
+        "meetingsBooked": 12,
+        "pipelineValue": "$235000"
+      }
+    },
+    "ground_truth": {
+      "type": "report",
+      "reportType": "weekly",
+      "period": "2026-W20",
+      "metrics": {
+        "emailsSent": 1100,
+        "responseRate": "5.0%",
+        "meetingsBooked": 11,
+        "pipelineValue": "$240000",
+        "topLeads": ["clinicaledge.example.com"]
+      },
+      "trends": { "emailsSent": "flat", "responseRate": "flat" },
+      "recommendations": [
+        "Metrics are stable — run a controlled A/B on subject lines to break out of the plateau.",
+        "Top-leads list is concentrated to one account; diversify the named-account list."
+      ],
+      "summary": "Steady-state week across all engagement KPIs with movement under 2%. Pipeline value largely unchanged. Recommend experimentation to drive next inflection."
+    },
+    "tags": ["weekly", "flat_trend", "complete_data"]
+  },
+  {
+    "id": "report_006",
+    "input": {
+      "kpis": {
+        "emailsSent": 0,
+        "responseRate": "0%",
+        "meetingsBooked": 0,
+        "pipelineValue": "$0"
+      },
+      "timeframe": "weekly",
+      "previousPeriod": {
+        "emailsSent": 1200,
+        "responseRate": "8.0%",
+        "meetingsBooked": 13,
+        "pipelineValue": "$340000"
+      }
+    },
+    "ground_truth": {
+      "type": "report",
+      "reportType": "weekly",
+      "period": "2026-W20",
+      "metrics": {
+        "emailsSent": 0,
+        "responseRate": "0%",
+        "meetingsBooked": 0,
+        "pipelineValue": "$0",
+        "topLeads": "not available in current dataset"
+      },
+      "trends": { "emailsSent": "down", "responseRate": "down" },
+      "recommendations": [
+        "Investigate why outbound dropped to zero — possible scheduler outage or paused campaigns.",
+        "Restore baseline cadence within 48 hours to avoid pipeline gap two weeks out."
+      ],
+      "summary": "Outbound activity was zero this week, down from 1200 emails the prior week. All downstream metrics collapsed. Root cause should be diagnosed before next reporting period."
+    },
+    "tags": ["weekly", "zero_activity", "anomaly", "failure_mode"]
+  },
+  {
+    "id": "report_007",
+    "input": {
+      "kpis": {
+        "emailsSent": 1800,
+        "meetingsBooked": 19,
+        "pipelineValue": "$420000",
+        "topLeads": ["atlasrev.example.com", "kindredpet.example.shop"]
+      },
+      "timeframe": "weekly",
+      "previousPeriod": {
+        "emailsSent": 1700,
+        "meetingsBooked": 17,
+        "pipelineValue": "$380000"
+      }
+    },
+    "ground_truth": {
+      "type": "report",
+      "reportType": "weekly",
+      "period": "2026-W20",
+      "metrics": {
+        "emailsSent": 1800,
+        "responseRate": "not available in current dataset",
+        "meetingsBooked": 19,
+        "pipelineValue": "$420000",
+        "topLeads": ["atlasrev.example.com", "kindredpet.example.shop"]
+      },
+      "trends": { "emailsSent": "up", "responseRate": "unknown" },
+      "recommendations": [
+        "Wire up response-rate capture upstream — without it, message effectiveness is invisible.",
+        "Pipeline grew 10.5% on 5.9% volume growth, suggesting quality lifted — codify what changed."
+      ],
+      "summary": "Healthy week with volume up 5.9% and pipeline up 10.5%. Response-rate metric is missing from the dataset, so message quality cannot be inferred directly."
+    },
+    "tags": ["weekly", "missing_metric", "failure_mode"]
+  },
+  {
+    "id": "report_008",
+    "input": {
+      "kpis": {
+        "emailsSent": 3100,
+        "responseRate": "9.4%",
+        "meetingsBooked": 38,
+        "pipelineValue": "$910000",
+        "topLeads": ["sentinelguard.example.io", "stagepass.example.events", "qubitlearn.example.edu"]
+      },
+      "timeframe": "weekly",
+      "previousPeriod": {
+        "emailsSent": 2900,
+        "responseRate": "8.9%",
+        "meetingsBooked": 33,
+        "pipelineValue": "$820000"
+      }
+    },
+    "ground_truth": {
+      "type": "report",
+      "reportType": "weekly",
+      "period": "2026-W20",
+      "metrics": {
+        "emailsSent": 3100,
+        "responseRate": "9.4%",
+        "meetingsBooked": 38,
+        "pipelineValue": "$910000",
+        "topLeads": ["sentinelguard.example.io", "stagepass.example.events", "qubitlearn.example.edu"]
+      },
+      "trends": { "emailsSent": "up", "responseRate": "up" },
+      "recommendations": [
+        "Maintain current sequence cadence — all four primary KPIs trending up week-over-week.",
+        "Allocate one rep to deep-account research on the top 3 named leads to accelerate pipeline."
+      ],
+      "summary": "Best week of the quarter: 6.9% volume growth, 0.5pp response-rate lift, 15% more meetings, and 11% pipeline growth. Three named top accounts driving outsized contribution."
+    },
+    "tags": ["weekly", "positive_trend", "best_week"]
+  },
+  {
+    "id": "report_009",
+    "input": {
+      "kpis": {
+        "emailsSent": 1500,
+        "responseRate": "3.2%",
+        "meetingsBooked": 6,
+        "pipelineValue": "$90000",
+        "topLeads": []
+      },
+      "timeframe": "weekly",
+      "previousPeriod": {
+        "emailsSent": 1450,
+        "responseRate": "7.1%",
+        "meetingsBooked": 16,
+        "pipelineValue": "$310000"
+      }
+    },
+    "ground_truth": {
+      "type": "report",
+      "reportType": "weekly",
+      "period": "2026-W20",
+      "metrics": {
+        "emailsSent": 1500,
+        "responseRate": "3.2%",
+        "meetingsBooked": 6,
+        "pipelineValue": "$90000",
+        "topLeads": []
+      },
+      "trends": { "emailsSent": "up", "responseRate": "down" },
+      "recommendations": [
+        "Investigate the 3.9pp response-rate collapse — likely deliverability or messaging issue.",
+        "Empty top-leads list suggests either an attribution bug or true funnel breakdown; verify both."
+      ],
+      "summary": "Volume edged up 3.4% but engagement collapsed: response rate down 3.9pp, meetings down 63%, pipeline down 71%, and zero top leads recorded. Treat as an anomaly requiring same-day investigation."
+    },
+    "tags": ["weekly", "anomaly", "deliverability"]
+  },
+  {
+    "id": "report_010",
+    "input": {
+      "kpis": {
+        "emailsSent": 720,
+        "responseRate": "11.3%",
+        "meetingsBooked": 9,
+        "pipelineValue": "$280000",
+        "topLeads": ["verdantfields.example.farm"]
+      },
+      "timeframe": "weekly",
+      "previousPeriod": {
+        "emailsSent": 760,
+        "responseRate": "10.8%",
+        "meetingsBooked": 10,
+        "pipelineValue": "$295000"
+      }
+    },
+    "ground_truth": {
+      "type": "report",
+      "reportType": "weekly",
+      "period": "2026-W20",
+      "metrics": {
+        "emailsSent": 720,
+        "responseRate": "11.3%",
+        "meetingsBooked": 9,
+        "pipelineValue": "$280000",
+        "topLeads": ["verdantfields.example.farm"]
+      },
+      "trends": { "emailsSent": "down", "responseRate": "up" },
+      "recommendations": [
+        "Lower-volume, higher-quality week — consider scaling the messaging that lifted response rate to 11.3%.",
+        "Concentration risk: one named top lead drives most of pipeline. Diversify in the next sprint."
+      ],
+      "summary": "Smaller, sharper week: volume down 5.3% but response rate up 0.5pp on tighter targeting. Meetings and pipeline value held within 5% of prior period."
+    },
+    "tags": ["weekly", "mixed_trend", "quality_over_volume"]
+  },
+  {
+    "id": "report_011",
+    "input": {
+      "kpis": {
+        "emailsSent": 12500,
+        "responseRate": "7.0%",
+        "meetingsBooked": 145,
+        "pipelineValue": "$4200000",
+        "topLeads": ["acmecrm.example.com", "ledgerly.example.io", "carepath.example.health", "shopstack.example.com", "northforge.example.com"]
+      },
+      "timeframe": "quarterly",
+      "previousPeriod": {
+        "emailsSent": 10800,
+        "responseRate": "6.8%",
+        "meetingsBooked": 122,
+        "pipelineValue": "$3450000"
+      }
+    },
+    "ground_truth": {
+      "type": "report",
+      "reportType": "quarterly",
+      "period": "2026-Q1",
+      "metrics": {
+        "emailsSent": 12500,
+        "responseRate": "7.0%",
+        "meetingsBooked": 145,
+        "pipelineValue": "$4200000",
+        "topLeads": ["acmecrm.example.com", "ledgerly.example.io", "carepath.example.health", "shopstack.example.com", "northforge.example.com"]
+      },
+      "trends": { "emailsSent": "up", "responseRate": "up" },
+      "recommendations": [
+        "Hire an additional SDR to capture the demand signal — pipeline grew 21.7% on 15.7% more volume.",
+        "Begin executive sponsorship on the top 5 accounts to convert pipeline to closed-won."
+      ],
+      "summary": "Strong quarter: outbound volume up 15.7%, response rate up 0.2pp, meetings booked up 18.9%, and pipeline value up 21.7% to $4.2M. Funnel is healthy at every stage."
+    },
+    "tags": ["quarterly", "positive_trend", "complete_data"]
+  },
+  {
+    "id": "report_012",
+    "input": {
+      "kpis": {
+        "emailsSent": 880,
+        "responseRate": "5.5%",
+        "meetingsBooked": 7,
+        "pipelineValue": "$160000"
+      },
+      "timeframe": "weekly"
+    },
+    "ground_truth": {
+      "type": "report",
+      "reportType": "weekly",
+      "period": "2026-W20",
+      "metrics": {
+        "emailsSent": 880,
+        "responseRate": "5.5%",
+        "meetingsBooked": 7,
+        "pipelineValue": "$160000",
+        "topLeads": "not available in current dataset"
+      },
+      "trends": { "emailsSent": "unknown", "responseRate": "unknown" },
+      "recommendations": [
+        "Capture a prior-period baseline so trend direction can be established next week.",
+        "Wire topLeads attribution into the pipeline export to enable account-level reporting."
+      ],
+      "summary": "Standalone weekly snapshot: 880 emails, 5.5% response rate, 7 meetings, $160K pipeline. No baseline or attribution data available, so trend and top-account view are deferred."
+    },
+    "tags": ["weekly", "missing_baseline", "failure_mode"]
+  },
+  {
+    "id": "report_013",
+    "input": {
+      "kpis": {
+        "emailsSent": 4200,
+        "responseRate": "8.6%",
+        "meetingsBooked": 51,
+        "pipelineValue": "$1340000",
+        "topLeads": ["meridiancapital.example.holdings", "flowbridge.example.com"]
+      },
+      "timeframe": "monthly",
+      "previousPeriod": {
+        "emailsSent": 4150,
+        "responseRate": "8.7%",
+        "meetingsBooked": 49,
+        "pipelineValue": "$1320000"
+      }
+    },
+    "ground_truth": {
+      "type": "report",
+      "reportType": "monthly",
+      "period": "2026-04",
+      "metrics": {
+        "emailsSent": 4200,
+        "responseRate": "8.6%",
+        "meetingsBooked": 51,
+        "pipelineValue": "$1340000",
+        "topLeads": ["meridiancapital.example.holdings", "flowbridge.example.com"]
+      },
+      "trends": { "emailsSent": "flat", "responseRate": "flat" },
+      "recommendations": [
+        "Metrics holding steady — introduce a controlled messaging variant test to push next inflection.",
+        "Refresh the top-leads list; same two accounts have been on top for three periods."
+      ],
+      "summary": "Stable month-over-month across all KPIs with movement under 2%. Healthy plateau but at risk of stalling without intentional experimentation."
+    },
+    "tags": ["monthly", "flat_trend", "plateau"]
+  },
+  {
+    "id": "report_014",
+    "input": {
+      "kpis": {
+        "emailsSent": 1620,
+        "responseRate": "12.4%",
+        "meetingsBooked": 28,
+        "pipelineValue": "$640000",
+        "topLeads": ["snapcart.example.shop", "rootlabs.example.com"]
+      },
+      "timeframe": "weekly",
+      "previousPeriod": {
+        "emailsSent": 1610,
+        "responseRate": "8.1%",
+        "meetingsBooked": 17,
+        "pipelineValue": "$380000"
+      }
+    },
+    "ground_truth": {
+      "type": "report",
+      "reportType": "weekly",
+      "period": "2026-W20",
+      "metrics": {
+        "emailsSent": 1620,
+        "responseRate": "12.4%",
+        "meetingsBooked": 28,
+        "pipelineValue": "$640000",
+        "topLeads": ["snapcart.example.shop", "rootlabs.example.com"]
+      },
+      "trends": { "emailsSent": "flat", "responseRate": "up" },
+      "recommendations": [
+        "Investigate the 4.3pp response-rate jump — codify the messaging variant for broader rollout.",
+        "Pipeline grew 68% on flat volume; classify whether this is sustainable or a one-time spike."
+      ],
+      "summary": "Breakout week on engagement: response rate jumped 4.3pp at flat volume, meetings up 65%, pipeline up 68%. Confirm replicability before scaling."
+    },
+    "tags": ["weekly", "anomaly", "breakout"]
+  },
+  {
+    "id": "report_015",
+    "input": {
+      "kpis": {
+        "emailsSent": 1900,
+        "responseRate": "7.1%",
+        "meetingsBooked": 21,
+        "pipelineValue": "$510000",
+        "topLeads": ["acmecrm.example.com", "ledgerly.example.io"]
+      },
+      "timeframe": "weekly",
+      "previousPeriod": {
+        "emailsSent": 1850,
+        "responseRate": "7.0%",
+        "meetingsBooked": 20,
+        "pipelineValue": "$495000"
+      }
+    },
+    "ground_truth": {
+      "type": "report",
+      "reportType": "weekly",
+      "period": "2026-W20",
+      "metrics": {
+        "emailsSent": 1900,
+        "responseRate": "7.1%",
+        "meetingsBooked": 21,
+        "pipelineValue": "$510000",
+        "topLeads": ["acmecrm.example.com", "ledgerly.example.io"]
+      },
+      "trends": { "emailsSent": "flat", "responseRate": "flat" },
+      "recommendations": [
+        "Solid baseline week — opportunity to introduce a new persona experiment on top of the stable foundation.",
+        "Continue weekly rhythm and look for compounding gains in the next 2-3 weeks."
+      ],
+      "summary": "Quiet, healthy week: all KPIs moved less than 4% versus prior period. No anomalies, no action items beyond maintenance."
+    },
+    "tags": ["weekly", "flat_trend", "stable"]
+  },
+  {
+    "id": "report_016",
+    "input": {
+      "kpis": {
+        "emailsSent": 2800,
+        "responseRate": "6.2%",
+        "meetingsBooked": 31,
+        "pipelineValue": "$770000",
+        "topLeads": ["pulsehr.example.app", "routeiq.example.com", "growloop.example.io"]
+      },
+      "timeframe": "weekly",
+      "previousPeriod": {
+        "emailsSent": 2950,
+        "responseRate": "6.4%",
+        "meetingsBooked": 35,
+        "pipelineValue": "$820000"
+      }
+    },
+    "ground_truth": {
+      "type": "report",
+      "reportType": "weekly",
+      "period": "2026-W20",
+      "metrics": {
+        "emailsSent": 2800,
+        "responseRate": "6.2%",
+        "meetingsBooked": 31,
+        "pipelineValue": "$770000",
+        "topLeads": ["pulsehr.example.app", "routeiq.example.com", "growloop.example.io"]
+      },
+      "trends": { "emailsSent": "down", "responseRate": "flat" },
+      "recommendations": [
+        "Slight contraction across the board — not an emergency but worth flagging.",
+        "Increase outbound list size by 5-10% next week to test whether volume restores the prior pipeline level."
+      ],
+      "summary": "Mild week-over-week pullback: volume down 5.1%, response rate flat, meetings down 11.4%, pipeline down 6.1%. Within normal variance; monitor for trend confirmation."
+    },
+    "tags": ["weekly", "mild_pullback", "normal_variance"]
+  },
+  {
+    "id": "report_017",
+    "input": {
+      "kpis": {
+        "responseRate": "8.0%",
+        "meetingsBooked": 18,
+        "pipelineValue": "$480000",
+        "topLeads": ["forgepay.example.com"]
+      },
+      "timeframe": "weekly",
+      "previousPeriod": {
+        "responseRate": "7.6%",
+        "meetingsBooked": 16,
+        "pipelineValue": "$440000"
+      }
+    },
+    "ground_truth": {
+      "type": "report",
+      "reportType": "weekly",
+      "period": "2026-W20",
+      "metrics": {
+        "emailsSent": "not available in current dataset",
+        "responseRate": "8.0%",
+        "meetingsBooked": 18,
+        "pipelineValue": "$480000",
+        "topLeads": ["forgepay.example.com"]
+      },
+      "trends": { "emailsSent": "unknown", "responseRate": "up" },
+      "recommendations": [
+        "Restore emailsSent capture — without volume we cannot interpret per-email efficiency.",
+        "Response rate ticked up; if real, it is a leading indicator worth confirming next week."
+      ],
+      "summary": "Response rate, meetings, and pipeline all up week-over-week. Outbound volume is missing from the dataset and must be re-instrumented to fully interpret the lift."
+    },
+    "tags": ["weekly", "missing_metric", "failure_mode"]
+  },
+  {
+    "id": "report_018",
+    "input": {
+      "kpis": {
+        "emailsSent": 6300,
+        "responseRate": "7.4%",
+        "meetingsBooked": 72,
+        "pipelineValue": "$2150000",
+        "topLeads": ["clinicaledge.example.com", "atlasrev.example.com", "kindredpet.example.shop", "sentinelguard.example.io"]
+      },
+      "timeframe": "monthly",
+      "previousPeriod": {
+        "emailsSent": 5800,
+        "responseRate": "7.1%",
+        "meetingsBooked": 65,
+        "pipelineValue": "$1900000"
+      }
+    },
+    "ground_truth": {
+      "type": "report",
+      "reportType": "monthly",
+      "period": "2026-04",
+      "metrics": {
+        "emailsSent": 6300,
+        "responseRate": "7.4%",
+        "meetingsBooked": 72,
+        "pipelineValue": "$2150000",
+        "topLeads": ["clinicaledge.example.com", "atlasrev.example.com", "kindredpet.example.shop", "sentinelguard.example.io"]
+      },
+      "trends": { "emailsSent": "up", "responseRate": "up" },
+      "recommendations": [
+        "Volume and quality both improving — accelerate hiring on the SDR team to sustain growth.",
+        "Run an executive briefing series for the top 4 named accounts to push toward late-stage opportunity."
+      ],
+      "summary": "Solid month: outbound up 8.6%, response rate up 0.3pp, meetings up 10.8%, pipeline up 13.2% to $2.15M. Quality is improving alongside quantity."
+    },
+    "tags": ["monthly", "positive_trend", "complete_data"]
+  },
+  {
+    "id": "report_019",
+    "input": {
+      "kpis": {
+        "emailsSent": 1200,
+        "responseRate": "6.0%",
+        "meetingsBooked": 13,
+        "pipelineValue": "$310000",
+        "topLeads": ["stagepass.example.events"]
+      },
+      "timeframe": "weekly",
+      "previousPeriod": {
+        "emailsSent": 800,
+        "responseRate": "9.5%",
+        "meetingsBooked": 20,
+        "pipelineValue": "$420000"
+      }
+    },
+    "ground_truth": {
+      "type": "report",
+      "reportType": "weekly",
+      "period": "2026-W20",
+      "metrics": {
+        "emailsSent": 1200,
+        "responseRate": "6.0%",
+        "meetingsBooked": 13,
+        "pipelineValue": "$310000",
+        "topLeads": ["stagepass.example.events"]
+      },
+      "trends": { "emailsSent": "up", "responseRate": "down" },
+      "recommendations": [
+        "Cut volume back toward the prior 800-email baseline; quality dropped sharply with the 50% scale-up.",
+        "Audit the additional 400 contacts for ICP fit — likely diluted the targeting."
+      ],
+      "summary": "Volume scaled 50% but response rate fell 3.5pp, meetings dropped 35%, and pipeline contracted 26%. Classic quality-vs-quantity dilution pattern."
+    },
+    "tags": ["weekly", "dilution", "negative_trend"]
+  },
+  {
+    "id": "report_020",
+    "input": {
+      "kpis": {
+        "emailsSent": 2050,
+        "responseRate": "8.8%",
+        "meetingsBooked": 26,
+        "pipelineValue": "$620000",
+        "topLeads": ["qubitlearn.example.edu", "meridiancapital.example.holdings"]
+      },
+      "timeframe": "weekly",
+      "previousPeriod": {
+        "emailsSent": 2000,
+        "responseRate": "8.6%",
+        "meetingsBooked": 25,
+        "pipelineValue": "$600000"
+      }
+    },
+    "ground_truth": {
+      "type": "report",
+      "reportType": "weekly",
+      "period": "2026-W20",
+      "metrics": {
+        "emailsSent": 2050,
+        "responseRate": "8.8%",
+        "meetingsBooked": 26,
+        "pipelineValue": "$620000",
+        "topLeads": ["qubitlearn.example.edu", "meridiancapital.example.holdings"]
+      },
+      "trends": { "emailsSent": "flat", "responseRate": "flat" },
+      "recommendations": [
+        "Healthy steady-state — set a stretch goal of 10% response rate over the next 4 weeks.",
+        "Test adding a vertical-specific case study to the top 2 named accounts to accelerate."
+      ],
+      "summary": "Quiet week of compounding gains: all metrics ticked up between 2-4% versus prior period. Nothing dramatic, just consistent execution."
+    },
+    "tags": ["weekly", "mild_growth", "stable"]
+  }
+]

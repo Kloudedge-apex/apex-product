@@ -33,13 +33,20 @@ CRITICAL RULES:
 
   requiredIntegrations: ["email", "crm"],
   defaultSchedule: "0 9 * * 1-5",
+  // Templates are the source of truth for tool whitelisting — the ToolRegistry derives its TEMPLATE_TOOL_MAP from these arrays at startup and bootstrap-fails if any name is unknown.
   availableTools: [
-    { name: "email_send", description: "Send a personalized email to a prospect via connected email provider" },
-    { name: "email_read", description: "Read recent emails and check for prospect replies" },
-    { name: "crm_search", description: "Search CRM contacts and deals by name, company, or custom fields" },
-    { name: "crm_update", description: "Create or update a CRM contact, deal, or activity log" },
     { name: "web_search", description: "Search the web for company news, funding rounds, and prospect info" },
-    { name: "linkedin_search", description: "Search LinkedIn profiles for prospect research and ICP matching" },
+    { name: "company_research", description: "Deep-dive research on a company (size, funding, tech stack, signals)" },
+    { name: "lead_score", description: "Score a prospect against the configured ICP criteria (0-100)" },
+    { name: "send_email", description: "Send a personalized outbound email to a prospect via the connected email provider" },
+    { name: "hubspot", description: "Search and update HubSpot CRM contacts, deals, and activity logs" },
+    { name: "memory", description: "Read and write durable agent memory (contacted leads, run summaries)" },
+    // LinkedIn DMs are an optional channel — they only succeed when the org has a
+    // CONNECTED LinkedIn integration with the right scopes. Without one, the tool
+    // returns a mock receipt so the agent loop doesn't crash on missing creds.
+    { name: "linkedin_send_message", description: "Send a personalized LinkedIn DM to a 1st-degree prospect via the connected LinkedIn account" },
+    // TODO: add email_read to registry (needed for reply detection inside SDR loop; currently delegated to reply-handler)
+    // TODO: add linkedin_search to registry (currently approximated via web_search)
   ],
   exampleTasks: [
     "Research and reach out to 10 Series-A SaaS companies in fintech",

@@ -57,11 +57,15 @@ CRITICAL RULES:
 
   requiredIntegrations: ["crm"],
   defaultSchedule: "0 8 * * 1-5",
+  // Templates are the source of truth for tool whitelisting — the ToolRegistry derives its TEMPLATE_TOOL_MAP from these arrays at startup and bootstrap-fails if any name is unknown.
   availableTools: [
-    { name: "data_query", description: "Query metrics and KPI data from connected CRM, analytics, and internal sources" },
-    { name: "chart_generate", description: "Generate charts and visualizations from data (line, bar, donut, sparkline)" },
-    { name: "anomaly_detect", description: "Detect statistical anomalies in metric time series data" },
-    { name: "report_compile", description: "Compile data, charts, and insights into a formatted report document" },
+    { name: "hubspot", description: "Query HubSpot CRM for pipeline value, deals, contacts, and activity metrics" },
+    { name: "web_search", description: "Search the web for benchmark data and external context for report narratives" },
+    { name: "memory", description: "Read and write durable agent memory (period baselines, anomaly history, KPI thresholds)" },
+    // TODO: add data_query to registry (currently scoped to HubSpot via the hubspot tool; broader analytics sources pending)
+    // TODO: add chart_generate to registry (charts currently rendered downstream by the dashboard)
+    // TODO: add anomaly_detect to registry (anomaly checks currently done inline by the LLM)
+    // TODO: add report_compile to registry (reports currently emitted as structured markdown in the LLM output)
   ],
   exampleTasks: [
     "Generate a daily KPI report with pipeline, outreach, and engagement metrics",

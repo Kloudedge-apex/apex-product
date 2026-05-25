@@ -1,0 +1,123 @@
+/**
+ * Validation-retry tests for IcpAutoService.
+ *
+ * Scope: confirm the LLM JSON parse helper is wired up correctly — malformed
+ * first response triggers a retry; both malformed returns a BadRequest
+ * (the service surfaces null-from-helper as a user-actionable error).
+ *
+ * We do NOT re-test parseJsonResponse / chatJsonWithRetry behaviour here;
+ * those have their own spec.
+ */
+
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { BadRequestException } from "@nestjs/common";
+import { IcpAutoService } from "../icp-auto.service";
+import type { PrismaService } from "../../prisma/prisma.service";
+import type { LLMService, LLMResponse } from "../../runtime/llm.service";
+
+const ORIGINAL_FETCH = globalThis.fetch;
+
+function homepageHtml(body: string): Response {
+  // 600+ chars so we clear the "too short" threshold (200).
+  const padding = "<p>About our company doing important things.</p>".repeat(20);
+  const html = `<html><head><title>Acme</title></head><body><h1>Acme Corp</h1>${padding}${body}</body></html>`;
+  return new Response(html, {
+    status: 200,
+    headers: { "Content-Type": "text/html" },
+  });
+}
+
+function mockPrisma() {
+  return {
+    org: {
+      findUnique: vi.fn().mockResolvedValue({ website: "https://acme.com", name: "Acme" }),
+    },
+    user: {
+      findFirst: vi.fn().mockResolvedValue(null),
+    },
+    icpProfile: {
+      create: vi.fn().mockResolvedValue({ id: "icp-1", name: "Acme — generated from https://acme.com" }),
+    },
+  } as unknown as PrismaService;
+}
+
+function makeLlm(contents: string[]): {
+  llm: LLMService;
+  chatMock: ReturnType<typeof vi.fn>;
+} {
+  const queue = [...contents];
+  const chatMock = vi.fn(async (): Promise<LLMResponse> => {
+    const content = queue.shift() ?? "";
+    return { content, tokensUsed: 100, model: "gpt-4o-mini-mock", cost: 0 };
+  });
+  const llm = { chat: chatMock } as unknown as LLMService;
+  return { llm, chatMock };
+}
+
+beforeEach(() => {
+  globalThis.fetch = vi.fn(async () => homepageHtml("")) as unknown as typeof fetch;
+});
+
+afterEach(() => {
+  globalThis.fetch = ORIGINAL_FETCH;
+  vi.restoreAllMocks();
+});
+
+describe("IcpAutoService.generateForOrg — JSON validation retry", () => {
+  it("retries once when the first LLM response is malformed and succeeds on the second", async () => {
+    const validIcp = JSON.stringify({
+      productSummary: "Sales automation for B2B SaaS",
+      industry: "SaaS",
+      targetTitles: ["VP of Sales", "Head of RevOps"],
+      targetIndustries: ["SaaS", "Fintech"],
+      targetGeos: ["United States"],
+      intentKeywords: ["outbound automation"],
+      minEmployees: 50,
+      maxEmployees: 500,
+    });
+    const { llm, chatMock } = makeLlm(["this is not valid json at all", validIcp]);
+    const prisma = mockPrisma();
+    const service = new IcpAutoService(prisma, llm);
+
+    const result = await service.generateForOrg("org-1");
+
+    expect(result.id).toBe("icp-1");
+    expect(chatMock).toHaveBeenCalledTimes(2);
+    // The retry call should include the original 2 turns + assistant echo +
+    // system nudge = 4 messages.
+    const retryArgs = chatMock.mock.calls[1]![0] as unknown[];
+    expect(retryArgs).toHaveLength(4);
+  });
+
+  it("throws BadRequestException when both LLM attempts fail to produce valid JSON", async () => {
+    const { llm, chatMock } = makeLlm(["garbage one", "garbage two"]);
+    const prisma = mockPrisma();
+    const service = new IcpAutoService(prisma, llm);
+
+    await expect(service.generateForOrg("org-1")).rejects.toBeInstanceOf(BadRequestException);
+    expect(chatMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("succeeds without retry when the first response is valid JSON wrapped in a markdown fence", async () => {
+    const fenced =
+      "```json\n" +
+      JSON.stringify({
+        productSummary: "x",
+        industry: "y",
+        targetTitles: ["CTO"],
+        targetIndustries: [],
+        targetGeos: [],
+        intentKeywords: [],
+        minEmployees: null,
+        maxEmployees: null,
+      }) +
+      "\n```";
+    const { llm, chatMock } = makeLlm([fenced]);
+    const prisma = mockPrisma();
+    const service = new IcpAutoService(prisma, llm);
+
+    const result = await service.generateForOrg("org-1");
+    expect(result.id).toBe("icp-1");
+    expect(chatMock).toHaveBeenCalledTimes(1);
+  });
+});

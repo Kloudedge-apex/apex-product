@@ -36,11 +36,14 @@ CRITICAL RULES:
 
   requiredIntegrations: ["social"],
   defaultSchedule: "0 8 * * 1-5",
+  // Templates are the source of truth for tool whitelisting — the ToolRegistry derives its TEMPLATE_TOOL_MAP from these arrays at startup and bootstrap-fails if any name is unknown.
   availableTools: [
-    { name: "social_post", description: "Publish content to LinkedIn, X/Twitter, or other social platforms" },
-    { name: "content_generate", description: "Generate content drafts with AI assistance and brand voice adherence" },
-    { name: "schedule_publish", description: "Schedule content for future publication at optimal engagement times" },
-    { name: "analytics_read", description: "Read engagement analytics for past content to inform strategy" },
+    { name: "web_search", description: "Search the web for trending topics, breaking news, and content ideas" },
+    { name: "web_scrape", description: "Scrape a URL for full-page context (competitor posts, source articles)" },
+    { name: "memory", description: "Read and write durable agent memory (recently published topics, content calendar)" },
+    // TODO: add social_post to registry (publishing to LinkedIn/X currently out of scope — drafts only)
+    // TODO: add schedule_publish to registry (scheduling currently routed through dashboard, not agent)
+    // TODO: add analytics_read to registry (post-performance analytics not yet wired)
   ],
   exampleTasks: [
     "Write and schedule a LinkedIn post about emerging AI trends in B2B sales",

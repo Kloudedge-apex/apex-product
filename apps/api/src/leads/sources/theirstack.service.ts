@@ -1,5 +1,6 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+import { fetchWithRetry, withCircuitBreaker } from "../../common/http-retry.util";
 
 interface IcpInput {
   targetTitles: string[];
@@ -90,15 +91,21 @@ export class TheirStackService {
     this.logger.log("TheirStack: searching for hiring companies");
 
     try {
-      const res = await fetch("https://api.theirstack.com/v1/jobs/search", {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${this.apiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(20000),
-      });
+      const res = await withCircuitBreaker("theirstack", () =>
+        fetchWithRetry(
+          "https://api.theirstack.com/v1/jobs/search",
+          {
+            method: "POST",
+            headers: {
+              "Authorization": `Bearer ${this.apiKey}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(body),
+            signal: AbortSignal.timeout(20000),
+          },
+          { provider: "theirstack" },
+        ),
+      );
 
       if (!res.ok) {
         throw new Error(`TheirStack API error: ${res.status} ${res.statusText}`);
@@ -157,19 +164,25 @@ export class TheirStackService {
     if (!this.enabled) return [];
 
     try {
-      const res = await fetch("https://api.theirstack.com/v1/jobs/search", {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${this.apiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          company_domain: companyDomain,
-          posted_at_max_age_days: 90,
-          limit: 50,
-        }),
-        signal: AbortSignal.timeout(15000),
-      });
+      const res = await withCircuitBreaker("theirstack", () =>
+        fetchWithRetry(
+          "https://api.theirstack.com/v1/jobs/search",
+          {
+            method: "POST",
+            headers: {
+              "Authorization": `Bearer ${this.apiKey}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              company_domain: companyDomain,
+              posted_at_max_age_days: 90,
+              limit: 50,
+            }),
+            signal: AbortSignal.timeout(15000),
+          },
+          { provider: "theirstack" },
+        ),
+      );
 
       if (!res.ok) return [];
 

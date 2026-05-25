@@ -10,6 +10,7 @@ import { TheirStackService } from "./sources/theirstack.service";
 import { EmailPatternService } from "./enrichment/email-pattern.service";
 import { IdentityResolver } from "./enrichment/identity-resolver.service";
 import { LeadScorer } from "./scoring/lead-scorer.service";
+import { QUALIFIED_THRESHOLD } from "../common/qualification.constants";
 import type { Seniority, Department, ScrapeStage } from "@prisma/client";
 
 interface CompanyFilters {
@@ -100,7 +101,25 @@ export class LeadsService {
 
   // ─── Discovery Pipeline ──────────────────────────────
 
+  /**
+   * @deprecated Legacy direct executor for the discovery pipeline.
+   *
+   * Races with the LangGraph supervisor (`GraphService.runPipelineGraph`),
+   * which is now the single canonical entry point for pipeline runs.
+   * Gated behind `LEGACY_TRIGGER_DISCOVERY_ENABLED=true` (default OFF); when
+   * disabled it returns immediately without scheduling any work.
+   *
+   * Do not call from new code. Use `GraphService.runPipelineGraph` instead.
+   * See: apps/api/src/graph/graph.service.ts
+   */
   async triggerDiscovery(orgId: string, icpProfileId: string) {
+    if (process.env.LEGACY_TRIGGER_DISCOVERY_ENABLED !== "true") {
+      this.logger.warn(
+        "triggerDiscovery is deprecated — set LEGACY_TRIGGER_DISCOVERY_ENABLED=true to opt back in; graph supervisor is now the single entry point",
+      );
+      return { message: "Legacy discovery disabled; use graph supervisor", icpProfileId, skipped: true as const };
+    }
+
     const existingJob = await this.prisma.scrapeJob.findFirst({
       where: { orgId, status: { in: ['QUEUED', 'RUNNING'] } },
     });
@@ -147,7 +166,7 @@ export class LeadsService {
     const peopleJobId = await this.createJob(orgId, icpProfileId, "PEOPLE_DISCOVERY");
     try {
       await this.markJobRunning(peopleJobId);
-      const count = await this.discoverPeople(orgId, icp);
+      const { count } = await this.discoverPeople(orgId, icp);
       await this.markJobCompleted(peopleJobId, count);
     } catch (err) {
       await this.markJobFailed(peopleJobId, err);
@@ -167,7 +186,7 @@ export class LeadsService {
     const contactJobId = await this.createJob(orgId, icpProfileId, "CONTACT_ENRICHMENT");
     try {
       await this.markJobRunning(contactJobId);
-      const enriched = await this.enrichContacts(orgId);
+      const { count: enriched } = await this.enrichContacts(orgId);
       await this.markJobCompleted(contactJobId, enriched);
     } catch (err) {
       await this.markJobFailed(contactJobId, err);
@@ -177,7 +196,7 @@ export class LeadsService {
     const scoringJobId = await this.createJob(orgId, icpProfileId, "SCORING");
     try {
       await this.markJobRunning(scoringJobId);
-      const scored = await this.scoreLeads(orgId, icp);
+      const { count: scored } = await this.scoreLeads(orgId, icp);
       await this.markJobCompleted(scoringJobId, scored);
     } catch (err) {
       await this.markJobFailed(scoringJobId, err);
@@ -285,13 +304,33 @@ export class LeadsService {
     return companyIds;
   }
 
-  private async discoverPeople(orgId: string, icp?: { targetTitles: string[]; targetIndustries: string[]; targetGeos: string[]; minEmployees?: number | null; maxEmployees?: number | null }): Promise<number> {
+  private async discoverPeople(
+    orgId: string,
+    icp?: { targetTitles: string[]; targetIndustries: string[]; targetGeos: string[]; minEmployees?: number | null; maxEmployees?: number | null },
+    scopedCompanyIds?: string[],
+  ): Promise<{ count: number; personIds: string[] }> {
+    // per-run only: when scopedCompanyIds is provided we restrict people
+    // discovery to companies sourced in THIS pipeline run. Falling back to
+    // the org-wide set is reserved for ad-hoc calls (e.g. manual reruns).
     const companies = await this.prisma.company.findMany({
-      where: { orgId },
+      where: scopedCompanyIds && scopedCompanyIds.length > 0
+        ? { orgId, id: { in: scopedCompanyIds } }
+        : { orgId },
       select: { id: true, domain: true, atsProvider: true, atsSlug: true, teamPageUrl: true },
     });
 
     let count = 0;
+    const personIds = new Set<string>();
+    const trackUpsert = async (
+      companyId: string,
+      p: Parameters<LeadsService["upsertPerson"]>[1],
+    ) => {
+      const id = await this.upsertPerson(companyId, p);
+      if (id) {
+        personIds.add(id);
+        count++;
+      }
+    };
 
     // SERP-discovered people
     if (icp) {
@@ -315,14 +354,13 @@ export class LeadsService {
               });
             }
             if (company) {
-              await this.upsertPerson(company.id, {
+              await trackUpsert(company.id, {
                 firstName: sp.firstName,
                 lastName: sp.lastName,
                 title: sp.title,
                 linkedinSlug: sp.linkedinSlug,
                 linkedinUrl: sp.linkedinUrl,
               });
-              count++;
             }
           }
         }
@@ -335,8 +373,7 @@ export class LeadsService {
       try {
         const teamPeople = await this.teamPageScraper.scrapeTeamPage(co.domain, co.teamPageUrl);
         for (const p of teamPeople) {
-          await this.upsertPerson(co.id, p);
-          count++;
+          await trackUpsert(co.id, p);
         }
       } catch (err) {
         this.logger.warn(`Team page scrape failed for ${co.domain}: ${err instanceof Error ? err.message : String(err)}`);
@@ -346,8 +383,7 @@ export class LeadsService {
         if (co.atsProvider && co.atsSlug) {
           const atsPeople = await this.atsScraper.extractPeopleFromJobs(co.atsProvider, co.atsSlug);
           for (const p of atsPeople) {
-            await this.upsertPerson(co.id, p);
-            count++;
+            await trackUpsert(co.id, p);
           }
         }
       } catch (err) {
@@ -357,8 +393,7 @@ export class LeadsService {
       try {
         const ghPeople = await this.githubEnrichment.discoverPeople(co.domain);
         for (const p of ghPeople) {
-          await this.upsertPerson(co.id, p);
-          count++;
+          await trackUpsert(co.id, p);
         }
       } catch (err) {
         this.logger.warn(`GitHub enrichment failed for ${co.domain}: ${err instanceof Error ? err.message : String(err)}`);
@@ -367,7 +402,7 @@ export class LeadsService {
 
     await batchProcess(companies, 5, processCompany);
 
-    return count;
+    return { count, personIds: [...personIds] };
   }
 
   private async upsertPerson(
@@ -483,13 +518,22 @@ export class LeadsService {
     return "OTHER";
   }
 
-  private async enrichContacts(orgId: string): Promise<number> {
+  private async enrichContacts(
+    orgId: string,
+    scopedPersonIds?: string[],
+  ): Promise<{ count: number; personIds: string[] }> {
+    // per-run only: when scopedPersonIds is provided we restrict enrichment
+    // to people sourced in THIS pipeline run. Falling back to org-wide is
+    // reserved for ad-hoc reruns invoked outside the graph.
     const people = await this.prisma.person.findMany({
-      where: { company: { orgId } },
+      where: scopedPersonIds && scopedPersonIds.length > 0
+        ? { company: { orgId }, id: { in: scopedPersonIds } }
+        : { company: { orgId } },
       include: { company: { select: { domain: true } }, emails: true },
     });
 
     let count = 0;
+    const touched = new Set<string>();
 
     const processPerson = async (person: typeof people[number]) => {
       if (person.emails.length > 0) return;
@@ -540,6 +584,7 @@ export class LeadsService {
             },
           });
           count++;
+          touched.add(person.id);
         }
 
         // Learn patterns from verified or source-confirmed emails
@@ -557,15 +602,25 @@ export class LeadsService {
 
     await batchProcess(people, 10, processPerson);
 
-    return count;
+    // Union: people seen as input (so downstream gets all candidates this
+    // run touched, even if they already had emails and we skipped them).
+    for (const p of people) touched.add(p.id);
+
+    return { count, personIds: [...touched] };
   }
 
   private async scoreLeads(
     orgId: string,
     icp: { targetTitles: string[]; targetGeos: string[]; targetIndustries: string[] },
-  ): Promise<number> {
+    scopedPersonIds?: string[],
+  ): Promise<{ count: number; personIds: string[] }> {
+    // per-run only: when scopedPersonIds is provided we score only the
+    // people sourced+enriched in THIS pipeline run. Falling back to org-wide
+    // is reserved for ad-hoc reruns invoked outside the graph.
     const people = await this.prisma.person.findMany({
-      where: { company: { orgId } },
+      where: scopedPersonIds && scopedPersonIds.length > 0
+        ? { company: { orgId }, id: { in: scopedPersonIds } }
+        : { company: { orgId } },
       include: {
         company: true,
         emails: true,
@@ -573,6 +628,7 @@ export class LeadsService {
     });
 
     let count = 0;
+    const scoredIds: string[] = [];
     for (const person of people) {
       const { score, breakdown } = this.leadScorer.score(person, icp);
       await this.prisma.leadScore.upsert({
@@ -582,18 +638,19 @@ export class LeadsService {
           personId: person.id,
           score,
           breakdown,
-          qualifiedAt: score >= 100 ? new Date() : null,
+          qualifiedAt: score >= QUALIFIED_THRESHOLD ? new Date() : null,
         },
         update: {
           score,
           breakdown,
-          qualifiedAt: score >= 100 ? new Date() : null,
+          qualifiedAt: score >= QUALIFIED_THRESHOLD ? new Date() : null,
         },
       });
+      scoredIds.push(person.id);
       count++;
     }
 
-    return count;
+    return { count, personIds: scoredIds };
   }
 
   // ─── Progress & Job Detail ───────────────────────────
@@ -604,17 +661,21 @@ export class LeadsService {
   // private stage logic that `runPipeline` does. The graph supervisor invokes
   // these one at a time so each stage gets its own checkpoint + UI row.
 
-  async runSourcingStage(orgId: string, icpProfileId: string): Promise<{ companies: number; people: number }> {
+  async runSourcingStage(
+    orgId: string,
+    icpProfileId: string,
+  ): Promise<{ companies: number; people: number; companyIds: string[]; personIds: string[] }> {
     const icp = await this.prisma.icpProfile.findFirstOrThrow({
       where: { id: icpProfileId, orgId },
     });
 
     const companyJobId = await this.createJob(orgId, icpProfileId, "COMPANY_DISCOVERY");
     let companies = 0;
+    let companyIds: string[] = [];
     try {
       await this.markJobRunning(companyJobId);
-      const ids = await this.discoverCompanies(orgId, icp, companyJobId);
-      companies = ids.length;
+      companyIds = await this.discoverCompanies(orgId, icp, companyJobId);
+      companies = companyIds.length;
       await this.markJobCompleted(companyJobId, companies);
     } catch (err) {
       await this.markJobFailed(companyJobId, err);
@@ -623,23 +684,36 @@ export class LeadsService {
 
     const peopleJobId = await this.createJob(orgId, icpProfileId, "PEOPLE_DISCOVERY");
     let people = 0;
+    let personIds: string[] = [];
     try {
       await this.markJobRunning(peopleJobId);
-      people = await this.discoverPeople(orgId, icp);
+      // per-run only: scope people discovery to companies sourced in THIS
+      // run so downstream nodes don't see leads from prior runs.
+      const result = await this.discoverPeople(orgId, icp, companyIds);
+      people = result.count;
+      personIds = result.personIds;
       await this.markJobCompleted(peopleJobId, people);
     } catch (err) {
       await this.markJobFailed(peopleJobId, err);
       throw err;
     }
 
-    return { companies, people };
+    return { companies, people, companyIds, personIds };
   }
 
-  async runEnrichmentStage(orgId: string, icpProfileId: string): Promise<{ merged: number; enriched: number }> {
+  async runEnrichmentStage(
+    orgId: string,
+    icpProfileId: string,
+    scopedPersonIds?: string[],
+  ): Promise<{ merged: number; enriched: number; personIds: string[] }> {
     const identityJobId = await this.createJob(orgId, icpProfileId, "IDENTITY_RESOLUTION");
     let merged = 0;
     try {
       await this.markJobRunning(identityJobId);
+      // Identity resolution is intentionally org-wide: it merges duplicate
+      // Person rows across the org (including ones created in prior runs).
+      // This is a data-quality op, not a per-run lead snapshot, so the
+      // result feeds back into the run via scopedPersonIds being remapped.
       merged = await this.identityResolver.resolveAll(orgId);
       await this.markJobCompleted(identityJobId, merged);
     } catch (err) {
@@ -649,28 +723,37 @@ export class LeadsService {
 
     const contactJobId = await this.createJob(orgId, icpProfileId, "CONTACT_ENRICHMENT");
     let enriched = 0;
+    let personIds: string[] = [];
     try {
       await this.markJobRunning(contactJobId);
-      enriched = await this.enrichContacts(orgId);
+      // per-run only: scope enrichment to people sourced in THIS run.
+      const result = await this.enrichContacts(orgId, scopedPersonIds);
+      enriched = result.count;
+      personIds = result.personIds;
       await this.markJobCompleted(contactJobId, enriched);
     } catch (err) {
       await this.markJobFailed(contactJobId, err);
       throw err;
     }
 
-    return { merged, enriched };
+    return { merged, enriched, personIds };
   }
 
-  async runScoringStage(orgId: string, icpProfileId: string): Promise<{ scored: number }> {
+  async runScoringStage(
+    orgId: string,
+    icpProfileId: string,
+    scopedPersonIds?: string[],
+  ): Promise<{ scored: number; personIds: string[] }> {
     const icp = await this.prisma.icpProfile.findFirstOrThrow({
       where: { id: icpProfileId, orgId },
     });
     const jobId = await this.createJob(orgId, icpProfileId, "SCORING");
     try {
       await this.markJobRunning(jobId);
-      const scored = await this.scoreLeads(orgId, icp);
-      await this.markJobCompleted(jobId, scored);
-      return { scored };
+      // per-run only: score only the people enriched in THIS run.
+      const result = await this.scoreLeads(orgId, icp, scopedPersonIds);
+      await this.markJobCompleted(jobId, result.count);
+      return { scored: result.count, personIds: result.personIds };
     } catch (err) {
       await this.markJobFailed(jobId, err);
       throw err;
@@ -896,7 +979,7 @@ export class LeadsService {
     const people = await this.prisma.person.findMany({
       where: {
         company: { orgId },
-        scores: { some: { orgId, score: { gte: 100 } } },
+        scores: { some: { orgId, score: { gte: QUALIFIED_THRESHOLD } } },
       },
       include: {
         company: { select: { name: true, domain: true } },
@@ -926,6 +1009,168 @@ export class LeadsService {
     });
 
     return [header, ...rows].join('\n');
+  }
+
+  async listLeadsForUi(
+    orgId: string,
+    opts: {
+      stage?: "sourced" | "enriched" | "qualified" | "in_crm" | "contacted" | "replied" | "meeting";
+      minScore?: number;
+      page: number;
+      perPage: number;
+      search?: string;
+    },
+  ): Promise<{
+    leads: Array<{
+      id: string;
+      name: string;
+      title: string;
+      company: string;
+      domain: string;
+      email: string;
+      industry: string;
+      companySize: string;
+      techStack: string[];
+      score: number;
+      scoreBreakdown: Array<{ label: string; value: number }>;
+      stage: "sourced" | "enriched" | "qualified" | "in_crm" | "contacted" | "replied" | "meeting";
+      source: string;
+      emailStatus: "not_sent" | "sent" | "opened" | "replied" | "bounced";
+      timeline: Array<{ stage: string; at: string }>;
+      createdAt: string;
+    }>;
+    total: number;
+  }> {
+    const where: Record<string, unknown> = { company: { orgId } };
+    if (opts.minScore !== undefined) {
+      where.scores = { some: { orgId, score: { gte: opts.minScore } } };
+    }
+    if (opts.search && opts.search.trim()) {
+      const q = opts.search.trim().slice(0, 100);
+      where.OR = [
+        { firstName: { contains: q, mode: "insensitive" } },
+        { lastName: { contains: q, mode: "insensitive" } },
+        { title: { contains: q, mode: "insensitive" } },
+        { company: { is: { name: { contains: q, mode: "insensitive" } } } },
+      ];
+    }
+
+    const [raw, total] = await Promise.all([
+      this.prisma.person.findMany({
+        where,
+        include: {
+          company: {
+            select: { name: true, domain: true, industry: true, employeeRange: true, techStack: true },
+          },
+          scores: { where: { orgId }, select: { score: true, breakdown: true, qualifiedAt: true } },
+          emails: {
+            select: { email: true, verified: true, confidence: true },
+            orderBy: { confidence: "desc" },
+            take: 1,
+          },
+        },
+        skip: (opts.page - 1) * opts.perPage,
+        take: opts.perPage,
+        orderBy: { createdAt: "desc" },
+      }),
+      this.prisma.person.count({ where }),
+    ]);
+
+    const personIds = raw.map((p) => p.id);
+
+    const [artifactsByRecipient, meetingsByPerson] = await Promise.all([
+      personIds.length
+        ? this.prisma.outreachArtifact.findMany({
+            where: { orgId, recipientRef: { in: personIds } },
+            select: { recipientRef: true, status: true, sentAt: true },
+          })
+        : Promise.resolve([]),
+      personIds.length
+        ? this.prisma.meetingLedger.findMany({
+            where: { orgId, personId: { in: personIds } },
+            select: { personId: true, status: true },
+          })
+        : Promise.resolve([]),
+    ]);
+
+    const contactedSet = new Set<string>();
+    for (const a of artifactsByRecipient) {
+      if (a.recipientRef && a.sentAt) contactedSet.add(a.recipientRef);
+    }
+    const meetingSet = new Set<string>();
+    for (const m of meetingsByPerson) {
+      if (m.personId) meetingSet.add(m.personId);
+    }
+
+    type Stage = "sourced" | "enriched" | "qualified" | "in_crm" | "contacted" | "replied" | "meeting";
+    const deriveStage = (
+      personId: string,
+      hasEmail: boolean,
+      qualifiedAt: Date | null | undefined,
+    ): Stage => {
+      if (meetingSet.has(personId)) return "meeting";
+      if (contactedSet.has(personId)) return "contacted";
+      if (qualifiedAt) return "qualified";
+      if (hasEmail) return "enriched";
+      return "sourced";
+    };
+
+    const normalizeBreakdown = (
+      raw: unknown,
+    ): Array<{ label: string; value: number }> => {
+      if (Array.isArray(raw)) {
+        return raw
+          .filter((b): b is Record<string, unknown> => !!b && typeof b === "object")
+          .map((b) => ({
+            label: typeof b.label === "string" ? b.label : typeof b.category === "string" ? b.category : "Score",
+            value:
+              typeof b.value === "number"
+                ? b.value
+                : typeof b.points === "number"
+                  ? b.points
+                  : 0,
+          }));
+      }
+      if (raw && typeof raw === "object") {
+        return Object.entries(raw as Record<string, unknown>).map(([k, v]) => ({
+          label: k,
+          value: typeof v === "number" ? v : 0,
+        }));
+      }
+      return [];
+    };
+
+    const leads = raw.map((p) => {
+      const email = p.emails[0]?.email ?? "";
+      const score = p.scores[0]?.score ?? 0;
+      const stage = deriveStage(p.id, !!email, p.scores[0]?.qualifiedAt);
+      return {
+        id: p.id,
+        name: `${p.firstName} ${p.lastName}`.trim(),
+        title: p.title ?? "",
+        company: p.company?.name ?? "",
+        domain: p.company?.domain ?? "",
+        email,
+        industry: p.company?.industry ?? "",
+        companySize: p.company?.employeeRange ?? "",
+        techStack: p.company?.techStack ?? [],
+        score,
+        scoreBreakdown: normalizeBreakdown(p.scores[0]?.breakdown),
+        stage,
+        source: "discovery",
+        emailStatus: (stage === "contacted" || stage === "meeting" ? "sent" : "not_sent") as
+          | "not_sent"
+          | "sent"
+          | "opened"
+          | "replied"
+          | "bounced",
+        timeline: [],
+        createdAt: p.createdAt.toISOString(),
+      };
+    });
+
+    const filtered = opts.stage ? leads.filter((l) => l.stage === opts.stage) : leads;
+    return { leads: filtered, total };
   }
 
   async getStats(orgId: string) {

@@ -48,6 +48,17 @@ function mockDeps(
     outreachArtifacts: {
       recordDryRun,
     } as unknown as SubgraphDeps["outreachArtifacts"],
+    evidenceLedger: {
+      leadSourced: vi.fn().mockResolvedValue(undefined),
+      leadScored: vi.fn().mockResolvedValue(undefined),
+      messageDrafted: vi.fn().mockResolvedValue(undefined),
+      qaPass: vi.fn().mockResolvedValue(undefined),
+      qaFail: vi.fn().mockResolvedValue(undefined),
+      approvalRequested: vi.fn().mockResolvedValue(undefined),
+      approvalGranted: vi.fn().mockResolvedValue(undefined),
+      approvalDenied: vi.fn().mockResolvedValue(undefined),
+      artifactPersisted: vi.fn().mockResolvedValue(undefined),
+    } as unknown as SubgraphDeps["evidenceLedger"],
     drafter: overrides.drafter,
     _recorded: recordDryRun,
   };

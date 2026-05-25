@@ -1,5 +1,6 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, Optional } from "@nestjs/common";
 import * as crypto from "crypto";
+import { OutreachArtifactStatus } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { LLMService, ChatMessage } from "./llm.service";
 import { getPromptForTemplate } from "./prompts";
@@ -7,12 +8,20 @@ import { ToolRegistry } from "./tools/registry";
 import { ToolContext, toolToOpenAIFunction, IntegrationCredentials } from "./tools/tool.interface";
 import {
   SideEffectPolicy,
-  type ApprovalEnvelope,
+  type ApprovalEnvelope as PolicyApprovalEnvelope,
   type PolicyDecision,
 } from "./tools/side-effect";
+import {
+  APPROVAL_PREVIEW_MAX,
+  type PendingApprovalEnvelope,
+} from "./approval-envelope.types";
 import { MemoryService } from "./memory.service";
 import { IntegrationsService } from "../integrations/integrations.service";
 import { OutreachArtifactsService } from "../outreach/outreach-artifacts.service";
+import { EvidenceLedgerService } from "../observability/evidence-ledger.service";
+import { LinkedInService } from "../integrations/linkedin/linkedin.service";
+
+export type { PendingApprovalEnvelope } from "./approval-envelope.types";
 
 /**
  * Per-process default: when set to "dry_run", external_write tools that
@@ -99,20 +108,31 @@ export class ExecutorService {
     private memoryService: MemoryService,
     private integrationsService: IntegrationsService,
     private outreachArtifacts: OutreachArtifactsService,
+    @Optional() private readonly evidenceLedger?: EvidenceLedgerService,
+    @Optional() private readonly linkedinService?: LinkedInService,
   ) {
-    this.toolRegistry = new ToolRegistry(memoryService);
+    this.toolRegistry = new ToolRegistry(
+      memoryService,
+      evidenceLedger,
+      undefined,
+      linkedinService,
+    );
   }
 
   /**
-   * Resolve the active approval envelope for the run, if any. Phase 2.5 has
-   * no envelope source yet (graph approval gates only mark GraphRun.status,
+   * Policy-gate envelope: the *authorization* envelope consulted by
+   * SideEffectPolicy before an external-write tool fires. Phase 2.5 has no
+   * envelope source yet (graph approval gates only mark GraphRun.status,
    * not individual agent runs), so this returns undefined and external_write
    * tools fall through to the dry_run / blocked path.
    *
    * Future: read from GraphRun.approvalEnvelope JSON when the outreach
    * subgraph passes an envelope down to the SDR agent run.
+   *
+   * NOTE: this is distinct from `approvalEnvelopeForRun(runId)` below, which
+   * returns the *review payload* (artifacts pending human review) for the UI.
    */
-  protected approvalEnvelopeForRun(_runId: string): ApprovalEnvelope | undefined {
+  protected policyApprovalEnvelopeForRun(_runId: string): PolicyApprovalEnvelope | undefined {
     return undefined;
   }
 
@@ -123,6 +143,45 @@ export class ExecutorService {
    */
   protected graphRunIdForRun(_runId: string): string | null {
     return null;
+  }
+
+  /**
+   * Return the pending-review approval payloads attached to an AgentRun.
+   *
+   * Resolution order:
+   *   1. Look up the AgentRun (scope by id). If missing, return [].
+   *   2. If we can resolve a GraphRun for the AgentRun (Phase 2.5: there is
+   *      no FK; subclasses or future schema changes can hook this via
+   *      `graphRunIdForRun`), pull every OutreachArtifact with status =
+   *      PENDING_REVIEW linked to that GraphRun.
+   *   3. Otherwise, return [] — a direct AgentRun that isn't part of a
+   *      graph has no artifacts to surface. (When AgentRun gains a metadata
+   *      / graphRunId column, this branch can use it without changing the
+   *      method shape.)
+   *
+   * Always returns an array (never null) so the UI can render a stable
+   * "0 items pending" state.
+   */
+  async approvalEnvelopeForRun(runId: string): Promise<PendingApprovalEnvelope[]> {
+    const run = await this.prisma.agentRun.findUnique({
+      where: { id: runId },
+      select: { id: true, orgId: true },
+    });
+    if (!run) return [];
+
+    const graphRunId = this.graphRunIdForRun(runId);
+    if (!graphRunId) return [];
+
+    const artifacts = await this.prisma.outreachArtifact.findMany({
+      where: {
+        orgId: run.orgId,
+        graphRunId,
+        status: OutreachArtifactStatus.PENDING_REVIEW,
+      },
+      orderBy: { createdAt: "asc" },
+    });
+
+    return artifacts.map(toPendingApprovalEnvelope);
   }
 
   async executeAgent(agentId: string, runId: string): Promise<ExecutionResult> {
@@ -155,6 +214,13 @@ export class ExecutorService {
     const tools = this.toolRegistry.getForTemplate(agent.template.name);
     const openAITools = tools.map(toolToOpenAIFunction);
 
+    // Per-template tool whitelist enforced inside the agent loop. `null` means
+    // the template has no explicit mapping (fallback = unrestricted, matches
+    // the existing ToolRegistry behaviour). Any array is the exclusive set the
+    // LLM is allowed to call — even if the global registry has more tools.
+    const allowedToolNames = this.toolRegistry.getAllowedToolNames(agent.template.name);
+    const allowedToolSet = allowedToolNames ? new Set(allowedToolNames) : null;
+
     await this.addLog(runId, "INFO", `Loaded ${tools.length} tools: ${tools.map((t) => t.name).join(", ")}`);
 
     // Build user message early so we can use it as the semantic-retrieval query
@@ -182,9 +248,21 @@ export class ExecutorService {
       { role: "user", content: userMessage },
     ];
 
-    // Determine model
+    // Determine model — pull from template config so we can swap models
+    // per-agent without code changes. Templates declare a primary `model`
+    // and an optional `fastModel` inside `defaultConfig` (Json on the DB
+    // row). Fall back to the historical defaults if either field is absent.
     const isComplex = this.isComplexTask(agent.template.name);
-    const model = isComplex ? "gpt-4o" : "gpt-4o-mini";
+    const templateConfig = (agent.template.defaultConfig ?? {}) as Record<string, unknown>;
+    const templateModel =
+      typeof templateConfig.model === "string" ? templateConfig.model : undefined;
+    const templateFastModel =
+      typeof templateConfig.fastModel === "string" ? templateConfig.fastModel : undefined;
+    const defaultModel = process.env.DEFAULT_MODEL ?? "gpt-4o";
+    const defaultFastModel = process.env.SYSTEM_MODEL_MINI ?? "gpt-4o-mini";
+    const model = isComplex
+      ? (templateModel ?? defaultModel)
+      : (templateFastModel ?? defaultFastModel);
     const plan = agent.org.plan;
 
     await this.addLog(runId, "INFO", `Using model: ${model}, plan: ${plan}`);
@@ -216,6 +294,7 @@ export class ExecutorService {
       // Cap maxTokens to remaining budget
       const remainingBudget = tokenBudget === Infinity ? 4000 : Math.min(4000, tokenBudget - totalTokens);
 
+      const templateSlug = String(agent.template.name).toLowerCase().replace(/\s+/g, "_");
       const llmStart = Date.now();
       const response = await this.llm.chat(messages, {
         model,
@@ -223,6 +302,17 @@ export class ExecutorService {
         maxTokens: Math.min(remainingBudget, 4000), // cap to remaining budget; minimum enforced below
         tools: openAITools.length > 0 ? openAITools : undefined,
         toolChoice: forceTools ? "required" : "auto",
+        agent: `${templateSlug}.step`,
+        tags: ["executor", templateSlug, `step:${stepNum}`],
+        metadata: {
+          org_id: agent.orgId,
+          agent_id: agent.id,
+          agent_name: agent.name,
+          template: agent.template.name,
+          run_id: runId,
+          step: stepNum,
+          plan,
+        },
       });
       const llmDuration = Date.now() - llmStart;
 
@@ -266,6 +356,43 @@ export class ExecutorService {
             timestamp: Date.now(),
           });
 
+          // Per-template whitelist enforcement. If the template declares a
+          // whitelist and the LLM tried to call a tool outside it, reject the
+          // call without ever touching the tool. The rejection result is
+          // returned to the LLM so it can choose a different tool. This is the
+          // choke point that makes scoped templates (Reply Handler, SEO Agent)
+          // safe even if the global ToolRegistry has more tools available.
+          if (allowedToolSet && !allowedToolSet.has(toolName)) {
+            const reason = `Tool "${toolName}" is not allowed for this agent template. Allowed tools: ${[...allowedToolSet].join(", ")}.`;
+            await this.addLog(runId, "WARN", `tool_not_whitelisted: ${reason}`);
+            const rejection = { success: false, error: reason, tool_not_whitelisted: true };
+            await this.persistStep(runId, dbStepIndex++, "TOOL_CALL", toolName, toolArgs, null, 0, 0);
+            await this.persistStep(
+              runId,
+              dbStepIndex++,
+              "TOOL_RESULT",
+              toolName,
+              null,
+              rejection as Record<string, unknown>,
+              0,
+              0,
+              reason,
+            );
+            steps.push({
+              step: stepNum,
+              type: "tool_result",
+              toolName,
+              toolOutput: rejection,
+              timestamp: Date.now(),
+            });
+            messages.push({
+              role: "tool",
+              tool_call_id: toolCall.id,
+              content: JSON.stringify(rejection),
+            });
+            continue;
+          }
+
           const tool = this.toolRegistry.get(toolName);
           let toolResult: unknown;
           const toolStart = Date.now();
@@ -277,7 +404,7 @@ export class ExecutorService {
           // tool that became disallowed since the last receipt cannot be
           // re-served from cache.
           const policyDecision: PolicyDecision = SideEffectPolicy.check(toolName, {
-            envelope: this.approvalEnvelopeForRun(runId),
+            envelope: this.policyApprovalEnvelopeForRun(runId),
             defaultDryRun: getOutreachExecutionMode() === "dry_run",
           });
 
@@ -611,6 +738,10 @@ ${toolDescriptions}
         return `Triage emails with these rules:\n${configSummary}\n\nClassify and prioritize incoming messages, draft replies for urgent items.`;
       case "reporting agent":
         return `Generate a report with these metrics:\n${configSummary}\n\nGather data, analyze metrics, and create a comprehensive summary report.`;
+      case "reply handler":
+        return `Process inbound prospect replies with these parameters:\n${configSummary}\n\nClassify intent, draft a polite contextual reply on the existing thread, and escalate to a human when in doubt.`;
+      case "seo agent":
+        return `Run SEO research with these parameters:\n${configSummary}\n\nDiscover keyword opportunities, analyze the SERP, and produce structured content briefs. Research only — no publishing.`;
       default:
         return `Execute task with configuration:\n${configSummary}`;
     }
@@ -626,6 +757,8 @@ ${toolDescriptions}
       "crm sync agent": 2,     // hubspot read + hubspot write
       "reporting agent": 2,    // hubspot + web_search
       "social engagement agent": 1,
+      "reply handler": 1,      // at minimum, read memory for thread context
+      "seo agent": 2,          // web_search + (web_scrape | company_research)
     };
     return minSteps[templateName.toLowerCase()] || 1;
   }
@@ -742,4 +875,38 @@ ${toolDescriptions}
       data: { runId, level, message, metadata: (metadata || undefined) as any },
     });
   }
+}
+
+/**
+ * Convert an OutreachArtifact row to the UI-facing PendingApprovalEnvelope.
+ * Kept module-private so the mapping can be unit-tested via the service
+ * surface without exposing a parallel API. `previewText` is truncated to
+ * `APPROVAL_PREVIEW_MAX` chars so list responses stay compact even when
+ * the underlying bodyText is multi-page.
+ */
+function toPendingApprovalEnvelope(artifact: {
+  id: string;
+  channel: "EMAIL" | "LINKEDIN" | "HUBSPOT_NOTE";
+  recipientRef: string | null;
+  subject: string | null;
+  bodyText: string | null;
+  bodyHtml: string | null;
+  toolName: string;
+  payload: unknown;
+  createdAt: Date;
+}): PendingApprovalEnvelope {
+  const body = artifact.bodyText ?? "";
+  const previewText =
+    body.length > APPROVAL_PREVIEW_MAX ? body.slice(0, APPROVAL_PREVIEW_MAX) : body;
+  return {
+    artifactId: artifact.id,
+    channel: artifact.channel,
+    recipientRef: artifact.recipientRef,
+    subject: artifact.subject,
+    previewText,
+    bodyHtml: artifact.bodyHtml,
+    toolName: artifact.toolName,
+    payload: artifact.payload,
+    createdAt: artifact.createdAt,
+  };
 }

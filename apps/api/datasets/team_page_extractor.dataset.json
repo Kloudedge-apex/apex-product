@@ -1,0 +1,268 @@
+[
+  {
+    "id": "team_001",
+    "input": {
+      "team_page_html": "<html><body><h1>Leadership</h1><div class=\"team-grid\"><div class=\"member\"><h3>Jane Patel</h3><p>Chief Executive Officer</p><a href=\"https://www.linkedin.com/in/janepatel\">LinkedIn</a></div><div class=\"member\"><h3>Marcus Lee</h3><p>Chief Technology Officer</p><a href=\"https://www.linkedin.com/in/marcuslee\">LinkedIn</a></div><div class=\"member\"><h3>Aisha Brown</h3><p>Chief Financial Officer</p><a href=\"https://www.linkedin.com/in/aishabrown\">LinkedIn</a></div></div></body></html>"
+    },
+    "ground_truth": {
+      "people": [
+        { "firstName": "Jane", "lastName": "Patel", "title": "Chief Executive Officer", "linkedinUrl": "https://www.linkedin.com/in/janepatel" },
+        { "firstName": "Marcus", "lastName": "Lee", "title": "Chief Technology Officer", "linkedinUrl": "https://www.linkedin.com/in/marcuslee" },
+        { "firstName": "Aisha", "lastName": "Brown", "title": "Chief Financial Officer", "linkedinUrl": "https://www.linkedin.com/in/aishabrown" }
+      ]
+    },
+    "tags": ["clean_grid", "with_linkedin", "csuite"]
+  },
+  {
+    "id": "team_002",
+    "input": {
+      "team_page_html": "<html><body><section><h2>Our Team</h2><div class=\"person\"><h4>David Kim</h4><span>Founder & CEO</span></div><div class=\"person\"><h4>Sarah Nguyen</h4><span>Head of Engineering</span></div><div class=\"person\"><h4>Tom Ferguson</h4><span>VP of Sales</span></div><div class=\"person\"><h4>Priya Shah</h4><span>VP of Marketing</span></div></section></body></html>"
+    },
+    "ground_truth": {
+      "people": [
+        { "firstName": "David", "lastName": "Kim", "title": "Founder & CEO" },
+        { "firstName": "Sarah", "lastName": "Nguyen", "title": "Head of Engineering" },
+        { "firstName": "Tom", "lastName": "Ferguson", "title": "VP of Sales" },
+        { "firstName": "Priya", "lastName": "Shah", "title": "VP of Marketing" }
+      ]
+    },
+    "tags": ["clean_grid", "no_linkedin"]
+  },
+  {
+    "id": "team_003",
+    "input": {
+      "team_page_html": "<html><body><h1>About Us</h1><p>Founded in 2019 by Alex Romano and Maria Chen, Lumen Analytics has grown to a team of 45. Alex (CEO) previously led data products at Stripe, while Maria (CTO) was a principal engineer at Snowflake. They are joined by Head of Product Wei Zhang and Head of Sales Liam O'Connor.</p></body></html>"
+    },
+    "ground_truth": {
+      "people": [
+        { "firstName": "Alex", "lastName": "Romano", "title": "CEO" },
+        { "firstName": "Maria", "lastName": "Chen", "title": "CTO" },
+        { "firstName": "Wei", "lastName": "Zhang", "title": "Head of Product" },
+        { "firstName": "Liam", "lastName": "O'Connor", "title": "Head of Sales" }
+      ]
+    },
+    "tags": ["prose_paragraph", "founders"]
+  },
+  {
+    "id": "team_004",
+    "input": {
+      "team_page_html": "<html><body><h2>Equipo Directivo</h2><ul><li><strong>Carlos Mendoza</strong> — Director General</li><li><strong>Ana Martinez</strong> — Directora de Operaciones</li><li><strong>Javier Ruiz</strong> — Director de Tecnologia</li></ul></body></html>"
+    },
+    "ground_truth": {
+      "people": [
+        { "firstName": "Carlos", "lastName": "Mendoza", "title": "Director General" },
+        { "firstName": "Ana", "lastName": "Martinez", "title": "Directora de Operaciones" },
+        { "firstName": "Javier", "lastName": "Ruiz", "title": "Director de Tecnologia" }
+      ]
+    },
+    "tags": ["multi_language", "spanish"]
+  },
+  {
+    "id": "team_005",
+    "input": {
+      "team_page_html": "<html><body><h1>Welcome</h1><p>We build things people love. Get in touch: hello@example.com</p></body></html>"
+    },
+    "ground_truth": {
+      "people": []
+    },
+    "tags": ["no_officers", "edge_case", "empty_result"]
+  },
+  {
+    "id": "team_006",
+    "input": {
+      "team_page_html": "<html><body><div class=\"leadership\"><article><h3>Rachel Goldstein</h3><p class=\"title\">President & COO</p><a href=\"https://linkedin.com/in/rachelgoldstein\">Profile</a></article><article><h3>Benjamin Park</h3><p class=\"title\">Chief Revenue Officer</p><a href=\"https://linkedin.com/in/benjaminpark\">Profile</a></article><article><h3>Olivia Thompson</h3><p class=\"title\">Chief Marketing Officer</p><a href=\"https://linkedin.com/in/oliviathompson\">Profile</a></article></div></body></html>"
+    },
+    "ground_truth": {
+      "people": [
+        { "firstName": "Rachel", "lastName": "Goldstein", "title": "President & COO", "linkedinUrl": "https://linkedin.com/in/rachelgoldstein" },
+        { "firstName": "Benjamin", "lastName": "Park", "title": "Chief Revenue Officer", "linkedinUrl": "https://linkedin.com/in/benjaminpark" },
+        { "firstName": "Olivia", "lastName": "Thompson", "title": "Chief Marketing Officer", "linkedinUrl": "https://linkedin.com/in/oliviathompson" }
+      ]
+    },
+    "tags": ["clean_grid", "with_linkedin"]
+  },
+  {
+    "id": "team_007",
+    "input": {
+      "team_page_html": "<html><body><script type=\"application/ld+json\">[{\"@type\":\"Person\",\"name\":\"Henry Walters\",\"jobTitle\":\"CEO\",\"sameAs\":\"https://linkedin.com/in/henrywalters\"},{\"@type\":\"Person\",\"name\":\"Naomi Tanaka\",\"jobTitle\":\"CTO\",\"sameAs\":\"https://linkedin.com/in/naomitanaka\"}]</script><h1>Team</h1></body></html>"
+    },
+    "ground_truth": {
+      "people": [
+        { "firstName": "Henry", "lastName": "Walters", "title": "CEO", "linkedinUrl": "https://linkedin.com/in/henrywalters" },
+        { "firstName": "Naomi", "lastName": "Tanaka", "title": "CTO", "linkedinUrl": "https://linkedin.com/in/naomitanaka" }
+      ]
+    },
+    "tags": ["json_ld", "structured_data"]
+  },
+  {
+    "id": "team_008",
+    "input": {
+      "team_page_html": "<html><body><h2>Founders</h2><div><h3>Emily Chen</h3><p>Co-Founder & CEO</p></div><div><h3>Robert Singh</h3><p>Co-Founder & CTO</p></div><h2>Leadership</h2><div><h3>Marcus Williams</h3><p>VP of Engineering</p></div><div><h3>Sophia Garcia</h3><p>VP of Product</p></div><div><h3>Daniel Rivera</h3><p>VP of Sales</p></div></body></html>"
+    },
+    "ground_truth": {
+      "people": [
+        { "firstName": "Emily", "lastName": "Chen", "title": "Co-Founder & CEO" },
+        { "firstName": "Robert", "lastName": "Singh", "title": "Co-Founder & CTO" },
+        { "firstName": "Marcus", "lastName": "Williams", "title": "VP of Engineering" },
+        { "firstName": "Sophia", "lastName": "Garcia", "title": "VP of Product" },
+        { "firstName": "Daniel", "lastName": "Rivera", "title": "VP of Sales" }
+      ]
+    },
+    "tags": ["mixed_sections", "founders_and_leadership"]
+  },
+  {
+    "id": "team_009",
+    "input": {
+      "team_page_html": "<html><body><h1>Notre Equipe</h1><div><h3>Pierre Dubois</h3><p>Directeur General</p></div><div><h3>Camille Laurent</h3><p>Directrice Technique</p></div></body></html>"
+    },
+    "ground_truth": {
+      "people": [
+        { "firstName": "Pierre", "lastName": "Dubois", "title": "Directeur General" },
+        { "firstName": "Camille", "lastName": "Laurent", "title": "Directrice Technique" }
+      ]
+    },
+    "tags": ["multi_language", "french"]
+  },
+  {
+    "id": "team_010",
+    "input": {
+      "team_page_html": "<html><body><nav>Home | About | Careers | Contact</nav><h1>About Us</h1><p>We are a remote-first company building productivity software. Join us — we are hiring!</p></body></html>"
+    },
+    "ground_truth": {
+      "people": []
+    },
+    "tags": ["no_officers", "edge_case", "about_only"]
+  },
+  {
+    "id": "team_011",
+    "input": {
+      "team_page_html": "<html><body><h2>Meet The Team</h2><div class=\"card\"><img alt=\"missing\"/><h4>Lucas Schmidt</h4><p>Director of Engineering</p></div><div class=\"card\"><img alt=\"missing\"/><h4>Yara Hassan</h4><p>Director of Design</p></div><div class=\"card\"><img alt=\"missing\"/><h4>Noah Williams</h4><p>Director of Operations</p></div></body></html>"
+    },
+    "ground_truth": {
+      "people": [
+        { "firstName": "Lucas", "lastName": "Schmidt", "title": "Director of Engineering" },
+        { "firstName": "Yara", "lastName": "Hassan", "title": "Director of Design" },
+        { "firstName": "Noah", "lastName": "Williams", "title": "Director of Operations" }
+      ]
+    },
+    "tags": ["missing_photos", "clean_grid"]
+  },
+  {
+    "id": "team_012",
+    "input": {
+      "team_page_html": "<html><body><h1>Our Founders</h1><div><h3>Isabella Rossi</h3><p>CEO & Co-Founder</p><a href=\"https://www.linkedin.com/in/isabellarossi\">LinkedIn</a></div><div><h3>Mateo Fernandez</h3><p>CTO & Co-Founder</p><a href=\"https://www.linkedin.com/in/mateofernandez\">LinkedIn</a></div></body></html>"
+    },
+    "ground_truth": {
+      "people": [
+        { "firstName": "Isabella", "lastName": "Rossi", "title": "CEO & Co-Founder", "linkedinUrl": "https://www.linkedin.com/in/isabellarossi" },
+        { "firstName": "Mateo", "lastName": "Fernandez", "title": "CTO & Co-Founder", "linkedinUrl": "https://www.linkedin.com/in/mateofernandez" }
+      ]
+    },
+    "tags": ["founders", "with_linkedin"]
+  },
+  {
+    "id": "team_013",
+    "input": {
+      "team_page_html": "<html><body><h2>Advisors and Board</h2><ul><li>Dr. Karen Holloway, MD — Board Chair</li><li>Prof. Samuel Greene — Independent Director</li><li>Linda Park — Independent Director</li></ul></body></html>"
+    },
+    "ground_truth": {
+      "people": [
+        { "firstName": "Karen", "lastName": "Holloway", "title": "Board Chair" },
+        { "firstName": "Samuel", "lastName": "Greene", "title": "Independent Director" },
+        { "firstName": "Linda", "lastName": "Park", "title": "Independent Director" }
+      ]
+    },
+    "tags": ["board", "advisors", "honorifics"]
+  },
+  {
+    "id": "team_014",
+    "input": {
+      "team_page_html": "<html><body><h1>404 — Page Not Found</h1><p>Sorry, the page you were looking for does not exist.</p></body></html>"
+    },
+    "ground_truth": {
+      "people": []
+    },
+    "tags": ["no_officers", "edge_case", "error_page"]
+  },
+  {
+    "id": "team_015",
+    "input": {
+      "team_page_html": "<html><body><h2>Engineering Leadership</h2><div><h3>Antoine Mercier</h3><p>VP of Engineering</p></div><div><h3>Jia Wang</h3><p>Director of Platform</p></div><div><h3>Hiroshi Sato</h3><p>Director of Mobile</p></div><h2>Business Leadership</h2><div><h3>Megan O'Brien</h3><p>VP of Customer Success</p></div></body></html>"
+    },
+    "ground_truth": {
+      "people": [
+        { "firstName": "Antoine", "lastName": "Mercier", "title": "VP of Engineering" },
+        { "firstName": "Jia", "lastName": "Wang", "title": "Director of Platform" },
+        { "firstName": "Hiroshi", "lastName": "Sato", "title": "Director of Mobile" },
+        { "firstName": "Megan", "lastName": "O'Brien", "title": "VP of Customer Success" }
+      ]
+    },
+    "tags": ["mixed_sections", "international_names"]
+  },
+  {
+    "id": "team_016",
+    "input": {
+      "team_page_html": "<html><body><h1>About</h1><p>Our mission is to make logistics simple for every shipper on the planet. We are headquartered in Austin, Texas with offices in Berlin and Singapore.</p></body></html>"
+    },
+    "ground_truth": {
+      "people": []
+    },
+    "tags": ["no_officers", "edge_case", "mission_only"]
+  },
+  {
+    "id": "team_017",
+    "input": {
+      "team_page_html": "<html><body><h1>Founding Team</h1><div class=\"founder\"><h3>Sebastian Cole</h3><p>Chief Executive Officer</p><a href=\"https://linkedin.com/in/sebastiancole\">LinkedIn</a></div><div class=\"founder\"><h3>Vera Klein</h3><p>Chief Product Officer</p><a href=\"https://linkedin.com/in/veraklein\">LinkedIn</a></div><div class=\"founder\"><h3>Owen Mitchell</h3><p>Chief Technology Officer</p><a href=\"https://linkedin.com/in/owenmitchell\">LinkedIn</a></div><div class=\"founder\"><h3>Hana Yamamoto</h3><p>Chief Operating Officer</p><a href=\"https://linkedin.com/in/hanayamamoto\">LinkedIn</a></div></body></html>"
+    },
+    "ground_truth": {
+      "people": [
+        { "firstName": "Sebastian", "lastName": "Cole", "title": "Chief Executive Officer", "linkedinUrl": "https://linkedin.com/in/sebastiancole" },
+        { "firstName": "Vera", "lastName": "Klein", "title": "Chief Product Officer", "linkedinUrl": "https://linkedin.com/in/veraklein" },
+        { "firstName": "Owen", "lastName": "Mitchell", "title": "Chief Technology Officer", "linkedinUrl": "https://linkedin.com/in/owenmitchell" },
+        { "firstName": "Hana", "lastName": "Yamamoto", "title": "Chief Operating Officer", "linkedinUrl": "https://linkedin.com/in/hanayamamoto" }
+      ]
+    },
+    "tags": ["founding_team", "with_linkedin", "csuite"]
+  },
+  {
+    "id": "team_018",
+    "input": {
+      "team_page_html": "<html><body><h2>Unsere Geschaftsfuhrung</h2><div><h3>Klaus Berger</h3><p>Geschaftsfuhrer</p></div><div><h3>Greta Hoffmann</h3><p>Chief Operating Officer</p></div></body></html>"
+    },
+    "ground_truth": {
+      "people": [
+        { "firstName": "Klaus", "lastName": "Berger", "title": "Geschaftsfuhrer" },
+        { "firstName": "Greta", "lastName": "Hoffmann", "title": "Chief Operating Officer" }
+      ]
+    },
+    "tags": ["multi_language", "german"]
+  },
+  {
+    "id": "team_019",
+    "input": {
+      "team_page_html": "<html><body><h1>Meet the founders</h1><p>Co-founder John Davies (CEO) and co-founder Mei Liu (CTO) started this company in a garage in 2017. Today they lead a team of 80 across two offices.</p></body></html>"
+    },
+    "ground_truth": {
+      "people": [
+        { "firstName": "John", "lastName": "Davies", "title": "CEO" },
+        { "firstName": "Mei", "lastName": "Liu", "title": "CTO" }
+      ]
+    },
+    "tags": ["prose_paragraph", "founders"]
+  },
+  {
+    "id": "team_020",
+    "input": {
+      "team_page_html": "<html><body><h2>Leadership</h2><div><h3>Helena Vargas</h3><p>Chief Executive Officer</p><a href=\"https://www.linkedin.com/in/helenavargas\">LinkedIn</a></div><div><h3>Idris Mahmood</h3><p>Chief Financial Officer</p></div><div><h3>Priscilla Adams</h3><p>Chief People Officer</p><a href=\"https://www.linkedin.com/in/priscillaadams\">LinkedIn</a></div><div><h3>Theo Larsen</h3><p>Chief Marketing Officer</p></div></body></html>"
+    },
+    "ground_truth": {
+      "people": [
+        { "firstName": "Helena", "lastName": "Vargas", "title": "Chief Executive Officer", "linkedinUrl": "https://www.linkedin.com/in/helenavargas" },
+        { "firstName": "Idris", "lastName": "Mahmood", "title": "Chief Financial Officer" },
+        { "firstName": "Priscilla", "lastName": "Adams", "title": "Chief People Officer", "linkedinUrl": "https://www.linkedin.com/in/priscillaadams" },
+        { "firstName": "Theo", "lastName": "Larsen", "title": "Chief Marketing Officer" }
+      ]
+    },
+    "tags": ["mixed_linkedin", "csuite"]
+  }
+]

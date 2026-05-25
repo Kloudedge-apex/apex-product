@@ -9,15 +9,60 @@ import {
   HttpCode,
   HttpStatus,
   BadRequestException,
+  Logger,
 } from "@nestjs/common";
 import type { Response } from "express";
 import { OrgId } from "../common/org-context.decorator";
 import { LeadsService } from "./leads.service";
 import type { Seniority, Department } from "@prisma/client";
 
+type LeadsUiStage =
+  | "sourced"
+  | "enriched"
+  | "qualified"
+  | "in_crm"
+  | "contacted"
+  | "replied"
+  | "meeting";
+
+const LEAD_UI_STAGES: ReadonlySet<LeadsUiStage> = new Set([
+  "sourced",
+  "enriched",
+  "qualified",
+  "in_crm",
+  "contacted",
+  "replied",
+  "meeting",
+]);
+
 @Controller("leads")
 export class LeadsController {
+  private readonly logger = new Logger(LeadsController.name);
+
   constructor(private readonly leads: LeadsService) {}
+
+  // ─── Unified UI list ─────────────────────────────────
+
+  @Get()
+  listLeads(
+    @OrgId() orgId: string | undefined,
+    @Query("stage") stage?: string,
+    @Query("min_score") minScore?: string,
+    @Query("page") page?: string,
+    @Query("per_page") perPage?: string,
+    @Query("search") search?: string,
+  ) {
+    if (!orgId) throw new BadRequestException("orgId required");
+    const stageNarrow: LeadsUiStage | undefined =
+      stage && LEAD_UI_STAGES.has(stage as LeadsUiStage) ? (stage as LeadsUiStage) : undefined;
+    return this.leads.listLeadsForUi(orgId, {
+      stage: stageNarrow,
+      minScore: minScore ? Math.max(0, parseInt(minScore, 10)) : undefined,
+      page: Math.max(1, parseInt(page ?? "1", 10)),
+      perPage: Math.min(100, Math.max(1, parseInt(perPage ?? "50", 10))),
+      search: search?.trim() || undefined,
+    });
+  }
 
   // ─── ICP ─────────────────────────────────────────────
 
@@ -90,6 +135,11 @@ export class LeadsController {
     const profileId = body.icpProfileId ?? body.icpId;
     if (!profileId)
       throw new BadRequestException("icpProfileId or icpId required");
+    if (process.env.LEGACY_TRIGGER_DISCOVERY_ENABLED !== "true") {
+      this.logger.warn(
+        "triggerDiscovery is deprecated — set LEGACY_TRIGGER_DISCOVERY_ENABLED=true to opt back in; graph supervisor is now the single entry point",
+      );
+    }
     return this.leads.triggerDiscovery(orgId, profileId);
   }
 

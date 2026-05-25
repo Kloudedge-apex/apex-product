@@ -1,8 +1,12 @@
 import { Tool, ToolContext, ToolResult } from "./tool.interface";
+import { MOCK_DISCLAIMER_SUFFIX, markMocked } from "./mock-metadata";
+import { fetchWithRetry } from "../../common/http-retry.util";
 
 export class WebScrapeTool implements Tool {
   name = "web_scrape";
-  description = "Extract readable content from a URL. Returns the page title, main content text, and links found on the page.";
+  description =
+    "Extract readable content from a URL. Returns the page title, main content text, and links found on the page." +
+    MOCK_DISCLAIMER_SUFFIX;
   parameters = {
     url: { type: "string", description: "The URL to scrape", required: true },
   };
@@ -15,13 +19,19 @@ export class WebScrapeTool implements Tool {
     }
 
     try {
-      const response = await fetch(url, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (compatible; ApexBot/1.0)",
-          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      // No circuit breaker: arbitrary user-supplied URLs — one slow host
+      // must not poison the breaker pool for unrelated scrapes.
+      const response = await fetchWithRetry(
+        url,
+        {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (compatible; ApexBot/1.0)",
+            Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          },
+          signal: AbortSignal.timeout(10000),
         },
-        signal: AbortSignal.timeout(10000),
-      });
+        { provider: "web-scrape", maxAttempts: 3 },
+      );
 
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
@@ -30,8 +40,9 @@ export class WebScrapeTool implements Tool {
       const html = await response.text();
       return { success: true, data: this.extractContent(html, url) };
     } catch (error) {
-      // Return mock data on failure
-      return { success: true, data: this.mockScrape(url) };
+      // Return mock data on failure, but tag it so the LLM does not cite it as fact.
+      const reason = `Scrape fetch failed: ${error instanceof Error ? error.message : String(error)}`;
+      return { success: true, data: markMocked(this.mockScrape(url), reason) };
     }
   }
 

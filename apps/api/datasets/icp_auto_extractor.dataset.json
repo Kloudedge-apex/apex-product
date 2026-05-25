@@ -1,0 +1,362 @@
+[
+  {
+    "id": "icp_001",
+    "input": {
+      "company_url": "https://acmecrm.example.com",
+      "scraped_text": "Acme CRM helps mid-market B2B sales teams close more deals. Our pipeline analytics, deal forecasting, and account-based playbooks are trusted by RevOps leaders at 500+ growth-stage SaaS companies. Integrate with HubSpot, Salesforce and Outreach in minutes."
+    },
+    "ground_truth": {
+      "productSummary": "B2B sales CRM and pipeline analytics for mid-market SaaS RevOps teams.",
+      "industry": "SaaS / Sales Tech",
+      "targetTitles": ["VP of Sales", "Head of RevOps", "Sales Operations Manager", "Director of Sales", "Chief Revenue Officer"],
+      "targetIndustries": ["SaaS", "B2B Software", "Cloud Software"],
+      "targetGeos": ["United States", "Canada", "United Kingdom"],
+      "intentKeywords": ["pipeline analytics", "deal forecasting", "RevOps", "sales pipeline", "account-based selling"],
+      "minEmployees": 50,
+      "maxEmployees": 1000
+    },
+    "tags": ["saas", "salestech", "midmarket"]
+  },
+  {
+    "id": "icp_002",
+    "input": {
+      "company_url": "https://ledgerly.example.io",
+      "scraped_text": "Ledgerly is the modern API-first payments and ledger platform for fintech builders. Engineering teams at neobanks, lending platforms, and embedded-finance startups use Ledgerly to launch new financial products in weeks instead of quarters."
+    },
+    "ground_truth": {
+      "productSummary": "API-first payments and ledger infrastructure for fintech engineering teams.",
+      "industry": "Fintech Infrastructure",
+      "targetTitles": ["VP of Engineering", "Head of Platform", "CTO", "Staff Engineer", "Director of Payments"],
+      "targetIndustries": ["Fintech", "Neobanking", "Embedded Finance", "Lending"],
+      "targetGeos": ["United States", "United Kingdom", "Singapore"],
+      "intentKeywords": ["payments API", "ledger", "embedded finance", "neobank", "lending platform"],
+      "minEmployees": 20,
+      "maxEmployees": 500
+    },
+    "tags": ["fintech", "infrastructure", "developer-tools"]
+  },
+  {
+    "id": "icp_003",
+    "input": {
+      "company_url": "https://carepath.example.health",
+      "scraped_text": "CarePath is the patient-engagement platform purpose-built for mid-sized US hospital networks and specialty clinics. HIPAA-compliant messaging, post-visit follow-ups, and care-team coordination, all in one place."
+    },
+    "ground_truth": {
+      "productSummary": "Patient-engagement and care-coordination platform for US healthcare providers.",
+      "industry": "Healthcare Technology",
+      "targetTitles": ["Chief Medical Officer", "VP of Patient Experience", "Director of Clinical Operations", "Chief Information Officer", "Practice Administrator"],
+      "targetIndustries": ["Healthcare", "Hospital Systems", "Specialty Clinics", "Ambulatory Care"],
+      "targetGeos": ["United States"],
+      "intentKeywords": ["patient engagement", "HIPAA messaging", "care coordination", "post-visit follow-up", "EHR integration"],
+      "minEmployees": 100,
+      "maxEmployees": 5000
+    },
+    "tags": ["healthcare", "hipaa", "providers"]
+  },
+  {
+    "id": "icp_004",
+    "input": {
+      "company_url": "https://shopstack.example.com",
+      "scraped_text": "ShopStack is the all-in-one ops platform for Shopify Plus merchants doing $5M-$100M GMV. Inventory, fulfillment, returns, and customer service — unified in one dashboard for ecommerce operators."
+    },
+    "ground_truth": {
+      "productSummary": "Unified operations dashboard for mid-market Shopify Plus ecommerce merchants.",
+      "industry": "Ecommerce Operations",
+      "targetTitles": ["Head of Ecommerce", "VP of Operations", "Director of Fulfillment", "Ecommerce Manager", "COO"],
+      "targetIndustries": ["Ecommerce", "DTC Brands", "Retail", "Consumer Goods"],
+      "targetGeos": ["United States", "Canada", "Australia"],
+      "intentKeywords": ["Shopify Plus", "ecommerce operations", "inventory management", "fulfillment", "DTC ops"],
+      "minEmployees": 25,
+      "maxEmployees": 500
+    },
+    "tags": ["ecommerce", "shopify", "dtc"]
+  },
+  {
+    "id": "icp_005",
+    "input": {
+      "company_url": "https://northforge.example.com",
+      "scraped_text": "Northforge Consulting delivers cloud migration and managed services to regulated enterprises. Our AWS-certified engineers help banks and insurers modernize legacy workloads with zero downtime."
+    },
+    "ground_truth": {
+      "productSummary": "AWS cloud migration and managed services for regulated enterprises.",
+      "industry": "B2B IT Services",
+      "targetTitles": ["VP of Infrastructure", "Director of Cloud", "Chief Information Officer", "Head of IT", "Enterprise Architect"],
+      "targetIndustries": ["Financial Services", "Insurance", "Banking", "Regulated Enterprises"],
+      "targetGeos": ["United States", "United Kingdom", "Canada"],
+      "intentKeywords": ["AWS migration", "cloud modernization", "managed services", "legacy modernization", "regulated workloads"],
+      "minEmployees": 500,
+      "maxEmployees": 50000
+    },
+    "tags": ["b2b-services", "consulting", "enterprise"]
+  },
+  {
+    "id": "icp_006",
+    "input": {
+      "company_url": "https://pulsehr.example.app",
+      "scraped_text": "PulseHR is the modern HRIS for fast-growing tech startups (20-200 employees). Onboarding, time-off, payroll integrations, and employee engagement in a single workflow your People team will actually use."
+    },
+    "ground_truth": {
+      "productSummary": "All-in-one HRIS for fast-growing tech startups.",
+      "industry": "HR Tech / SaaS",
+      "targetTitles": ["Head of People", "People Operations Manager", "HR Director", "Chief People Officer", "Office Manager"],
+      "targetIndustries": ["Tech Startups", "SaaS", "Software"],
+      "targetGeos": ["United States", "Canada", "United Kingdom", "Germany"],
+      "intentKeywords": ["HRIS", "people operations", "onboarding", "payroll integration", "employee engagement"],
+      "minEmployees": 20,
+      "maxEmployees": 200
+    },
+    "tags": ["saas", "hrtech", "startups"]
+  },
+  {
+    "id": "icp_007",
+    "input": {
+      "company_url": "https://routeiq.example.com",
+      "scraped_text": "RouteIQ provides last-mile delivery route optimization for regional logistics fleets. Cut fuel costs 18% and improve on-time delivery rates with our AI-powered dispatch engine."
+    },
+    "ground_truth": {
+      "productSummary": "AI-powered last-mile route optimization for regional delivery fleets.",
+      "industry": "Logistics SaaS",
+      "targetTitles": ["VP of Operations", "Director of Logistics", "Fleet Manager", "Head of Dispatch", "COO"],
+      "targetIndustries": ["Logistics", "Last-Mile Delivery", "Transportation", "3PL"],
+      "targetGeos": ["United States", "Canada", "Mexico"],
+      "intentKeywords": ["route optimization", "last-mile delivery", "fleet dispatch", "on-time delivery", "fuel cost reduction"],
+      "minEmployees": 50,
+      "maxEmployees": 2000
+    },
+    "tags": ["saas", "logistics", "ai"]
+  },
+  {
+    "id": "icp_008",
+    "input": {
+      "company_url": "https://growloop.example.io",
+      "scraped_text": "GrowLoop is the referral marketing platform for consumer subscription brands. Launch a refer-a-friend program in under 30 minutes and track every share, signup and reward — no engineering required."
+    },
+    "ground_truth": {
+      "productSummary": "Referral marketing platform for consumer subscription brands.",
+      "industry": "Marketing Technology",
+      "targetTitles": ["Head of Growth", "VP of Marketing", "Director of CRM", "Growth Marketing Manager", "Lifecycle Marketing Lead"],
+      "targetIndustries": ["DTC", "Consumer Subscriptions", "Ecommerce", "Consumer SaaS"],
+      "targetGeos": ["United States", "United Kingdom", "Canada", "Australia"],
+      "intentKeywords": ["referral marketing", "refer a friend", "growth loops", "viral coefficient", "customer acquisition"],
+      "minEmployees": 10,
+      "maxEmployees": 500
+    },
+    "tags": ["martech", "dtc", "growth"]
+  },
+  {
+    "id": "icp_009",
+    "input": {
+      "company_url": "https://forgepay.example.com",
+      "scraped_text": "ForgePay accelerates underwriting for small-business lenders. Our underwriting workflow connects to bank-feed data, alt-data signals, and document parsing — used by 60+ community banks and SMB lenders."
+    },
+    "ground_truth": {
+      "productSummary": "Underwriting automation for SMB lenders and community banks.",
+      "industry": "Fintech / Lending",
+      "targetTitles": ["VP of Underwriting", "Chief Credit Officer", "Head of SMB Lending", "Director of Risk", "Chief Lending Officer"],
+      "targetIndustries": ["Community Banking", "SMB Lending", "Alternative Lending", "Fintech"],
+      "targetGeos": ["United States"],
+      "intentKeywords": ["SMB underwriting", "bank feed analysis", "credit decisioning", "alt data underwriting", "community bank"],
+      "minEmployees": 50,
+      "maxEmployees": 2000
+    },
+    "tags": ["fintech", "lending", "banking"]
+  },
+  {
+    "id": "icp_010",
+    "input": {
+      "company_url": "https://clinicaledge.example.com",
+      "scraped_text": "ClinicalEdge is purpose-built clinical trial software for biotech CROs and sponsors. EDC, ePRO, and adaptive trial design — fully GxP-compliant and FDA 21 CFR Part 11 validated."
+    },
+    "ground_truth": {
+      "productSummary": "Clinical trial management software for biotech sponsors and CROs.",
+      "industry": "Healthcare / Clinical Research",
+      "targetTitles": ["VP of Clinical Operations", "Head of Data Management", "Clinical Trial Manager", "Director of Biometrics", "Chief Medical Officer"],
+      "targetIndustries": ["Biotech", "Pharma", "Contract Research Organizations", "Clinical Research"],
+      "targetGeos": ["United States", "United Kingdom", "Germany", "Switzerland"],
+      "intentKeywords": ["clinical trial software", "EDC", "ePRO", "GxP compliance", "21 CFR Part 11"],
+      "minEmployees": 100,
+      "maxEmployees": 10000
+    },
+    "tags": ["healthcare", "biotech", "regulated"]
+  },
+  {
+    "id": "icp_011",
+    "input": {
+      "company_url": "https://snapcart.example.shop",
+      "scraped_text": "Buy faster. Snap and ship."
+    },
+    "ground_truth": {
+      "productSummary": "Consumer-facing shopping product; ICP cannot be confidently inferred from minimal homepage copy.",
+      "industry": "Ecommerce",
+      "targetTitles": ["Head of Ecommerce", "Director of Digital", "Marketing Manager"],
+      "targetIndustries": ["Ecommerce", "Retail"],
+      "targetGeos": ["United States"],
+      "intentKeywords": ["online shopping", "checkout"],
+      "minEmployees": null,
+      "maxEmployees": null
+    },
+    "tags": ["ecommerce", "edge_case", "vague_homepage"]
+  },
+  {
+    "id": "icp_012",
+    "input": {
+      "company_url": "https://meridiancapital.example.holdings",
+      "scraped_text": "Meridian Capital Holdings is a diversified investment firm with portfolio companies across SaaS, healthcare services, industrial manufacturing, and consumer brands. We partner with founders and management teams for long-term value creation."
+    },
+    "ground_truth": {
+      "productSummary": "Holding company across SaaS, healthcare services, manufacturing, and consumer brands; no single outbound ICP.",
+      "industry": "Investment / Holding Company",
+      "targetTitles": ["Portfolio Operating Partner", "Investment Director", "Head of Business Development"],
+      "targetIndustries": ["Private Equity", "Investment Firms", "Family Offices"],
+      "targetGeos": ["United States", "United Kingdom"],
+      "intentKeywords": ["portfolio company", "value creation", "platform investment", "add-on acquisition"],
+      "minEmployees": null,
+      "maxEmployees": null
+    },
+    "tags": ["holding-company", "edge_case", "multi_vertical"]
+  },
+  {
+    "id": "icp_013",
+    "input": {
+      "company_url": "https://flowbridge.example.com",
+      "scraped_text": "Flowbridge offers two products: (1) Flowbridge Sync, an iPaaS for marketing teams, and (2) Flowbridge Pulse, a reverse-ETL tool for data engineers. Customers include B2B SaaS marketing leaders and analytics platform teams."
+    },
+    "ground_truth": {
+      "productSummary": "Dual-product platform: iPaaS for marketers and reverse-ETL for data engineers.",
+      "industry": "Data Integration / MarTech",
+      "targetTitles": ["VP of Marketing Operations", "Director of MarTech", "Head of Data", "Analytics Engineer", "Director of Data Engineering"],
+      "targetIndustries": ["B2B SaaS", "Data & Analytics", "Marketing Operations"],
+      "targetGeos": ["United States", "United Kingdom", "Canada"],
+      "intentKeywords": ["reverse ETL", "iPaaS", "marketing operations", "data activation", "customer data platform"],
+      "minEmployees": 50,
+      "maxEmployees": 2000
+    },
+    "tags": ["saas", "edge_case", "multi_product"]
+  },
+  {
+    "id": "icp_014",
+    "input": {
+      "company_url": "https://stagepass.example.events",
+      "scraped_text": "StagePass is the all-in-one ticketing and access-control platform for independent music venues, festivals, and live event producers. Sell tickets, scan at the door, and pay out artists faster."
+    },
+    "ground_truth": {
+      "productSummary": "Ticketing and access-control platform for independent live event producers.",
+      "industry": "Events & Live Entertainment Tech",
+      "targetTitles": ["Venue Owner", "Festival Producer", "Director of Operations", "Box Office Manager", "Head of Live"],
+      "targetIndustries": ["Live Events", "Music Venues", "Festivals", "Entertainment"],
+      "targetGeos": ["United States", "United Kingdom", "Germany", "Australia"],
+      "intentKeywords": ["event ticketing", "access control", "box office", "festival operations", "artist payouts"],
+      "minEmployees": 5,
+      "maxEmployees": 200
+    },
+    "tags": ["saas", "events", "smb"]
+  },
+  {
+    "id": "icp_015",
+    "input": {
+      "company_url": "https://qubitlearn.example.edu",
+      "scraped_text": "QubitLearn is the curriculum-as-a-service platform for K-12 STEM educators. Standards-aligned lessons, hands-on coding exercises, and admin dashboards for district-wide rollouts."
+    },
+    "ground_truth": {
+      "productSummary": "STEM curriculum platform for K-12 districts.",
+      "industry": "EdTech",
+      "targetTitles": ["Curriculum Director", "Director of STEM", "Superintendent", "Director of Instructional Technology", "Principal"],
+      "targetIndustries": ["K-12 Education", "School Districts", "Public Schools", "Charter Networks"],
+      "targetGeos": ["United States"],
+      "intentKeywords": ["K-12 STEM", "curriculum platform", "standards-aligned", "district rollout", "coding curriculum"],
+      "minEmployees": 50,
+      "maxEmployees": 50000
+    },
+    "tags": ["edtech", "k12", "saas"]
+  },
+  {
+    "id": "icp_016",
+    "input": {
+      "company_url": "https://sentinelguard.example.io",
+      "scraped_text": "Sentinel Guard is the cloud security posture management (CSPM) platform built for cloud-native engineering teams. Continuous compliance checks for AWS, Azure, and GCP — SOC 2, HIPAA, PCI mapped automatically."
+    },
+    "ground_truth": {
+      "productSummary": "Cloud security posture management for multi-cloud engineering teams.",
+      "industry": "Cybersecurity / Cloud Security",
+      "targetTitles": ["CISO", "VP of Security", "Director of Cloud Security", "Head of DevSecOps", "Compliance Manager"],
+      "targetIndustries": ["SaaS", "Fintech", "Healthcare", "Cloud-Native Companies"],
+      "targetGeos": ["United States", "United Kingdom", "Germany", "Canada"],
+      "intentKeywords": ["CSPM", "cloud security", "SOC 2 compliance", "HIPAA cloud", "DevSecOps"],
+      "minEmployees": 100,
+      "maxEmployees": 10000
+    },
+    "tags": ["saas", "security", "cloud"]
+  },
+  {
+    "id": "icp_017",
+    "input": {
+      "company_url": "https://rootlabs.example.com",
+      "scraped_text": "Welcome to Root Labs."
+    },
+    "ground_truth": {
+      "productSummary": "Insufficient homepage signal to confidently determine product or buyer persona.",
+      "industry": "Unknown",
+      "targetTitles": ["Head of Operations", "Founder", "Chief Operating Officer"],
+      "targetIndustries": ["B2B"],
+      "targetGeos": ["Global"],
+      "intentKeywords": ["root labs"],
+      "minEmployees": null,
+      "maxEmployees": null
+    },
+    "tags": ["edge_case", "vague_homepage", "low_signal"]
+  },
+  {
+    "id": "icp_018",
+    "input": {
+      "company_url": "https://atlasrev.example.com",
+      "scraped_text": "AtlasRev is the AI revenue intelligence platform purpose-built for B2B SaaS GTM leaders. Conversation intelligence, deal scoring, pipeline forecasting and rep coaching — replace 4 point tools with one platform."
+    },
+    "ground_truth": {
+      "productSummary": "AI revenue intelligence platform for B2B SaaS GTM teams.",
+      "industry": "Revenue Intelligence / SaaS",
+      "targetTitles": ["Chief Revenue Officer", "VP of Sales", "Head of RevOps", "Sales Enablement Manager", "VP of Sales Operations"],
+      "targetIndustries": ["B2B SaaS", "Software", "Cloud Software"],
+      "targetGeos": ["United States", "United Kingdom", "Canada", "Australia"],
+      "intentKeywords": ["revenue intelligence", "conversation intelligence", "deal scoring", "pipeline forecasting", "sales coaching"],
+      "minEmployees": 100,
+      "maxEmployees": 5000
+    },
+    "tags": ["saas", "salestech", "ai"]
+  },
+  {
+    "id": "icp_019",
+    "input": {
+      "company_url": "https://kindredpet.example.shop",
+      "scraped_text": "Kindred Pet ships fresh, vet-formulated dog food on a weekly subscription. Direct-to-consumer brand serving 40,000+ subscribers across the US."
+    },
+    "ground_truth": {
+      "productSummary": "DTC fresh dog food subscription brand.",
+      "industry": "Consumer Subscription / Pet",
+      "targetTitles": ["Head of Growth", "Director of Brand Marketing", "VP of Ecommerce", "CMO", "Director of Performance Marketing"],
+      "targetIndustries": ["DTC", "Consumer Goods", "Pet Care", "Subscription Commerce"],
+      "targetGeos": ["United States"],
+      "intentKeywords": ["fresh pet food", "subscription box", "DTC pet brand", "pet wellness", "subscription retention"],
+      "minEmployees": 20,
+      "maxEmployees": 500
+    },
+    "tags": ["dtc", "ecommerce", "subscription"]
+  },
+  {
+    "id": "icp_020",
+    "input": {
+      "company_url": "https://verdantfields.example.farm",
+      "scraped_text": "Verdant Fields supplies precision-agriculture sensors and analytics to row-crop farms across the US Midwest. Soil moisture, NDVI, and yield-prediction dashboards trusted by 1,200+ growers."
+    },
+    "ground_truth": {
+      "productSummary": "Precision agriculture sensors and analytics for row-crop farms.",
+      "industry": "AgTech",
+      "targetTitles": ["Farm Owner", "Agronomy Manager", "Director of Operations", "Precision Ag Specialist", "Farm Manager"],
+      "targetIndustries": ["Row-Crop Agriculture", "AgTech", "Farming"],
+      "targetGeos": ["United States"],
+      "intentKeywords": ["precision agriculture", "soil moisture monitoring", "NDVI", "yield prediction", "row crop analytics"],
+      "minEmployees": 5,
+      "maxEmployees": 500
+    },
+    "tags": ["agtech", "iot", "vertical-saas"]
+  }
+]

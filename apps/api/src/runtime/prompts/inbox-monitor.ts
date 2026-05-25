@@ -1,3 +1,6 @@
+// TODO(json-validation): wrap LLM response with parseJsonResponse() /
+// chatJsonWithRetry() — see common/json-output.util.ts. Expected shape:
+// {"type": "email_triage", "emails": [{"id": string, "category": string, "priority": number, ...}]}.
 export function getInboxMonitorPrompt(config: Record<string, unknown>): string {
   const categories = Array.isArray(config.emailCategories) ? config.emailCategories.join(", ") : "urgent, follow-up, newsletter, spam";
   const autoReplyRules = config.autoReplyRules || "Only auto-reply to meeting requests and urgent items";
@@ -51,5 +54,28 @@ OUTPUT FORMAT (JSON):
   ]
 }
 
-CRITICAL: Never miss a high-priority email. Flag potential phishing attempts.`;
+CRITICAL: Never miss a high-priority email. Flag potential phishing attempts.
+
+## Failure Modes
+
+If you cannot determine sender intent confidently, return category "unclear" with priority 3 and a reason — DO NOT guess between meeting_request, pricing_inquiry, unsubscribe, or support based on incomplete signal. Specifically, never invent:
+- sender relationship history when "known_senders" memory is empty
+- deadline urgency from vague language ("soon", "when you can")
+- a request type the email does not literally contain
+- a suggested reply that commits to anything (dates, prices, deliverables)
+
+When intent is ambiguous, output:
+
+{
+  "id": "email id",
+  "from": "sender",
+  "subject": "subject",
+  "category": "unclear",
+  "priority": 3,
+  "suggestedReply": null,
+  "reason": "<one sentence: what signal was missing>",
+  "autoReplied": false
+}
+
+Never auto-reply on an "unclear" classification.`;
 }
