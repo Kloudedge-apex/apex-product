@@ -8,6 +8,7 @@ import {
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { google, gmail_v1, Auth } from "googleapis";
+import { OAuth2Client } from "google-auth-library";
 import { Prisma } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { RuntimeService } from "../../runtime/runtime.service";
@@ -86,7 +87,10 @@ export class GmailService {
   private readonly clientId: string;
   private readonly clientSecret: string;
   private readonly redirectUri: string;
-  private readonly pushVerificationToken: string;
+  private readonly pushAudience: string;
+  private readonly pushPublisherSa: string;
+  private readonly pushPubsubTopic: string;
+  private readonly oidcClient = new OAuth2Client();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -100,33 +104,45 @@ export class GmailService {
       "GOOGLE_REDIRECT_URI",
       "http://localhost:4000/api/integrations/gmail/callback",
     );
-    this.pushVerificationToken = this.config.get<string>(
-      "GMAIL_PUSH_VERIFICATION_TOKEN",
+    this.pushAudience = this.config.get<string>("GMAIL_PUSH_AUDIENCE", "");
+    this.pushPublisherSa = this.config.get<string>(
+      "GMAIL_PUSH_PUBLISHER_SA",
       "",
     );
+    this.pushPubsubTopic = this.config.get<string>("GMAIL_PUBSUB_TOPIC", "");
   }
 
   /**
-   * Verifies that an inbound push request came from Google.
+   * Verifies an inbound push request was signed by the configured Google
+   * Pub/Sub publisher service account. Fail-closed if config is incomplete.
    *
-   * Phase 1 — simple shared bearer token sent in the `Authorization` header.
-   * Configure Google Pub/Sub to attach this token via the subscription's
-   * `pushConfig.attributes` or `authentication_method.token`.
-   *
-   * TODO(security): upgrade to OIDC JWT verification — Google signs each push
-   * with a Google-issued JWT; we should verify the signature against
-   * https://www.googleapis.com/oauth2/v1/certs and check `aud` matches our
-   * push endpoint. The bearer approach is acceptable for hackathon timeline
-   * but MUST be hardened before production traffic.
+   * Pub/Sub push with OIDC: Google signs a short-lived JWT with the publisher
+   * SA's identity. We verify the signature against Google's public certs,
+   * pin `aud` to our exact push URL, and pin `email` to the publisher SA.
    */
-  verifyPushAuth(authorizationHeader: string | undefined): boolean {
-    if (!this.pushVerificationToken) {
-      // Fail-closed: if no token is configured, refuse all push traffic.
+  async verifyPushAuth(
+    authorizationHeader: string | undefined,
+  ): Promise<boolean> {
+    if (!this.pushAudience || !this.pushPublisherSa) return false;
+    if (!authorizationHeader?.startsWith("Bearer ")) return false;
+
+    const idToken = authorizationHeader.slice(7);
+    try {
+      const ticket = await this.oidcClient.verifyIdToken({
+        idToken,
+        audience: this.pushAudience,
+      });
+      const payload = ticket.getPayload();
+      if (!payload) return false;
+      if (payload.email !== this.pushPublisherSa) return false;
+      if (payload.email_verified !== true) return false;
+      return true;
+    } catch (err) {
+      this.logger.warn("gmail.push OIDC verification failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
       return false;
     }
-    if (!authorizationHeader) return false;
-    const expected = `Bearer ${this.pushVerificationToken}`;
-    return authorizationHeader === expected;
   }
 
   /**
@@ -347,6 +363,52 @@ export class GmailService {
         lastSyncAt: new Date(),
       },
     });
+
+    // Subscribe this mailbox to our Pub/Sub topic so inbound replies push to
+    // /integrations/gmail/push. Non-fatal — OAuth succeeds even if watch fails
+    // (e.g., topic env not configured in dev), the mailbox just won't get
+    // realtime pushes until backfilled.
+    await this.registerWatch(orgId).catch((err) => {
+      this.logger.warn("gmail.users.watch registration failed", {
+        orgId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }
+
+  /**
+   * Calls `gmail.users.watch` for the org's mailbox, subscribing it to the
+   * configured Pub/Sub topic. Idempotent: Gmail accepts repeat calls; watches
+   * expire after ~7 days so this should be re-run periodically.
+   */
+  async registerWatch(orgId: string): Promise<{
+    historyId?: string;
+    expiration?: string;
+  } | null> {
+    if (!this.pushPubsubTopic) {
+      this.logger.debug("gmail.users.watch skipped — GMAIL_PUBSUB_TOPIC unset", {
+        orgId,
+      });
+      return null;
+    }
+    const gmail = await this.getGmailClient(orgId);
+    const response = await gmail.users.watch({
+      userId: "me",
+      requestBody: {
+        topicName: this.pushPubsubTopic,
+        labelIds: ["INBOX"],
+        labelFilterBehavior: "INCLUDE",
+      },
+    });
+    this.logger.log("gmail.users.watch registered", {
+      orgId,
+      historyId: response.data.historyId,
+      expiration: response.data.expiration,
+    });
+    return {
+      historyId: response.data.historyId ?? undefined,
+      expiration: response.data.expiration ?? undefined,
+    };
   }
 
   async listMessages(

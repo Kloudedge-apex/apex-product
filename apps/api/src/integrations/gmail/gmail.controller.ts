@@ -54,10 +54,10 @@ export class GmailController {
   /**
    * Gmail Pub/Sub push endpoint.
    *
-   * Google Cloud Pub/Sub posts new-message notifications here. We verify a
-   * shared bearer token (phase 1 — see GmailService.verifyPushAuth for the
-   * upgrade path to OIDC JWT), decode the base64 `message.data` payload, and
-   * dispatch the Reply Handler agent for any new inbound replies.
+   * Google Cloud Pub/Sub posts new-message notifications here. We verify the
+   * OIDC JWT signed by the configured publisher service account (audience must
+   * match this URL), decode the base64 `message.data` payload, and dispatch
+   * the Reply Handler agent for any new inbound replies.
    *
    * Always returns 200 on a successful dispatch hand-off so Pub/Sub stops
    * retrying. Internal failures are logged but never surfaced as 5xx — we
@@ -70,7 +70,7 @@ export class GmailController {
     @Headers("authorization") authorization: string | undefined,
     @Body() body: PubSubPushBody,
   ): Promise<{ ok: true }> {
-    if (!this.gmailService.verifyPushAuth(authorization)) {
+    if (!(await this.gmailService.verifyPushAuth(authorization))) {
       throw new UnauthorizedException("Invalid Gmail push verification token");
     }
 
@@ -115,6 +115,19 @@ export class GmailController {
   @HttpCode(HttpStatus.OK)
   sendEmail(@OrgId() orgId: string, @Body() body: SendEmailDto) {
     return this.gmailService.sendEmail(orgId, body);
+  }
+
+  /**
+   * (Re-)register the org's mailbox with Gmail's `users.watch` so inbound
+   * messages push to /integrations/gmail/push. Idempotent. Useful for
+   * backfilling mailboxes connected before the push wiring existed, or for
+   * renewing watches before the 7-day expiration.
+   */
+  @Post("watch")
+  @HttpCode(HttpStatus.OK)
+  async registerWatch(@OrgId() orgId: string) {
+    const result = await this.gmailService.registerWatch(orgId);
+    return { ok: true, ...result };
   }
 
   @Get("messages")
