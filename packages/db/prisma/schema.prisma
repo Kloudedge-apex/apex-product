@@ -580,6 +580,11 @@ model GraphRun {
   error         String?
   startedAt     DateTime       @default(now())
   completedAt   DateTime?
+  // LangSmith root run id captured by whichever node makes the first traced
+  // LLM call. Persisted (instead of held in an in-memory Map) so a graph that
+  // crashes and resumes on a fresh pod can still post run-level feedback for
+  // its earlier legs. Nullable: legacy rows and tracing-disabled envs leave it null.
+  langsmithRootRunId String?
   outreachArtifacts OutreachArtifact[]
 
   @@index([orgId])

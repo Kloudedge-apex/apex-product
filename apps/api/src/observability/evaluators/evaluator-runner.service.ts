@@ -9,6 +9,9 @@ import { BiasFairnessEvaluator } from "./bias-fairness.evaluator";
 import { HallucinationEvaluator } from "./hallucination.evaluator";
 import { CorrectnessEvaluator } from "./correctness.evaluator";
 import { ToolUseCorrectnessEvaluator } from "./tool-use-correctness.evaluator";
+import { BoilerplateEvaluator } from "./boilerplate.evaluator";
+import { AiTellEvaluator } from "./ai-tell.evaluator";
+import { CitationCoverageEvaluator } from "./citation-coverage.evaluator";
 
 /**
  * Orchestrates evaluator execution. Called after each traced LLM run completes;
@@ -35,8 +38,22 @@ export class EvaluatorRunnerService {
     hallucination: HallucinationEvaluator,
     correctness: CorrectnessEvaluator,
     toolUseCorrectness: ToolUseCorrectnessEvaluator,
+    boilerplate: BoilerplateEvaluator,
+    aiTell: AiTellEvaluator,
+    citationCoverage: CitationCoverageEvaluator,
   ) {
-    this.evaluators = [pii, promptInjection, toxicity, bias, hallucination, correctness, toolUseCorrectness];
+    this.evaluators = [
+      pii,
+      promptInjection,
+      toxicity,
+      bias,
+      hallucination,
+      correctness,
+      toolUseCorrectness,
+      boilerplate,
+      aiTell,
+      citationCoverage,
+    ];
   }
 
   setJudge(judge: EvaluatorDeps["judge"]): void {

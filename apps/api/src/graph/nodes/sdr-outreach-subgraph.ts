@@ -26,9 +26,39 @@ const MAX_DRAFT_ATTEMPTS = 2;
 const MAX_SUBJECT_LEN = 120;
 const MAX_BODY_LEN = 2000;
 const MIN_BODY_LEN = 30;
+const MAX_RECENT_EVIDENCE_EVENTS = 5;
 
 /** Substrings that, if present, mean the LLM left a placeholder unfilled. */
 const PLACEHOLDER_LEAKS = ["{{", "}}", "[FIRST_NAME]", "[COMPANY]", "TODO", "<insert"];
+
+/**
+ * Evidence-event kinds we surface as grounding signals in the research brief.
+ * Order matters for fact_id assignment (S1, S2, …) but not for ranking — the
+ * caller takes the most recent N regardless of kind.
+ */
+const SIGNAL_KINDS = new Set([
+  "recent_hire",
+  "funding_event",
+  "product_launch",
+  "leadership_change",
+  "press_mention",
+  "intent_signal",
+]);
+
+export interface BriefFact {
+  readonly id: string; // "F1", "P1", "S1", "ICP1", …
+  readonly category: "firmographic" | "person" | "signal" | "icp_fit";
+  readonly source: string;
+  readonly text: string;
+  readonly date?: string; // ISO date if known (signals)
+}
+
+export interface ResearchBrief {
+  readonly xml: string; // rendered for the LLM
+  readonly facts: readonly BriefFact[];
+  readonly doNotClaim: readonly string[];
+  readonly hasGroundingSignal: boolean; // true if ≥1 fact in <signals>
+}
 
 export interface SdrLeadInput {
   readonly orgId: string;
@@ -49,6 +79,18 @@ export interface SdrLeadResult {
   readonly body: string;
   readonly qaIssues: readonly string[];
   readonly draftAttempts: number;
+  readonly refusal: DrafterRefusal | null;
+  readonly groundednessSelfCheck: GroundednessSelfCheck | null;
+}
+
+export interface DrafterRefusal {
+  readonly reason: string;
+  readonly missing: readonly string[];
+}
+
+export interface GroundednessSelfCheck {
+  readonly citedFactIds: readonly string[];
+  readonly unsupportedClaims: readonly string[];
 }
 
 /**
@@ -60,15 +102,20 @@ export interface SdrLeadResult {
  * a reviewer rejecting the draft can later append that run to a regression
  * dataset (see OutreachArtifactsService.reject).
  */
-export type DrafterFn = (
-  input: DrafterInput,
-) => Promise<{ subject: string; body: string }>;
+export type DrafterFn = (input: DrafterInput) => Promise<DrafterOutput>;
 
 export interface DrafterInput {
-  readonly researchBrief: string;
+  readonly brief: ResearchBrief;
   readonly lead: SdrLeadInput;
   readonly previousAttempt?: { subject: string; body: string; issues: readonly string[] };
   readonly onRunId?: (runId: string) => void;
+}
+
+export interface DrafterOutput {
+  readonly subject: string;
+  readonly body: string;
+  readonly refusal: DrafterRefusal | null;
+  readonly groundednessSelfCheck: GroundednessSelfCheck | null;
 }
 
 export interface SubgraphDeps {
@@ -95,9 +142,9 @@ const SdrStateAnnotation = Annotation.Root({
         companyDomain: "",
       }) as SdrLeadInput,
   }),
-  researchBrief: Annotation<string>({
+  researchBrief: Annotation<ResearchBrief>({
     reducer: (_p, n) => n,
-    default: () => "",
+    default: () => ({ xml: "", facts: [], doNotClaim: [], hasGroundingSignal: false }),
   }),
   subject: Annotation<string>({
     reducer: (_p, n) => n,
@@ -106,6 +153,14 @@ const SdrStateAnnotation = Annotation.Root({
   body: Annotation<string>({
     reducer: (_p, n) => n,
     default: () => "",
+  }),
+  refusal: Annotation<DrafterRefusal | null>({
+    reducer: (_p, n) => n,
+    default: () => null,
+  }),
+  groundednessSelfCheck: Annotation<GroundednessSelfCheck | null>({
+    reducer: (_p, n) => n,
+    default: () => null,
   }),
   draftAttempts: Annotation<number>({
     reducer: (_p, n) => n,
@@ -140,7 +195,16 @@ export const SDR_NODE = {
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-function qaCheck(subject: string, body: string): string[] {
+function qaCheck(
+  subject: string,
+  body: string,
+  refusal: DrafterRefusal | null,
+): string[] {
+  // Refusals are not "QA failures" to retry — they're a first-class outcome
+  // and route straight to human review with the reason preserved.
+  if (refusal) {
+    return [`refusal:${refusal.reason}`];
+  }
   const issues: string[] = [];
   if (subject.length === 0) issues.push("empty_subject");
   if (subject.length > MAX_SUBJECT_LEN) issues.push(`subject_too_long(${subject.length})`);
@@ -155,32 +219,103 @@ function qaCheck(subject: string, body: string): string[] {
   return issues;
 }
 
+// XML-scaffolded SDR draft prompt. The grounding rules + refusal protocol +
+// `groundedness_self_check` field together collapse the previous 3-line prompt's
+// hallucination surface: the model can no longer invent specifics to satisfy
+// "reference a specific signal" because (a) the brief lists explicit fact_ids,
+// (b) refusal is a first-class JSON output, and (c) the model declares which
+// fact_ids it used in the self-check, giving evaluators a deterministic citation.
+const SDR_DRAFT_SYSTEM_PROMPT = `You are Apex SDR, an outbound writer for first-touch B2B cold email.
+
+<role>
+Write one short cold email to one named buyer. You are calibrated for
+deliverability and grounding, not creativity. Your output is reviewed
+by a human before sending.
+</role>
+
+<grounding_rules>
+1. Only state facts that appear verbatim or paraphrase a fact in <brief>.
+2. Every concrete claim about the prospect, their company, their stack,
+   their funding, hiring, or product MUST be supported by a brief item.
+   You will cite the supporting fact_id in groundedness_self_check.
+3. If a fact is not in <brief>, you may NOT use it. Do not infer industry,
+   company size, tech stack, funding stage, or pain points from the
+   company name or title alone.
+4. Do not use boilerplate like "I hope this finds you well", "quick
+   question", "I help companies like yours", "circling back",
+   "just checking in", or em-dashes.
+5. Never invent named entities (people, products, customers, metrics).
+6. If <brief> contains a <do_not_claim> item, you may not contradict it.
+</grounding_rules>
+
+<refusal_protocol>
+If <brief> does not contain at least ONE specific behavioral or
+firmographic signal you can ground on (e.g. recent_hire, funding_event,
+product_launch, website_excerpt, tech_signal), refuse the draft.
+Return:
+{
+  "subject": null,
+  "body": null,
+  "refusal": {
+    "reason": "insufficient_grounding",
+    "missing": ["<which signal categories are absent>"]
+  },
+  "groundedness_self_check": { "unsupported_claims": [], "cited_fact_ids": [] }
+}
+</refusal_protocol>
+
+<output_schema>
+Return ONLY valid JSON matching this shape, no markdown, no preamble:
+{
+  "subject": "string, 3-9 words, no emoji, no clickbait, plaintext",
+  "body": "string, 60-180 words, plaintext, reference at least one cited fact_id",
+  "refusal": null,
+  "groundedness_self_check": {
+    "cited_fact_ids": ["array of fact_id strings from <brief> you used"],
+    "unsupported_claims": ["array of any sentence you suspect is not grounded; empty array if confident"]
+  }
+}
+</output_schema>
+
+<style>
+Plaintext only. One specific signal in line 1. One sentence on relevance
+to the buyer's role. One soft CTA (e.g. "worth a 15-min look?"). No
+hard-sell. Reading level: 5th-6th grade (short sentences, common words).
+</style>`;
+
+function renderUserPrompt(input: DrafterInput): string {
+  const previous = input.previousAttempt
+    ? `\n<previous_attempt_feedback>\nFlagged issues: ${input.previousAttempt.issues.join(", ")}. Fix them.\n</previous_attempt_feedback>\n`
+    : "";
+
+  return `<brief>
+${input.brief.xml}
+</brief>
+
+<lead>
+  <firstName>${escapeXml(input.lead.firstName)}</firstName>
+  <lastName>${escapeXml(input.lead.lastName)}</lastName>
+  <title>${escapeXml(input.lead.title ?? "")}</title>
+  <companyName>${escapeXml(input.lead.companyName)}</companyName>
+  <domain>${escapeXml(input.lead.companyDomain)}</domain>
+</lead>
+${previous}
+Draft the email now. Remember: refuse if no specific signal is available.`;
+}
+
 async function defaultDrafter(
   llm: LLMService,
   input: DrafterInput,
   evidenceLedger: EvidenceLedgerService,
-): Promise<{ subject: string; body: string }> {
-  const previous = input.previousAttempt
-    ? `\nPrevious draft was flagged for: ${input.previousAttempt.issues.join(", ")}. Fix those issues.`
-    : "";
-
-  const systemPrompt =
-    "You are an SDR writing a first-touch cold email. Output ONLY valid JSON " +
-    "with shape {\"subject\":\"...\",\"body\":\"...\"}. No markdown, no commentary. " +
-    "The body must be 60-180 words, plaintext, and reference a specific signal from the brief.";
-
-  const userPrompt = `Lead: ${input.lead.firstName} ${input.lead.lastName} (${input.lead.title ?? "no title"}) at ${input.lead.companyName} (${input.lead.companyDomain}).
-Research brief:
-${input.researchBrief}${previous}`;
-
+): Promise<DrafterOutput> {
   const startedAt = Date.now();
   const resp = await llm.chat(
     [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userPrompt },
+      { role: "system", content: SDR_DRAFT_SYSTEM_PROMPT },
+      { role: "user", content: renderUserPrompt(input) },
     ],
     {
-      maxTokens: 600,
+      maxTokens: 700,
       agent: "sdr_agent.draft_message",
       node: "sdr_outreach.draft_message",
       tags: ["sdr_outreach", "draft_message", "customer_facing"],
@@ -189,6 +324,8 @@ ${input.researchBrief}${previous}`;
         person_id: input.lead.personId,
         graph_run_id: input.lead.graphRunId ?? null,
         draft_attempt: input.previousAttempt ? "retry" : "first",
+        brief_fact_count: input.brief.facts.length,
+        brief_has_signal: input.brief.hasGroundingSignal,
       },
       // Capture the LangSmith runId so the artifact can be linked back to its
       // generating trace. We record only the latest attempt's runId — that's
@@ -214,7 +351,13 @@ ${input.researchBrief}${previous}`;
   return parseDrafterJson(resp.content);
 }
 
-function parseDrafterJson(raw: string): { subject: string; body: string } {
+function parseDrafterJson(raw: string): DrafterOutput {
+  const empty: DrafterOutput = {
+    subject: "",
+    body: "",
+    refusal: null,
+    groundednessSelfCheck: null,
+  };
   const trimmed = raw.trim();
   // Strip ```json fences if the model added them despite the instruction.
   const cleaned = trimmed
@@ -222,13 +365,51 @@ function parseDrafterJson(raw: string): { subject: string; body: string } {
     .replace(/\s*```$/i, "")
     .trim();
   try {
-    const parsed = JSON.parse(cleaned) as { subject?: unknown; body?: unknown };
+    const parsed = JSON.parse(cleaned) as {
+      subject?: unknown;
+      body?: unknown;
+      refusal?: unknown;
+      groundedness_self_check?: unknown;
+    };
     const subject = typeof parsed.subject === "string" ? parsed.subject : "";
     const body = typeof parsed.body === "string" ? parsed.body : "";
-    return { subject, body };
+    const refusal = parseRefusal(parsed.refusal);
+    const selfCheck = parseSelfCheck(parsed.groundedness_self_check);
+    return { subject, body, refusal, groundednessSelfCheck: selfCheck };
   } catch {
-    return { subject: "", body: "" };
+    return empty;
   }
+}
+
+function parseRefusal(raw: unknown): DrafterRefusal | null {
+  if (!raw || typeof raw !== "object") return null;
+  const obj = raw as Record<string, unknown>;
+  const reason = typeof obj.reason === "string" ? obj.reason : null;
+  if (!reason) return null;
+  const missing = Array.isArray(obj.missing)
+    ? obj.missing.filter((m): m is string => typeof m === "string")
+    : [];
+  return { reason, missing };
+}
+
+function parseSelfCheck(raw: unknown): GroundednessSelfCheck | null {
+  if (!raw || typeof raw !== "object") return null;
+  const obj = raw as Record<string, unknown>;
+  const cited = Array.isArray(obj.cited_fact_ids)
+    ? obj.cited_fact_ids.filter((m): m is string => typeof m === "string")
+    : [];
+  const unsupported = Array.isArray(obj.unsupported_claims)
+    ? obj.unsupported_claims.filter((m): m is string => typeof m === "string")
+    : [];
+  return { citedFactIds: cited, unsupportedClaims: unsupported };
+}
+
+function escapeXml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 // ── Subgraph builder ───────────────────────────────────────────────────────
@@ -247,22 +428,8 @@ export function buildSdrOutreachSubgraph(deps: SubgraphDeps) {
         "apex.lead.person_id": state.lead.personId,
       },
       async () => {
-        // Pull a small amount of context. The brief is rendered as plain text the
-        // drafter sees; richer signals (firmographics, news) can attach later
-        // without changing the subgraph shape.
-        const company = await deps.prisma.company.findFirst({
-          where: { orgId: state.lead.orgId, domain: state.lead.companyDomain },
-          select: { name: true, domain: true, employeeRange: true, industry: true },
-        });
-
-        const briefLines = [
-          `Company: ${state.lead.companyName} (${state.lead.companyDomain}).`,
-          company?.industry ? `Industry: ${company.industry}.` : null,
-          company?.employeeRange ? `Headcount: ${company.employeeRange}.` : null,
-          `Contact: ${state.lead.firstName} ${state.lead.lastName}, ${state.lead.title ?? "title unknown"}.`,
-        ].filter(Boolean);
-
-        return { researchBrief: briefLines.join(" ") };
+        const brief = await assembleResearchBrief(deps.prisma, state.lead);
+        return { researchBrief: brief };
       },
     );
   };
@@ -284,8 +451,8 @@ export function buildSdrOutreachSubgraph(deps: SubgraphDeps) {
 
         let capturedRunId: string | null = null;
         try {
-          const { subject, body } = await drafter({
-            researchBrief: state.researchBrief,
+          const out = await drafter({
+            brief: state.researchBrief,
             lead: state.lead,
             previousAttempt: previous,
             onRunId: (runId): void => {
@@ -293,8 +460,10 @@ export function buildSdrOutreachSubgraph(deps: SubgraphDeps) {
             },
           });
           return {
-            subject,
-            body,
+            subject: out.subject,
+            body: out.body,
+            refusal: out.refusal,
+            groundednessSelfCheck: out.groundednessSelfCheck,
             draftAttempts: state.draftAttempts + 1,
             langsmithRunId: capturedRunId,
           };
@@ -305,6 +474,8 @@ export function buildSdrOutreachSubgraph(deps: SubgraphDeps) {
           return {
             subject: "",
             body: "",
+            refusal: null,
+            groundednessSelfCheck: null,
             draftAttempts: state.draftAttempts + 1,
             langsmithRunId: capturedRunId,
           };
@@ -324,7 +495,7 @@ export function buildSdrOutreachSubgraph(deps: SubgraphDeps) {
       },
       async () => {
         const startedAt = Date.now();
-        const issues = qaCheck(state.subject, state.body);
+        const issues = qaCheck(state.subject, state.body, state.refusal);
 
         if (issues.length === 0) {
           void deps.evidenceLedger.qaPass({
@@ -368,6 +539,15 @@ export function buildSdrOutreachSubgraph(deps: SubgraphDeps) {
           personId: state.lead.personId,
           qaIssues: state.qaIssues,
           draftAttempts: state.draftAttempts,
+          // Grounding surface: the cited fact_ids and unsupported_claims the model
+          // declared, plus the structured brief facts the drafter actually saw.
+          // Approvers see these alongside the draft so they can spot-check.
+          brief_facts: state.researchBrief.facts,
+          brief_do_not_claim: state.researchBrief.doNotClaim,
+          ...(state.refusal ? { refusal: state.refusal } : {}),
+          ...(state.groundednessSelfCheck
+            ? { groundedness_self_check: state.groundednessSelfCheck }
+            : {}),
           ...(state.langsmithRunId
             ? { langsmith_run_id: state.langsmithRunId }
             : {}),
@@ -385,8 +565,11 @@ export function buildSdrOutreachSubgraph(deps: SubgraphDeps) {
     );
   };
 
-  // QA → DRAFT if issues remain AND we have attempts left; else QA → REVIEW.
+  // QA → DRAFT if issues remain AND we have attempts left AND we didn't refuse;
+  // else QA → REVIEW. Refusals are a deliberate outcome — retrying loses the
+  // signal and risks the model fabricating to escape the refusal.
   const routeAfterQa = (state: SdrState): typeof SDR_NODE.DRAFT | typeof SDR_NODE.REVIEW => {
+    if (state.refusal) return SDR_NODE.REVIEW;
     if (state.qaIssues.length > 0 && state.draftAttempts < MAX_DRAFT_ATTEMPTS) {
       return SDR_NODE.DRAFT;
     }
@@ -428,7 +611,247 @@ export async function runSdrOutreachSubgraph(
     body: final.body,
     qaIssues: final.qaIssues,
     draftAttempts: final.draftAttempts,
+    refusal: final.refusal,
+    groundednessSelfCheck: final.groundednessSelfCheck,
   };
 }
 
-export const _internalForTests = { qaCheck, parseDrafterJson };
+// ── Research brief assembly (XML, fact_id-indexed) ─────────────────────────
+
+/**
+ * Build a research brief for one lead. The brief is XML so the drafter can cite
+ * facts by id; each fact carries a stable `id` (F1, P1, S1…), a `source`
+ * attribute (the DB table or service that produced it), and verbatim text. The
+ * structured `facts` array is preserved on state so downstream evaluators
+ * (citation_coverage) can verify citation-by-id without re-parsing XML.
+ *
+ * Today the brief is sourced from Company + Person + LeadScore + recent
+ * EvidenceEvents. The `<website_excerpt>` slot is left empty until the
+ * web_fetch sidecar lands later this week; the schema is forward-compatible.
+ */
+export async function assembleResearchBrief(
+  prisma: PrismaService,
+  lead: SdrLeadInput,
+): Promise<ResearchBrief> {
+  const facts: BriefFact[] = [];
+
+  // Company firmographics (F-series).
+  const company = await prisma.company.findFirst({
+    where: { orgId: lead.orgId, domain: lead.companyDomain },
+    select: {
+      id: true,
+      name: true,
+      domain: true,
+      industry: true,
+      employeeRange: true,
+      country: true,
+      city: true,
+      fundingStage: true,
+      techStack: true,
+      intentSignals: true,
+    },
+  });
+
+  const firmoBits: string[] = [`Company: ${lead.companyName} (${lead.companyDomain})`];
+  if (company?.industry) firmoBits.push(`industry: ${company.industry}`);
+  if (company?.employeeRange) firmoBits.push(`headcount: ${company.employeeRange}`);
+  if (company?.city || company?.country) {
+    firmoBits.push(`HQ: ${[company?.city, company?.country].filter(Boolean).join(", ")}`);
+  }
+  facts.push({
+    id: "F1",
+    category: "firmographic",
+    source: "company.registry",
+    text: firmoBits.join("; ") + ".",
+  });
+  if (company?.fundingStage) {
+    facts.push({
+      id: "F2",
+      category: "firmographic",
+      source: "company.registry",
+      text: `Funding stage: ${company.fundingStage}.`,
+    });
+  }
+  if (company?.techStack && company.techStack.length > 0) {
+    facts.push({
+      id: "F3",
+      category: "firmographic",
+      source: "company.builtwith",
+      text: `Tech stack: ${company.techStack.slice(0, 8).join(", ")}.`,
+    });
+  }
+
+  // Person facts (P-series).
+  const person = await prisma.person.findFirst({
+    where: { id: lead.personId },
+    select: { title: true, seniority: true, department: true, location: true, bio: true },
+  });
+  const personBits: string[] = [`${lead.firstName} ${lead.lastName}`];
+  if (lead.title) personBits.push(`${lead.title}`);
+  personBits.push(`at ${lead.companyName}`);
+  if (person?.location) personBits.push(`location: ${person.location}`);
+  facts.push({
+    id: "P1",
+    category: "person",
+    source: "person.profile",
+    text: personBits.join(", ") + ".",
+  });
+  if (person?.bio) {
+    facts.push({
+      id: "P2",
+      category: "person",
+      source: "person.bio",
+      text: `Bio: ${truncate(person.bio, 240)}`,
+    });
+  }
+
+  // Behavioral signals (S-series) from EvidenceEvent — most recent first.
+  let signalCount = 0;
+  if (company?.id) {
+    const events = await prisma.evidenceEvent.findMany({
+      where: {
+        orgId: lead.orgId,
+        OR: [
+          { refType: "company", refId: company.id },
+          { refType: "person", refId: lead.personId },
+        ],
+        kind: { in: Array.from(SIGNAL_KINDS) },
+      },
+      orderBy: { createdAt: "desc" },
+      take: MAX_RECENT_EVIDENCE_EVENTS,
+      select: { kind: true, payload: true, createdAt: true },
+    });
+    for (const ev of events) {
+      signalCount += 1;
+      const summary = summarizeEvidencePayload(ev.kind, ev.payload);
+      facts.push({
+        id: `S${signalCount}`,
+        category: "signal",
+        source: `evidence_event.${ev.kind}`,
+        text: summary,
+        date: ev.createdAt.toISOString().slice(0, 10),
+      });
+    }
+  }
+
+  // ICP fit (ICP1) — only if we have a score.
+  const score = await prisma.leadScore.findFirst({
+    where: { orgId: lead.orgId, personId: lead.personId },
+    select: { score: true, breakdown: true, updatedAt: true },
+  });
+  if (score) {
+    facts.push({
+      id: "ICP1",
+      category: "icp_fit",
+      source: "lead_score",
+      text: `ICP score: ${score.score}/100. Updated ${score.updatedAt.toISOString().slice(0, 10)}.`,
+    });
+  }
+
+  // Defensive `do_not_claim` items — small, generic, always-on. The catalog
+  // can grow as we learn what the model fabricates most often in production.
+  const doNotClaim: string[] = [
+    `Do not claim ${lead.companyName} is in any specific industry unless a fact above explicitly states it.`,
+    `Do not claim ${lead.firstName} previously worked at any specific company unless a fact above explicitly states it.`,
+    `Do not reference "AI SDR" or "AI agent" as ${lead.companyName}'s pain — they are evaluating us, not buying it.`,
+  ];
+
+  const xml = renderBriefXml(facts, doNotClaim);
+  return {
+    xml,
+    facts,
+    doNotClaim,
+    hasGroundingSignal: signalCount > 0 || Boolean(company?.intentSignals?.length),
+  };
+}
+
+function renderBriefXml(facts: readonly BriefFact[], doNotClaim: readonly string[]): string {
+  const byCategory = {
+    firmographic: facts.filter((f) => f.category === "firmographic"),
+    person: facts.filter((f) => f.category === "person"),
+    signal: facts.filter((f) => f.category === "signal"),
+    icp_fit: facts.filter((f) => f.category === "icp_fit"),
+  };
+
+  const section = (
+    tag: string,
+    items: readonly BriefFact[],
+  ): string =>
+    items.length === 0
+      ? `<${tag}/>`
+      : `<${tag}>\n${items
+          .map((f) => {
+            const date = f.date ? ` date="${escapeXml(f.date)}"` : "";
+            return `    <fact id="${escapeXml(f.id)}" source="${escapeXml(f.source)}"${date}>${escapeXml(f.text)}</fact>`;
+          })
+          .join("\n")}\n  </${tag}>`;
+
+  const dnc =
+    doNotClaim.length === 0
+      ? "<do_not_claim/>"
+      : `<do_not_claim>\n${doNotClaim
+          .map((s) => `    <item>${escapeXml(s)}</item>`)
+          .join("\n")}\n  </do_not_claim>`;
+
+  return `<brief>
+  ${section("firmographic", byCategory.firmographic)}
+  ${section("person", byCategory.person)}
+  ${section("signals", byCategory.signal)}
+  ${section("icp_fit", byCategory.icp_fit)}
+  ${dnc}
+</brief>`;
+}
+
+function summarizeEvidencePayload(kind: string, payload: unknown): string {
+  if (!payload || typeof payload !== "object") return `${kind} signal recorded.`;
+  const p = payload as Record<string, unknown>;
+  const pickStr = (k: string): string | null => (typeof p[k] === "string" ? (p[k] as string) : null);
+  const pickNum = (k: string): number | null => (typeof p[k] === "number" ? (p[k] as number) : null);
+  switch (kind) {
+    case "recent_hire": {
+      const title = pickStr("jobTitle") ?? pickStr("title") ?? "an open role";
+      const source = pickStr("source") ?? "a public job board";
+      return `Posted a job for "${title}" on ${source}.`;
+    }
+    case "funding_event": {
+      const amount = pickStr("amount") ?? (pickNum("amountUsd") ? `$${pickNum("amountUsd")}` : "an undisclosed amount");
+      const round = pickStr("round") ?? "round";
+      const lead = pickStr("leadInvestor");
+      return `Raised ${amount} ${round}${lead ? ` led by ${lead}` : ""}.`;
+    }
+    case "product_launch": {
+      const name = pickStr("productName") ?? pickStr("name") ?? "a new product";
+      const quote = pickStr("quote");
+      return `Announced ${name}${quote ? `: "${truncate(quote, 200)}"` : "."}`;
+    }
+    case "leadership_change": {
+      const role = pickStr("role") ?? "a leadership role";
+      const who = pickStr("name") ?? "a new leader";
+      return `${who} joined as ${role}.`;
+    }
+    case "press_mention": {
+      const outlet = pickStr("outlet") ?? "a publication";
+      const headline = pickStr("headline") ?? "a recent story";
+      return `Mentioned in ${outlet}: "${truncate(headline, 200)}".`;
+    }
+    case "intent_signal": {
+      const topic = pickStr("topic") ?? "a relevant topic";
+      return `Showing buyer intent around ${topic}.`;
+    }
+    default:
+      return `${kind} signal recorded.`;
+  }
+}
+
+function truncate(s: string, max: number): string {
+  if (s.length <= max) return s;
+  return `${s.slice(0, max - 1)}…`;
+}
+
+export const _internalForTests = {
+  qaCheck,
+  parseDrafterJson,
+  renderBriefXml,
+  summarizeEvidencePayload,
+  SDR_DRAFT_SYSTEM_PROMPT,
+};

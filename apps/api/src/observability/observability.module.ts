@@ -8,6 +8,9 @@ import { BiasFairnessEvaluator } from "./evaluators/bias-fairness.evaluator";
 import { HallucinationEvaluator } from "./evaluators/hallucination.evaluator";
 import { CorrectnessEvaluator } from "./evaluators/correctness.evaluator";
 import { ToolUseCorrectnessEvaluator } from "./evaluators/tool-use-correctness.evaluator";
+import { BoilerplateEvaluator } from "./evaluators/boilerplate.evaluator";
+import { AiTellEvaluator } from "./evaluators/ai-tell.evaluator";
+import { CitationCoverageEvaluator } from "./evaluators/citation-coverage.evaluator";
 import { EvaluatorRunnerService } from "./evaluators/evaluator-runner.service";
 import { RunLevelEvaluatorService } from "./run-level-evaluator.service";
 
@@ -23,6 +26,9 @@ import { RunLevelEvaluatorService } from "./run-level-evaluator.service";
     HallucinationEvaluator,
     CorrectnessEvaluator,
     ToolUseCorrectnessEvaluator,
+    BoilerplateEvaluator,
+    AiTellEvaluator,
+    CitationCoverageEvaluator,
     EvaluatorRunnerService,
     RunLevelEvaluatorService,
   ],
@@ -38,6 +44,9 @@ import { RunLevelEvaluatorService } from "./run-level-evaluator.service";
     HallucinationEvaluator,
     CorrectnessEvaluator,
     ToolUseCorrectnessEvaluator,
+    BoilerplateEvaluator,
+    AiTellEvaluator,
+    CitationCoverageEvaluator,
   ],
 })
 export class ObservabilityModule implements OnModuleInit {

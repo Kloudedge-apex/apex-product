@@ -25,6 +25,7 @@ function graphRunRow(overrides: Partial<GraphRun> = {}): GraphRun {
     error: null,
     startedAt: now,
     completedAt: null,
+    langsmithRootRunId: null,
     ...overrides,
   };
 }

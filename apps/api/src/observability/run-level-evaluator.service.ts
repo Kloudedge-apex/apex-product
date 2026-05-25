@@ -18,7 +18,9 @@ export interface RunLevelEvaluatorPrisma {
       readonly status: GraphRunStatus;
       readonly startedAt: Date;
       readonly completedAt: Date | null;
+      readonly langsmithRootRunId: string | null;
     } | null>;
+    update(args: Prisma.GraphRunUpdateArgs): Promise<unknown>;
   };
   readonly leadScore: {
     count(args: Prisma.LeadScoreCountArgs): Promise<number>;
@@ -73,12 +75,11 @@ const PARTIAL_THRESHOLD = 0.4;
  * LANGSMITH_API_KEY) silently skip the feedback post but the evaluation still
  * runs and its result is available to callers.
  *
- * TODO(observability): the LangSmith root run id currently lives in an
- * in-memory Map keyed by graphRunId. Pod restarts forget the mapping; a
- * graph that crashes and resumes on a fresh pod won't be able to post
- * run-level feedback for its first leg. The proper fix is a one-column
- * migration (`GraphRun.langsmithRootRunId String?`) or repurposing the
- * `state` JSON. Holding off until a Phase 3 schema bump is on the table.
+ * Persistence: the LangSmith root run id is written through to
+ * `GraphRun.langsmithRootRunId` so a graph that crashes and resumes on a
+ * fresh pod can still post run-level feedback for its earlier legs. We keep
+ * an in-memory Map as a write-through cache to skip the DB read on the
+ * common same-pod path; on a cache miss we fall back to the row's column.
  */
 @Injectable()
 export class RunLevelEvaluatorService {
@@ -92,14 +93,25 @@ export class RunLevelEvaluatorService {
 
   /**
    * Capture the LangSmith root run id for a GraphRun. Called by the graph
-   * runtime when the first traced LLM call returns its run id.
+   * runtime when the first traced LLM call returns its run id. The DB write
+   * is fire-and-forget so a transient DB hiccup never breaks tracing — the
+   * in-memory cache still holds the value for this pod's lifetime.
    */
   recordLangSmithRunId(graphRunId: string, runId: string): void {
     if (!graphRunId || !runId) return;
     this.langsmithRunIds.set(graphRunId, runId);
+    void this.prisma.graphRun
+      .update({ where: { id: graphRunId }, data: { langsmithRootRunId: runId } })
+      .catch((err) => {
+        this.logger.warn(
+          `failed to persist langsmithRootRunId for graphRun=${graphRunId}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      });
   }
 
-  /** Read-back, mostly for tests. */
+  /** Read-back, mostly for tests. Returns only the in-memory cache. */
   getLangSmithRunId(graphRunId: string): string | undefined {
     return this.langsmithRunIds.get(graphRunId);
   }
@@ -220,12 +232,17 @@ export class RunLevelEvaluatorService {
       },
     };
 
-    await this.postFeedback(score);
+    await this.postFeedback(score, run.langsmithRootRunId);
     return score;
   }
 
-  private async postFeedback(score: RunLevelScore): Promise<void> {
-    const runId = this.langsmithRunIds.get(score.graphRunId);
+  private async postFeedback(
+    score: RunLevelScore,
+    persistedRunId: string | null,
+  ): Promise<void> {
+    // Prefer the in-memory cache (same-pod hot path); fall back to the
+    // persisted column when the pod that captured the id has since rolled.
+    const runId = this.langsmithRunIds.get(score.graphRunId) ?? persistedRunId ?? undefined;
     if (!runId) {
       this.logger.log(
         `no langsmith root run for graphRun=${score.graphRunId} — skipping run-level feedback`,

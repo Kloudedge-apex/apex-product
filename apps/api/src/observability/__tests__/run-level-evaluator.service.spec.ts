@@ -10,6 +10,7 @@ type GraphRunRow = {
   readonly status: GraphRunStatus;
   readonly startedAt: Date;
   readonly completedAt: Date | null;
+  readonly langsmithRootRunId?: string | null;
 };
 
 type FakeLeadScore = { readonly orgId: string; readonly score: number; readonly updatedAt: Date };
@@ -32,12 +33,22 @@ interface Fixtures {
 }
 
 function makePrisma(fx: Fixtures) {
+  const updates: Array<{ id: string; langsmithRootRunId: string | null }> = [];
   return {
     graphRun: {
       findUnique: async (args: Prisma.GraphRunFindUniqueArgs) => {
         const id = (args.where as { id?: string }).id;
-        return fx.graphRuns.find((r) => r.id === id) ?? null;
+        const row = fx.graphRuns.find((r) => r.id === id);
+        if (!row) return null;
+        return { langsmithRootRunId: null, ...row };
       },
+      update: async (args: Prisma.GraphRunUpdateArgs) => {
+        const id = (args.where as { id?: string }).id ?? "";
+        const data = args.data as { langsmithRootRunId?: string | null };
+        updates.push({ id, langsmithRootRunId: data.langsmithRootRunId ?? null });
+        return { id };
+      },
+      _updates: updates,
     },
     leadScore: {
       count: async (args: Prisma.LeadScoreCountArgs) => {
@@ -305,6 +316,67 @@ describe("RunLevelEvaluatorService", () => {
       4;
     expect(Math.abs(score!.composite_score - expectedMean)).toBeLessThan(0.01);
     expect(score!.composite_score).toBeCloseTo(0.7875, 2);
+  });
+
+  it("recordLangSmithRunId persists to GraphRun.langsmithRootRunId (write-through)", async () => {
+    const fx: Fixtures = {
+      graphRuns: [
+        { id: RUN, orgId: ORG, status: GraphRunStatus.COMPLETED, startedAt: START, completedAt: END },
+      ],
+      leadScores: [],
+      evidenceEvents: [],
+      artifacts: [],
+    };
+    const prisma = makePrisma(fx);
+    const { langsmith } = makeLangSmith();
+
+    const svc = new RunLevelEvaluatorService(
+      prisma as unknown as ConstructorParameters<typeof RunLevelEvaluatorService>[0],
+      langsmith,
+    );
+    svc.recordLangSmithRunId(RUN, "ls_root_run_id");
+
+    // Fire-and-forget — let the microtask flush.
+    await new Promise((r) => setImmediate(r));
+
+    const updates = (prisma.graphRun as unknown as { _updates: Array<{ id: string; langsmithRootRunId: string | null }> })._updates;
+    expect(updates).toEqual([{ id: RUN, langsmithRootRunId: "ls_root_run_id" }]);
+  });
+
+  it("postFeedback falls back to GraphRun.langsmithRootRunId when the in-memory cache is empty (cross-pod resume)", async () => {
+    // Simulates a graph that captured its langsmith run id on pod A,
+    // then resumes on pod B which has an empty cache. The persisted column
+    // must back-fill the feedback path.
+    const fx: Fixtures = {
+      graphRuns: [
+        {
+          id: RUN,
+          orgId: ORG,
+          status: GraphRunStatus.COMPLETED,
+          startedAt: START,
+          completedAt: END,
+          langsmithRootRunId: "ls_root_from_db",
+        },
+      ],
+      leadScores: [],
+      evidenceEvents: [],
+      artifacts: [],
+    };
+    const prisma = makePrisma(fx);
+    const { langsmith, feedbacks } = makeLangSmith();
+
+    const svc = new RunLevelEvaluatorService(
+      prisma as unknown as ConstructorParameters<typeof RunLevelEvaluatorService>[0],
+      langsmith,
+    );
+    // Intentionally do NOT call recordLangSmithRunId — cache is cold.
+
+    const score = await svc.evaluateGraphRun(RUN);
+
+    expect(score).not.toBeNull();
+    // Feedback must still post, sourced from the persisted column.
+    expect(feedbacks.length).toBeGreaterThan(0);
+    expect(feedbacks.some((f) => f.key === "run_outcome_composite")).toBe(true);
   });
 
   it("returns null and does not throw when GraphRun row is missing", async () => {

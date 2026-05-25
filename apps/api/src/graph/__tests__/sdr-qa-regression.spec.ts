@@ -34,7 +34,7 @@ describe("qaCheck — placeholder leak patterns (each pattern locked individuall
   ];
 
   it.each(cases)("flags %s anywhere in the message", (needle, body) => {
-    const issues = qaCheck(VALID_SUBJECT, body);
+    const issues = qaCheck(VALID_SUBJECT, body, null);
     expect(
       issues.some((i) => i.includes("placeholder_leak") && i.includes(needle)),
     ).toBe(true);
@@ -44,6 +44,7 @@ describe("qaCheck — placeholder leak patterns (each pattern locked individuall
     const issues = qaCheck(
       "Hello {{name}} at [COMPANY]",
       `${VALID_BODY} TODO finalise`,
+      null,
     );
     const leaks = issues.filter((i) => i.includes("placeholder_leak"));
     expect(leaks.length).toBeGreaterThanOrEqual(3);
@@ -56,53 +57,53 @@ describe("qaCheck — placeholder leak patterns (each pattern locked individuall
     const safeBody =
       "Hi Alice, our pricing tier is $99/month (per user, billed annually). " +
       "If that works, I can share the deck — happy to chat next week.";
-    expect(qaCheck(VALID_SUBJECT, safeBody)).toEqual([]);
+    expect(qaCheck(VALID_SUBJECT, safeBody, null)).toEqual([]);
   });
 });
 
 describe("qaCheck — exact length boundaries", () => {
   it("body of exactly MIN_BODY_LEN (30) chars is allowed", () => {
     const body = "x".repeat(30);
-    const issues = qaCheck(VALID_SUBJECT, body);
+    const issues = qaCheck(VALID_SUBJECT, body, null);
     expect(issues.some((i) => i.startsWith("body_too_short"))).toBe(false);
   });
 
   it("body of MIN_BODY_LEN - 1 (29) chars is rejected", () => {
     const body = "x".repeat(29);
-    const issues = qaCheck(VALID_SUBJECT, body);
+    const issues = qaCheck(VALID_SUBJECT, body, null);
     expect(issues.some((i) => i.startsWith("body_too_short"))).toBe(true);
   });
 
   it("body of exactly MAX_BODY_LEN (2000) chars is allowed", () => {
     const body = "x".repeat(2000);
-    const issues = qaCheck(VALID_SUBJECT, body);
+    const issues = qaCheck(VALID_SUBJECT, body, null);
     expect(issues.some((i) => i.startsWith("body_too_long"))).toBe(false);
   });
 
   it("body of MAX_BODY_LEN + 1 (2001) chars is rejected", () => {
     const body = "x".repeat(2001);
-    const issues = qaCheck(VALID_SUBJECT, body);
+    const issues = qaCheck(VALID_SUBJECT, body, null);
     expect(issues.some((i) => i.startsWith("body_too_long"))).toBe(true);
   });
 
   it("subject of exactly MAX_SUBJECT_LEN (120) chars is allowed", () => {
     const subject = "x".repeat(120);
-    const issues = qaCheck(subject, VALID_BODY);
+    const issues = qaCheck(subject, VALID_BODY, null);
     expect(issues.some((i) => i.startsWith("subject_too_long"))).toBe(false);
   });
 
   it("subject of MAX_SUBJECT_LEN + 1 (121) chars is rejected", () => {
     const subject = "x".repeat(121);
-    const issues = qaCheck(subject, VALID_BODY);
+    const issues = qaCheck(subject, VALID_BODY, null);
     expect(issues.some((i) => i.startsWith("subject_too_long"))).toBe(true);
   });
 
   it("empty subject is flagged even when body is fine", () => {
-    expect(qaCheck("", VALID_BODY)).toContain("empty_subject");
+    expect(qaCheck("", VALID_BODY, null)).toContain("empty_subject");
   });
 
   it("a clean subject + body passes every check", () => {
-    expect(qaCheck(VALID_SUBJECT, VALID_BODY)).toEqual([]);
+    expect(qaCheck(VALID_SUBJECT, VALID_BODY, null)).toEqual([]);
   });
 });
 
@@ -114,12 +115,21 @@ function mockDepsFor(drafter: SubgraphDeps["drafter"]): SubgraphDeps & {
     prisma: {
       company: {
         findFirst: vi.fn().mockResolvedValue({
+          id: "co_reg",
           name: "Acme",
           domain: "acme.io",
           employeeRange: "50-200",
           industry: "SaaS",
+          country: null,
+          city: null,
+          fundingStage: null,
+          techStack: [],
+          intentSignals: [],
         }),
       },
+      person: { findFirst: vi.fn().mockResolvedValue(null) },
+      evidenceEvent: { findMany: vi.fn().mockResolvedValue([]) },
+      leadScore: { findFirst: vi.fn().mockResolvedValue(null) },
     } as unknown as SubgraphDeps["prisma"],
     llm: { chat: vi.fn() } as unknown as SubgraphDeps["llm"],
     outreachArtifacts: {
@@ -156,12 +166,15 @@ function lead(overrides: Partial<SdrLeadInput> = {}): SdrLeadInput {
   };
 }
 
+function draft(subject: string, body: string) {
+  return { subject, body, refusal: null, groundednessSelfCheck: null };
+}
+
 describe("SDR subgraph — MAX_DRAFT_ATTEMPTS termination", () => {
   it("invokes drafter at most MAX_DRAFT_ATTEMPTS (2) times even when QA always fails", async () => {
-    const drafter = vi.fn().mockResolvedValue({
-      subject: "Hello {{firstName}}",
-      body: VALID_BODY,
-    });
+    const drafter = vi
+      .fn()
+      .mockResolvedValue(draft("Hello {{firstName}}", VALID_BODY));
     const deps = mockDepsFor(drafter);
 
     const result = await runSdrOutreachSubgraph(deps, lead());
@@ -174,9 +187,7 @@ describe("SDR subgraph — MAX_DRAFT_ATTEMPTS termination", () => {
   });
 
   it("invokes drafter exactly once when first draft passes QA", async () => {
-    const drafter = vi
-      .fn()
-      .mockResolvedValue({ subject: VALID_SUBJECT, body: VALID_BODY });
+    const drafter = vi.fn().mockResolvedValue(draft(VALID_SUBJECT, VALID_BODY));
     const deps = mockDepsFor(drafter);
 
     const result = await runSdrOutreachSubgraph(deps, lead());
@@ -191,9 +202,9 @@ describe("SDR subgraph — MAX_DRAFT_ATTEMPTS termination", () => {
     const drafter = vi.fn().mockImplementation(async () => {
       attempt += 1;
       if (attempt === 1) {
-        return { subject: "Hi [COMPANY]", body: VALID_BODY };
+        return draft("Hi [COMPANY]", VALID_BODY);
       }
-      return { subject: VALID_SUBJECT, body: VALID_BODY };
+      return draft(VALID_SUBJECT, VALID_BODY);
     });
     const deps = mockDepsFor(drafter);
 
@@ -210,10 +221,10 @@ describe("SDR subgraph — MAX_DRAFT_ATTEMPTS termination", () => {
     const drafter = vi.fn().mockImplementation(async (input) => {
       attempt += 1;
       if (attempt === 1) {
-        return { subject: "Hello {{firstName}}", body: VALID_BODY };
+        return draft("Hello {{firstName}}", VALID_BODY);
       }
       captured = input.previousAttempt;
-      return { subject: VALID_SUBJECT, body: VALID_BODY };
+      return draft(VALID_SUBJECT, VALID_BODY);
     });
     const deps = mockDepsFor(drafter);
 
@@ -232,9 +243,7 @@ describe("SDR subgraph — Phase 2.5 safety contract", () => {
     // never call an LLM tool or external send path. If a future refactor
     // wires up direct sending, this test catches it because recordDryRun
     // is the only persistence side-effect on `outreachArtifacts`.
-    const drafter = vi
-      .fn()
-      .mockResolvedValue({ subject: VALID_SUBJECT, body: VALID_BODY });
+    const drafter = vi.fn().mockResolvedValue(draft(VALID_SUBJECT, VALID_BODY));
     const deps = mockDepsFor(drafter);
 
     await runSdrOutreachSubgraph(deps, lead());
@@ -248,9 +257,7 @@ describe("SDR subgraph — Phase 2.5 safety contract", () => {
   });
 
   it("attaches qaIssues to the artifact payload so reviewers see the gate result", async () => {
-    const drafter = vi
-      .fn()
-      .mockResolvedValue({ subject: "Hi [COMPANY]", body: VALID_BODY });
+    const drafter = vi.fn().mockResolvedValue(draft("Hi [COMPANY]", VALID_BODY));
     const deps = mockDepsFor(drafter);
 
     await runSdrOutreachSubgraph(deps, lead());

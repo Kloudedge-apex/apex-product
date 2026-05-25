@@ -45,10 +45,16 @@ describe("pipeline-graph (supervisor routing)", () => {
         company: {
           findMany: async () => [{ id: "c1", domain: "acme.io", name: "Acme" }],
           findFirst: async () => ({
+            id: "c1",
             name: "Acme",
             domain: "acme.io",
             employeeRange: "50-200",
             industry: "SaaS",
+            country: "US",
+            city: "SF",
+            fundingStage: "Series B",
+            techStack: ["Postgres", "Node"],
+            intentSignals: [],
           }),
         },
         person: {
@@ -63,6 +69,16 @@ describe("pipeline-graph (supervisor routing)", () => {
               company: { name: "Acme", domain: "acme.io" },
             },
           ],
+          findFirst: async () => ({
+            title: "VP Sales",
+            seniority: "VP",
+            department: "Sales",
+            location: "SF",
+            bio: null,
+          }),
+        },
+        evidenceEvent: {
+          findMany: async () => [],
         },
         leadScore: {
           findMany: async () => [
@@ -70,6 +86,11 @@ describe("pipeline-graph (supervisor routing)", () => {
             { personId: "p2", score: 60 },
             { personId: "p3", score: 30 },
           ],
+          findFirst: async () => ({
+            score: 90,
+            breakdown: {},
+            updatedAt: new Date("2026-05-26T00:00:00Z"),
+          }),
         },
         agent: {
           findFirst: async () => ({ id: "agent_sdr" }),
