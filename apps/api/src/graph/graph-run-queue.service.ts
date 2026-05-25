@@ -117,9 +117,12 @@ export class GraphRunQueueService implements OnModuleDestroy {
             resume: input.resume,
           };
 
+    // BullMQ rejects custom job ids that contain ':' (it uses colon as an
+    // internal key separator). Use '-' instead so resume jobs can still be
+    // distinguished from start jobs for the same run.
     const jobId =
       input.kind === "resume"
-        ? `${input.graphRunId}:resume`
+        ? `${input.graphRunId}-resume`
         : input.graphRunId;
 
     await this.bullQueue.add("process-graph-run", data, {
