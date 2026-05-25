@@ -1,5 +1,12 @@
-import { Injectable, Logger, ConflictException } from "@nestjs/common";
+import {
+  Injectable,
+  Logger,
+  ConflictException,
+  Inject,
+  forwardRef,
+} from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
+import { GraphService } from "../graph/graph.service";
 import { AtsScraper } from "./sources/ats-scraper.service";
 import { TeamPageScraper } from "./sources/team-page-scraper.service";
 import { RegistryScraper } from "./sources/registry-scraper.service";
@@ -44,6 +51,8 @@ export class LeadsService {
     private readonly emailPatternService: EmailPatternService,
     private readonly identityResolver: IdentityResolver,
     private readonly leadScorer: LeadScorer,
+    @Inject(forwardRef(() => GraphService))
+    private readonly graphService: GraphService,
   ) {}
 
   // ─── ICP ─────────────────────────────────────────────
@@ -114,10 +123,19 @@ export class LeadsService {
    */
   async triggerDiscovery(orgId: string, icpProfileId: string) {
     if (process.env.LEGACY_TRIGGER_DISCOVERY_ENABLED !== "true") {
-      this.logger.warn(
-        "triggerDiscovery is deprecated — set LEGACY_TRIGGER_DISCOVERY_ENABLED=true to opt back in; graph supervisor is now the single entry point",
+      const { runId, threadId } = await this.graphService.runPipelineGraph(
+        orgId,
+        [icpProfileId],
       );
-      return { message: "Legacy discovery disabled; use graph supervisor", icpProfileId, skipped: true as const };
+      this.logger.log(
+        `Discovery routed through graph supervisor (runId=${runId})`,
+      );
+      return {
+        message: "Discovery pipeline started",
+        icpProfileId,
+        runId,
+        threadId,
+      };
     }
 
     const existingJob = await this.prisma.scrapeJob.findFirst({

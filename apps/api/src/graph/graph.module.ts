@@ -1,4 +1,4 @@
-import { Module } from "@nestjs/common";
+import { Module, forwardRef } from "@nestjs/common";
 import { GraphService } from "./graph.service";
 import { GraphController } from "./graph.controller";
 import { GraphRunQueueService } from "./graph-run-queue.service";
@@ -9,7 +9,12 @@ import { OutreachModule } from "../outreach/outreach.module";
 import { ObservabilityModule } from "../observability/observability.module";
 
 @Module({
-  imports: [LeadsModule, RuntimeModule, OutreachModule, ObservabilityModule],
+  imports: [
+    forwardRef(() => LeadsModule),
+    RuntimeModule,
+    OutreachModule,
+    ObservabilityModule,
+  ],
   controllers: [GraphController],
   providers: [GraphService, GraphRunQueueService, GraphRunWorker],
   exports: [GraphService, GraphRunQueueService],

@@ -3,6 +3,8 @@ import {
   Logger,
   NotFoundException,
   ConflictException,
+  Inject,
+  forwardRef,
 } from "@nestjs/common";
 import { Command, isInterrupted } from "@langchain/langgraph";
 import { PrismaService } from "../prisma/prisma.service";
@@ -29,6 +31,7 @@ export class GraphService {
 
   constructor(
     private readonly prisma: PrismaService,
+    @Inject(forwardRef(() => LeadsService))
     private readonly leads: LeadsService,
     private readonly runtime: RuntimeService,
     private readonly llm: LLMService,
