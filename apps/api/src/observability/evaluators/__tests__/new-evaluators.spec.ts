@@ -146,6 +146,48 @@ describe("CitationCoverageEvaluator", () => {
     expect(r?.score).toBe(1);
     expect(r?.value).toBe("no_claims");
   });
+
+  // Regression for the 2026-05-26 outlier: in prod the evaluator receives the
+  // raw LLMResponse where `content` is the JSON string and `body` /
+  // `groundedness_self_check` live INSIDE it. Without JSON parsing the
+  // evaluator scored 0 (treated the whole JSON as the body, missed the cited
+  // ids). With parsing the cited fact_id is reachable and the score is 1.
+  it("parses outputs.content as JSON when the model returned a stringified payload", async () => {
+    const llmResponseShape = {
+      content: JSON.stringify({
+        subject: "Andrew, a quick note",
+        body: "Andrew, I saw your role as Managing Director, Global Financial Crime at Home [P1]. Worth a 15-min look?",
+        refusal: null,
+        groundedness_self_check: {
+          cited_fact_ids: ["P1"],
+          unsupported_claims: [],
+        },
+      }),
+      model: "gpt-4o-mini",
+      finishReason: "stop",
+      tokensUsed: 200,
+      toolCalls: null,
+    };
+    const r = await ev.evaluate(
+      baseCtx({
+        inputs: [
+          { role: "system", content: "system prompt" },
+          {
+            role: "user",
+            content: `<brief>
+  <person>
+    <fact id="P1" source="person.profile">Andrew Tennant, Managing Director, Global Financial Crime, at Home.</fact>
+  </person>
+</brief>`,
+          },
+        ],
+        outputs: llmResponseShape,
+      }),
+    );
+    expect(r).not.toBeNull();
+    expect(r!.score).toBe(1);
+    expect(r!.value).toBe("well_cited");
+  });
 });
 
 describe("PiiLeakageEvaluator — tightened phone regex", () => {

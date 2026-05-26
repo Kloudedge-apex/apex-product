@@ -81,9 +81,38 @@ export class CitationCoverageEvaluator implements Evaluator {
   }
 }
 
+// The SDR drafter's LLM response surfaces as `{ content: "<json string>", ... }`
+// from the LangSmith wrapper — `outputs.content` is the raw assistant message,
+// not the parsed payload. Parse JSON-shaped content before reaching for `body`
+// or `groundedness_self_check`, otherwise we treat the whole JSON as the body
+// (matching "Director" etc.) AND silently miss the cited_fact_ids that live
+// inside it. That mismatch is what produced score=0 outliers in prod.
+function parseOutputsPayload(outputs: unknown): Record<string, unknown> | null {
+  if (!outputs || typeof outputs !== "object") return null;
+  const obj = outputs as Record<string, unknown>;
+  if (typeof obj.content === "string") {
+    const cleaned = obj.content
+      .trim()
+      .replace(/^```(?:json)?\s*/i, "")
+      .replace(/\s*```$/i, "")
+      .trim();
+    if (cleaned.startsWith("{")) {
+      try {
+        const parsed = JSON.parse(cleaned) as Record<string, unknown>;
+        return parsed;
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
 function extractBody(outputs: unknown): string {
   if (!outputs) return "";
   if (typeof outputs === "string") return outputs;
+  const parsed = parseOutputsPayload(outputs);
+  if (parsed && typeof parsed.body === "string") return parsed.body;
   if (typeof outputs === "object") {
     const obj = outputs as Record<string, unknown>;
     if (typeof obj.body === "string") return obj.body;
@@ -94,15 +123,21 @@ function extractBody(outputs: unknown): string {
 
 function extractCitedFactIds(outputs: unknown): readonly string[] {
   if (!outputs || typeof outputs !== "object") return [];
-  const obj = outputs as Record<string, unknown>;
-  const sc =
-    (obj.groundednessSelfCheck as Record<string, unknown> | undefined) ??
-    (obj.groundedness_self_check as Record<string, unknown> | undefined);
-  if (!sc) return [];
-  const ids =
-    (sc.citedFactIds as unknown) ?? (sc.cited_fact_ids as unknown);
-  if (!Array.isArray(ids)) return [];
-  return ids.filter((x): x is string => typeof x === "string");
+  const parsed = parseOutputsPayload(outputs);
+  const containers: Array<Record<string, unknown>> = [];
+  if (parsed) containers.push(parsed);
+  containers.push(outputs as Record<string, unknown>);
+  for (const obj of containers) {
+    const sc =
+      (obj.groundednessSelfCheck as Record<string, unknown> | undefined) ??
+      (obj.groundedness_self_check as Record<string, unknown> | undefined);
+    if (!sc) continue;
+    const ids = (sc.citedFactIds as unknown) ?? (sc.cited_fact_ids as unknown);
+    if (Array.isArray(ids)) {
+      return ids.filter((x): x is string => typeof x === "string");
+    }
+  }
+  return [];
 }
 
 function extractFacts(inputs: unknown): Map<string, string> {

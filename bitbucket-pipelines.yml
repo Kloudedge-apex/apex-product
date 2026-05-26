@@ -51,10 +51,16 @@ definitions:
         image: mcr.microsoft.com/azure-cli:latest
         script:
           - az login --service-principal -u $AZURE_SP_APP_ID -p $AZURE_SP_PASSWORD --tenant $AZURE_TENANT_ID --output none
+          # Tag scheme:
+          #   :$BITBUCKET_COMMIT  — immutable SHA tag, what deploys roll forward to
+          #   :v$STAMP            — human-readable timestamp, matches manual `az acr build` provenance
+          #   :latest             — moving pointer, used by the manual redeploy fallback
+          - export STAMP=$(date -u +%Y%m%d%H%M%S)
           - >
             az acr build
             --registry ledgracr
             --image apex-api:$BITBUCKET_COMMIT
+            --image apex-api:v$STAMP
             --image apex-api:latest
             --file apps/api/Dockerfile
             .
@@ -104,14 +110,20 @@ pipelines:
       - step: *install-and-test
 
   # Manual: trigger from Bitbucket UI when you want to roll without a push
-  # (e.g. re-deploy current master image, or roll back to a specific SHA by
-  # editing the variable IMAGE_TAG before clicking Run).
+  # (e.g. re-deploy current master image, or roll back to a specific SHA /
+  # timestamp tag). Set IMAGE_TAG in the "Run pipeline" dialog — defaults to
+  # `latest`, which matches what the most recent successful master build
+  # pushed.
   custom:
     redeploy-current-master:
+      - variables:
+          - name: IMAGE_TAG
+            default: latest
       - step:
-          name: Roll API + worker to apex-api:latest
+          name: Roll API + worker to apex-api:$IMAGE_TAG
           image: mcr.microsoft.com/azure-cli:latest
           script:
             - az login --service-principal -u $AZURE_SP_APP_ID -p $AZURE_SP_PASSWORD --tenant $AZURE_TENANT_ID --output none
-            - az containerapp update -n apex-gtm-api -g Ledgr-prod --image ledgracr.azurecr.io/apex-api:latest --output none
-            - az containerapp update -n apex-gtm-worker -g Ledgr-prod --image ledgracr.azurecr.io/apex-api:latest --output none
+            - echo "Rolling to ledgracr.azurecr.io/apex-api:$IMAGE_TAG"
+            - az containerapp update -n apex-gtm-api -g Ledgr-prod --image ledgracr.azurecr.io/apex-api:$IMAGE_TAG --output none
+            - az containerapp update -n apex-gtm-worker -g Ledgr-prod --image ledgracr.azurecr.io/apex-api:$IMAGE_TAG --output none
