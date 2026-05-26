@@ -45,6 +45,34 @@ export function isOutreachWorkerEnabled(
   return env.OUTREACH_WORKER_ENABLED === "true";
 }
 
+/**
+ * Per-org allowlist for real outbound sends. Without this gate, any org with
+ * connected Gmail/Outlook credentials would real-send post-approval — there
+ * is no other dry-run check on the LangGraph approval path (the legacy
+ * SideEffectPolicy.defaultDryRun only applies to the direct executor).
+ *
+ *   OUTREACH_LIVE_FOR_ORGS unset / empty → no orgs may real-send (fail-closed)
+ *   OUTREACH_LIVE_FOR_ORGS="org_a,org_b" → only those orgs may real-send
+ *   OUTREACH_LIVE_FOR_ORGS="*"           → all orgs (dev convenience only)
+ *
+ * Orgs NOT in the allowlist still progress through the worker, but their
+ * integrations Map is left empty so SendEmailTool / LinkedInSendMessageTool
+ * fall back to their mock branches. Artifacts get marked SENT with a mock
+ * receipt — the audit trail records the attempt without an external call.
+ */
+export function isLiveSendAllowedForOrg(
+  orgId: string,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const raw = env.OUTREACH_LIVE_FOR_ORGS?.trim();
+  if (!raw) return false;
+  if (raw === "*") return true;
+  const allowlist = new Set(
+    raw.split(",").map((s) => s.trim()).filter(Boolean),
+  );
+  return allowlist.has(orgId);
+}
+
 const IN_MEMORY_POLL_INTERVAL_MS = 5_000;
 const IN_MEMORY_BATCH_SIZE = 10;
 
@@ -243,9 +271,23 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
 
   /** Channel-dispatch. Add new branches as more send tools come online. */
   private async dispatch(artifact: OutreachArtifact): Promise<ToolResult> {
+    // Gate: only allowlisted orgs may load real credentials. For non-listed
+    // orgs we pass an empty Map, which causes the send tools to take their
+    // mock branch — same shape as having no integration connected.
+    const liveAllowed = isLiveSendAllowedForOrg(artifact.orgId);
+    if (!liveAllowed) {
+      this.logger.log(
+        `Org ${artifact.orgId} not in OUTREACH_LIVE_FOR_ORGS — forcing mock send for artifact ${artifact.id}`,
+      );
+    }
+    const loadIntegrationsIfAllowed = async () =>
+      liveAllowed
+        ? this.loadIntegrations(artifact.orgId)
+        : new Map<string, IntegrationCredentials>();
+
     switch (artifact.channel) {
       case OutreachChannel.EMAIL: {
-        const integrations = await this.loadIntegrations(artifact.orgId);
+        const integrations = await loadIntegrationsIfAllowed();
         const context: ToolContext = {
           orgId: artifact.orgId,
           // No agent/run context post-approval — we're dispatching a human
@@ -259,7 +301,7 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
         return this.sendEmailTool.execute(payload, context);
       }
       case OutreachChannel.LINKEDIN: {
-        const integrations = await this.loadIntegrations(artifact.orgId);
+        const integrations = await loadIntegrationsIfAllowed();
         const context: ToolContext = {
           orgId: artifact.orgId,
           agentId: "outreach-worker",

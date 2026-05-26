@@ -1,8 +1,9 @@
-import { Injectable, Optional } from "@nestjs/common";
+import { BadRequestException, Injectable, Optional } from "@nestjs/common";
 import * as crypto from "crypto";
 import { OutreachArtifactStatus } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { LLMService, ChatMessage } from "./llm.service";
+import { LlmBudgetService } from "./llm-budget.service";
 import { getPromptForTemplate } from "./prompts";
 import { ToolRegistry } from "./tools/registry";
 import { ToolContext, toolToOpenAIFunction, IntegrationCredentials } from "./tools/tool.interface";
@@ -110,6 +111,7 @@ export class ExecutorService {
     private outreachArtifacts: OutreachArtifactsService,
     @Optional() private readonly evidenceLedger?: EvidenceLedgerService,
     @Optional() private readonly linkedinService?: LinkedInService,
+    @Optional() private readonly llmBudget?: LlmBudgetService,
   ) {
     this.toolRegistry = new ToolRegistry(
       memoryService,
@@ -285,6 +287,35 @@ export class ExecutorService {
         await this.addLog(runId, "WARN", `Token budget exhausted (${totalTokens}/${tokenBudget} for plan ${plan}). Stopping.`);
         await this.persistStep(runId, dbStepIndex++, "ERROR", undefined, undefined, { budget: tokenBudget, used: totalTokens }, 0, 0, `Token budget exhausted for plan ${plan}`);
         break;
+      }
+
+      // ── Daily USD budget enforcement (per org) ────────────────────────
+      // Read-only check before the LLM call. The actual atomic charge happens
+      // inside LLMService.chat() so every entry point (executor + LangGraph
+      // nodes + judges) is gated by the same ledger. This fast-fail surfaces
+      // the cap in the run trace before the BadRequestException bubbles up.
+      if (this.llmBudget) {
+        const spent = this.llmBudget.getSpentToday(agent.orgId);
+        const cap = this.llmBudget.getCap();
+        if (spent >= cap) {
+          await this.addLog(
+            runId,
+            "ERROR",
+            `Daily LLM USD cap reached for org ${agent.orgId} (spent ${spent.toFixed(2)}/${cap.toFixed(2)}). Stopping.`,
+          );
+          await this.persistStep(
+            runId,
+            dbStepIndex++,
+            "ERROR",
+            undefined,
+            undefined,
+            { cap, spent },
+            0,
+            0,
+            `Daily LLM budget exceeded for org`,
+          );
+          throw new BadRequestException("Daily LLM budget exceeded for org");
+        }
       }
 
       // Force tool use for the first N iterations to ensure agents actually use their tools

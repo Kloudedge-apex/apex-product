@@ -1,6 +1,7 @@
-import { Injectable, Logger, Optional } from "@nestjs/common";
+import { BadRequestException, Injectable, Logger, Optional } from "@nestjs/common";
 import { OpenAIFunctionDef } from "./tools/tool.interface";
 import { LangSmithService } from "../observability/langsmith.service";
+import { LlmBudgetService } from "./llm-budget.service";
 import { withCircuitBreaker } from "../common/http-retry.util";
 
 export interface ChatMessage {
@@ -138,6 +139,14 @@ export interface ChatOptions {
   metadata?: Readonly<Record<string, unknown>>;
   /** Fires after the LangSmith run is created on the server, with the runId. */
   onRunStart?: (runId: string) => void;
+  /**
+   * Org owning this call. When set, the LLM budget service charges this org
+   * before the call is dispatched and refuses the call if the daily cap is
+   * exhausted. Falls back to `metadata.org_id` if not specified directly, so
+   * existing call-sites that already pass org_id via metadata are gated
+   * without code changes.
+   */
+  orgId?: string;
 }
 
 @Injectable()
@@ -149,6 +158,7 @@ export class LLMService {
 
   constructor(
     @Optional() private readonly langsmith?: LangSmithService,
+    @Optional() private readonly budget?: LlmBudgetService,
   ) {
     if (process.env.NODE_ENV === "production") {
       const hasAzure = !!(this.azureKey && this.azureEndpoint);
@@ -174,6 +184,24 @@ export class LLMService {
     const plan = options?.plan || "TRIAL";
     const tokenLimit = TOKEN_LIMITS[plan] || TOKEN_LIMITS.TRIAL;
     const maxTokens = Math.min(options?.maxTokens || 4000, tokenLimit);
+
+    // Per-org daily LLM budget gate. Single chokepoint — every executor step,
+    // every LangGraph node, and the LLM-judge evaluators all reach this method,
+    // so charging here covers the whole platform with one check. orgId may be
+    // passed directly or via metadata.org_id (most existing callers do the
+    // latter); if neither is provided, the call is uncharged — that's
+    // intentional for system-level callers (judges, embeddings) that aren't
+    // attributable to a tenant.
+    const orgId = LLMService.resolveOrgId(options);
+    if (orgId && this.budget) {
+      const estimate = LLMService.estimateUsd(model, messages, maxTokens);
+      const charged = this.budget.tryCharge(orgId, estimate);
+      if (!charged.allowed) {
+        throw new BadRequestException(
+          `Daily LLM budget exceeded for org (spent ${charged.spentToday.toFixed(2)}/${charged.cap.toFixed(2)} USD).`,
+        );
+      }
+    }
     const attribution: LlmAttribution = {
       parentRunId: options?.parentRunId,
       agent: options?.agent,
@@ -651,6 +679,56 @@ export class LLMService {
 
   getTokenLimit(plan: string): number {
     return TOKEN_LIMITS[plan] || TOKEN_LIMITS.TRIAL;
+  }
+
+  /**
+   * Resolve the org charged for this call. Direct `orgId` takes precedence;
+   * fall back to `metadata.org_id` because most existing call-sites attach
+   * the tenant via the metadata blob for LangSmith. Returns `undefined` for
+   * system calls that have no tenant attribution.
+   */
+  private static resolveOrgId(options: ChatOptions | undefined): string | undefined {
+    if (!options) return undefined;
+    if (typeof options.orgId === "string" && options.orgId.length > 0) {
+      return options.orgId;
+    }
+    const meta = options.metadata;
+    if (meta && typeof meta === "object") {
+      const candidate = (meta as Record<string, unknown>).org_id;
+      if (typeof candidate === "string" && candidate.length > 0) return candidate;
+    }
+    return undefined;
+  }
+
+  /**
+   * Conservative per-call USD estimate used to pre-charge the budget service.
+   * We don't have the response token count yet (this is a *pre*-call gate),
+   * so we estimate input tokens from the message bodies (~4 chars/token) and
+   * assume the response will use the full `maxTokens` slot. The estimate is
+   * intentionally pessimistic so the budget guard fails closed rather than
+   * silently letting a runaway loop chew through the cap.
+   */
+  private static estimateUsd(
+    model: string,
+    messages: ChatMessage[],
+    maxTokens: number,
+  ): number {
+    let chars = 0;
+    for (const m of messages) {
+      if (typeof m.content === "string") chars += m.content.length;
+      if (m.tool_calls) {
+        for (const tc of m.tool_calls) {
+          chars += tc.function.name.length + tc.function.arguments.length;
+        }
+      }
+    }
+    const inputTokens = Math.ceil(chars / 4);
+    const totalTokens = inputTokens + maxTokens;
+    const costPer1K = COST_PER_1K[model] ?? COST_PER_1K["gpt-4o-mini"];
+    const estimated = (totalTokens / 1000) * costPer1K;
+    // Floor at $0.02/call so even mock/cheap models still consume budget —
+    // matches the "conservative flat $0.02 per call" fallback in the spec.
+    return Math.max(estimated, 0.02);
   }
 
   /**

@@ -3,6 +3,7 @@ import { RuntimeService } from "./runtime.service";
 import { QueueService } from "./queue.service";
 import { WorkerService } from "./worker.service";
 import { LLMService } from "./llm.service";
+import { LlmBudgetService } from "./llm-budget.service";
 import { ExecutorService } from "./executor.service";
 import { SchedulerService } from "./scheduler.service";
 import { RuntimeController } from "./runtime.controller";
@@ -21,11 +22,12 @@ import { callJudge } from "../observability/evaluators/judge";
     QueueService,
     WorkerService,
     LLMService,
+    LlmBudgetService,
     ExecutorService,
     SchedulerService,
     MemoryService,
   ],
-  exports: [RuntimeService, LLMService, MemoryService],
+  exports: [RuntimeService, LLMService, LlmBudgetService, MemoryService],
 })
 export class RuntimeModule implements OnModuleInit {
   constructor(

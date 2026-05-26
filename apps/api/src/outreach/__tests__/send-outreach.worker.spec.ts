@@ -1,10 +1,13 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   OutreachArtifact,
   OutreachArtifactStatus,
   OutreachChannel,
 } from "@prisma/client";
-import { SendOutreachWorker } from "../send-outreach.worker";
+import {
+  SendOutreachWorker,
+  isLiveSendAllowedForOrg,
+} from "../send-outreach.worker";
 import { OutreachSendQueueService } from "../outreach-send-queue.service";
 import { PrismaService } from "../../prisma/prisma.service";
 import { IntegrationsService } from "../../integrations/integrations.service";
@@ -304,6 +307,68 @@ describe("SendOutreachWorker.processArtifact", () => {
     );
   });
 
+  it("strips integrations when orgId is not in OUTREACH_LIVE_FOR_ORGS (forces mock branch)", async () => {
+    process.env.OUTREACH_LIVE_FOR_ORGS = "org_live_a,org_live_b";
+    try {
+      prisma.outreachArtifact.findUnique.mockResolvedValue(
+        artifactRow({ orgId: "org_blocked" }),
+      );
+      prisma.outreachArtifact.update.mockResolvedValue(
+        artifactRow({ status: OutreachArtifactStatus.SENT }),
+      );
+      // Don't let prisma.integration.findMany even be called — but tolerate it
+      // returning [] if it is. The contract under test is that the tool sees
+      // an empty integrations Map.
+      const sendSpy = vi
+        .spyOn(SendEmailTool.prototype, "execute")
+        .mockResolvedValueOnce({
+          success: true,
+          data: {
+            sent: false,
+            mock: true,
+            provider: "mock",
+            messageId: "mock_xyz",
+            to: "dest@example.com",
+            subject: "Hi",
+          },
+        });
+
+      await worker.processArtifact("art_1", "org_blocked");
+
+      const ctxArg = sendSpy.mock.calls[0]?.[1] as { integrations: Map<string, unknown> };
+      expect(ctxArg.integrations.size).toBe(0);
+      // loadIntegrations() must NOT run for blocked orgs — confirms we skipped
+      // the prisma query path entirely rather than just emptying the Map.
+      expect(prisma.integration.findMany).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.OUTREACH_LIVE_FOR_ORGS;
+    }
+  });
+
+  it("loads integrations when orgId IS in OUTREACH_LIVE_FOR_ORGS", async () => {
+    process.env.OUTREACH_LIVE_FOR_ORGS = "org_1,org_2";
+    try {
+      prisma.outreachArtifact.findUnique.mockResolvedValue(artifactRow());
+      prisma.outreachArtifact.update.mockResolvedValue(
+        artifactRow({ status: OutreachArtifactStatus.SENT }),
+      );
+      vi.spyOn(SendEmailTool.prototype, "execute").mockResolvedValueOnce({
+        success: true,
+        data: { sent: true, provider: "gmail", messageId: "real_1" },
+      });
+
+      await worker.processArtifact("art_1", "org_1");
+
+      // Allowlisted org → loadIntegrations() runs → prisma.integration.findMany
+      // is queried. We only assert the side-effect, not the result.
+      expect(prisma.integration.findMany).toHaveBeenCalledWith({
+        where: { orgId: "org_1", status: "CONNECTED" },
+      });
+    } finally {
+      delete process.env.OUTREACH_LIVE_FOR_ORGS;
+    }
+  });
+
   it("emits messageSent EvidenceEvent on success", async () => {
     prisma.outreachArtifact.findUnique.mockResolvedValue(
       artifactRow({ graphRunId: "graph_42" }),
@@ -335,5 +400,41 @@ describe("SendOutreachWorker.processArtifact", () => {
       sendReceiptId: "gmail_msg_99",
       provider: "gmail",
     });
+  });
+});
+
+describe("isLiveSendAllowedForOrg", () => {
+  it("returns false when OUTREACH_LIVE_FOR_ORGS is unset (fail-closed)", () => {
+    expect(isLiveSendAllowedForOrg("org_x", {})).toBe(false);
+  });
+
+  it("returns false when env var is empty string", () => {
+    expect(isLiveSendAllowedForOrg("org_x", { OUTREACH_LIVE_FOR_ORGS: "" })).toBe(false);
+  });
+
+  it("returns false when env var is whitespace only", () => {
+    expect(isLiveSendAllowedForOrg("org_x", { OUTREACH_LIVE_FOR_ORGS: "   " })).toBe(false);
+  });
+
+  it("returns true for org listed in comma-separated allowlist", () => {
+    expect(
+      isLiveSendAllowedForOrg("org_b", { OUTREACH_LIVE_FOR_ORGS: "org_a,org_b,org_c" }),
+    ).toBe(true);
+  });
+
+  it("returns false for org not in allowlist", () => {
+    expect(
+      isLiveSendAllowedForOrg("org_z", { OUTREACH_LIVE_FOR_ORGS: "org_a,org_b" }),
+    ).toBe(false);
+  });
+
+  it("tolerates whitespace around comma-separated entries", () => {
+    expect(
+      isLiveSendAllowedForOrg("org_b", { OUTREACH_LIVE_FOR_ORGS: " org_a , org_b , org_c " }),
+    ).toBe(true);
+  });
+
+  it("wildcard '*' permits any org (dev only)", () => {
+    expect(isLiveSendAllowedForOrg("any_org", { OUTREACH_LIVE_FOR_ORGS: "*" })).toBe(true);
   });
 });
