@@ -21,6 +21,18 @@ import { isWorkerEnabled } from "../runtime/worker.service";
  *     - NODE_ENV must equal "production"
  *     - ADMIN_API_KEY must be set
  *
+ *   When NODE_ENV="production" (i.e. running as a deployed image):
+ *     - OPENAI_API_KEY must be set
+ *     - ANTHROPIC_API_KEY must be set
+ *     - GMAIL_OAUTH_CLIENT_ID must be set
+ *     - GMAIL_OAUTH_CLIENT_SECRET must be set
+ *     - HUBSPOT_CLIENT_ID must be set
+ *     - HUBSPOT_CLIENT_SECRET must be set
+ *
+ * Missing prod secrets are collected and reported in a single throw so the
+ * operator can fix everything in one redeploy instead of bouncing the pod
+ * once per missing var.
+ *
  * Never prints the key. Logs a SHA-256 fingerprint (first 8 hex of digest) so
  * api/worker drift shows up in side-by-side logs.
  */
@@ -70,6 +82,31 @@ export function validateEnv(
     }
     if (!env.ADMIN_API_KEY || env.ADMIN_API_KEY.length === 0) {
       issues.push("ADMIN_API_KEY is required when REQUIRE_PRODUCTION_ENV=true");
+    }
+  }
+
+  if (isProd) {
+    // Required third-party credentials. Missing keys would otherwise surface
+    // as opaque 500s on the first user request that hits an LLM call or an
+    // OAuth start endpoint. Collect all of them so the operator can fix the
+    // pod config in one redeploy.
+    // NOTE: env names below MUST match what the rest of the codebase actually
+    // reads (see apps/api/src/integrations/integrations.service.ts and
+    // gmail.service.ts / hubspot.service.ts). The Gmail OAuth client is named
+    // GOOGLE_CLIENT_ID/SECRET, not GMAIL_OAUTH_*.
+    const REQUIRED_PROD_SECRETS = [
+      "OPENAI_API_KEY",
+      "ANTHROPIC_API_KEY",
+      "GOOGLE_CLIENT_ID",
+      "GOOGLE_CLIENT_SECRET",
+      "HUBSPOT_CLIENT_ID",
+      "HUBSPOT_CLIENT_SECRET",
+    ] as const;
+    for (const name of REQUIRED_PROD_SECRETS) {
+      const value = env[name];
+      if (!value || value.length === 0) {
+        issues.push(`${name} is required when NODE_ENV=production`);
+      }
     }
   }
 

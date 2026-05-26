@@ -22,6 +22,12 @@ function baseProdEnv(): NodeJS.ProcessEnv {
     DATABASE_URL: "postgresql://localhost/test",
     ENCRYPTION_KEY: HEX_KEY,
     ADMIN_API_KEY: "admin-secret",
+    OPENAI_API_KEY: "sk-test-openai",
+    ANTHROPIC_API_KEY: "sk-ant-test",
+    GOOGLE_CLIENT_ID: "gmail-client-id",
+    GOOGLE_CLIENT_SECRET: "gmail-client-secret",
+    HUBSPOT_CLIENT_ID: "hubspot-client-id",
+    HUBSPOT_CLIENT_SECRET: "hubspot-client-secret",
   } as NodeJS.ProcessEnv;
 }
 
@@ -84,6 +90,57 @@ describe("validateEnv", () => {
     expect(encryptionKeyFingerprint).toBeTruthy();
     expect(encryptionKeyFingerprint).not.toContain(HEX_KEY);
     expect(encryptionKeyFingerprint?.length).toBe(8);
+  });
+
+  it("passes when all six third-party secrets are set in production", () => {
+    const { issues } = validateEnv(baseProdEnv());
+    expect(issues).toEqual([]);
+  });
+
+  it("fails when a single third-party secret is missing in production and names that var", () => {
+    const env = baseProdEnv();
+    delete env.HUBSPOT_CLIENT_SECRET;
+    const { issues } = validateEnv(env);
+    expect(issues.some((i) => i.includes("HUBSPOT_CLIENT_SECRET"))).toBe(true);
+    // Single missing var produces exactly one new issue.
+    expect(issues.filter((i) => i.includes("when NODE_ENV=production")).length).toBe(1);
+  });
+
+  it("reports ALL missing third-party secrets in a single pass (no early bail-out)", () => {
+    const env = baseProdEnv();
+    delete env.OPENAI_API_KEY;
+    delete env.GOOGLE_CLIENT_ID;
+    delete env.HUBSPOT_CLIENT_SECRET;
+    const { issues } = validateEnv(env);
+    expect(issues.some((i) => i.includes("OPENAI_API_KEY"))).toBe(true);
+    expect(issues.some((i) => i.includes("GOOGLE_CLIENT_ID"))).toBe(true);
+    expect(issues.some((i) => i.includes("HUBSPOT_CLIENT_SECRET"))).toBe(true);
+    // The two we left set should NOT show up.
+    expect(issues.some((i) => i.includes("ANTHROPIC_API_KEY"))).toBe(false);
+    expect(issues.some((i) => i.includes("GOOGLE_CLIENT_SECRET"))).toBe(false);
+    expect(issues.some((i) => i.includes("HUBSPOT_CLIENT_ID"))).toBe(false);
+  });
+
+  it("treats empty-string third-party secrets the same as unset", () => {
+    const env = baseProdEnv();
+    env.OPENAI_API_KEY = "";
+    const { issues } = validateEnv(env);
+    expect(issues.some((i) => i.includes("OPENAI_API_KEY"))).toBe(true);
+  });
+
+  it("does NOT require third-party secrets outside production even if all are missing", () => {
+    const env: NodeJS.ProcessEnv = {
+      NODE_ENV: "development",
+      DATABASE_URL: "postgresql://localhost/test",
+      ENCRYPTION_KEY: HEX_KEY,
+    } as NodeJS.ProcessEnv;
+    const { issues } = validateEnv(env);
+    expect(issues.some((i) => i.includes("OPENAI_API_KEY"))).toBe(false);
+    expect(issues.some((i) => i.includes("ANTHROPIC_API_KEY"))).toBe(false);
+    expect(issues.some((i) => i.includes("GOOGLE_CLIENT_ID"))).toBe(false);
+    expect(issues.some((i) => i.includes("GOOGLE_CLIENT_SECRET"))).toBe(false);
+    expect(issues.some((i) => i.includes("HUBSPOT_CLIENT_ID"))).toBe(false);
+    expect(issues.some((i) => i.includes("HUBSPOT_CLIENT_SECRET"))).toBe(false);
   });
 });
 

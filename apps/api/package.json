@@ -48,6 +48,7 @@
     "razorpay": "^2.9.6",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
+    "svix": "1.88.0",
     "swagger-ui-express": "^5.0.1"
   },
   "devDependencies": {
