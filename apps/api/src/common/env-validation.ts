@@ -22,12 +22,8 @@ import { isWorkerEnabled } from "../runtime/worker.service";
  *     - ADMIN_API_KEY must be set
  *
  *   When NODE_ENV="production" (i.e. running as a deployed image):
- *     - OPENAI_API_KEY must be set
- *     - ANTHROPIC_API_KEY must be set
- *     - GMAIL_OAUTH_CLIENT_ID must be set
- *     - GMAIL_OAUTH_CLIENT_SECRET must be set
- *     - HUBSPOT_CLIENT_ID must be set
- *     - HUBSPOT_CLIENT_SECRET must be set
+ *     - At least one LLM provider key (OPENAI_API_KEY | AZURE_OPENAI_KEY | ANTHROPIC_API_KEY)
+ *     - GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET (Gmail OAuth, needed by api + worker)
  *
  * Missing prod secrets are collected and reported in a single throw so the
  * operator can fix everything in one redeploy instead of bouncing the pod
@@ -86,23 +82,28 @@ export function validateEnv(
   }
 
   if (isProd) {
-    // Required third-party credentials. Missing keys would otherwise surface
-    // as opaque 500s on the first user request that hits an LLM call or an
-    // OAuth start endpoint. Collect all of them so the operator can fix the
-    // pod config in one redeploy.
-    // NOTE: env names below MUST match what the rest of the codebase actually
-    // reads (see apps/api/src/integrations/integrations.service.ts and
-    // gmail.service.ts / hubspot.service.ts). The Gmail OAuth client is named
-    // GOOGLE_CLIENT_ID/SECRET, not GMAIL_OAUTH_*.
-    const REQUIRED_PROD_SECRETS = [
-      "OPENAI_API_KEY",
-      "ANTHROPIC_API_KEY",
-      "GOOGLE_CLIENT_ID",
-      "GOOGLE_CLIENT_SECRET",
-      "HUBSPOT_CLIENT_ID",
-      "HUBSPOT_CLIENT_SECRET",
-    ] as const;
-    for (const name of REQUIRED_PROD_SECRETS) {
+    // Hard-fail only on credentials whose absence would crash the very
+    // first request and which BOTH the api and the worker need at boot.
+    // Anything else is warned-not-thrown so a partial config doesn't take
+    // the whole pod down.
+    //
+    // LLM provider: at least one of OPENAI_API_KEY / AZURE_OPENAI_KEY /
+    // ANTHROPIC_API_KEY must be set. Prod uses Azure OpenAI today, but the
+    // codepath chooses dynamically.
+    const hasAnyLlmKey = ["OPENAI_API_KEY", "AZURE_OPENAI_KEY", "ANTHROPIC_API_KEY"]
+      .some((k) => {
+        const v = env[k];
+        return typeof v === "string" && v.length > 0;
+      });
+    if (!hasAnyLlmKey) {
+      issues.push(
+        "At least one of OPENAI_API_KEY / AZURE_OPENAI_KEY / ANTHROPIC_API_KEY must be set when NODE_ENV=production",
+      );
+    }
+
+    // Gmail OAuth: needed by both api (start oauth flow) and worker
+    // (token refresh during send). Names per integrations.service.ts.
+    for (const name of ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"] as const) {
       const value = env[name];
       if (!value || value.length === 0) {
         issues.push(`${name} is required when NODE_ENV=production`);
