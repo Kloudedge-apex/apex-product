@@ -14,6 +14,7 @@ import { Webhook } from "svix";
 import { AuthService } from "./auth.service";
 import { SkipOrgGuard } from "../common/org-scope.guard";
 import { verifyClerkToken } from "../common/jwt.util";
+import { isWorkerEnabled } from "../runtime/worker.service";
 
 interface RawBodyRequest extends Request {
   rawBody?: Buffer;
@@ -26,10 +27,12 @@ interface RawBodyRequest extends Request {
 const SVIX_TIMESTAMP_TOLERANCE_SEC = 5 * 60;
 
 /**
- * Throws at module load (controller construction) in production if the Clerk
- * webhook secret is missing, matching the fail-fast pattern in env-validation
- * for other security-critical config. We allow `undefined` in non-prod so
- * local dev / tests don't need to set the secret unless they hit the route.
+ * Resolves the Clerk webhook secret. In production we fail fast at module
+ * load IF this process is going to serve HTTP (i.e. it's the api container,
+ * not the worker). The worker loads AuthController via AppModule but never
+ * routes /auth/webhook traffic, so demanding the secret there would crash
+ * the worker for no security benefit. The runtime check inside handleWebhook
+ * is the actual gate that prevents forgery on the api.
  */
 function resolveWebhookSecret(
   config: ConfigService,
@@ -38,7 +41,7 @@ function resolveWebhookSecret(
   const secret = config.get<string>("CLERK_WEBHOOK_SECRET");
   const isProd = process.env.NODE_ENV === "production";
   if (!secret) {
-    if (isProd) {
+    if (isProd && !isWorkerEnabled()) {
       throw new Error(
         "CLERK_WEBHOOK_SECRET is required in production. " +
           "Without it the /auth/webhook endpoint is forge-able.",
