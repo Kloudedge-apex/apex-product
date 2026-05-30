@@ -20,6 +20,7 @@ import { NODE, PipelineState } from "./state";
 import { GraphRunQueueService } from "./graph-run-queue.service";
 
 const GRAPH_NAME = "pipeline-supervisor";
+const SUPERVISOR_PLAN = ["sourcing", "enrichment", "scoring", "approval", "outreach"] as const;
 
 @Injectable()
 export class GraphService {
@@ -92,6 +93,16 @@ export class GraphService {
     await this.prisma.graphRun.update({
       where: { id: run.id },
       data: { threadId: run.id },
+    });
+
+    void this.evidenceLedger.graphRunStarted({
+      orgId,
+      graphRunId: run.id,
+      supervisorPlan: {
+        graphName: GRAPH_NAME,
+        stages: SUPERVISOR_PLAN,
+        icpProfileIds,
+      },
     });
 
     // Persisted execution: hand off to the graph-runs queue so the worker
@@ -201,6 +212,10 @@ export class GraphService {
     input: Partial<PipelineState> | Command,
   ): Promise<void> {
     const config = { configurable: { thread_id: runId } };
+    const run = await this.prisma.graphRun.findUnique({
+      where: { id: runId },
+      select: { orgId: true, startedAt: true },
+    });
 
     try {
       const result = (await this.compiled.invoke(input as never, config)) as PipelineState & {
@@ -245,6 +260,14 @@ export class GraphService {
         },
       });
       this.logger.log(`Graph ${runId} completed`);
+      if (run) {
+        void this.evidenceLedger.graphRunCompleted({
+          orgId: run.orgId,
+          graphRunId: runId,
+          status: "COMPLETED",
+          durationMs: Math.max(0, Date.now() - run.startedAt.getTime()),
+        });
+      }
       this.fireRunLevelEvaluator(runId);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -256,6 +279,14 @@ export class GraphService {
           error: msg.slice(0, 1000),
         },
       });
+      if (run) {
+        void this.evidenceLedger.graphRunCompleted({
+          orgId: run.orgId,
+          graphRunId: runId,
+          status: "FAILED",
+          durationMs: Math.max(0, Date.now() - run.startedAt.getTime()),
+        });
+      }
       this.fireRunLevelEvaluator(runId);
       throw err;
     }

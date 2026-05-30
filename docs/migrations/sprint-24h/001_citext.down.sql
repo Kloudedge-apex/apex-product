@@ -1,0 +1,2 @@
+-- 001_citext.down.sql
+-- No-op rollback: citext is a shared extension; leave installed in practice.

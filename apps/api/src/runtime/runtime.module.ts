@@ -2,8 +2,6 @@ import { Module, OnModuleInit } from "@nestjs/common";
 import { RuntimeService } from "./runtime.service";
 import { QueueService } from "./queue.service";
 import { WorkerService } from "./worker.service";
-import { LLMService } from "./llm.service";
-import { LlmBudgetService } from "./llm-budget.service";
 import { ExecutorService } from "./executor.service";
 import { SchedulerService } from "./scheduler.service";
 import { RuntimeController } from "./runtime.controller";
@@ -11,23 +9,24 @@ import { MemoryService } from "./memory.service";
 import { IntegrationsModule } from "../integrations/integrations.module";
 import { OutreachModule } from "../outreach/outreach.module";
 import { ObservabilityModule } from "../observability/observability.module";
+import { EnrichmentModule } from "../enrichment/enrichment.module";
 import { EvaluatorRunnerService } from "../observability/evaluators/evaluator-runner.service";
 import { callJudge } from "../observability/evaluators/judge";
+import { LlmModule } from "./llm.module";
+import { LLMService } from "./llm.service";
 
 @Module({
-  imports: [IntegrationsModule, OutreachModule, ObservabilityModule],
+  imports: [IntegrationsModule, OutreachModule, ObservabilityModule, EnrichmentModule, LlmModule],
   controllers: [RuntimeController],
   providers: [
     RuntimeService,
     QueueService,
     WorkerService,
-    LLMService,
-    LlmBudgetService,
     ExecutorService,
     SchedulerService,
     MemoryService,
   ],
-  exports: [RuntimeService, LLMService, LlmBudgetService, MemoryService],
+  exports: [RuntimeService, LlmModule, MemoryService],
 })
 export class RuntimeModule implements OnModuleInit {
   constructor(

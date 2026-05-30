@@ -10,6 +10,10 @@ import {
   OutreachArtifact,
   OutreachArtifactStatus,
   OutreachChannel,
+  EmailDirection,
+  EmailEventKind,
+  EmailIngestSource,
+  Prisma,
 } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import {
@@ -26,6 +30,8 @@ import {
 import { IntegrationsService } from "../integrations/integrations.service";
 import { LinkedInService } from "../integrations/linkedin/linkedin.service";
 import { EvidenceLedgerService } from "../observability/evidence-ledger.service";
+import { SuppressionService } from "../suppression/suppression.service";
+import { ConfigService } from "@nestjs/config";
 
 interface SendJobData {
   artifactId: string;
@@ -84,16 +90,19 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
   private inFlight = false;
 
-  private readonly sendEmailTool = new SendEmailTool();
+  private readonly sendEmailTool: SendEmailTool;
   private readonly linkedinSendTool: LinkedInSendMessageTool;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly queue: OutreachSendQueueService,
     private readonly integrations: IntegrationsService,
+    private readonly suppressionService: SuppressionService,
+    private readonly config: ConfigService,
     @Optional() private readonly evidenceLedger?: EvidenceLedgerService,
     @Optional() private readonly linkedinService?: LinkedInService,
   ) {
+    this.sendEmailTool = new SendEmailTool(this.evidenceLedger, this.config);
     // Build the LinkedIn tool with the optional service + ledger so worker-
     // dispatched sends use the same code path as in-loop agent calls. When
     // LinkedInService is absent (e.g. dev with no IntegrationsModule wiring),
@@ -229,7 +238,10 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
       );
       return;
     }
-    if (artifact.status !== OutreachArtifactStatus.APPROVED) {
+    if (
+      artifact.status !== OutreachArtifactStatus.APPROVED &&
+      artifact.status !== OutreachArtifactStatus.QUEUED
+    ) {
       // Idempotency guard: if already SENT, REJECTED, or anything else, do
       // nothing. This is the property that makes re-running the same job safe.
       this.logger.log(
@@ -238,15 +250,83 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    if (artifact.status === OutreachArtifactStatus.APPROVED) {
+      const updated = await this.prisma.outreachArtifact.updateMany({
+        where: { id: artifactId, orgId, status: OutreachArtifactStatus.APPROVED },
+        data: { status: OutreachArtifactStatus.QUEUED },
+      });
+      if (updated.count > 0) {
+        void this.evidenceLedger?.artifactStatusTransition?.({
+          orgId,
+          runId: artifact.graphRunId ?? null,
+          artifactId,
+          fromStatus: OutreachArtifactStatus.APPROVED,
+          toStatus: OutreachArtifactStatus.QUEUED,
+          reason: "send_worker_started",
+        });
+        artifact.status = OutreachArtifactStatus.QUEUED;
+      }
+    }
+
+    if (artifact.channel === OutreachChannel.EMAIL) {
+      const recipientEmail =
+        artifact.recipientRef ??
+        (typeof (artifact.payload as Record<string, unknown>)?.to === "string"
+          ? String((artifact.payload as Record<string, unknown>).to)
+          : null);
+
+      if (recipientEmail && recipientEmail.includes("@")) {
+        const threadId = await this.resolveProviderThreadId(artifact);
+        const senderMailboxId = await this.resolveSenderMailboxId(artifact);
+
+        const suppression = await this.suppressionService.isSuppressed({
+          orgId: artifact.orgId,
+          recipientEmail,
+          threadId,
+          senderMailboxId,
+        });
+
+        if (suppression.suppressed) {
+          await this.markSuppressed(artifact, suppression.matchedEntries);
+          return;
+        }
+      }
+    }
+
+    const statusBeforeSend = artifact.status;
     const result = await this.dispatch(artifact);
     if (!result.success) {
       // Throw so BullMQ records the failure and applies retry/backoff. Status
-      // stays APPROVED so the next attempt re-picks it up.
+      // stays APPROVED/QUEUED so the next attempt re-picks it up.
       throw new Error(result.error ?? "send failed (no error message)");
     }
 
     const receiptId = extractReceiptId(result);
     const provider = extractProvider(result);
+
+    if (artifact.channel === OutreachChannel.EMAIL && provider !== "outlook") {
+      await this.persistOutboundEmailTelemetry(artifact, result);
+      // Persistence is responsible for flipping the artifact to SENT.
+      void this.evidenceLedger?.messageSent({
+        orgId: artifact.orgId,
+        runId: artifact.graphRunId ?? null,
+        artifactId: artifact.id,
+        channel: artifact.channel,
+        recipientRef: artifact.recipientRef ?? null,
+        subject: artifact.subject ?? null,
+        sendReceiptId: receiptId,
+        provider,
+      });
+      void this.evidenceLedger?.artifactStatusTransition?.({
+        orgId: artifact.orgId,
+        runId: artifact.graphRunId ?? null,
+        artifactId: artifact.id,
+        fromStatus: statusBeforeSend,
+        toStatus: OutreachArtifactStatus.SENT,
+        reason: "sent",
+      });
+      return;
+    }
 
     await this.prisma.outreachArtifact.update({
       where: { id: artifactId },
@@ -267,6 +347,297 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
       sendReceiptId: receiptId,
       provider,
     });
+    void this.evidenceLedger?.artifactStatusTransition?.({
+      orgId: artifact.orgId,
+      runId: artifact.graphRunId ?? null,
+      artifactId: artifact.id,
+      fromStatus: statusBeforeSend,
+      toStatus: OutreachArtifactStatus.SENT,
+      reason: "sent",
+    });
+  }
+
+  private async resolveProviderThreadId(
+    artifact: OutreachArtifact,
+  ): Promise<string | null> {
+    if (!artifact.conversationId) return null;
+    const convo = await this.prisma.conversation.findUnique({
+      where: { id: artifact.conversationId },
+      select: { orgId: true, providerThreadId: true },
+    });
+    if (!convo || convo.orgId !== artifact.orgId) return null;
+    return convo.providerThreadId ?? null;
+  }
+
+  private async resolveSenderMailboxId(
+    artifact: OutreachArtifact,
+  ): Promise<string | null> {
+    const payload = (artifact.payload as Record<string, unknown>) ?? {};
+    const from =
+      typeof payload.from === "string" && payload.from.trim().length > 0
+        ? payload.from.trim()
+        : null;
+    if (from) return from;
+
+    const integration = await this.prisma.integration.findUnique({
+      where: { orgId_provider: { orgId: artifact.orgId, provider: "gmail" } },
+      select: { credentials: true },
+    });
+    return readIntegrationAccountEmail(integration?.credentials) ?? null;
+  }
+
+  private async markSuppressed(
+    artifact: OutreachArtifact,
+    matchedEntries: readonly { id: string; kind: string; reason: string | null }[],
+  ): Promise<void> {
+    const now = new Date();
+    const suppressionEntryIds = matchedEntries.map((e) => e.id);
+    const kinds = matchedEntries.map((e) => e.kind);
+    const suppressionReason = matchedEntries[0]?.reason ?? matchedEntries[0]?.kind ?? "SUPPRESSED";
+    const fromStatus = artifact.status;
+
+    await this.prisma.$transaction([
+      this.prisma.outreachArtifact.update({
+        where: { id: artifact.id },
+        data: {
+          status: OutreachArtifactStatus.SUPPRESSED,
+          sentAt: null,
+          sendReceiptId: null,
+          suppressionReason,
+        },
+      }),
+      this.prisma.emailEvent.create({
+        data: {
+          orgId: artifact.orgId,
+          kind: EmailEventKind.SUPPRESSED,
+          provider: "apex",
+          providerMessageId: null,
+          occurredAt: now,
+          artifactId: artifact.id,
+          conversationId: artifact.conversationId ?? null,
+          meta: {
+            suppressionEntryIds,
+            kinds,
+          } as unknown as Prisma.InputJsonValue,
+        },
+      }),
+    ]);
+
+    void this.evidenceLedger?.artifactStatusTransition?.({
+      orgId: artifact.orgId,
+      runId: artifact.graphRunId ?? null,
+      artifactId: artifact.id,
+      fromStatus,
+      toStatus: OutreachArtifactStatus.SUPPRESSED,
+      reason: "suppressed",
+    });
+
+    await this.evidenceLedger?.outreachSuppressed({
+      orgId: artifact.orgId,
+      runId: artifact.graphRunId ?? null,
+      artifactId: artifact.id,
+      suppressionEntryIds,
+      kinds,
+    });
+  }
+
+  private async persistOutboundEmailTelemetry(
+    artifact: OutreachArtifact,
+    sendResult: ToolResult,
+  ): Promise<void> {
+    const now = new Date();
+    const payload = (artifact.payload as Record<string, unknown>) ?? {};
+
+    const receiptId = extractReceiptId(sendResult);
+    const sendData = parseSendEmailResult(sendResult.data);
+
+    const providerThreadId =
+      sendData.threadId ??
+      // Gmail returns a threadId on send; mock sends should still be tied to a stable synthetic thread.
+      `mock_thread_${artifact.id}`;
+
+    const integration = await this.prisma.integration.findUnique({
+      where: { orgId_provider: { orgId: artifact.orgId, provider: "gmail" } },
+      select: { credentials: true },
+    });
+    const integrationEmail = readIntegrationAccountEmail(integration?.credentials);
+    const fromEmail =
+      (typeof payload.from === "string" && payload.from.trim()
+        ? payload.from.trim()
+        : integrationEmail) ?? "unknown@send.apex";
+
+    const toEmail =
+      (typeof payload.to === "string" && payload.to.trim()
+        ? payload.to.trim()
+        : artifact.recipientRef) ?? null;
+
+    if (!toEmail) {
+      this.logger.error("outreach email send succeeded but recipient missing", {
+        orgId: artifact.orgId,
+        artifactId: artifact.id,
+      });
+      return;
+    }
+
+    try {
+      const conversationUpsert = this.prisma.conversation.upsert({
+        where: {
+          orgId_provider_providerThreadId: {
+            orgId: artifact.orgId,
+            provider: "gmail",
+            providerThreadId,
+          },
+        },
+        create: {
+          orgId: artifact.orgId,
+          provider: "gmail",
+          providerThreadId,
+          subject: artifact.subject ?? undefined,
+          lastActivityAt: now,
+        },
+        update: {
+          lastActivityAt: now,
+          ...(artifact.subject ? { subject: artifact.subject } : {}),
+        },
+      });
+
+      const emailMessageCreate = this.prisma.emailMessage.create({
+        data: {
+          direction: EmailDirection.OUTBOUND,
+          ingestSource: EmailIngestSource.APP_SEND,
+          provider: "gmail",
+          providerMessageId: receiptId ?? `mock_${artifact.id}`,
+          providerThreadId,
+          rfcMessageId: sendData.rfcMessageId,
+          inReplyTo: sendData.inReplyTo,
+          references: sendData.references,
+          subject: artifact.subject ?? null,
+          bodyText: artifact.bodyText ?? null,
+          bodyHtml: artifact.bodyHtml ?? null,
+          headers: {
+            "Message-ID": sendData.rfcMessageId,
+            "In-Reply-To": sendData.inReplyTo,
+            References: sendData.references,
+          } as unknown as Prisma.InputJsonValue,
+          fromEmail,
+          toEmails: [toEmail],
+          cc: [],
+          bcc: [],
+          senderMailboxId: fromEmail,
+          occurredAt: now,
+          org: { connect: { id: artifact.orgId } },
+          conversation: {
+            connect: {
+              orgId_provider_providerThreadId: {
+                orgId: artifact.orgId,
+                provider: "gmail",
+                providerThreadId,
+              },
+            },
+          },
+          artifact: { connect: { id: artifact.id } },
+        },
+      });
+
+      const emailEventCreate = this.prisma.emailEvent.create({
+        data: {
+          kind: EmailEventKind.SENT,
+          provider: "gmail",
+          providerMessageId: receiptId,
+          occurredAt: now,
+          meta: {
+            providerResponse: {
+              id: receiptId,
+              threadId: sendData.threadId ?? providerThreadId,
+            },
+          } as unknown as Prisma.InputJsonValue,
+          org: { connect: { id: artifact.orgId } },
+          conversation: {
+            connect: {
+              orgId_provider_providerThreadId: {
+                orgId: artifact.orgId,
+                provider: "gmail",
+                providerThreadId,
+              },
+            },
+          },
+          emailMessage: {
+            connect: {
+              orgId_provider_providerMessageId: {
+                orgId: artifact.orgId,
+                provider: "gmail",
+                providerMessageId: receiptId ?? `mock_${artifact.id}`,
+              },
+            },
+          },
+          artifact: { connect: { id: artifact.id } },
+        },
+      });
+
+      const outreachArtifactUpdate = this.prisma.outreachArtifact.update({
+        where: { id: artifact.id },
+        data: {
+          status: OutreachArtifactStatus.SENT,
+          sentAt: now,
+          sendReceiptId: receiptId,
+          ...(artifact.conversationId
+            ? {}
+            : {
+                conversation: {
+                  connect: {
+                    orgId_provider_providerThreadId: {
+                      orgId: artifact.orgId,
+                      provider: "gmail",
+                      providerThreadId,
+                    },
+                  },
+                },
+              }),
+        },
+      });
+
+      await this.prisma.$transaction([
+        conversationUpsert,
+        emailMessageCreate,
+        emailEventCreate,
+        outreachArtifactUpdate,
+      ]);
+    } catch (err) {
+      this.logger.error("outreach email send succeeded but persistence failed", {
+        orgId: artifact.orgId,
+        artifactId: artifact.id,
+        sendReceiptId: receiptId,
+        threadId: providerThreadId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      await this.evidenceLedger?.outreachSendPersistenceFailed({
+        orgId: artifact.orgId,
+        runId: artifact.graphRunId ?? null,
+        artifactId: artifact.id,
+        provider: extractProvider(sendResult),
+        sendReceiptId: receiptId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+
+      // Best-effort: avoid re-sending on retries by still marking the artifact SENT.
+      try {
+        await this.prisma.outreachArtifact.update({
+          where: { id: artifact.id },
+          data: {
+            status: OutreachArtifactStatus.SENT,
+            sentAt: now,
+            sendReceiptId: receiptId,
+          },
+        });
+      } catch (fallbackErr) {
+        this.logger.error("outreach persistence failure fallback update failed", {
+          orgId: artifact.orgId,
+          artifactId: artifact.id,
+          error:
+            fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr),
+        });
+      }
+    }
   }
 
   /** Channel-dispatch. Add new branches as more send tools come online. */
@@ -298,7 +669,7 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
           integrations,
         };
         const payload = artifact.payload as Record<string, unknown>;
-        return this.sendEmailTool.execute(payload, context);
+        return this.sendEmailTool.execute({ ...payload, artifactId: artifact.id }, context);
       }
       case OutreachChannel.LINKEDIN: {
         const integrations = await loadIntegrationsIfAllowed();
@@ -367,13 +738,18 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
             record.provider,
           );
           if (!decrypted) continue;
-          integrations.set(record.provider, {
+          const credentials: IntegrationCredentials = {
             provider: record.provider,
             accessToken: (decrypted.access_token as string) || "",
             refreshToken: decrypted.refresh_token as string | undefined,
             expiresAt: decrypted.expires_at as number | undefined,
             scopes: decrypted.scope as string | undefined,
-          });
+          };
+          if (record.provider === "gmail") {
+            const accountEmail = readIntegrationAccountEmail(record.credentials);
+            if (accountEmail) credentials.accountEmail = accountEmail;
+          }
+          integrations.set(record.provider, credentials);
         } catch {
           // Skip integrations with bad credentials — SendEmailTool will fall
           // back to mock mode if no live provider is available.
@@ -411,7 +787,12 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
       // Only flip if we still own the row (still APPROVED) and it belongs to
       // the expected org. If it raced to SENT, leave it alone.
       if (!artifact || artifact.orgId !== orgId) return;
-      if (artifact.status !== OutreachArtifactStatus.APPROVED) return;
+      if (
+        artifact.status !== OutreachArtifactStatus.APPROVED &&
+        artifact.status !== OutreachArtifactStatus.QUEUED
+      ) {
+        return;
+      }
 
       await this.prisma.outreachArtifact.update({
         where: { id: artifactId },
@@ -420,6 +801,14 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
           reviewerNote: `auto-failed: ${reason}`.slice(0, 1000),
           reviewedAt: new Date(),
         },
+      });
+      void this.evidenceLedger?.artifactStatusTransition?.({
+        orgId,
+        runId: artifact.graphRunId ?? null,
+        artifactId,
+        fromStatus: artifact.status,
+        toStatus: OutreachArtifactStatus.REJECTED,
+        reason: `auto_failed:${reason}`.slice(0, 200),
       });
     } catch (err) {
       this.logger.error(
@@ -443,4 +832,35 @@ function extractProvider(result: ToolResult): string | null {
   const data = result.data as Record<string, unknown>;
   const provider = data.provider;
   return typeof provider === "string" ? provider : null;
+}
+
+function parseSendEmailResult(
+  data: unknown,
+): {
+  readonly threadId: string | null;
+  readonly rfcMessageId: string | null;
+  readonly inReplyTo: string | null;
+  readonly references: string[];
+} {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    return { threadId: null, rfcMessageId: null, inReplyTo: null, references: [] };
+  }
+  const record = data as Record<string, unknown>;
+  const threadId = typeof record.threadId === "string" ? record.threadId : null;
+  const rfcMessageId =
+    typeof record.rfcMessageId === "string" ? record.rfcMessageId : null;
+  const inReplyTo = typeof record.inReplyTo === "string" ? record.inReplyTo : null;
+  const references = Array.isArray(record.references)
+    ? record.references.filter((v): v is string => typeof v === "string")
+    : [];
+  return { threadId, rfcMessageId, inReplyTo, references };
+}
+
+function readIntegrationAccountEmail(credentials: unknown): string | null {
+  if (!credentials || typeof credentials !== "object" || Array.isArray(credentials)) {
+    return null;
+  }
+  const record = credentials as Record<string, unknown>;
+  const email = record.accountEmail;
+  return typeof email === "string" && email.trim() ? email.trim() : null;
 }

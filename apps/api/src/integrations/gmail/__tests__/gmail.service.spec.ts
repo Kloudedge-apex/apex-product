@@ -5,6 +5,7 @@ import { PrismaService } from "../../../prisma/prisma.service";
 import { RuntimeService } from "../../../runtime/runtime.service";
 import { ConfigService } from "@nestjs/config";
 import { encrypt } from "../../crypto.util";
+import { SuppressionService } from "../../../suppression/suppression.service";
 
 // Mock google-auth-library (OAuth2Client used for OIDC verification)
 vi.mock("google-auth-library", () => {
@@ -128,7 +129,8 @@ vi.mock("googleapis", () => {
 });
 
 function createMockPrisma() {
-  return {
+  const prisma = {
+    $transaction: vi.fn(),
     integration: {
       findUnique: vi.fn(),
       findFirst: vi.fn(),
@@ -143,7 +145,38 @@ function createMockPrisma() {
     agentLog: {
       create: vi.fn().mockResolvedValue({ id: "log_1" }),
     },
-  } as unknown as PrismaService;
+    conversation: {
+      upsert: vi.fn(),
+    },
+    emailMessage: {
+      findFirst: vi.fn(),
+      create: vi.fn(),
+    },
+    reply: {
+      create: vi.fn(),
+    },
+    emailEvent: {
+      create: vi.fn(),
+    },
+    outreachArtifact: {
+      updateMany: vi.fn(),
+      findUnique: vi.fn().mockResolvedValue({
+        orgId: "org_1",
+        status: "SENT",
+        graphRunId: null,
+      }),
+    },
+  };
+
+  // Default transaction behavior: execute the callback with the prisma-ish tx.
+  prisma.$transaction.mockImplementation(async (fn: unknown) => {
+    if (typeof fn === "function") {
+      return (fn as (tx: typeof prisma) => unknown)(prisma);
+    }
+    return [];
+  });
+
+  return prisma as unknown as PrismaService;
 }
 
 function createMockRuntime() {
@@ -192,13 +225,23 @@ describe("GmailService", () => {
   let mockPrisma: ReturnType<typeof createMockPrisma>;
   let mockConfig: ReturnType<typeof createMockConfig>;
   let mockRuntime: ReturnType<typeof createMockRuntime>;
+  let mockSuppression: SuppressionService;
 
   beforeEach(() => {
     vi.clearAllMocks();
     mockPrisma = createMockPrisma();
     mockConfig = createMockConfig();
     mockRuntime = createMockRuntime();
-    service = new GmailService(mockPrisma, mockConfig, mockRuntime);
+    const mockReplyClassifierQueue = { enqueue: vi.fn().mockResolvedValue(undefined) } as any;
+    mockSuppression = { add: vi.fn().mockResolvedValue(undefined) } as unknown as SuppressionService;
+    service = new GmailService(
+      mockPrisma as any,
+      mockConfig as any,
+      mockRuntime as any,
+      mockReplyClassifierQueue,
+      mockSuppression,
+      undefined,
+    );
   });
 
   describe("getAuthUrl", () => {
@@ -366,10 +409,15 @@ describe("GmailService", () => {
       const blankConfig = {
         get: vi.fn().mockImplementation((_key: string, def?: string) => def ?? ""),
       } as unknown as ConfigService;
+      const mockReplyClassifierQueue = { enqueue: vi.fn().mockResolvedValue(undefined) } as any;
+      const suppression = { add: vi.fn().mockResolvedValue(undefined) } as unknown as SuppressionService;
       const blankService = new GmailService(
         createMockPrisma(),
         blankConfig,
         createMockRuntime(),
+        mockReplyClassifierQueue,
+        suppression,
+        undefined,
       );
       expect(await blankService.verifyPushAuth("Bearer anything")).toBe(false);
     });
@@ -386,6 +434,25 @@ describe("GmailService", () => {
       (mockPrisma.integration.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(
         integration,
       );
+
+      // Default correlator mocks: orphan path (no outbound match).
+      (mockPrisma.emailMessage.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue(
+        null,
+      );
+      (mockPrisma.conversation.upsert as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: "conv_1",
+      });
+      (mockPrisma.emailMessage.create as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: "em_in_1",
+        providerMessageId: "msg_new_1",
+        rfcMessageId: null,
+      });
+      (mockPrisma.reply.create as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: "reply_1",
+      });
+      (mockPrisma.emailEvent.create as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: "evt_1",
+      });
     }
 
     it("dispatches a Reply Handler run for a new inbound message", async () => {
@@ -439,6 +506,7 @@ describe("GmailService", () => {
               threadId: "thread_new",
               from: "prospect@acme.com",
               subject: "Re: quick question",
+              replyId: "reply_1",
             }),
           }),
         }),

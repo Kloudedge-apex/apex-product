@@ -1,7 +1,7 @@
 import "./observability/tracing";
 
 import { NestFactory } from "@nestjs/core";
-import { Logger, ValidationPipe } from "@nestjs/common";
+import { Logger, ValidationPipe, RequestMethod } from "@nestjs/common";
 import { NestExpressApplication } from "@nestjs/platform-express";
 import { SwaggerModule, DocumentBuilder } from "@nestjs/swagger";
 import helmet from "helmet";
@@ -24,7 +24,13 @@ async function bootstrap() {
     rawBody: true,
   });
 
-  app.setGlobalPrefix("api");
+  // Keep our main REST APIs under `/api`, but expose RFC 8058 one-click
+  // unsubscribe endpoints at the public root (`/unsubscribe/:token`) so they
+  // match List-Unsubscribe URLs and can be hit by email clients without
+  // knowing our internal prefixing.
+  app.setGlobalPrefix("api", {
+    exclude: [{ path: "unsubscribe/:token", method: RequestMethod.ALL }],
+  });
 
   // ── Security headers ────────────────────────────────────────────────────
   app.use(

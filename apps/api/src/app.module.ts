@@ -21,6 +21,9 @@ import { PolicyEventsModule } from "./policy-events/policy-events.module";
 import { ObservabilityModule } from "./observability/observability.module";
 import { KpisModule } from "./kpis/kpis.module";
 import { BetaStubsModule } from "./beta-stubs/beta-stubs.module";
+import { SuppressionModule } from "./suppression/suppression.module";
+import { EnrichmentModule } from "./enrichment/enrichment.module";
+import { UsageModule } from "./usage/usage.module";
 import { OrgScopeGuard } from "./common/org-scope.guard";
 import { RateLimitGuard } from "./common/rate-limit.guard";
 
@@ -48,11 +51,16 @@ import { RateLimitGuard } from "./common/rate-limit.guard";
     OutreachModule,
     ObservabilityModule,
     KpisModule,
+    EnrichmentModule,
+    UsageModule,
+    EnrichmentModule,
+    UsageModule,
     WorkflowsModule,
     MeetingsModule,
     DashboardModule,
     PolicyEventsModule,
     BetaStubsModule,
+    SuppressionModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: OrgScopeGuard },

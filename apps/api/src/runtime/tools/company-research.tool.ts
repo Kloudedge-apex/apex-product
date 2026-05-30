@@ -2,6 +2,10 @@ import { Tool, ToolContext, ToolResult } from "./tool.interface";
 import { WebSearchTool } from "./web-search.tool";
 import { WebScrapeTool } from "./web-scrape.tool";
 import { MOCK_DISCLAIMER_SUFFIX, markMocked, markMockedItem } from "./mock-metadata";
+import { EnrichmentLicenseScope } from "@prisma/client";
+import type { EvidenceLedgerService } from "../../observability/evidence-ledger.service";
+import type { EnrichmentFactService } from "../../enrichment/enrichment-fact.service";
+import { withEnrichmentCache } from "../../enrichment/enrichment-cache.guard";
 
 export class CompanyResearchTool implements Tool {
   name = "company_research";
@@ -13,8 +17,18 @@ export class CompanyResearchTool implements Tool {
     domain: { type: "string", description: "Company website domain (e.g. acme.com)", required: false },
   };
 
-  private searchTool = new WebSearchTool();
-  private scrapeTool = new WebScrapeTool();
+  private searchTool: WebSearchTool;
+  private scrapeTool: WebScrapeTool;
+
+  constructor(
+    searchTool?: WebSearchTool,
+    scrapeTool?: WebScrapeTool,
+    private readonly enrichmentFacts?: EnrichmentFactService,
+    private readonly evidenceLedger?: EvidenceLedgerService,
+  ) {
+    this.searchTool = searchTool ?? new WebSearchTool();
+    this.scrapeTool = scrapeTool ?? new WebScrapeTool();
+  }
 
   async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
     const companyName = params.company_name as string;
@@ -24,6 +38,52 @@ export class CompanyResearchTool implements Tool {
       return { success: false, data: null, error: "company_name is required" };
     }
 
+    const normalizedDomain = domain?.trim().toLowerCase();
+    const lookupKey = `company:${companyName.trim().toLowerCase()}${normalizedDomain ? `|domain:${normalizedDomain}` : ""}`;
+
+    if (this.enrichmentFacts) {
+      try {
+        const fact = await withEnrichmentCache(
+          {
+            enrichmentFacts: this.enrichmentFacts,
+            evidenceLedger: this.evidenceLedger,
+            orgId: context.orgId,
+            runId: context.runId,
+            provider: "company_research",
+            lookupKey,
+            field: "profile",
+            ttlMs: 7 * 24 * 60 * 60 * 1000,
+            costCredits: 1,
+            licenseScope: EnrichmentLicenseScope.RESEARCH_OK,
+          },
+          async () => {
+            const result = await this.executeUncached(companyName, domain, context);
+            if (!result.success) {
+              throw new Error(result.error ?? "company_research failed");
+            }
+            const data = result.data as unknown;
+            if (data && typeof data === "object" && (data as { source?: string }).source === "mock") {
+              const reason = (data as { reason?: string }).reason ?? "mock provider path";
+              throw new Error(`provider_failed: ${reason}`);
+            }
+            return data as any;
+          },
+        );
+
+        return { success: true, data: fact.value };
+      } catch (error) {
+        return this.executeUncached(companyName, domain, context);
+      }
+    }
+
+    return this.executeUncached(companyName, domain, context);
+  }
+
+  private async executeUncached(
+    companyName: string,
+    domain: string | undefined,
+    context: ToolContext,
+  ): Promise<ToolResult> {
     try {
       // Search for company info
       const searchResult = await this.searchTool.execute(

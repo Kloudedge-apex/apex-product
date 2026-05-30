@@ -25,6 +25,7 @@ function baseProdEnv(): NodeJS.ProcessEnv {
     OPENAI_API_KEY: "sk-test-openai",
     GOOGLE_CLIENT_ID: "gmail-client-id",
     GOOGLE_CLIENT_SECRET: "gmail-client-secret",
+    OUTREACH_UNSUBSCRIBE_SECRET: "test_unsub_secret_" + "x".repeat(32),
   } as NodeJS.ProcessEnv;
 }
 

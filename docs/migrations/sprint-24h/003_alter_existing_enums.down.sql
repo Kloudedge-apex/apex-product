@@ -1,0 +1,3 @@
+-- 003_alter_existing_enums.down.sql
+-- Postgres cannot remove enum values safely once added.
+-- Rollback procedure: stop writing the new values; leave the enum extended.

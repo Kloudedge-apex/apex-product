@@ -5,6 +5,7 @@ import { MemoryService } from "../memory.service";
 import { PrismaService } from "../../prisma/prisma.service";
 import { IntegrationsService } from "../../integrations/integrations.service";
 import { OutreachArtifactsService } from "../../outreach/outreach-artifacts.service";
+import { ConfigService } from "@nestjs/config";
 
 // Mock PrismaService
 function createMockPrisma() {
@@ -105,6 +106,7 @@ describe("ExecutorService", () => {
       mockMemory as MemoryService,
       mockIntegrations as IntegrationsService,
       createMockOutreachArtifacts(),
+      { get: vi.fn().mockReturnValue(undefined) } as unknown as ConfigService,
     );
   });
 

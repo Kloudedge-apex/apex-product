@@ -13,9 +13,13 @@ import { AiTellEvaluator } from "./evaluators/ai-tell.evaluator";
 import { CitationCoverageEvaluator } from "./evaluators/citation-coverage.evaluator";
 import { EvaluatorRunnerService } from "./evaluators/evaluator-runner.service";
 import { RunLevelEvaluatorService } from "./run-level-evaluator.service";
+import { LlmFactModule } from "./llm-fact/llm-fact.module";
+import { EvaluatorFactModule } from "./evaluator-fact/evaluator-fact.module";
+import { EvaluatorFactService } from "./evaluator-fact/evaluator-fact.service";
 
 @Global()
 @Module({
+  imports: [LlmFactModule, EvaluatorFactModule],
   providers: [
     LangSmithService,
     EvidenceLedgerService,
@@ -35,6 +39,10 @@ import { RunLevelEvaluatorService } from "./run-level-evaluator.service";
   exports: [
     LangSmithService,
     EvidenceLedgerService,
+    LlmFactModule,
+    EvaluatorFactService,
+    LlmFactModule,
+    EvaluatorFactService,
     EvaluatorRunnerService,
     RunLevelEvaluatorService,
     PiiLeakageEvaluator,

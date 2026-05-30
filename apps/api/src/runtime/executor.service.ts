@@ -21,6 +21,8 @@ import { IntegrationsService } from "../integrations/integrations.service";
 import { OutreachArtifactsService } from "../outreach/outreach-artifacts.service";
 import { EvidenceLedgerService } from "../observability/evidence-ledger.service";
 import { LinkedInService } from "../integrations/linkedin/linkedin.service";
+import { ConfigService } from "@nestjs/config";
+import { EnrichmentFactService } from "../enrichment/enrichment-fact.service";
 
 export type { PendingApprovalEnvelope } from "./approval-envelope.types";
 
@@ -109,6 +111,8 @@ export class ExecutorService {
     private memoryService: MemoryService,
     private integrationsService: IntegrationsService,
     private outreachArtifacts: OutreachArtifactsService,
+    private readonly config: ConfigService,
+    private readonly enrichmentFacts: EnrichmentFactService,
     @Optional() private readonly evidenceLedger?: EvidenceLedgerService,
     @Optional() private readonly linkedinService?: LinkedInService,
     @Optional() private readonly llmBudget?: LlmBudgetService,
@@ -118,6 +122,8 @@ export class ExecutorService {
       evidenceLedger,
       undefined,
       linkedinService,
+      config,
+      enrichmentFacts,
     );
   }
 
@@ -326,14 +332,15 @@ export class ExecutorService {
       const remainingBudget = tokenBudget === Infinity ? 4000 : Math.min(4000, tokenBudget - totalTokens);
 
       const templateSlug = String(agent.template.name).toLowerCase().replace(/\s+/g, "_");
-      const llmStart = Date.now();
-      const response = await this.llm.chat(messages, {
-        model,
-        plan,
-        maxTokens: Math.min(remainingBudget, 4000), // cap to remaining budget; minimum enforced below
-        tools: openAITools.length > 0 ? openAITools : undefined,
-        toolChoice: forceTools ? "required" : "auto",
-        agent: `${templateSlug}.step`,
+	      const llmStart = Date.now();
+	      const response = await this.llm.chat(messages, {
+	        model,
+	        plan,
+	        maxTokens: Math.min(remainingBudget, 4000), // cap to remaining budget; minimum enforced below
+	        orgId: agent.orgId,
+	        tools: openAITools.length > 0 ? openAITools : undefined,
+	        toolChoice: forceTools ? "required" : "auto",
+	        agent: `${templateSlug}.step`,
         tags: ["executor", templateSlug, `step:${stepNum}`],
         metadata: {
           org_id: agent.orgId,

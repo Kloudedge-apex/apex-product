@@ -107,6 +107,14 @@ export class OutreachArtifactsService {
       status: artifact.status,
       channel: artifact.channel,
     });
+    void this.evidenceLedger?.artifactStatusTransition?.({
+      orgId: input.orgId,
+      runId: input.graphRunId ?? null,
+      artifactId: artifact.id,
+      fromStatus: OutreachArtifactStatus.DRAFT,
+      toStatus: artifact.status,
+      reason: "dry_run_recorded",
+    });
 
     return artifact;
   }
@@ -157,6 +165,15 @@ export class OutreachArtifactsService {
       },
     });
 
+    void this.evidenceLedger?.artifactStatusTransition?.({
+      orgId,
+      runId: updated.graphRunId ?? null,
+      artifactId: updated.id,
+      fromStatus: OutreachArtifactStatus.PENDING_REVIEW,
+      toStatus: OutreachArtifactStatus.APPROVED,
+      reason: "approved",
+    });
+
     // Hand off to the send worker. Best-effort: a queue outage must not
     // poison the approve API — the in-memory poller in dev and a future
     // recovery sweep can pick up APPROVED rows that never made it onto the
@@ -200,6 +217,15 @@ export class OutreachArtifactsService {
         reviewedAt: new Date(),
         reviewerNote: reviewerNote ?? null,
       },
+    });
+
+    void this.evidenceLedger?.artifactStatusTransition?.({
+      orgId,
+      runId: updated.graphRunId ?? null,
+      artifactId: updated.id,
+      fromStatus: OutreachArtifactStatus.PENDING_REVIEW,
+      toStatus: OutreachArtifactStatus.REJECTED,
+      reason: reviewerNote ? `rejected:${reviewerNote}` : "rejected",
     });
 
     // Best-effort: append the generating LangSmith run to the bad-drafts

@@ -109,6 +109,12 @@ export function validateEnv(
         issues.push(`${name} is required when NODE_ENV=production`);
       }
     }
+
+    // One-click unsubscribe signing secret. Needed to generate/verify
+    // List-Unsubscribe tokens for outbound email.
+    if (!env.OUTREACH_UNSUBSCRIBE_SECRET || env.OUTREACH_UNSUBSCRIBE_SECRET.length === 0) {
+      issues.push("OUTREACH_UNSUBSCRIBE_SECRET is required when NODE_ENV=production");
+    }
   }
 
   return { issues, encryptionKeyFingerprint };

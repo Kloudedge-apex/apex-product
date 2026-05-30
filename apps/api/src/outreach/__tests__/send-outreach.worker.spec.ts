@@ -14,6 +14,8 @@ import { IntegrationsService } from "../../integrations/integrations.service";
 import { EvidenceLedgerService } from "../../observability/evidence-ledger.service";
 import { SendEmailTool } from "../../runtime/tools/send-email.tool";
 import { LinkedInSendMessageTool } from "../../runtime/tools/linkedin-send-message.tool";
+import { SuppressionService } from "../../suppression/suppression.service";
+import { ConfigService } from "@nestjs/config";
 
 function artifactRow(overrides: Partial<OutreachArtifact> = {}): OutreachArtifact {
   const now = new Date("2026-05-25T12:00:00Z");
@@ -30,10 +32,12 @@ function artifactRow(overrides: Partial<OutreachArtifact> = {}): OutreachArtifac
     payload: { to: "dest@example.com", subject: "Hi", body: "Body" },
     status: OutreachArtifactStatus.APPROVED,
     reviewerNote: null,
+    suppressionReason: null,
     reviewedBy: "user_x",
     reviewedAt: now,
     sentAt: null,
     sendReceiptId: null,
+    conversationId: null,
     createdAt: now,
     updatedAt: now,
     ...overrides,
@@ -42,21 +46,39 @@ function artifactRow(overrides: Partial<OutreachArtifact> = {}): OutreachArtifac
 
 function mockPrisma() {
   return {
+    $transaction: vi.fn().mockResolvedValue([]),
     outreachArtifact: {
       findUnique: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
       findMany: vi.fn(),
     },
     integration: {
       findMany: vi.fn().mockResolvedValue([]),
+      findUnique: vi.fn(),
+    },
+    conversation: {
+      upsert: vi.fn(),
+      findUnique: vi.fn(),
+    },
+    emailMessage: {
+      create: vi.fn(),
+    },
+    emailEvent: {
+      create: vi.fn(),
     },
   } as unknown as PrismaService & {
+    $transaction: ReturnType<typeof vi.fn>;
     outreachArtifact: {
       findUnique: ReturnType<typeof vi.fn>;
       update: ReturnType<typeof vi.fn>;
+      updateMany: ReturnType<typeof vi.fn>;
       findMany: ReturnType<typeof vi.fn>;
     };
-    integration: { findMany: ReturnType<typeof vi.fn> };
+    integration: { findMany: ReturnType<typeof vi.fn>; findUnique: ReturnType<typeof vi.fn> };
+    conversation: { upsert: ReturnType<typeof vi.fn>; findUnique: ReturnType<typeof vi.fn> };
+    emailMessage: { create: ReturnType<typeof vi.fn> };
+    emailEvent: { create: ReturnType<typeof vi.fn> };
   };
 }
 
@@ -79,9 +101,23 @@ function mockIntegrations(): IntegrationsService {
 function mockLedger() {
   return {
     messageSent: vi.fn().mockResolvedValue(undefined),
+    outreachSendPersistenceFailed: vi.fn().mockResolvedValue(undefined),
+    outreachSuppressed: vi.fn().mockResolvedValue(undefined),
   } as unknown as EvidenceLedgerService & {
     messageSent: ReturnType<typeof vi.fn>;
+    outreachSendPersistenceFailed: ReturnType<typeof vi.fn>;
+    outreachSuppressed: ReturnType<typeof vi.fn>;
   };
+}
+
+function mockSuppression(): SuppressionService {
+  return {
+    isSuppressed: vi.fn().mockResolvedValue({ suppressed: false, matchedEntries: [] }),
+  } as unknown as SuppressionService;
+}
+
+function mockConfig(): ConfigService {
+  return { get: vi.fn().mockReturnValue(undefined) } as unknown as ConfigService;
 }
 
 describe("SendOutreachWorker.processArtifact", () => {
@@ -89,6 +125,8 @@ describe("SendOutreachWorker.processArtifact", () => {
   let queue: OutreachSendQueueService;
   let integrations: IntegrationsService;
   let ledger: ReturnType<typeof mockLedger>;
+  let suppression: SuppressionService;
+  let config: ConfigService;
   let worker: SendOutreachWorker;
 
   beforeEach(() => {
@@ -101,18 +139,29 @@ describe("SendOutreachWorker.processArtifact", () => {
     queue = mockQueue();
     integrations = mockIntegrations();
     ledger = mockLedger();
+    suppression = mockSuppression();
+    config = mockConfig();
     worker = new SendOutreachWorker(
       prisma as unknown as PrismaService,
       queue,
       integrations,
+      suppression,
+      config,
       ledger,
     );
+    prisma.outreachArtifact.updateMany.mockResolvedValue({ count: 1 });
   });
 
   it("sends an APPROVED EMAIL artifact and flips it to SENT with a receipt", async () => {
     prisma.outreachArtifact.findUnique.mockResolvedValue(artifactRow());
-    prisma.outreachArtifact.update.mockResolvedValue(
-      artifactRow({ status: OutreachArtifactStatus.SENT }),
+    prisma.integration.findUnique.mockResolvedValue({
+      credentials: { accountEmail: "sender@example.com" },
+    });
+    prisma.conversation.upsert.mockReturnValueOnce(Promise.resolve({ id: "conv_1" }));
+    prisma.emailMessage.create.mockReturnValueOnce(Promise.resolve({ id: "em_1" }));
+    prisma.emailEvent.create.mockReturnValueOnce(Promise.resolve({ id: "evt_1" }));
+    prisma.outreachArtifact.update.mockReturnValueOnce(
+      Promise.resolve(artifactRow({ status: OutreachArtifactStatus.SENT })),
     );
     // Force mock mode in SendEmailTool — no integration creds loaded — so it
     // returns success with a synthetic messageId.
@@ -123,6 +172,10 @@ describe("SendOutreachWorker.processArtifact", () => {
         mock: true,
         provider: "mock",
         messageId: "mock_123",
+        threadId: "thread_1",
+        rfcMessageId: "<uuid@sender.example.com>",
+        inReplyTo: null,
+        references: [],
         to: "dest@example.com",
         subject: "Hi",
       },
@@ -130,14 +183,55 @@ describe("SendOutreachWorker.processArtifact", () => {
 
     await worker.processArtifact("art_1", "org_1");
 
-    expect(prisma.outreachArtifact.update).toHaveBeenCalledWith({
-      where: { id: "art_1" },
-      data: expect.objectContaining({
-        status: OutreachArtifactStatus.SENT,
-        sendReceiptId: "mock_123",
-        sentAt: expect.any(Date),
+    expect(prisma.conversation.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          orgId_provider_providerThreadId: expect.objectContaining({
+            orgId: "org_1",
+            provider: "gmail",
+            providerThreadId: "thread_1",
+          }),
+        }),
       }),
-    });
+    );
+    expect(prisma.emailMessage.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          provider: "gmail",
+          providerMessageId: "mock_123",
+          providerThreadId: "thread_1",
+          direction: "OUTBOUND",
+          ingestSource: "APP_SEND",
+          org: { connect: { id: "org_1" } },
+        }),
+      }),
+    );
+    expect(prisma.emailEvent.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          kind: "SENT",
+          provider: "gmail",
+          providerMessageId: "mock_123",
+          org: { connect: { id: "org_1" } },
+        }),
+      }),
+    );
+    expect(prisma.outreachArtifact.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "art_1" },
+        data: expect.objectContaining({
+          status: OutreachArtifactStatus.SENT,
+          sendReceiptId: "mock_123",
+          sentAt: expect.any(Date),
+        }),
+      }),
+    );
+    expect(prisma.$transaction).toHaveBeenCalledWith([
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+    ]);
     expect(ledger.messageSent).toHaveBeenCalledWith(
       expect.objectContaining({
         artifactId: "art_1",
@@ -147,6 +241,51 @@ describe("SendOutreachWorker.processArtifact", () => {
         subject: "Hi",
         sendReceiptId: "mock_123",
         provider: "mock",
+      }),
+    );
+  });
+
+  it("marks the artifact SUPPRESSED and skips dispatch when suppressed", async () => {
+    prisma.outreachArtifact.findUnique.mockResolvedValue(artifactRow());
+    (suppression as unknown as { isSuppressed: ReturnType<typeof vi.fn> }).isSuppressed.mockResolvedValueOnce({
+      suppressed: true,
+      matchedEntries: [{ id: "sup_1", kind: "UNSUBSCRIBE", reason: "asked" }],
+    });
+
+    const sendSpy = vi.spyOn(SendEmailTool.prototype, "execute");
+
+    await worker.processArtifact("art_1", "org_1");
+
+    expect(sendSpy).not.toHaveBeenCalled();
+    expect(prisma.outreachArtifact.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "art_1" },
+        data: expect.objectContaining({
+          status: OutreachArtifactStatus.SUPPRESSED,
+          sentAt: null,
+          sendReceiptId: null,
+          suppressionReason: "asked",
+        }),
+      }),
+    );
+    expect(prisma.emailEvent.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          kind: "SUPPRESSED",
+          artifactId: "art_1",
+          meta: expect.objectContaining({
+            suppressionEntryIds: ["sup_1"],
+            kinds: ["UNSUBSCRIBE"],
+          }),
+        }),
+      }),
+    );
+    expect(ledger.outreachSuppressed).toHaveBeenCalledWith(
+      expect.objectContaining({
+        orgId: "org_1",
+        artifactId: "art_1",
+        suppressionEntryIds: ["sup_1"],
+        kinds: ["UNSUBSCRIBE"],
       }),
     );
   });

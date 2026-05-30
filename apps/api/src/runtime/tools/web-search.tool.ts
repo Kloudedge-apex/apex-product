@@ -1,6 +1,10 @@
 import { Tool, ToolContext, ToolResult } from "./tool.interface";
 import { MOCK_DISCLAIMER_SUFFIX, markMocked, markMockedItem } from "./mock-metadata";
 import { fetchWithRetry, withCircuitBreaker } from "../../common/http-retry.util";
+import { EnrichmentLicenseScope, type Prisma } from "@prisma/client";
+import type { EvidenceLedgerService } from "../../observability/evidence-ledger.service";
+import type { EnrichmentFactService } from "../../enrichment/enrichment-fact.service";
+import { withEnrichmentCache } from "../../enrichment/enrichment-cache.guard";
 
 export class WebSearchTool implements Tool {
   name = "web_search";
@@ -12,7 +16,12 @@ export class WebSearchTool implements Tool {
     max_results: { type: "number", description: "Maximum number of results to return (default 5)", required: false },
   };
 
-  async execute(params: Record<string, unknown>, _context: ToolContext): Promise<ToolResult> {
+  constructor(
+    private readonly enrichmentFacts?: EnrichmentFactService,
+    private readonly evidenceLedger?: EvidenceLedgerService,
+  ) {}
+
+  async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
     const query = params.query as string;
     const maxResults = (params.max_results as number) || 5;
 
@@ -23,52 +32,83 @@ export class WebSearchTool implements Tool {
     const tavilyKey = process.env.TAVILY_API_KEY;
 
     if (tavilyKey) {
+      if (this.enrichmentFacts) {
+        try {
+          const fact = await withEnrichmentCache(
+            {
+              enrichmentFacts: this.enrichmentFacts,
+              evidenceLedger: this.evidenceLedger,
+              orgId: context.orgId,
+              runId: context.runId,
+              provider: "tavily",
+              lookupKey: `query:${query}`,
+              field: "search",
+              ttlMs: 7 * 24 * 60 * 60 * 1000,
+              costCredits: 1,
+              licenseScope: EnrichmentLicenseScope.INTERNAL_ONLY,
+            },
+            async () => this.searchWithTavilyData(query, maxResults, tavilyKey),
+          );
+
+          return { success: true, data: fact.value };
+        } catch (error) {
+          const reason = `Tavily provider failed: ${error instanceof Error ? error.message : String(error)}`;
+          return this.mockSearch(query, maxResults, reason);
+        }
+      }
+
       return this.searchWithTavily(query, maxResults, tavilyKey);
     }
 
     return this.mockSearch(query, maxResults, "TAVILY_API_KEY not configured");
   }
 
+  private async searchWithTavilyData(
+    query: string,
+    maxResults: number,
+    apiKey: string,
+  ): Promise<Prisma.InputJsonValue> {
+    const response = await withCircuitBreaker("tavily", () =>
+      fetchWithRetry(
+        "https://api.tavily.com/search",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            api_key: apiKey,
+            query,
+            max_results: maxResults,
+            include_answer: true,
+          }),
+        },
+        { provider: "tavily" },
+      ),
+    );
+
+    if (!response.ok) {
+      throw new Error(`Tavily API error: ${response.status}`);
+    }
+
+    const data = (await response.json()) as {
+      results: Array<{ title: string; url: string; content: string }>;
+      answer?: string;
+    };
+
+    return {
+      results: data.results.map((r) => ({
+        title: r.title,
+        url: r.url,
+        snippet: r.content?.slice(0, 200),
+        content: r.content,
+      })),
+      answer: data.answer,
+    };
+  }
+
   private async searchWithTavily(query: string, maxResults: number, apiKey: string): Promise<ToolResult> {
     try {
-      const response = await withCircuitBreaker("tavily", () =>
-        fetchWithRetry(
-          "https://api.tavily.com/search",
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              api_key: apiKey,
-              query,
-              max_results: maxResults,
-              include_answer: true,
-            }),
-          },
-          { provider: "tavily" },
-        ),
-      );
-
-      if (!response.ok) {
-        throw new Error(`Tavily API error: ${response.status}`);
-      }
-
-      const data = (await response.json()) as {
-        results: Array<{ title: string; url: string; content: string }>;
-        answer?: string;
-      };
-
-      return {
-        success: true,
-        data: {
-          results: data.results.map((r) => ({
-            title: r.title,
-            url: r.url,
-            snippet: r.content?.slice(0, 200),
-            content: r.content,
-          })),
-          answer: data.answer,
-        },
-      };
+      const data = await this.searchWithTavilyData(query, maxResults, apiKey);
+      return { success: true, data };
     } catch (error) {
       const reason = `Tavily provider failed: ${error instanceof Error ? error.message : String(error)}`;
       return this.mockSearch(query, maxResults, reason);

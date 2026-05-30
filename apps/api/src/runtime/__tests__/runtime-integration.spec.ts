@@ -8,6 +8,7 @@ import { MemoryService } from "../memory.service";
 import { PrismaService } from "../../prisma/prisma.service";
 import { IntegrationsService } from "../../integrations/integrations.service";
 import { OutreachArtifactsService } from "../../outreach/outreach-artifacts.service";
+import { ConfigService } from "@nestjs/config";
 
 /**
  * Integration-level test for the runtime pipeline:
@@ -110,6 +111,7 @@ describe("Runtime Integration", () => {
       memoryService,
       integrationsService,
       outreachArtifacts,
+      { get: vi.fn().mockReturnValue(undefined) } as unknown as ConfigService,
     );
 
     runtimeService = new RuntimeService(mockPrisma as PrismaService, queueService);

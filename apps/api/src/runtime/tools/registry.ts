@@ -10,6 +10,8 @@ import { LinkedInSendMessageTool } from "./linkedin-send-message.tool";
 import { MemoryService } from "../memory.service";
 import { EvidenceLedgerService } from "../../observability/evidence-ledger.service";
 import { LinkedInService } from "../../integrations/linkedin/linkedin.service";
+import { ConfigService } from "@nestjs/config";
+import { EnrichmentFactService } from "../../enrichment/enrichment-fact.service";
 import { getAllTemplates } from "../../agents/templates";
 import { AgentTemplateConfig } from "../../agents/templates/template.types";
 
@@ -72,8 +74,16 @@ export class ToolRegistry {
     evidenceLedger?: EvidenceLedgerService,
     templates: AgentTemplateConfig[] = getAllTemplates(),
     linkedinService?: LinkedInService,
+    config?: ConfigService,
+    enrichmentFacts?: EnrichmentFactService,
   ) {
-    this.registerDefaults(memoryService, evidenceLedger, linkedinService);
+    this.registerDefaults(
+      memoryService,
+      evidenceLedger,
+      linkedinService,
+      config,
+      enrichmentFacts,
+    );
     // Templates are the source of truth for tool whitelisting; derive the map
     // at construction so the runtime cannot drift away from declared templates.
     this.templateToolMap = buildTemplateToolMap(templates);
@@ -83,12 +93,17 @@ export class ToolRegistry {
     memoryService?: MemoryService,
     evidenceLedger?: EvidenceLedgerService,
     linkedinService?: LinkedInService,
+    config?: ConfigService,
+    enrichmentFacts?: EnrichmentFactService,
   ): void {
-    this.register(new WebSearchTool());
-    this.register(new WebScrapeTool());
-    this.register(new SendEmailTool(evidenceLedger));
+    const webSearch = new WebSearchTool(enrichmentFacts, evidenceLedger);
+    const webScrape = new WebScrapeTool(enrichmentFacts, evidenceLedger);
+
+    this.register(webSearch);
+    this.register(webScrape);
+    this.register(new SendEmailTool(evidenceLedger, config));
     this.register(new HubSpotTool(evidenceLedger));
-    this.register(new CompanyResearchTool());
+    this.register(new CompanyResearchTool(webSearch, webScrape, enrichmentFacts, evidenceLedger));
     this.register(new LeadScoreTool());
     // linkedin_send_message is always registered so the template/registry sync
     // invariant holds even when LinkedInService isn't wired (tests, bootstrap

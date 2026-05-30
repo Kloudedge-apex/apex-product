@@ -22,6 +22,8 @@ export interface LLMResponse {
   tokensUsed: number;
   model: string;
   cost: number;
+  /** Provider-native usage block (OpenAI/Azure/Anthropic). Used for billing persistence. */
+  usage?: Readonly<Record<string, unknown>>;
   toolCalls?: ToolCallMessage[];
   finishReason?: string;
 }
@@ -117,9 +119,21 @@ interface LlmAttribution {
   parentRunId?: string;
   agent?: string;
   node?: string;
+  /**
+   * Stable graph node identifier for attribution and billing rollups.
+   * Prefer this over `node` when set.
+   */
+  nodeName?: string;
   tags?: readonly string[];
   metadata?: Readonly<Record<string, unknown>>;
   onRunStart?: (runId: string) => void;
+  orgId?: string;
+  campaignId?: string | null;
+  leadId?: string | null;
+  artifactId?: string | null;
+  graphRunId?: string | null;
+  promptVersion?: string | null;
+  evalBundleVersion?: string | null;
 }
 
 export interface ChatOptions {
@@ -131,8 +145,13 @@ export interface ChatOptions {
   parentRunId?: string;
   /** Logical agent name for LangSmith attribution, e.g. "sdr_agent.draft_message". */
   agent?: string;
-  /** Graph node name, e.g. "sdr_outreach.qa_message". */
+  /**
+   * Graph node identifier used for LangSmith tags/metadata.
+   * Prefer `nodeName` for stable attribution if both are provided.
+   */
   node?: string;
+  /** Stable node identifier for billing attribution, e.g. "DraftGeneration". */
+  nodeName?: string;
   /** Free-form tags attached to the LangSmith run. */
   tags?: readonly string[];
   /** Extra metadata merged into the LangSmith run. */
@@ -147,6 +166,12 @@ export interface ChatOptions {
    * without code changes.
    */
   orgId?: string;
+  campaignId?: string | null;
+  leadId?: string | null;
+  artifactId?: string | null;
+  graphRunId?: string | null;
+  promptVersion?: string | null;
+  evalBundleVersion?: string | null;
 }
 
 @Injectable()
@@ -206,9 +231,17 @@ export class LLMService {
       parentRunId: options?.parentRunId,
       agent: options?.agent,
       node: options?.node,
+      nodeName: options?.nodeName ?? options?.node,
       tags: options?.tags,
       metadata: options?.metadata,
       onRunStart: options?.onRunStart,
+      orgId,
+      campaignId: options?.campaignId ?? null,
+      leadId: options?.leadId ?? null,
+      artifactId: options?.artifactId ?? null,
+      graphRunId: options?.graphRunId ?? null,
+      promptVersion: options?.promptVersion ?? null,
+      evalBundleVersion: options?.evalBundleVersion ?? null,
     };
 
     // Route Claude models to Anthropic API
@@ -287,7 +320,14 @@ export class LLMService {
         inputs: input.inputs,
         parentRunId: input.attribution?.parentRunId,
         agent: input.attribution?.agent,
-        node: input.attribution?.node,
+        node: input.attribution?.nodeName ?? input.attribution?.node,
+        orgId: input.attribution?.orgId,
+        campaignId: input.attribution?.campaignId ?? null,
+        leadId: input.attribution?.leadId ?? null,
+        artifactId: input.attribution?.artifactId ?? null,
+        graphRunId: input.attribution?.graphRunId ?? null,
+        promptVersion: input.attribution?.promptVersion ?? null,
+        evalBundleVersion: input.attribution?.evalBundleVersion ?? null,
         tags: input.attribution?.tags,
         metadata: input.attribution?.metadata,
         onRunStart: input.attribution?.onRunStart,
@@ -347,26 +387,32 @@ export class LLMService {
           throw new Error(`Azure OpenAI ${response.status}: ${text.slice(0, 200)}`);
         }
 
-        const data = (await response.json()) as {
-          choices: Array<{
-            message: { content: string | null; tool_calls?: ToolCallMessage[] };
-            finish_reason: string;
-          }>;
-          usage: { total_tokens: number };
-        };
+	        const data = (await response.json()) as {
+	          choices: Array<{
+	            message: { content: string | null; tool_calls?: ToolCallMessage[] };
+	            finish_reason: string;
+	          }>;
+	          usage: {
+	            total_tokens: number;
+	            prompt_tokens?: number;
+	            completion_tokens?: number;
+	            prompt_tokens_details?: { cached_tokens?: number };
+	          };
+	        };
 
         const choice = data.choices[0];
         const tokensUsed = data.usage?.total_tokens || 0;
         const costPer1K = COST_PER_1K[model] || COST_PER_1K["gpt-4o-mini"];
 
-        return {
-          content: choice?.message?.content || "",
-          tokensUsed,
-          model,
-          cost: (tokensUsed / 1000) * costPer1K,
-          toolCalls: choice?.message?.tool_calls,
-          finishReason: choice?.finish_reason,
-        };
+	        return {
+	          content: choice?.message?.content || "",
+	          tokensUsed,
+	          model,
+	          cost: (tokensUsed / 1000) * costPer1K,
+	          usage: data.usage as unknown as Record<string, unknown>,
+	          toolCalls: choice?.message?.tool_calls,
+	          finishReason: choice?.finish_reason,
+	        };
       },
     );
   }
@@ -415,26 +461,32 @@ export class LLMService {
             throw new Error(`OpenAI API error: ${response.status}`);
           }
 
-          const data = (await response.json()) as {
-            choices: Array<{
-              message: { content: string | null; tool_calls?: ToolCallMessage[] };
-              finish_reason: string;
-            }>;
-            usage: { total_tokens: number };
-          };
+	          const data = (await response.json()) as {
+	            choices: Array<{
+	              message: { content: string | null; tool_calls?: ToolCallMessage[] };
+	              finish_reason: string;
+	            }>;
+	            usage: {
+	              total_tokens: number;
+	              prompt_tokens?: number;
+	              completion_tokens?: number;
+	              prompt_tokens_details?: { cached_tokens?: number };
+	            };
+	          };
 
           const choice = data.choices[0];
           const tokensUsed = data.usage?.total_tokens || 0;
           const costPer1K = COST_PER_1K[model] || COST_PER_1K["gpt-4o-mini"];
 
-          return {
-            content: choice?.message?.content || "",
-            tokensUsed,
-            model,
-            cost: (tokensUsed / 1000) * costPer1K,
-            toolCalls: choice?.message?.tool_calls,
-            finishReason: choice?.finish_reason,
-          };
+	          return {
+	            content: choice?.message?.content || "",
+	            tokensUsed,
+	            model,
+	            cost: (tokensUsed / 1000) * costPer1K,
+	            usage: data.usage as unknown as Record<string, unknown>,
+	            toolCalls: choice?.message?.tool_calls,
+	            finishReason: choice?.finish_reason,
+	          };
         },
       );
     } catch (error) {
@@ -501,11 +553,11 @@ export class LLMService {
             throw new Error(`Anthropic API error: ${response.status}`);
           }
 
-          const data = (await response.json()) as {
-            content: Array<{ type: string; text?: string; id?: string; name?: string; input?: unknown }>;
-            usage: { input_tokens: number; output_tokens: number };
-            stop_reason: string;
-          };
+	          const data = (await response.json()) as {
+	            content: Array<{ type: string; text?: string; id?: string; name?: string; input?: unknown }>;
+	            usage: { input_tokens: number; output_tokens: number; cache_read_input_tokens?: number };
+	            stop_reason: string;
+	          };
 
           const tokensUsed = (data.usage?.input_tokens || 0) + (data.usage?.output_tokens || 0);
           const costPer1K = COST_PER_1K[model] || COST_PER_1K["claude-3-5-sonnet-20241022"];
@@ -520,14 +572,15 @@ export class LLMService {
 
           const textBlock = data.content.find((b) => b.type === "text");
 
-          return {
-            content: textBlock?.text || "",
-            tokensUsed,
-            model,
-            cost: (tokensUsed / 1000) * costPer1K,
-            toolCalls: openAIToolCalls.length > 0 ? openAIToolCalls : undefined,
-            finishReason: data.stop_reason,
-          };
+	          return {
+	            content: textBlock?.text || "",
+	            tokensUsed,
+	            model,
+	            cost: (tokensUsed / 1000) * costPer1K,
+	            usage: data.usage as unknown as Record<string, unknown>,
+	            toolCalls: openAIToolCalls.length > 0 ? openAIToolCalls : undefined,
+	            finishReason: data.stop_reason,
+	          };
         },
       );
     } catch (error) {

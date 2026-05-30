@@ -1,6 +1,10 @@
 import { Tool, ToolContext, ToolResult } from "./tool.interface";
 import { MOCK_DISCLAIMER_SUFFIX, markMocked } from "./mock-metadata";
 import { fetchWithRetry } from "../../common/http-retry.util";
+import { EnrichmentLicenseScope, type Prisma } from "@prisma/client";
+import type { EvidenceLedgerService } from "../../observability/evidence-ledger.service";
+import type { EnrichmentFactService } from "../../enrichment/enrichment-fact.service";
+import { withEnrichmentCache } from "../../enrichment/enrichment-cache.guard";
 
 export class WebScrapeTool implements Tool {
   name = "web_scrape";
@@ -11,7 +15,12 @@ export class WebScrapeTool implements Tool {
     url: { type: "string", description: "The URL to scrape", required: true },
   };
 
-  async execute(params: Record<string, unknown>, _context: ToolContext): Promise<ToolResult> {
+  constructor(
+    private readonly enrichmentFacts?: EnrichmentFactService,
+    private readonly evidenceLedger?: EvidenceLedgerService,
+  ) {}
+
+  async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
     const url = params.url as string;
 
     if (!url) {
@@ -19,31 +28,56 @@ export class WebScrapeTool implements Tool {
     }
 
     try {
-      // No circuit breaker: arbitrary user-supplied URLs — one slow host
-      // must not poison the breaker pool for unrelated scrapes.
-      const response = await fetchWithRetry(
-        url,
-        {
-          headers: {
-            "User-Agent": "Mozilla/5.0 (compatible; ApexBot/1.0)",
-            Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      if (this.enrichmentFacts) {
+        const fact = await withEnrichmentCache(
+          {
+            enrichmentFacts: this.enrichmentFacts,
+            evidenceLedger: this.evidenceLedger,
+            orgId: context.orgId,
+            runId: context.runId,
+            provider: "web-scrape",
+            lookupKey: `url:${url}`,
+            field: "page",
+            ttlMs: 7 * 24 * 60 * 60 * 1000,
+            costCredits: 1,
+            licenseScope: EnrichmentLicenseScope.RESEARCH_OK,
           },
-          signal: AbortSignal.timeout(10000),
-        },
-        { provider: "web-scrape", maxAttempts: 3 },
-      );
+          async () => this.scrapeUrlData(url),
+        );
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        return { success: true, data: fact.value };
       }
 
-      const html = await response.text();
-      return { success: true, data: this.extractContent(html, url) };
+      const data = await this.scrapeUrlData(url);
+      return { success: true, data };
     } catch (error) {
       // Return mock data on failure, but tag it so the LLM does not cite it as fact.
       const reason = `Scrape fetch failed: ${error instanceof Error ? error.message : String(error)}`;
       return { success: true, data: markMocked(this.mockScrape(url), reason) };
     }
+  }
+
+  private async scrapeUrlData(url: string): Promise<Prisma.InputJsonValue> {
+    // No circuit breaker: arbitrary user-supplied URLs — one slow host
+    // must not poison the breaker pool for unrelated scrapes.
+    const response = await fetchWithRetry(
+      url,
+      {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (compatible; ApexBot/1.0)",
+          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+        signal: AbortSignal.timeout(10000),
+      },
+      { provider: "web-scrape", maxAttempts: 3 },
+    );
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    const html = await response.text();
+    return this.extractContent(html, url);
   }
 
   private extractContent(html: string, url: string): { title: string; content: string; links: string[] } {

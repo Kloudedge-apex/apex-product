@@ -3,16 +3,30 @@ import {
   Logger,
   UnauthorizedException,
   BadRequestException,
+  Optional,
   Inject,
   forwardRef,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { google, gmail_v1, Auth } from "googleapis";
 import { OAuth2Client } from "google-auth-library";
-import { Prisma } from "@prisma/client";
+import {
+  Prisma,
+  EmailDirection,
+  EmailEventKind,
+  EmailIngestSource,
+  OutreachArtifactStatus,
+  SuppressionKind,
+  SuppressionScope,
+  ReplyIntent10,
+} from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { RuntimeService } from "../../runtime/runtime.service";
+import { ReplyClassifierQueueService } from "../../inbox/reply-classifier/reply-classifier.queue";
+import { EvidenceLedgerService } from "../../observability/evidence-ledger.service";
 import { encrypt, decrypt } from "../crypto.util";
+import { SuppressionService } from "../../suppression/suppression.service";
+import { verifyToken } from "../../suppression/unsubscribe-token.util";
 
 interface GmailTokens {
   access_token: string;
@@ -44,6 +58,11 @@ interface GmailMessage {
   date: string;
   labelIds: string[];
   body?: string;
+  // Extra data populated only when called with includeHeadersForIngest=true.
+  headersRaw?: gmail_v1.Schema$MessagePartHeader[];
+  mimeType?: string;
+  bodyText?: string;
+  bodyHtml?: string;
 }
 
 interface GmailThread {
@@ -97,6 +116,9 @@ export class GmailService {
     private readonly config: ConfigService,
     @Inject(forwardRef(() => RuntimeService))
     private readonly runtime: RuntimeService,
+    private readonly replyClassifierQueue: ReplyClassifierQueueService,
+    private readonly suppressionService: SuppressionService,
+    @Optional() private readonly evidenceLedger?: EvidenceLedgerService,
   ) {
     this.clientId = this.config.get<string>("GOOGLE_CLIENT_ID", "");
     this.clientSecret = this.config.get<string>("GOOGLE_CLIENT_SECRET", "");
@@ -203,7 +225,9 @@ export class GmailService {
 
     for (const messageId of newMessageIds) {
       try {
-        const message = await this.getMessage(orgId, messageId, gmail);
+        const message = await this.getMessage(orgId, messageId, gmail, {
+          includeHeadersForIngest: true,
+        });
         await this.maybeDispatchReply(orgId, emailAddress, message);
       } catch (err) {
         this.logger.warn("gmail.push message processing failed", {
@@ -235,6 +259,9 @@ export class GmailService {
       return;
     }
 
+    const ingest = await this.persistInboundCorrelation(orgId, integrationEmail, message);
+    if (!ingest) return;
+
     // Look up the Reply Handler agent for this org. Template slug is
     // "reply-handler"; the seeded AgentTemplate row has name "Reply Handler".
     const agent = await this.prisma.agent.findFirst({
@@ -253,12 +280,13 @@ export class GmailService {
       return;
     }
 
-    const context: ReplyDispatchContext = {
+    const context: ReplyDispatchContext & { replyId: string } = {
       gmailMessageId: message.id,
       threadId: message.threadId,
       from: message.from,
       subject: message.subject,
       bodyPreview: (message.body ?? message.snippet).slice(0, 280),
+      replyId: ingest.replyId,
     };
 
     const run = await this.runtime.triggerRun(agent.id, agent.orgId);
@@ -273,6 +301,421 @@ export class GmailService {
         metadata: context as unknown as Prisma.InputJsonValue,
       },
     });
+
+    // WS-3: enqueue reply classification (deterministic → LLM → HITL).
+    try {
+      await this.replyClassifierQueue.enqueue({
+        orgId,
+        replyId: ingest.replyId,
+      });
+    } catch (err) {
+      this.logger.warn("reply-classifier enqueue failed", {
+        orgId,
+        replyId: ingest.replyId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    // WS-4: auto-suppression hooks after classifier (or mailto token).
+    // Best-effort and should never block reply dispatch.
+    void this.maybeAutoSuppressFromInbound(orgId, ingest.replyId, message).catch(
+      (err) => {
+        this.logger.warn("gmail.auto_suppress failed", {
+          orgId,
+          replyId: ingest.replyId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      },
+    );
+  }
+
+  private async maybeAutoSuppressFromInbound(
+    orgId: string,
+    replyId: string,
+    message: GmailMessage,
+  ): Promise<void> {
+    const fromParsed = parseMailbox(message.from);
+    const fromEmail = fromParsed.email ?? null;
+    const toEmails = parseEmailAddressList(message.to);
+
+    const tokenFromTo = extractUnsubscribeTokenFromTo(toEmails);
+    if (tokenFromTo) {
+      const claims = verifyToken(tokenFromTo);
+      if (claims && claims.orgId === orgId) {
+        await this.suppressionService.add({
+          orgId,
+          scope: SuppressionScope.ORG,
+          kind: SuppressionKind.UNSUBSCRIBE,
+          subjectEmail: claims.recipientEmail,
+          source: "inbound-reply",
+          reason: "mailto-unsubscribe",
+        });
+        return;
+      }
+    }
+
+    // Only auto-suppress on classifier intent when this reply is tied to an
+    // outbound artifact (prevents random inbox mail from mutating suppression).
+    const reply = await this.prisma.reply.findUnique({
+      where: { id: replyId },
+      select: { artifactId: true },
+    });
+    if (!reply?.artifactId) return;
+    if (!fromEmail) return;
+
+    const maxAttempts = 20;
+    const delayMs = 250;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const latest = await this.prisma.replyClassification.findFirst({
+        where: { orgId, replyId, intent: ReplyIntent10.unsubscribe },
+        orderBy: { createdAt: "desc" },
+        select: { id: true },
+      });
+      if (latest) {
+        await this.suppressionService.add({
+          orgId,
+          scope: SuppressionScope.ORG,
+          kind: SuppressionKind.UNSUBSCRIBE,
+          subjectEmail: fromEmail,
+          source: "inbound-reply",
+          reason: "reply-intent-unsubscribe",
+        });
+        return;
+      }
+
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+
+  private async persistInboundCorrelation(
+    orgId: string,
+    integrationEmail: string,
+    message: GmailMessage,
+  ): Promise<
+    | {
+        replyId: string;
+        artifactTransition?: {
+          artifactId: string;
+          fromStatus: OutreachArtifactStatus;
+          toStatus: OutreachArtifactStatus;
+          graphRunId: string | null;
+          reason: string;
+        };
+      }
+    | null
+  > {
+    const headersRaw = message.headersRaw ?? [];
+    const headerBag = buildHeaderBag(headersRaw);
+
+    const rfcMessageId = normalizeMaybeMessageId(
+      getHeaderValue(headerBag, "Message-ID"),
+    );
+    const inReplyTo = normalizeMaybeMessageId(
+      getHeaderValue(headerBag, "In-Reply-To"),
+    );
+    const references = parseReferencesHeader(getHeaderValue(headerBag, "References"));
+
+    const contentType =
+      getHeaderValue(headerBag, "Content-Type") || message.mimeType || "";
+    const autoSubmitted = getHeaderValue(headerBag, "Auto-Submitted");
+    const isNdr =
+      contentType.toLowerCase().startsWith("multipart/report") ||
+      autoSubmitted.toLowerCase().startsWith("auto-replied");
+
+    const now = new Date();
+    const occurredAt =
+      parseDateOrNull(getHeaderValue(headerBag, "Date") || message.date) ?? now;
+
+    const fromParsed = parseMailbox(getHeaderValue(headerBag, "From") || message.from);
+    const toEmails = parseEmailAddressList(
+      getHeaderValue(headerBag, "To") || message.to,
+    );
+    const cc = parseEmailAddressList(getHeaderValue(headerBag, "Cc"));
+    const bcc = parseEmailAddressList(getHeaderValue(headerBag, "Bcc"));
+
+    const matchIds = [inReplyTo, ...references].filter(
+      (v): v is string => typeof v === "string" && v.length > 0,
+    );
+
+    let originatingOutbound:
+      | {
+          readonly id: string;
+          readonly artifactId: string | null;
+          readonly providerMessageId: string;
+          readonly rfcMessageId: string | null;
+          readonly toEmails: readonly string[];
+        }
+      | null = null;
+
+    if (matchIds.length > 0) {
+      originatingOutbound = await this.prisma.emailMessage.findFirst({
+        where: {
+          orgId,
+          provider: "gmail",
+          direction: EmailDirection.OUTBOUND,
+          references: { hasSome: matchIds },
+        },
+        orderBy: { occurredAt: "desc" },
+        select: {
+          id: true,
+          artifactId: true,
+          providerMessageId: true,
+          rfcMessageId: true,
+          toEmails: true,
+        },
+      });
+    }
+
+    if (!originatingOutbound && matchIds.length > 0) {
+      originatingOutbound = await this.prisma.emailMessage.findFirst({
+        where: {
+          orgId,
+          provider: "gmail",
+          direction: EmailDirection.OUTBOUND,
+          rfcMessageId: { in: matchIds },
+        },
+        orderBy: { occurredAt: "desc" },
+        select: {
+          id: true,
+          artifactId: true,
+          providerMessageId: true,
+          rfcMessageId: true,
+          toEmails: true,
+        },
+      });
+    }
+
+    if (!originatingOutbound && message.threadId) {
+      originatingOutbound = await this.prisma.emailMessage.findFirst({
+        where: {
+          orgId,
+          provider: "gmail",
+          direction: EmailDirection.OUTBOUND,
+          providerThreadId: message.threadId,
+        },
+        orderBy: { occurredAt: "desc" },
+        select: {
+          id: true,
+          artifactId: true,
+          providerMessageId: true,
+          rfcMessageId: true,
+          toEmails: true,
+        },
+      });
+    }
+
+    const hardBounceRecipient =
+      originatingOutbound?.artifactId && isNdr
+        ? (originatingOutbound.toEmails?.[0] ?? null)
+        : null;
+
+    try {
+      const result = await this.prisma.$transaction(async (tx) => {
+        let artifactTransition:
+          | {
+              artifactId: string;
+              fromStatus: OutreachArtifactStatus;
+              toStatus: OutreachArtifactStatus;
+              graphRunId: string | null;
+              reason: string;
+            }
+          | undefined;
+
+        const conversation = await tx.conversation.upsert({
+          where: {
+            orgId_provider_providerThreadId: {
+              orgId,
+              provider: "gmail",
+              providerThreadId: message.threadId,
+            },
+          },
+          create: {
+            orgId,
+            provider: "gmail",
+            providerThreadId: message.threadId,
+            subject: message.subject ?? null,
+            lastActivityAt: now,
+          },
+          update: {
+            lastActivityAt: now,
+            ...(message.subject ? { subject: message.subject } : {}),
+          },
+        });
+
+        const inboundEmail = await tx.emailMessage.create({
+          data: {
+            orgId,
+            direction: EmailDirection.INBOUND,
+            ingestSource: EmailIngestSource.GMAIL_WATCH,
+            provider: "gmail",
+            providerMessageId: message.id,
+            providerThreadId: message.threadId,
+            rfcMessageId,
+            inReplyTo,
+            references,
+            subject: message.subject ?? null,
+            bodyText: message.bodyText ?? message.body ?? null,
+            bodyHtml: message.bodyHtml ?? null,
+            headers: headersRaw as unknown as Prisma.InputJsonValue,
+            fromEmail: fromParsed.email ?? fromParsed.raw ?? "unknown@unknown",
+            fromName: fromParsed.name,
+            toEmails:
+              toEmails.length > 0
+                ? toEmails
+                : integrationEmail
+                  ? [integrationEmail]
+                  : [],
+            cc,
+            bcc,
+            senderMailboxId: integrationEmail || null,
+            occurredAt,
+            conversationId: conversation.id,
+            ...(originatingOutbound?.artifactId
+              ? { artifactId: originatingOutbound.artifactId }
+              : {}),
+          },
+        });
+
+        const reply = await tx.reply.create({
+          data: {
+            orgId,
+            emailMessageId: inboundEmail.id,
+            conversationId: conversation.id,
+            artifactId: originatingOutbound?.artifactId ?? null,
+            isOrphan: !originatingOutbound?.artifactId,
+            receivedAt: occurredAt,
+          },
+        });
+
+        await tx.emailEvent.create({
+          data: {
+            orgId,
+            kind: EmailEventKind.REPLIED,
+            provider: "gmail",
+            providerMessageId: inboundEmail.providerMessageId,
+            occurredAt,
+            emailMessageId: inboundEmail.id,
+            replyId: reply.id,
+            conversationId: conversation.id,
+            artifactId: originatingOutbound?.artifactId ?? null,
+          },
+        });
+
+        if (originatingOutbound?.artifactId) {
+          const artifactBefore = await tx.outreachArtifact.findUnique({
+            where: { id: originatingOutbound.artifactId },
+            select: { orgId: true, status: true, graphRunId: true },
+          });
+          if (isNdr) {
+            await tx.emailEvent.create({
+              data: {
+                orgId,
+                kind: EmailEventKind.BOUNCED,
+                provider: "gmail",
+                providerMessageId: originatingOutbound.providerMessageId,
+                occurredAt,
+                emailMessageId: originatingOutbound.id,
+                conversationId: conversation.id,
+                artifactId: originatingOutbound.artifactId,
+                meta: {
+                  inboundProviderMessageId: inboundEmail.providerMessageId,
+                  inboundRfcMessageId: inboundEmail.rfcMessageId,
+                } as unknown as Prisma.InputJsonValue,
+              },
+            });
+
+            const updated = await tx.outreachArtifact.updateMany({
+              where: {
+                id: originatingOutbound.artifactId,
+                orgId,
+                status: {
+                  in: [
+                    OutreachArtifactStatus.SENT,
+                    OutreachArtifactStatus.QUEUED,
+                    OutreachArtifactStatus.REPLIED,
+                  ],
+                },
+              },
+              data: { status: OutreachArtifactStatus.BOUNCED },
+            });
+            if (
+              updated.count > 0 &&
+              artifactBefore &&
+              artifactBefore.orgId === orgId &&
+              artifactBefore.status !== OutreachArtifactStatus.BOUNCED
+            ) {
+              artifactTransition = {
+                artifactId: originatingOutbound.artifactId,
+                fromStatus: artifactBefore.status,
+                toStatus: OutreachArtifactStatus.BOUNCED,
+                graphRunId: artifactBefore.graphRunId ?? null,
+                reason: "gmail_inbound_ndr",
+              };
+            }
+          } else {
+            const updated = await tx.outreachArtifact.updateMany({
+              where: {
+                id: originatingOutbound.artifactId,
+                orgId,
+                status: {
+                  in: [OutreachArtifactStatus.SENT, OutreachArtifactStatus.QUEUED],
+                },
+              },
+              data: { status: OutreachArtifactStatus.REPLIED },
+            });
+            if (
+              updated.count > 0 &&
+              artifactBefore &&
+              artifactBefore.orgId === orgId &&
+              artifactBefore.status !== OutreachArtifactStatus.REPLIED
+            ) {
+              artifactTransition = {
+                artifactId: originatingOutbound.artifactId,
+                fromStatus: artifactBefore.status,
+                toStatus: OutreachArtifactStatus.REPLIED,
+                graphRunId: artifactBefore.graphRunId ?? null,
+                reason: "gmail_inbound_reply",
+              };
+            }
+          }
+        }
+
+        return { replyId: reply.id, artifactTransition };
+      });
+      if (result?.artifactTransition) {
+        void this.evidenceLedger?.artifactStatusTransition?.({
+          orgId,
+          runId: result.artifactTransition.graphRunId ?? null,
+          artifactId: result.artifactTransition.artifactId,
+          fromStatus: result.artifactTransition.fromStatus,
+          toStatus: result.artifactTransition.toStatus,
+          reason: result.artifactTransition.reason,
+        });
+      }
+
+      if (hardBounceRecipient) {
+        await this.suppressionService.add({
+          orgId,
+          scope: SuppressionScope.ORG,
+          kind: SuppressionKind.HARD_BOUNCE,
+          subjectEmail: hardBounceRecipient,
+          source: "ndr-detected",
+          reason: "gmail-ndr",
+        });
+      }
+
+      return result;
+    } catch (err) {
+      // Gmail Pub/Sub is at-least-once; duplicate deliveries should no-op.
+      if (isPrismaUniqueViolation(err)) {
+        this.logger.debug("gmail.push duplicate delivery ignored", {
+          orgId,
+          providerMessageId: message.id,
+        });
+        return null;
+      }
+      throw err;
+    }
   }
 
   private async findIntegrationByEmail(emailAddress: string): Promise<{
@@ -443,6 +886,7 @@ export class GmailService {
     orgId: string,
     messageId: string,
     existingClient?: gmail_v1.Gmail,
+    options?: { includeHeadersForIngest?: boolean },
   ): Promise<GmailMessage> {
     const gmail = existingClient ?? (await this.getGmailClient(orgId));
 
@@ -452,22 +896,13 @@ export class GmailService {
       format: "full",
     });
 
-    const headers = response.data.payload?.headers ?? [];
+    const payload = response.data.payload;
+    const headers = payload?.headers ?? [];
     const getHeader = (name: string): string =>
       headers.find((h) => h.name?.toLowerCase() === name.toLowerCase())?.value ?? "";
 
-    let body = "";
-    const payload = response.data.payload;
-    if (payload?.body?.data) {
-      body = Buffer.from(payload.body.data, "base64url").toString("utf-8");
-    } else if (payload?.parts) {
-      const textPart = payload.parts.find((p) => p.mimeType === "text/plain");
-      const htmlPart = payload.parts.find((p) => p.mimeType === "text/html");
-      const part = textPart ?? htmlPart;
-      if (part?.body?.data) {
-        body = Buffer.from(part.body.data, "base64url").toString("utf-8");
-      }
-    }
+    const extracted = extractBodiesFromPayload(payload);
+    const body = extracted.bodyText ?? extracted.bodyHtml ?? "";
 
     return {
       id: response.data.id!,
@@ -479,6 +914,14 @@ export class GmailService {
       date: getHeader("Date"),
       labelIds: response.data.labelIds ?? [],
       body,
+      ...(options?.includeHeadersForIngest
+        ? {
+            headersRaw: headers,
+            mimeType: payload?.mimeType ?? undefined,
+            bodyText: extracted.bodyText ?? undefined,
+            bodyHtml: extracted.bodyHtml ?? undefined,
+          }
+        : {}),
     };
   }
 
@@ -665,4 +1108,141 @@ export class GmailService {
       },
     });
   }
+}
+
+function extractBodiesFromPayload(
+  payload: gmail_v1.Schema$MessagePart | undefined,
+): { bodyText: string | null; bodyHtml: string | null } {
+  const decoded = (data: string | null | undefined): string | null => {
+    if (!data) return null;
+    try {
+      return Buffer.from(data, "base64url").toString("utf-8");
+    } catch {
+      return null;
+    }
+  };
+
+  const walk = (
+    part: gmail_v1.Schema$MessagePart | undefined,
+  ): { bodyText: string | null; bodyHtml: string | null } => {
+    if (!part) return { bodyText: null, bodyHtml: null };
+    const mimeType = part.mimeType ?? "";
+    if (mimeType === "text/plain") {
+      return { bodyText: decoded(part.body?.data), bodyHtml: null };
+    }
+    if (mimeType === "text/html") {
+      return { bodyText: null, bodyHtml: decoded(part.body?.data) };
+    }
+    let bodyText: string | null = null;
+    let bodyHtml: string | null = null;
+    for (const child of part.parts ?? []) {
+      const next = walk(child);
+      bodyText = bodyText ?? next.bodyText;
+      bodyHtml = bodyHtml ?? next.bodyHtml;
+    }
+    // Single-part non-text (rare) can still have body.data on the root.
+    if (!bodyText && !bodyHtml) {
+      const maybe = decoded(part.body?.data);
+      if (maybe) bodyText = maybe;
+    }
+    return { bodyText, bodyHtml };
+  };
+
+  return walk(payload);
+}
+
+function buildHeaderBag(
+  headers: gmail_v1.Schema$MessagePartHeader[],
+): Record<string, string[]> {
+  const bag: Record<string, string[]> = {};
+  for (const header of headers) {
+    const name = header.name?.trim();
+    if (!name) continue;
+    const key = name.toLowerCase();
+    const value = header.value ?? "";
+    if (!bag[key]) bag[key] = [];
+    bag[key].push(value);
+  }
+  return bag;
+}
+
+function getHeaderValue(
+  bag: Record<string, string[]>,
+  name: string,
+): string {
+  const values = bag[name.toLowerCase()];
+  if (!values || values.length === 0) return "";
+  return values[0] ?? "";
+}
+
+function normalizeMaybeMessageId(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith("<") && trimmed.endsWith(">")) return trimmed;
+  return `<${trimmed.replace(/^<|>$/g, "")}>`;
+}
+
+function parseReferencesHeader(value: string): string[] {
+  const trimmed = value.trim();
+  if (!trimmed) return [];
+  const bracketed = trimmed.match(/<[^>]+>/g);
+  if (bracketed && bracketed.length > 0) {
+    return bracketed.map((v) => v.trim()).filter(Boolean);
+  }
+  return trimmed
+    .split(/\s+/)
+    .map((v) => normalizeMaybeMessageId(v))
+    .filter((v): v is string => typeof v === "string" && v.length > 0);
+}
+
+function parseDateOrNull(value: string): Date | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const date = new Date(trimmed);
+  return Number.isFinite(date.getTime()) ? date : null;
+}
+
+function parseEmailAddressList(value: string): string[] {
+  const trimmed = value.trim();
+  if (!trimmed) return [];
+  return trimmed
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => {
+      const match = part.match(/<([^>]+)>/);
+      return (match ? match[1] : part).trim();
+    })
+    .filter(Boolean);
+}
+
+function parseMailbox(
+  value: string,
+): { email: string | null; name: string | null; raw: string | null } {
+  const trimmed = value.trim();
+  if (!trimmed) return { email: null, name: null, raw: null };
+  const match = trimmed.match(/^(.*)<([^>]+)>$/);
+  if (match) {
+    const name = match[1].trim().replace(/^"|"$/g, "") || null;
+    const email = match[2].trim() || null;
+    return { email, name, raw: trimmed };
+  }
+  return { email: trimmed, name: null, raw: trimmed };
+}
+
+function extractUnsubscribeTokenFromTo(toEmails: readonly string[]): string | null {
+  for (const addr of toEmails) {
+    const match = addr.match(/^unsubscribe\+([^@]+)@/i);
+    if (match && match[1]) return match[1];
+  }
+  return null;
+}
+
+function isPrismaUniqueViolation(err: unknown): boolean {
+  return (
+    !!err &&
+    typeof err === "object" &&
+    "code" in err &&
+    (err as { code?: unknown }).code === "P2002"
+  );
 }

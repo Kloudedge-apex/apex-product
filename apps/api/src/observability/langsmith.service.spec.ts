@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createHash } from "node:crypto";
+import { LlmRequestStatus } from "@prisma/client";
 import { LangSmithService } from "./langsmith.service";
 
 let runTreeCtorArgs: unknown | undefined;
@@ -14,6 +15,8 @@ vi.mock("langsmith", () => {
   }
 
   class RunTree {
+    readonly id = "run_test_123";
+
     constructor(args: unknown) {
       runTreeCtorArgs = args;
     }
@@ -24,6 +27,10 @@ vi.mock("langsmith", () => {
 
     async end(...args: readonly unknown[]): Promise<void> {
       runTreeEndArgs = args;
+    }
+
+    async patchRun(): Promise<void> {
+      // no-op
     }
   }
 
@@ -335,5 +342,138 @@ describe("LangSmithService", () => {
     expect(endPayload).not.toBeNull();
     expect(typeof endPayload).toBe("object");
     expect(Object.prototype.hasOwnProperty.call(endPayload as object, "outputs")).toBe(false);
+  });
+
+  it("records LlmRequestFact on success (OpenAI usage shape)", async () => {
+    process.env.LANGSMITH_API_KEY = "k";
+
+    const recordRequest = vi.fn().mockResolvedValue(undefined);
+    const svc = new LangSmithService({ recordRequest } as any);
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-29T00:00:00Z"));
+
+    await svc.wrapLlm(
+      { name: "openai.chat", model: "gpt-4o-mini", inputs: [], orgId: "org_1" },
+      async () => {
+        vi.advanceTimersByTime(123);
+        return {
+          usage: {
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            prompt_tokens_details: { cached_tokens: 20 },
+          },
+        };
+      },
+    );
+
+    vi.useRealTimers();
+
+    expect(recordRequest).toHaveBeenCalledTimes(1);
+    const [args] = recordRequest.mock.calls[0] ?? [];
+    expect(args.status).toBe(LlmRequestStatus.OK);
+    expect(args.inputTokens).toBe(100);
+    expect(args.outputTokens).toBe(50);
+    expect(args.cachedInputTokens).toBe(20);
+    expect(args.latencyMs).toBe(123);
+    expect(args.langsmithRunId).toBe("run_test_123");
+
+    const expectedCost =
+      (80 / 1_000_000) * 0.15 + (20 / 1_000_000) * 0.075 + (50 / 1_000_000) * 0.6;
+    expect(args.costUsd).toBeCloseTo(expectedCost, 12);
+  });
+
+  it("records LlmRequestFact token usage (Anthropic usage shape)", async () => {
+    process.env.LANGSMITH_API_KEY = "k";
+
+    const recordRequest = vi.fn().mockResolvedValue(undefined);
+    const svc = new LangSmithService({ recordRequest } as any);
+
+    await svc.wrapLlm(
+      { name: "anthropic.chat", model: "gpt-4o-mini", inputs: [], orgId: "org_1" },
+      async () => ({
+        usage: { input_tokens: 200, output_tokens: 100, cache_read_input_tokens: 50 },
+      }),
+    );
+
+    expect(recordRequest).toHaveBeenCalledTimes(1);
+    const [args] = recordRequest.mock.calls[0] ?? [];
+    expect(args.status).toBe(LlmRequestStatus.OK);
+    expect(args.inputTokens).toBe(200);
+    expect(args.outputTokens).toBe(100);
+    expect(args.cachedInputTokens).toBe(50);
+  });
+
+  it("records LlmRequestFact with ERROR/TIMEOUT/CANCELLED statuses", async () => {
+    process.env.LANGSMITH_API_KEY = "k";
+
+    const recordRequest = vi.fn().mockResolvedValue(undefined);
+    const svc = new LangSmithService({ recordRequest } as any);
+
+    await expect(
+      svc.wrapLlm(
+        { name: "openai.chat", model: "gpt-4o-mini", inputs: [], orgId: "org_1" },
+        async () => {
+          throw new Error("OpenAI API error: 429");
+        },
+      ),
+    ).rejects.toThrow();
+
+    const [first] = recordRequest.mock.calls[0] ?? [];
+    expect(first.status).toBe(LlmRequestStatus.ERROR);
+    expect(first.errorKind).toBe("rate_limit");
+
+    recordRequest.mockClear();
+
+    await expect(
+      svc.wrapLlm(
+        { name: "openai.chat", model: "gpt-4o-mini", inputs: [], orgId: "org_1" },
+        async () => {
+          const e = new Error("timeout");
+          e.name = "AbortError";
+          throw e;
+        },
+      ),
+    ).rejects.toThrow();
+
+    const [second] = recordRequest.mock.calls[0] ?? [];
+    expect(second.status).toBe(LlmRequestStatus.TIMEOUT);
+    expect(second.errorKind).toBe("timeout");
+
+    recordRequest.mockClear();
+
+    await expect(
+      svc.wrapLlm(
+        { name: "openai.chat", model: "gpt-4o-mini", inputs: [], orgId: "org_1" },
+        async () => {
+          const e = new Error("cancelled");
+          e.name = "AbortError";
+          throw e;
+        },
+      ),
+    ).rejects.toThrow();
+
+    const [third] = recordRequest.mock.calls[0] ?? [];
+    expect(third.status).toBe(LlmRequestStatus.CANCELLED);
+    expect(third.errorKind).toBe("cancelled");
+  });
+
+  it("skips LlmRequestFact persistence when orgId cannot be resolved", async () => {
+    const recordRequest = vi.fn().mockResolvedValue(undefined);
+    const svc = new LangSmithService({ recordRequest } as any);
+    const warnSpy = vi.spyOn((svc as unknown as { logger: { warn: (m: string) => void } }).logger, "warn");
+
+    await svc.wrapLlm(
+      { name: "openai.chat", model: "gpt-4o-mini", inputs: [] },
+      async () => ({ usage: { prompt_tokens: 1, completion_tokens: 1 } }),
+    );
+
+    await svc.wrapLlm(
+      { name: "openai.chat", model: "gpt-4o-mini", inputs: [] },
+      async () => ({ usage: { prompt_tokens: 1, completion_tokens: 1 } }),
+    );
+
+    expect(recordRequest).toHaveBeenCalledTimes(0);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
   });
 });
