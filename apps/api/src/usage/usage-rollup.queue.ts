@@ -64,20 +64,23 @@ export class UsageRollupQueue implements OnModuleDestroy {
   async enqueueRollupHour(input: { readonly orgId: string; readonly hourBucket: Date }) {
     if (!this.bullQueue) return;
     const hourIso = input.hourBucket.toISOString();
+    // BullMQ jobId cannot contain ':' — strip colons from the timestamp.
+    const safeIso = hourIso.replace(/:/g, "_");
     await this.bullQueue.add(
       "rollup-hour",
       { orgId: input.orgId, hourBucket: hourIso },
-      { jobId: `hour:${input.orgId}:${hourIso}`, ...DEFAULT_JOB_OPTIONS },
+      { jobId: `hour-${input.orgId}-${safeIso}`, ...DEFAULT_JOB_OPTIONS },
     );
   }
 
   async enqueueRollupDay(input: { readonly orgId: string; readonly dayBucket: Date }) {
     if (!this.bullQueue) return;
     const dayIso = input.dayBucket.toISOString();
+    const safeIso = dayIso.replace(/:/g, "_");
     await this.bullQueue.add(
       "rollup-day",
       { orgId: input.orgId, dayBucket: dayIso },
-      { jobId: `day:${input.orgId}:${dayIso}`, ...DEFAULT_JOB_OPTIONS },
+      { jobId: `day-${input.orgId}-${safeIso}`, ...DEFAULT_JOB_OPTIONS },
     );
   }
 
