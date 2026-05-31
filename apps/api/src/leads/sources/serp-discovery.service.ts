@@ -1,6 +1,10 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { fetchWithRetry, withCircuitBreaker } from "../../common/http-retry.util";
+import {
+  isAggregatorDomain,
+  isLikelyHumanName,
+} from "../quality/lead-quality.validators";
 
 interface IcpInput {
   targetTitles: string[];
@@ -222,6 +226,13 @@ export class SerpDiscoveryService {
   // ─── Result Parsing ─────────────────────────────────
 
   private parseCompanyResult(result: SerperResult, icp: IcpInput): DiscoveredCompany | null {
+    // The `icp` param is intentionally unused now — we no longer mechanically
+    // stamp `icp.targetIndustries[0]` / `icp.targetGeos[0]` onto every row.
+    // The destination Company schema accepts null industry/country and a real
+    // classifier (or downstream enrichment) fills those in later. See TODO
+    // at the bottom of this method.
+    void icp;
+
     const link = result.link;
     let domain: string;
     let name: string;
@@ -235,7 +246,17 @@ export class SerpDiscoveryService {
       name = result.title.replace(/\s*[\|–-]\s*LinkedIn.*$/i, "").trim();
       // Try to extract domain from snippet
       const domainMatch = result.snippet.match(/(?:https?:\/\/)?(?:www\.)?([a-z0-9][-a-z0-9]*\.[a-z]{2,})/i);
-      domain = domainMatch ? domainMatch[1]! : `${linkedinMatch[1]!.replace(/-/g, "")}.com`;
+      if (domainMatch) {
+        domain = domainMatch[1]!;
+      } else {
+        // We used to synthesize `${slug}.com` here. That produced bogus rows
+        // for every LinkedIn company hit where the snippet didn't mention a
+        // domain — including SEO listing pages where the slug was a region
+        // tag, not a real company. Drop the result instead; downstream
+        // discovery will pick the company up via the team-page / SERP direct
+        // branches if it actually exists.
+        return null;
+      }
     } else if (link.match(/greenhouse\.io|lever\.co|ashbyhq\.com/)) {
       // ATS page: extract company slug
       const atsMatch = link.match(/(?:greenhouse\.io|lever\.co|ashbyhq\.com)\/([^/?]+)/);
@@ -253,18 +274,25 @@ export class SerpDiscoveryService {
       }
     }
 
-    // Filter out noise domains
-    const noiseDomains = ["google.com", "facebook.com", "twitter.com", "youtube.com", "wikipedia.org", "github.com"];
-    if (noiseDomains.some((nd) => domain.includes(nd))) return null;
+    // Filter out aggregator / SEO / parking / social domains. Single source
+    // of truth is the shared blocklist in lead-quality.validators — keep this
+    // call site dumb (a single function call) so updates propagate.
+    if (isAggregatorDomain(domain)) return null;
 
-    const geo = icp.targetGeos[0];
-    const industry = icp.targetIndustries[0];
+    // Defensive cap on absurd lengths — keeps us from inserting a hostname
+    // that survived URL parsing but is obviously bogus.
+    if (domain.length > 253) return null;
 
+    // TODO(deep-research follow-up): replace null industry/country with a
+    // real classifier (homepage-text → industry, WHOIS/CDN/IP → country).
+    // We deliberately do NOT stamp icp.targetIndustries[0] / icp.targetGeos[0]
+    // onto every row anymore — that produced the "all 200 companies are B2B
+    // SaaS in UAE" pathology in prod.
     return {
       domain,
       name: name || domain,
-      country: geo,
-      industry,
+      country: undefined,
+      industry: undefined,
       linkedinCompanyUrl,
       source: "serp",
     };
@@ -321,6 +349,18 @@ export class SerpDiscoveryService {
 
     const firstName = nameParts[0]!;
     const lastName = nameParts.slice(1).join(" ");
+
+    // Drop SERP titles whose "name half" is actually a region tag, FAQ
+    // header, or other directory-listing noise. Without this filter we saw
+    // rows like firstName="Saudi" lastName="Arabia" from LinkedIn region
+    // pages and firstName="Frequently" lastName="Asked Questions" from
+    // SEO listing snippets that happened to contain a /in/ link.
+    if (!isLikelyHumanName({ firstName, lastName })) {
+      this.logger.warn(
+        `[lead-quality] Skipping LinkedIn SERP hit with non-human name: ${firstName} ${lastName}`,
+      );
+      return null;
+    }
 
     // Extract location from snippet
     const locMatch = result.snippet.match(/(?:Location|Based in|Located in)[:\s]+([^.·]+)/i);
