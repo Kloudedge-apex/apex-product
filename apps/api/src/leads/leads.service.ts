@@ -18,6 +18,11 @@ import { EmailPatternService } from "./enrichment/email-pattern.service";
 import { IdentityResolver } from "./enrichment/identity-resolver.service";
 import { LeadScorer } from "./scoring/lead-scorer.service";
 import { QUALIFIED_THRESHOLD } from "../common/qualification.constants";
+import {
+  isAggregatorDomain,
+  isLikelyHumanName,
+  isLikelyJobTitle,
+} from "./quality/lead-quality.validators";
 import type { Seniority, Department, ScrapeStage } from "@prisma/client";
 
 interface CompanyFilters {
@@ -235,6 +240,16 @@ export class LeadsService {
 
     const upsertCompany = async (co: { domain: string; name: string; industry?: string; country?: string; atsProvider?: string; atsSlug?: string; source?: string; linkedinCompanyUrl?: string }) => {
       if (!co.domain || co.domain.length === 0) return;
+      // Block aggregator / SEO / social / parking domains BEFORE we touch the
+      // DB. Catches dnb.com, consultancy-me.com, legal500.com, cultureamp.com
+      // and friends — see lead-quality.validators.ts for the full list and
+      // the audit rows that motivated each entry.
+      if (isAggregatorDomain(co.domain)) {
+        this.logger.warn(
+          `[lead-quality] Skipping aggregator/noise company domain: ${co.domain}`,
+        );
+        return;
+      }
       if (seenDomains.has(co.domain)) return;
       seenDomains.add(co.domain);
       try {
@@ -427,8 +442,33 @@ export class LeadsService {
     companyId: string,
     p: { firstName: string; lastName: string; title?: string; seniority?: Seniority; department?: Department; linkedinSlug?: string; linkedinUrl?: string; githubHandle?: string },
   ) {
-    // Validate name: skip garbage entries from DOM parsing
+    // Quality gate (1/3): shared validator — catches FAQ headers, country
+    // names, all-caps DOM headings. Runs FIRST because it has the strongest
+    // negative-keyword list (section-headers + country/region lists) and we
+    // want to log the structured reason before falling through to the older
+    // regex check.
+    if (!isLikelyHumanName({ firstName: p.firstName, lastName: p.lastName })) {
+      this.logger.warn(
+        `[lead-quality] Skipping non-human-name person: ${p.firstName} ${p.lastName}`,
+      );
+      return null;
+    }
+
+    // Quality gate (2/3): existing regex + garbage-phrase check. Kept because
+    // it has a useful list of marketing-phrase rejections ("Get Started",
+    // "Click Here") that the shared validator doesn't cover.
     if (!this.isValidPersonName(p.firstName, p.lastName)) return null;
+
+    // Quality gate (3/3): job title sanity. Optional field, so only check
+    // when present — a missing title is fine (some sources don't provide one)
+    // but a title like "Saudi Arabia" or "Housemaids · Dubai" means the row
+    // came from a directory listing and isn't a real person.
+    if (p.title && !isLikelyJobTitle(p.title)) {
+      this.logger.warn(
+        `[lead-quality] Skipping person with non-title field: ${p.firstName} ${p.lastName} — "${p.title}"`,
+      );
+      return null;
+    }
 
     // Infer seniority from title if not already set
     if ((!p.seniority || p.seniority === "UNKNOWN") && p.title) {

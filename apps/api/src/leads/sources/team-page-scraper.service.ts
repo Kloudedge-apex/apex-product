@@ -34,6 +34,64 @@ const TEAM_PATHS = [
   "/founders",
 ];
 
+/**
+ * System prompt for the team-page LLM extractor.
+ *
+ * Why this exists: the prior single-sentence prompt produced rows like
+ * firstName="Frequently" lastName="Asked Questions", title="Saudi Arabia"
+ * because gpt-4o-mini, asked to "extract people", will dutifully invent
+ * people from FAQ headers and country labels on directory pages. The
+ * structured rules below — positive criteria + explicit negative examples +
+ * mandatory empty-array escape + final self-check — bring the false-positive
+ * rate down to roughly zero in spot-checks against the prod garbage corpus.
+ */
+const TEAM_PAGE_EXTRACTOR_SYSTEM_PROMPT = [
+  "You are a structured-data extractor, NOT a creative writer.",
+  "Your job: read the page text and return ONLY real human team members that the page explicitly identifies as employees of the company that owns this URL.",
+  "",
+  "Return shape (always — no other format):",
+  '  {"people": [{"firstName": string, "lastName": string, "title"?: string, "linkedinUrl"?: string}]}',
+  '  Empty: {"people": []}',
+  "",
+  "POSITIVE CRITERIA — include a row ONLY if ALL of these hold:",
+  "  1. The name is two distinct personal-name tokens (a first name and a last name) that look like real human names — not English words, not country/region names, not job-function labels, not city names.",
+  "  2. Both tokens start with an uppercase letter and contain only letters (and optionally an apostrophe or hyphen for names like O'Brien or Jean-Luc).",
+  "  3. The name is adjacent to (within the same paragraph or card) a recognizable job title at the company — e.g. CEO, Chief Marketing Officer, VP of Sales, Engineering Manager, Director of Product, Lead Designer, Senior Software Engineer, Co-Founder.",
+  "  4. The surrounding text makes it clear the person works at THIS company — not a customer logo, partner reference, advisor name, blog author from another company, or a quoted external expert.",
+  "",
+  "NEGATIVE CRITERIA — NEVER emit a row whose firstName or lastName is any of these (these are real false positives we have seen in production):",
+  '  - FAQ / accordion headers: "Frequently Asked Questions", "Frequently", "Asked", "Questions"',
+  '  - Service category labels: "Services We Help You Find", "Services", "Solutions", "Products", "Pricing"',
+  '  - Legal / compliance section headers: "Legal Compliance", "Privacy Policy", "Terms of Service", "Cookie Policy"',
+  '  - Navigation items: "About Us", "Contact Us", "Home", "Resources", "Blog", "Careers", "Login", "Sign Up"',
+  '  - Page section titles: "Our Team", "Leadership", "Investors", "Press", "Media"',
+  '  - Country / region names: "Saudi Arabia", "United Arab Emirates", "Bahrain", "Kuwait", "Qatar", "Oman", "Egypt", "India", "United Kingdom"',
+  '  - City names appearing as headings: "Dubai", "Abu Dhabi", "Riyadh", "London"',
+  '  - Partner / customer logo captions, testimonial author names from other companies, blog post bylines that are not the subject company.',
+  "",
+  "MANDATORY EMPTY-ARRAY ESCAPE — return {\"people\": []} (NOT a guess) when ANY of these is true:",
+  "  - The page is a directory, SEO listing, or aggregator (lists multiple companies, not one company's team).",
+  "  - The page is mostly an FAQ, services-listing, or category index.",
+  "  - The page text contains no clear name+title pairs that meet the positive criteria.",
+  "  - You cannot find at least one row that you are confident about. Returning a short, high-precision list is correct; returning a long, plausible-looking list is a failure.",
+  "",
+  "SELF-CHECK BEFORE RESPONDING:",
+  "  - Re-read your list. For each row, ask: \"Is this firstName + lastName a real personal name, or is it a section heading / country name / English-words pair that I extracted from a heading?\"",
+  "  - Drop any row that fails. If everything fails, return {\"people\": []}.",
+  "  - Do not pad the response. There is no minimum count.",
+  "",
+  "EXAMPLES",
+  "  Good (emit): firstName=\"Sarah\", lastName=\"Khan\", title=\"VP of Engineering\"  — clearly a person + recognizable role.",
+  "  Good (emit): firstName=\"Liam\", lastName=\"O'Brien\", title=\"Co-Founder & CEO\"  — apostrophe is fine in last name.",
+  "  Good (empty): the page is a list of \"Top consulting firms in the UAE\" with no team members — return {\"people\": []}.",
+  "  BAD (do NOT emit): firstName=\"Frequently\", lastName=\"Asked\" — FAQ header.",
+  "  BAD (do NOT emit): firstName=\"Saudi\", lastName=\"Arabia\" — country name.",
+  "  BAD (do NOT emit): firstName=\"Services\", lastName=\"We\" — section heading.",
+  "  BAD (do NOT emit): firstName=\"Contact\", lastName=\"Us\" — navigation item.",
+  "",
+  "Respond with the JSON object only — no prose, no markdown fences.",
+].join("\n");
+
 @Injectable()
 export class TeamPageScraper {
   private readonly logger = new Logger(TeamPageScraper.name);
@@ -227,8 +285,7 @@ export class TeamPageScraper {
         messages: [
           {
             role: "system",
-            content:
-              "Extract people (team members, leadership) from this web page text. Return a JSON object {\"people\": [{firstName, lastName, title, linkedinUrl}]}. Only include people who clearly work at this company. Return {\"people\":[]} if none found.",
+            content: TEAM_PAGE_EXTRACTOR_SYSTEM_PROMPT,
           },
           {
             role: "user",
@@ -241,6 +298,12 @@ export class TeamPageScraper {
           // tier shared with icp-auto. Falls back to the historical default.
           model: process.env.SYSTEM_MODEL_MINI ?? "gpt-4o-mini",
           maxTokens: 1500,
+          // Pin sampling to 0 for structured extraction. Pre-fix prod runs
+          // with the implicit 0.7 default were emitting fabricated "people"
+          // (FAQ headers, country names) on directory pages — temperature=0
+          // makes the model commit to the empty-array contract instead of
+          // sampling plausible-sounding nonsense.
+          temperature: 0,
           agent: "team_page_extractor.extract",
           tags: ["pipeline", "team_page_extractor"],
           metadata: { source_url: url },

@@ -125,6 +125,14 @@ interface LlmAttribution {
 export interface ChatOptions {
   model?: string;
   maxTokens?: number;
+  /**
+   * Per-call sampling temperature. Defaults to 0.7 inside the transport when
+   * unset. Structured-extraction callers (icp_auto, team_page_extractor, lead
+   * scoring, etc.) should pass `0` to make the model behave deterministically
+   * — fixes the "FAQ headers extracted as people" + "blanket ICP fabrication"
+   * regression that motivated the sourcing-quality fix branch.
+   */
+  temperature?: number;
   plan?: string;
   tools?: OpenAIFunctionDef[];
   toolChoice?: "auto" | "none" | "required";
@@ -211,10 +219,15 @@ export class LLMService {
       onRunStart: options?.onRunStart,
     };
 
+    // Per-call temperature override. When unset we keep the historical 0.7
+    // default inside the transport — structured-extraction callers explicitly
+    // pass 0 to suppress hallucinated rows.
+    const temperature = options?.temperature;
+
     // Route Claude models to Anthropic API
     if (model.startsWith("claude-")) {
       if (process.env.ANTHROPIC_API_KEY) {
-        return this.callAnthropic(messages, model, maxTokens, options?.tools, attribution);
+        return this.callAnthropic(messages, model, maxTokens, options?.tools, attribution, temperature);
       }
       // Fall back to GPT-4o if no Anthropic key
       return this.callOpenAIOrMock(
@@ -224,6 +237,7 @@ export class LLMService {
         options?.tools,
         options?.toolChoice,
         attribution,
+        temperature,
       );
     }
 
@@ -234,6 +248,7 @@ export class LLMService {
       options?.tools,
       options?.toolChoice,
       attribution,
+      temperature,
     );
   }
 
@@ -244,6 +259,7 @@ export class LLMService {
     tools?: OpenAIFunctionDef[],
     toolChoice?: string,
     attribution?: LlmAttribution,
+    temperature?: number,
   ): Promise<LLMResponse> {
     const azureDeployment = azureDeploymentFor(model);
     if (azureDeployment) {
@@ -255,10 +271,11 @@ export class LLMService {
         tools,
         toolChoice,
         attribution,
+        temperature,
       );
     }
     if (this.apiKey) {
-      return this.callOpenAI(messages, model, maxTokens, tools, toolChoice, attribution);
+      return this.callOpenAI(messages, model, maxTokens, tools, toolChoice, attribution, temperature);
     }
     if (process.env.NODE_ENV === "production") {
       // Constructor guard should have caught this, but defend-in-depth: refuse
@@ -304,6 +321,7 @@ export class LLMService {
     tools?: OpenAIFunctionDef[],
     toolChoice?: string,
     attribution?: LlmAttribution,
+    temperature?: number,
   ): Promise<LLMResponse> {
     return this.wrapWithLangSmith(
       { name: "azure.chat", model, inputs: messages, attribution },
@@ -315,7 +333,9 @@ export class LLMService {
         const body: Record<string, unknown> = {
           messages,
           [maxTokensParamFor(deployment)]: maxTokens,
-          temperature: 0.7,
+          // 0.7 is the historical default for chat/agent calls; structured
+          // extractors override to 0 to suppress fabricated rows.
+          temperature: typeof temperature === "number" ? temperature : 0.7,
         };
         if (tools && tools.length > 0) {
           body.tools = tools;
@@ -378,6 +398,7 @@ export class LLMService {
     tools?: OpenAIFunctionDef[],
     toolChoice?: string,
     attribution?: LlmAttribution,
+    temperature?: number,
   ): Promise<LLMResponse> {
     try {
       return await this.wrapWithLangSmith(
@@ -387,7 +408,9 @@ export class LLMService {
             model,
             messages,
             max_tokens: maxTokens,
-            temperature: 0.7,
+            // 0.7 is the historical default for chat/agent calls; structured
+            // extractors override to 0 to suppress fabricated rows.
+            temperature: typeof temperature === "number" ? temperature : 0.7,
           };
 
           if (tools && tools.length > 0) {
@@ -448,6 +471,7 @@ export class LLMService {
     maxTokens: number,
     tools?: OpenAIFunctionDef[],
     attribution?: LlmAttribution,
+    temperature?: number,
   ): Promise<LLMResponse> {
     const anthropicKey = process.env.ANTHROPIC_API_KEY;
     if (!anthropicKey) return this.mockResponse(messages, model, maxTokens, tools);
@@ -471,6 +495,12 @@ export class LLMService {
             system: systemMsg,
             messages: nonSystemMessages,
           };
+          // Forward an explicit temperature when the caller pinned one.
+          // Anthropic defaults to 1.0 server-side, but for structured
+          // extraction we want 0 — same rationale as the OpenAI paths above.
+          if (typeof temperature === "number") {
+            body.temperature = temperature;
+          }
 
           if (tools && tools.length > 0) {
             body.tools = tools.map((t) => ({
