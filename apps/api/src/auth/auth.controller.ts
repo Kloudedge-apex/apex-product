@@ -14,6 +14,7 @@ import { Webhook } from "svix";
 import { AuthService } from "./auth.service";
 import { SkipOrgGuard } from "../common/org-scope.guard";
 import { verifyClerkToken } from "../common/jwt.util";
+import { isWorkerEnabled } from "../runtime/worker.service";
 
 interface RawBodyRequest extends Request {
   rawBody?: Buffer;
@@ -38,7 +39,7 @@ function resolveWebhookSecret(
   const secret = config.get<string>("CLERK_WEBHOOK_SECRET");
   const isProd = process.env.NODE_ENV === "production";
   if (!secret) {
-    if (isProd) {
+    if (isProd && !isWorkerEnabled()) {
       throw new Error(
         "CLERK_WEBHOOK_SECRET is required in production. " +
           "Without it the /auth/webhook endpoint is forge-able.",
