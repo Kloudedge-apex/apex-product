@@ -1,5 +1,9 @@
 -- 011_suppression_partial_indexes.sql
 -- NOTE: CONCURRENTLY cannot run inside a transaction.
+-- APPLY: pipe each CREATE INDEX CONCURRENTLY statement to psql separately
+-- (`psql -f` is OK because psql does not auto-wrap multi-statement files
+-- in a transaction by default, but DO NOT use `psql -1` or wrap in
+-- BEGIN/COMMIT). Prisma's `migrate deploy` wraps in a tx — use raw psql.
 
 -- GLOBAL scan helpers (where orgId IS NULL).
 CREATE INDEX CONCURRENTLY IF NOT EXISTS

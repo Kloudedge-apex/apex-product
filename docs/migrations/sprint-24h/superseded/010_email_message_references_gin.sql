@@ -4,6 +4,8 @@
 -- O(log n) array-contains lookups during inbound correlation.
 --
 -- NOTE: CONCURRENTLY cannot run inside a transaction.
+-- APPLY: pipe directly to psql (-c or -f), NOT wrapped in BEGIN/COMMIT.
+-- Prisma's `migrate deploy` wraps in a tx — apply this file via raw psql.
 CREATE INDEX CONCURRENTLY IF NOT EXISTS
   idx_email_message_org_references_gin
   ON "EmailMessage"

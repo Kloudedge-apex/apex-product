@@ -1,7 +1,13 @@
 -- 009_email_event_append_only.sql
 -- Mirrors apps/api/docs/evidence-event.sql (append-only trigger pattern).
+--
+-- App role on apex-prod-db (Azure Flexible PG16) is "apexadmin", which also
+-- owns the tables. REVOKE on the owner is a Postgres no-op; the BEFORE
+-- UPDATE/DELETE trigger below is the actual enforcement. The REVOKE is left
+-- as documentary intent so any future non-owner app role inherits the
+-- restriction automatically.
 
-REVOKE UPDATE, DELETE, TRUNCATE ON email_event FROM "<app-role>";
+REVOKE UPDATE, DELETE, TRUNCATE ON email_event FROM apexadmin;
 
 CREATE OR REPLACE FUNCTION email_event_no_mutation() RETURNS trigger AS $$
 BEGIN
