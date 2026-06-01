@@ -1,11 +1,56 @@
-import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import {
+  BadRequestException,
+  Inject,
+  Injectable,
+  Logger,
+  NotFoundException,
+  Optional,
+} from "@nestjs/common";
 import { Plan } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
+import { EvidenceLedgerService } from "../observability/evidence-ledger.service";
 import { isIP } from "node:net";
+
+/**
+ * Optional best-effort LangSmith handle. We keep the interface here (instead of
+ * pulling in the real service type) so OrgsModule doesn't have to import the
+ * full observability stack — the deletion path treats every external purge as
+ * best-effort and only logs failures.
+ */
+export interface LangSmithPurgeClient {
+  /**
+   * Delete every run tagged with the given orgId from the LangSmith project.
+   * Implementations should swallow individual page failures and resolve with
+   * the count of runs they confirmed deleted.
+   */
+  deleteRunsByOrgTag(orgId: string): Promise<number>;
+}
+
+export const LANGSMITH_PURGE_CLIENT = Symbol("LANGSMITH_PURGE_CLIENT");
+
+/**
+ * Optional best-effort BullMQ queue scrubber. Same rationale as above.
+ */
+export interface GraphRunQueueScrubber {
+  removeJobsByOrg(orgId: string): Promise<number>;
+}
+
+export const GRAPH_RUN_QUEUE_SCRUBBER = Symbol("GRAPH_RUN_QUEUE_SCRUBBER");
 
 @Injectable()
 export class OrgsService {
-  constructor(private prisma: PrismaService) {}
+  private readonly logger = new Logger(OrgsService.name);
+
+  constructor(
+    private prisma: PrismaService,
+    @Optional() private readonly evidenceLedger?: EvidenceLedgerService,
+    @Optional()
+    @Inject(LANGSMITH_PURGE_CLIENT)
+    private readonly langsmithPurge?: LangSmithPurgeClient,
+    @Optional()
+    @Inject(GRAPH_RUN_QUEUE_SCRUBBER)
+    private readonly queueScrubber?: GraphRunQueueScrubber,
+  ) {}
 
   async create(data: {
     name: string;
@@ -92,6 +137,137 @@ export class OrgsService {
         ...(website !== undefined && { website }),
       },
     });
+  }
+
+  /**
+   * GDPR Art. 17 right-to-erasure / CCPA §1798.105 deletion request.
+   *
+   * Order of operations:
+   *   1. In a single $transaction: snapshot child-row counts, then delete the
+   *      Org. The schema's onDelete: Cascade fan-out wipes User, Agent,
+   *      Integration, AgentRun, GraphRun, EvidenceEvent, etc. — every model
+   *      that points at Org with Cascade.
+   *   2. Emit a structured logger.log() line BEFORE we touch the ledger. The
+   *      Container Apps log sink is the only durable audit trail that
+   *      survives the cascade, because EvidenceEvent.org is itself Cascade.
+   *   3. Best-effort ledger append (will normally fail with FK violation
+   *      because the org row is gone — we swallow that), best-effort
+   *      LangSmith purge by tag, best-effort BullMQ scrub by orgId.
+   *
+   * @returns the snapshot of child counts the caller can return for audit logs.
+   */
+  async deleteOrg(
+    orgId: string,
+    actor: { userId: string; email: string | null },
+  ): Promise<{
+    orgId: string;
+    orgName: string;
+    childCounts: {
+      users: number;
+      agents: number;
+      integrations: number;
+      agentRuns: number;
+      graphRuns: number;
+    };
+  }> {
+    const orgRecord = await this.prisma.org.findUnique({
+      where: { id: orgId },
+      select: { id: true, name: true },
+    });
+    if (!orgRecord) throw new NotFoundException("Org not found");
+
+    const snapshot = await this.prisma.$transaction(async (tx) => {
+      const [users, agents, integrations, agentRuns, graphRuns] = await Promise.all([
+        tx.user.count({ where: { orgId } }),
+        tx.agent.count({ where: { orgId } }),
+        tx.integration.count({ where: { orgId } }),
+        tx.agentRun.count({ where: { orgId } }),
+        tx.graphRun.count({ where: { orgId } }),
+      ]);
+
+      await tx.org.delete({ where: { id: orgId } });
+
+      return { users, agents, integrations, agentRuns, graphRuns };
+    });
+
+    // Authoritative audit trail. Structured payload so log-based alerts and
+    // forensic queries can pivot on `event=tenant.deletion`. Lives outside
+    // Postgres so the cascade can't erase it.
+    this.logger.log(
+      JSON.stringify({
+        event: "tenant.deletion",
+        org_id: orgId,
+        org_name: orgRecord.name,
+        deleted_by_user_id: actor.userId,
+        deleted_by_email: actor.email,
+        child_counts: snapshot,
+        ts: new Date().toISOString(),
+      }),
+    );
+
+    // Best-effort: append to the ledger. EvidenceEvent.org has onDelete:
+    // Cascade so this insert will likely fail with a FK violation now that
+    // the Org row is gone — that's fine, the log line above is the audit
+    // record. The append() helper already swallows + warn-logs on failure.
+    if (this.evidenceLedger) {
+      try {
+        await this.evidenceLedger.orgDeleted({
+          orgId,
+          orgName: orgRecord.name,
+          deletedByUserId: actor.userId,
+          deletedByEmail: actor.email,
+          childCounts: snapshot,
+        });
+      } catch (err) {
+        this.logger.warn(
+          `EvidenceLedger.orgDeleted failed (expected after cascade): ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+
+    // Best-effort: ask LangSmith to drop every traced run tagged with this
+    // orgId. There is no first-class delete-by-tag in the SDK, so the
+    // adapter is expected to page through and delete individually.
+    if (this.langsmithPurge) {
+      try {
+        const deleted = await this.langsmithPurge.deleteRunsByOrgTag(orgId);
+        this.logger.log(
+          `LangSmith purge for org=${orgId} removed ${deleted} runs`,
+        );
+      } catch (err) {
+        this.logger.warn(
+          `LangSmith purge failed for org=${orgId}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+
+    // Best-effort: remove queued/active BullMQ jobs for this org. Workers
+    // would otherwise pick up an in-flight job, fail to load its GraphRun
+    // (now gone), and retry forever.
+    if (this.queueScrubber) {
+      try {
+        const removed = await this.queueScrubber.removeJobsByOrg(orgId);
+        this.logger.log(
+          `Queue scrub for org=${orgId} removed ${removed} jobs`,
+        );
+      } catch (err) {
+        this.logger.warn(
+          `Queue scrub failed for org=${orgId}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+
+    return {
+      orgId,
+      orgName: orgRecord.name,
+      childCounts: snapshot,
+    };
   }
 
   async getStats(orgId: string) {

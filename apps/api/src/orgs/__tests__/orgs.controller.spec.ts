@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { ForbiddenException } from "@nestjs/common";
 import { OrgsController } from "../orgs.controller";
 import { OrgsService } from "../orgs.service";
+import { PrismaService } from "../../prisma/prisma.service";
 import { UpdateOrgDto } from "../../common/dto/orgs.dto";
 
 /**
@@ -22,6 +23,7 @@ describe("OrgsController IDOR protection", () => {
     update: ReturnType<typeof vi.fn>;
     getStats: ReturnType<typeof vi.fn>;
   };
+  let prisma: { user: { findUnique: ReturnType<typeof vi.fn> } };
   let controller: OrgsController;
 
   beforeEach(() => {
@@ -32,7 +34,11 @@ describe("OrgsController IDOR protection", () => {
         .mockResolvedValue({ id: ORG_ID, name: "Acme", plan: "TRIAL" }),
       getStats: vi.fn().mockResolvedValue({ users: 3, runs: 10 }),
     };
-    controller = new OrgsController(service as unknown as OrgsService);
+    prisma = { user: { findUnique: vi.fn() } };
+    controller = new OrgsController(
+      service as unknown as OrgsService,
+      prisma as unknown as PrismaService,
+    );
   });
 
   describe("GET /orgs/:id (findOne)", () => {

@@ -12,6 +12,11 @@ export const EVIDENCE_EVENT_KIND = {
   artifactPersisted: "artifact.persisted",
   messageSent: "message.sent",
   crmSynced: "crm.synced",
+  // GDPR Art. 17 / CCPA §1798.105 — tenant erasure. Emitted when an OWNER
+  // deletes their org via DELETE /orgs/:id. The DB row will be cascaded away
+  // along with the rest of the org's data; the evidentiary value lives in
+  // the structured logger.log() line captured by the Container Apps log sink.
+  tenantDeletion: "tenant.deletion",
 } as const;
 
 export type EvidenceEventKind =
@@ -104,6 +109,27 @@ export interface CrmSyncedPayload extends Prisma.InputJsonObject {
   readonly fields_changed?: readonly string[];
 }
 
+/**
+ * GDPR / CCPA tenant erasure event. The ledger row (if it lands at all) is
+ * best-effort and will be cascaded away as part of the org.delete; the
+ * authoritative audit record is the structured log line emitted by
+ * OrgsService.deleteOrg, which the Azure Container Apps log sink retains
+ * outside the Postgres blast radius.
+ */
+export interface TenantDeletionPayload extends Prisma.InputJsonObject {
+  readonly kind: typeof EVIDENCE_EVENT_KIND.tenantDeletion;
+  readonly org_name: string;
+  readonly deleted_by_user_id: string;
+  readonly deleted_by_email: string | null;
+  readonly child_counts: {
+    readonly users: number;
+    readonly agents: number;
+    readonly integrations: number;
+    readonly agent_runs: number;
+    readonly graph_runs: number;
+  };
+}
+
 export type EvidenceEventPayload =
   | LeadSourcedPayload
   | LeadScoredPayload
@@ -115,4 +141,5 @@ export type EvidenceEventPayload =
   | ApprovalDeniedPayload
   | ArtifactPersistedPayload
   | MessageSentPayload
-  | CrmSyncedPayload;
+  | CrmSyncedPayload
+  | TenantDeletionPayload;

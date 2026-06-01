@@ -306,5 +306,46 @@ export class EvidenceLedgerService {
       },
     });
   }
-}
 
+  /**
+   * GDPR / CCPA tenant erasure. This is a best-effort write: EvidenceEvent.org
+   * has onDelete: Cascade, so if the org row has already been deleted (the
+   * common case, since deleteOrg appends this AFTER prisma.org.delete commits)
+   * Postgres will refuse the insert. That's intentional — the authoritative
+   * audit record is OrgsService.deleteOrg's structured logger.log() line.
+   */
+  async orgDeleted(input: {
+    readonly orgId: string;
+    readonly orgName: string;
+    readonly deletedByUserId: string;
+    readonly deletedByEmail: string | null;
+    readonly childCounts: {
+      readonly users: number;
+      readonly agents: number;
+      readonly integrations: number;
+      readonly agentRuns: number;
+      readonly graphRuns: number;
+    };
+  }): Promise<void> {
+    return this.append({
+      orgId: input.orgId,
+      runId: null,
+      kind: EVIDENCE_EVENT_KIND.tenantDeletion,
+      refType: "org",
+      refId: input.orgId,
+      payload: {
+        kind: EVIDENCE_EVENT_KIND.tenantDeletion,
+        org_name: input.orgName,
+        deleted_by_user_id: input.deletedByUserId,
+        deleted_by_email: input.deletedByEmail,
+        child_counts: {
+          users: input.childCounts.users,
+          agents: input.childCounts.agents,
+          integrations: input.childCounts.integrations,
+          agent_runs: input.childCounts.agentRuns,
+          graph_runs: input.childCounts.graphRuns,
+        },
+      },
+    });
+  }
+}
