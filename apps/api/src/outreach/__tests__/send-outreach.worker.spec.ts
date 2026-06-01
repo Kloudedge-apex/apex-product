@@ -50,6 +50,18 @@ function mockPrisma() {
     integration: {
       findMany: vi.fn().mockResolvedValue([]),
     },
+    // CAN-SPAM postal-address fetch added by audit P0 #2. Default to an
+    // org with a configured physicalAddress so existing happy-path tests
+    // proceed without modification.
+    org: {
+      findUnique: vi.fn().mockResolvedValue({
+        id: "org_1",
+        name: "Acme Inc",
+        physicalAddress: "123 Main St, Springfield IL 62704",
+        country: "US",
+        senderName: null,
+      }),
+    },
   } as unknown as PrismaService & {
     outreachArtifact: {
       findUnique: ReturnType<typeof vi.fn>;
@@ -57,6 +69,7 @@ function mockPrisma() {
       findMany: ReturnType<typeof vi.fn>;
     };
     integration: { findMany: ReturnType<typeof vi.fn> };
+    org: { findUnique: ReturnType<typeof vi.fn> };
   };
 }
 

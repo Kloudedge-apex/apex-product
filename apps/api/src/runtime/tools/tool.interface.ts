@@ -9,6 +9,18 @@ export interface ToolContext {
   agentId: string;
   runId: string;
   integrations: Map<string, IntegrationCredentials>;
+  /**
+   * CAN-SPAM §7704(a)(5) compliance: sender identity fields used by
+   * SendEmailTool to compose the physical-address + unsubscribe-link footer
+   * appended to every outbound. Worker-dispatched sends populate this from
+   * the Org row immediately before tool.execute(). Audit P0 #2.
+   */
+  senderOrg?: {
+    readonly orgName: string;
+    readonly physicalAddress: string | null;
+    readonly country: string | null;
+    readonly senderName: string | null;
+  };
 }
 
 export interface IntegrationCredentials {

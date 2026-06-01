@@ -18,6 +18,51 @@ function buildUnsubscribeHeaders(orgId: string | undefined, recipient: string) {
   };
 }
 
+/**
+ * Append a CAN-SPAM §7704(a)(5)-compliant footer to the email body. The
+ * physical postal address and a visible Unsubscribe link satisfy the
+ * "must be visible to the recipient" half of CAN-SPAM (the headers cover
+ * the machine-readable RFC 8058 half).
+ *
+ * No-op when senderOrg is undefined (direct-executor path) or when the
+ * physical address is null (worker enforces the gate before reaching here
+ * for live sends — see send-outreach.worker). Detects whether the body is
+ * HTML by looking for any common HTML tag; falls back to plain text.
+ */
+function appendComplianceFooter(
+  body: string,
+  orgId: string | undefined,
+  recipient: string,
+  senderOrg: ToolContext["senderOrg"],
+): string {
+  if (!senderOrg || !senderOrg.physicalAddress || !orgId) return body;
+
+  const sender = senderOrg.senderName ?? senderOrg.orgName;
+  const addressLine = [senderOrg.physicalAddress, senderOrg.country].filter(Boolean).join(", ");
+  const unsubUrl = buildUnsubscribeUrl(orgId, recipient);
+
+  const looksLikeHtml = /<\/?(html|body|p|div|br|a|span|table|h[1-6])\b/i.test(body);
+  if (looksLikeHtml) {
+    const footer =
+      `<hr style="margin-top:24px;border:none;border-top:1px solid #ddd"/>` +
+      `<p style="font-size:12px;color:#666;line-height:1.5">` +
+      `${escapeHtml(sender)}<br/>` +
+      `${escapeHtml(addressLine)}<br/>` +
+      `<a href="${escapeHtml(unsubUrl)}">Unsubscribe</a>` +
+      `</p>`;
+    return `${body}\n${footer}`;
+  }
+  return `${body}\n\n--\n${sender}\n${addressLine}\nUnsubscribe: ${unsubUrl}`;
+}
+
+function escapeHtml(input: string): string {
+  return input
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 export class SendEmailTool implements Tool {
   name = "send_email";
   description = "Send an email. Uses Microsoft Graph API when Outlook credentials are available, otherwise operates in mock mode.";
@@ -44,9 +89,14 @@ export class SendEmailTool implements Tool {
     const gmailCreds = context.integrations.get("gmail");
 
     const unsubscribeHeaders = buildUnsubscribeHeaders(context.orgId, to);
+    // CAN-SPAM §7704(a)(5): when the worker passed senderOrg, append a
+    // user-visible compliance footer (postal address + unsubscribe link) to
+    // the body before dispatch. Mock and direct-executor paths leave this
+    // alone — they never produce live sends.
+    const composedBody = appendComplianceFooter(body, context.orgId, to, context.senderOrg);
 
     if (outlookCreds?.accessToken && !outlookCreds.accessToken.startsWith("mock_")) {
-      const result = await this.sendViaGraph(to, subject, body, outlookCreds.accessToken, unsubscribeHeaders);
+      const result = await this.sendViaGraph(to, subject, composedBody, outlookCreds.accessToken, unsubscribeHeaders);
       if (result.success) {
         this.emitMessageSent(context, {
           to,
@@ -59,7 +109,7 @@ export class SendEmailTool implements Tool {
     }
 
     if (gmailCreds?.accessToken && !gmailCreds.accessToken.startsWith("mock_")) {
-      const result = await this.sendViaGmail(to, subject, body, gmailCreds.accessToken, unsubscribeHeaders);
+      const result = await this.sendViaGmail(to, subject, composedBody, gmailCreds.accessToken, unsubscribeHeaders);
       if (result.success) {
         this.emitMessageSent(context, {
           to,

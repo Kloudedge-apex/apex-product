@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Injectable,
   Logger,
   OnModuleInit,
@@ -302,15 +303,34 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
 
     switch (artifact.channel) {
       case OutreachChannel.EMAIL: {
+        // Fetch the Org's CAN-SPAM identity fields. Live sends fail-closed
+        // when physicalAddress is null — the body footer required by
+        // §7704(a)(5) cannot be composed without it. Audit P0 #2.
+        const org = await this.prisma.org.findUnique({
+          where: { id: artifact.orgId },
+          select: { id: true, name: true, physicalAddress: true, country: true, senderName: true },
+        });
+        if (!org) {
+          throw new Error(`Org ${artifact.orgId} not found (required for email send)`);
+        }
+        if (liveAllowed && !org.physicalAddress) {
+          throw new BadRequestException(
+            `Org ${artifact.orgId} is missing physicalAddress; cannot send live email outreach until configured (CAN-SPAM §7704(a)(5)).`,
+          );
+        }
+
         const integrations = await loadIntegrationsIfAllowed();
         const context: ToolContext = {
           orgId: artifact.orgId,
-          // No agent/run context post-approval — we're dispatching a human
-          // approved artifact, not an agent step. The tool only uses these
-          // fields opportunistically.
           agentId: "outreach-worker",
           runId: artifact.graphRunId ?? "outreach-worker",
           integrations,
+          senderOrg: {
+            orgName: org.name,
+            physicalAddress: org.physicalAddress,
+            country: org.country,
+            senderName: org.senderName,
+          },
         };
         const payload = artifact.payload as Record<string, unknown>;
         return this.sendEmailTool.execute(payload, context);
