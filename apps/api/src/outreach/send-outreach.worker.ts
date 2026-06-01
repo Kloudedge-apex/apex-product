@@ -26,6 +26,9 @@ import {
 import { IntegrationsService } from "../integrations/integrations.service";
 import { LinkedInService } from "../integrations/linkedin/linkedin.service";
 import { EvidenceLedgerService } from "../observability/evidence-ledger.service";
+import { isLiveSendAllowedForOrg } from "./outreach-allowlist.util";
+
+export { isLiveSendAllowedForOrg } from "./outreach-allowlist.util";
 
 interface SendJobData {
   artifactId: string;
@@ -60,19 +63,6 @@ export function isOutreachWorkerEnabled(
  * fall back to their mock branches. Artifacts get marked SENT with a mock
  * receipt — the audit trail records the attempt without an external call.
  */
-export function isLiveSendAllowedForOrg(
-  orgId: string,
-  env: NodeJS.ProcessEnv = process.env,
-): boolean {
-  const raw = env.OUTREACH_LIVE_FOR_ORGS?.trim();
-  if (!raw) return false;
-  if (raw === "*") return true;
-  const allowlist = new Set(
-    raw.split(",").map((s) => s.trim()).filter(Boolean),
-  );
-  return allowlist.has(orgId);
-}
-
 const IN_MEMORY_POLL_INTERVAL_MS = 5_000;
 const IN_MEMORY_BATCH_SIZE = 10;
 

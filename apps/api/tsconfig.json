@@ -10,7 +10,6 @@
     "sourceMap": true,
     "outDir": "./dist",
     "rootDir": "./src",
-    "baseUrl": "./",
     "skipLibCheck": true,
     "strict": true,
     "forceConsistentCasingInFileNames": true,

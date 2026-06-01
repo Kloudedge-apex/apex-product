@@ -9,13 +9,16 @@ import {
   Param,
   Post,
   Query,
+  UseGuards,
   UnauthorizedException,
 } from "@nestjs/common";
 import { GmailService } from "./gmail.service";
 import { OrgId } from "../../common/org-context.decorator";
 import { SkipOrgGuard } from "../../common/org-scope.guard";
+import { AdminOrManagerGuard } from "../../common/admin-or-manager.guard";
 
 class SendEmailDto {
+  outreachArtifactId!: string;
   to!: string;
   subject!: string;
   body!: string;
@@ -112,9 +115,10 @@ export class GmailController {
   }
 
   @Post("send")
+  @UseGuards(AdminOrManagerGuard)
   @HttpCode(HttpStatus.OK)
   sendEmail(@OrgId() orgId: string, @Body() body: SendEmailDto) {
-    return this.gmailService.sendEmail(orgId, body);
+    return this.gmailService.sendApprovedOutreachEmail(orgId, body);
   }
 
   /**

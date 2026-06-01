@@ -3,16 +3,18 @@ import {
   Logger,
   UnauthorizedException,
   BadRequestException,
+  ForbiddenException,
   Inject,
   forwardRef,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { google, gmail_v1, Auth } from "googleapis";
 import { OAuth2Client } from "google-auth-library";
-import { Prisma } from "@prisma/client";
+import { OutreachArtifactStatus, Prisma } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { RuntimeService } from "../../runtime/runtime.service";
 import { encrypt, decrypt } from "../crypto.util";
+import { isLiveSendAllowedForOrg } from "../../outreach/outreach-allowlist.util";
 
 interface GmailTokens {
   access_token: string;
@@ -32,6 +34,10 @@ interface SendEmailOptions {
   replyTo?: string;
   inReplyTo?: string;
   threadId?: string;
+}
+
+export interface SendApprovedOutreachEmailOptions extends SendEmailOptions {
+  readonly outreachArtifactId: string;
 }
 
 interface GmailMessage {
@@ -577,6 +583,62 @@ export class GmailService {
     };
   }
 
+  async sendApprovedOutreachEmail(
+    orgId: string,
+    options: SendApprovedOutreachEmailOptions,
+  ): Promise<{ id: string; threadId: string }> {
+    if (!isLiveSendAllowedForOrg(orgId)) {
+      throw new ForbiddenException("Live send not enabled for this org");
+    }
+
+    const artifactId = options.outreachArtifactId;
+    if (typeof artifactId !== "string" || artifactId.trim().length === 0) {
+      throw new ForbiddenException("Missing approved outreach artifact");
+    }
+
+    const artifact = await this.prisma.outreachArtifact.findUnique({
+      where: { id: artifactId },
+      select: {
+        id: true,
+        orgId: true,
+        status: true,
+        toolName: true,
+        payload: true,
+      },
+    });
+
+    if (!artifact || artifact.orgId !== orgId) {
+      throw new ForbiddenException("Missing approved outreach artifact");
+    }
+    if (artifact.status !== OutreachArtifactStatus.APPROVED) {
+      throw new ForbiddenException("Missing approved outreach artifact");
+    }
+    if (artifact.toolName !== "send_email") {
+      throw new ForbiddenException("Outreach artifact does not authorize this send");
+    }
+
+    const approvedPayload = extractApprovedEmailPayload(artifact.payload);
+    if (!approvedPayload || !payloadMatchesApproved(approvedPayload, options)) {
+      throw new ForbiddenException("Outreach artifact payload mismatch");
+    }
+
+    const result = await this.sendEmail(orgId, options);
+
+    await this.prisma.outreachArtifact.update({
+      where: { id: artifact.id },
+      data: {
+        status: OutreachArtifactStatus.SENT,
+        sentAt: new Date(),
+        sendReceiptId: result.id,
+        providerMessageId: result.id,
+        providerThreadId: result.threadId,
+        inReplyTo: options.inReplyTo ?? null,
+      },
+    });
+
+    return result;
+  }
+
   async searchMessages(
     orgId: string,
     query: string,
@@ -665,4 +727,77 @@ export class GmailService {
       },
     });
   }
+}
+
+function asNonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+function extractApprovedEmailPayload(
+  payload: unknown,
+): {
+  readonly to: string;
+  readonly subject: string;
+  readonly body: string;
+  readonly html?: string;
+  readonly cc?: string;
+  readonly bcc?: string;
+  readonly replyTo?: string;
+  readonly inReplyTo?: string;
+  readonly threadId?: string;
+} | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const obj = payload as Record<string, unknown>;
+
+  const to =
+    asNonEmptyString(obj.to) ??
+    asNonEmptyString(obj.recipient) ??
+    asNonEmptyString(obj.email);
+  const subject = asNonEmptyString(obj.subject);
+  const body =
+    asNonEmptyString(obj.body) ??
+    asNonEmptyString(obj.bodyText) ??
+    asNonEmptyString(obj.text);
+
+  if (!to || !subject || !body) return null;
+
+  const html = asNonEmptyString(obj.html) ?? asNonEmptyString(obj.bodyHtml);
+  const cc = asNonEmptyString(obj.cc);
+  const bcc = asNonEmptyString(obj.bcc);
+  const replyTo = asNonEmptyString(obj.replyTo);
+  const inReplyTo = asNonEmptyString(obj.inReplyTo);
+  const threadId = asNonEmptyString(obj.threadId);
+
+  return {
+    to,
+    subject,
+    body,
+    ...(html ? { html } : {}),
+    ...(cc ? { cc } : {}),
+    ...(bcc ? { bcc } : {}),
+    ...(replyTo ? { replyTo } : {}),
+    ...(inReplyTo ? { inReplyTo } : {}),
+    ...(threadId ? { threadId } : {}),
+  };
+}
+
+function payloadMatchesApproved(
+  approved: Exclude<ReturnType<typeof extractApprovedEmailPayload>, null>,
+  requested: SendApprovedOutreachEmailOptions,
+): boolean {
+  if (approved.to !== requested.to) return false;
+  if (approved.subject !== requested.subject) return false;
+  if (approved.body !== requested.body) return false;
+
+  const normalizeOptional = (value: unknown): string | undefined =>
+    typeof value === "string" && value.length > 0 ? value : undefined;
+
+  if (normalizeOptional(approved.html) !== normalizeOptional(requested.html)) return false;
+  if (normalizeOptional(approved.cc) !== normalizeOptional(requested.cc)) return false;
+  if (normalizeOptional(approved.bcc) !== normalizeOptional(requested.bcc)) return false;
+  if (normalizeOptional(approved.replyTo) !== normalizeOptional(requested.replyTo)) return false;
+  if (normalizeOptional(approved.inReplyTo) !== normalizeOptional(requested.inReplyTo)) return false;
+  if (normalizeOptional(approved.threadId) !== normalizeOptional(requested.threadId)) return false;
+
+  return true;
 }
