@@ -2,6 +2,7 @@ import { Injectable, Logger, BadRequestException } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import { LLMService } from "../runtime/llm.service";
 import { chatJsonWithRetry } from "../common/json-output.util";
+import { ssrfGuardedFetch } from "../runtime/util/ssrf-guard";
 
 const FETCH_TIMEOUT_MS = 15_000;
 const MAX_HTML_BYTES = 500_000;
@@ -118,15 +119,18 @@ export class IcpAutoService {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
     try {
-      const res = await fetch(url, {
-        signal: controller.signal,
-        redirect: "follow",
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (compatible; WorkforceOS-ICP-Bot/1.0; +https://workforceos.xyz)",
-          Accept: "text/html,application/xhtml+xml",
+      const res = await ssrfGuardedFetch(
+        url,
+        {
+          signal: controller.signal,
+          headers: {
+            "User-Agent":
+              "Mozilla/5.0 (compatible; WorkforceOS-ICP-Bot/1.0; +https://workforceos.xyz)",
+            Accept: "text/html,application/xhtml+xml",
+          },
         },
-      });
+        { maxRedirects: 5 },
+      );
       if (!res.ok) {
         throw new Error(`Homepage fetch returned ${res.status}`);
       }

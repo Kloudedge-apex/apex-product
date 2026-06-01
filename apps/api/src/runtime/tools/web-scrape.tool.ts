@@ -1,6 +1,7 @@
 import { Tool, ToolContext, ToolResult } from "./tool.interface";
 import { MOCK_DISCLAIMER_SUFFIX, markMocked } from "./mock-metadata";
 import { fetchWithRetry } from "../../common/http-retry.util";
+import { ssrfGuardedFetch } from "../util/ssrf-guard";
 
 export class WebScrapeTool implements Tool {
   name = "web_scrape";
@@ -21,7 +22,7 @@ export class WebScrapeTool implements Tool {
     try {
       // No circuit breaker: arbitrary user-supplied URLs — one slow host
       // must not poison the breaker pool for unrelated scrapes.
-      const response = await fetchWithRetry(
+      const response = await ssrfGuardedFetch(
         url,
         {
           headers: {
@@ -30,7 +31,11 @@ export class WebScrapeTool implements Tool {
           },
           signal: AbortSignal.timeout(10000),
         },
-        { provider: "web-scrape", maxAttempts: 3 },
+        {
+          maxRedirects: 5,
+          fetcher: (nextUrl, init) =>
+            fetchWithRetry(nextUrl, init, { provider: "web-scrape", maxAttempts: 3 }),
+        },
       );
 
       if (!response.ok) {

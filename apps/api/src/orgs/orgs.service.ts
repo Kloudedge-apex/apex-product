@@ -1,6 +1,7 @@
-import { Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { Plan } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
+import { isIP } from "node:net";
 
 @Injectable()
 export class OrgsService {
@@ -76,12 +77,19 @@ export class OrgsService {
   }
 
   async update(id: string, data: { name?: string; plan?: string; website?: string }) {
+    const website =
+      data.website === undefined
+        ? undefined
+        : data.website.trim().length === 0
+          ? null
+          : validateOrgWebsiteOrThrow(data.website);
+
     return this.prisma.org.update({
       where: { id },
       data: {
         ...(data.name && { name: data.name }),
         ...(data.plan && { plan: data.plan as Plan }),
-        ...(data.website !== undefined && { website: data.website || null }),
+        ...(website !== undefined && { website }),
       },
     });
   }
@@ -267,4 +275,65 @@ export class OrgsService {
       runsByDomain,
     };
   }
+}
+
+function validateOrgWebsiteOrThrow(input: string): string {
+  let url: URL;
+  try {
+    url = new URL(input.trim());
+  } catch (err) {
+    throw new BadRequestException(
+      `Invalid website URL: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  if (url.protocol !== "https:") {
+    throw new BadRequestException("Org website must start with https://");
+  }
+
+  if (!url.hostname) {
+    throw new BadRequestException("Org website must include a hostname");
+  }
+
+  if (url.username || url.password) {
+    throw new BadRequestException("Org website must not include username/password");
+  }
+
+  const hostname = url.hostname.replace(/\.$/, "").toLowerCase();
+  if (hostname === "localhost") {
+    throw new BadRequestException("Org website hostname must be a public domain");
+  }
+
+  if (isIP(hostname) !== 0) {
+    throw new BadRequestException("Org website must not use an IP address");
+  }
+
+  if (!hostname.includes(".")) {
+    throw new BadRequestException("Org website must be a public domain with a TLD");
+  }
+
+  const labels = hostname.split(".").filter((x) => x.length > 0);
+  const tld = labels[labels.length - 1] ?? "";
+  if (!/^[a-z]{2,63}$/.test(tld)) {
+    throw new BadRequestException("Org website must have a valid public TLD");
+  }
+
+  const blockedTlds = new Set([
+    "local",
+    "localhost",
+    "internal",
+    "intranet",
+    "lan",
+    "home",
+    "corp",
+    "localdomain",
+    "test",
+    "example",
+    "invalid",
+  ]);
+  if (blockedTlds.has(tld)) {
+    throw new BadRequestException("Org website must use a public TLD");
+  }
+
+  return url.toString();
 }

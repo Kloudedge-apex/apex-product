@@ -630,9 +630,6 @@ export class GmailService {
         status: OutreachArtifactStatus.SENT,
         sentAt: new Date(),
         sendReceiptId: result.id,
-        providerMessageId: result.id,
-        providerThreadId: result.threadId,
-        inReplyTo: options.inReplyTo ?? null,
       },
     });
 

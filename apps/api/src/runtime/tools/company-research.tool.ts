@@ -2,6 +2,7 @@ import { Tool, ToolContext, ToolResult } from "./tool.interface";
 import { WebSearchTool } from "./web-search.tool";
 import { WebScrapeTool } from "./web-scrape.tool";
 import { MOCK_DISCLAIMER_SUFFIX, markMocked, markMockedItem } from "./mock-metadata";
+import { assertUrlIsPublicHttp } from "../util/ssrf-guard";
 
 export class CompanyResearchTool implements Tool {
   name = "company_research";
@@ -36,9 +37,14 @@ export class CompanyResearchTool implements Tool {
       // Scrape company website if domain is provided
       if (domain) {
         const scrapeUrl = domain.startsWith("http") ? domain : `https://${domain}`;
-        const scrapeResult = await this.scrapeTool.execute({ url: scrapeUrl }, context);
-        if (scrapeResult.success) {
-          websiteContent = scrapeResult.data as { title: string; content: string; links: string[] };
+        try {
+          await assertUrlIsPublicHttp(scrapeUrl);
+          const scrapeResult = await this.scrapeTool.execute({ url: scrapeUrl }, context);
+          if (scrapeResult.success) {
+            websiteContent = scrapeResult.data as { title: string; content: string; links: string[] };
+          }
+        } catch {
+          // Ignore blocked/invalid domains; proceed with search-only profile.
         }
       }
 
