@@ -13,6 +13,8 @@ import { AiTellEvaluator } from "./evaluators/ai-tell.evaluator";
 import { CitationCoverageEvaluator } from "./evaluators/citation-coverage.evaluator";
 import { EvaluatorRunnerService } from "./evaluators/evaluator-runner.service";
 import { RunLevelEvaluatorService } from "./run-level-evaluator.service";
+import { MetricsService, registerCanonicalMetrics } from "./metrics/metrics.service";
+import { MetricsController } from "./metrics/metrics.controller";
 
 @Global()
 @Module({
@@ -31,7 +33,9 @@ import { RunLevelEvaluatorService } from "./run-level-evaluator.service";
     CitationCoverageEvaluator,
     EvaluatorRunnerService,
     RunLevelEvaluatorService,
+    MetricsService,
   ],
+  controllers: [MetricsController],
   exports: [
     LangSmithService,
     EvidenceLedgerService,
@@ -47,17 +51,22 @@ import { RunLevelEvaluatorService } from "./run-level-evaluator.service";
     BoilerplateEvaluator,
     AiTellEvaluator,
     CitationCoverageEvaluator,
+    MetricsService,
   ],
 })
 export class ObservabilityModule implements OnModuleInit {
   constructor(
     private readonly langsmith: LangSmithService,
     private readonly runner: EvaluatorRunnerService,
+    private readonly metrics: MetricsService,
   ) {}
 
   onModuleInit(): void {
     // Wire the evaluator runner into LangSmithService via setter to avoid a
     // circular DI graph (EvaluatorRunner → LLMService → LangSmithService).
     this.langsmith.setEvaluatorRunner(this.runner);
+    // Register the four canonical metrics so /metrics returns zero series
+    // immediately on boot (instead of waiting for the first inc() per metric).
+    registerCanonicalMetrics(this.metrics);
   }
 }

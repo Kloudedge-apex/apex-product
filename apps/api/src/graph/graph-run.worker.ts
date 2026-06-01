@@ -3,6 +3,7 @@ import {
   Logger,
   OnModuleInit,
   OnModuleDestroy,
+  Optional,
 } from "@nestjs/common";
 import { Job, Worker } from "bullmq";
 import { GraphRunStatus } from "@prisma/client";
@@ -14,6 +15,7 @@ import {
   GraphRunQueueService,
   GRAPH_RUN_QUEUE_NAME,
 } from "./graph-run-queue.service";
+import { MetricsService, METRIC } from "../observability/metrics/metrics.service";
 
 /**
  * Strict gating: only "true" enables this worker. Defaults off so an API
@@ -64,6 +66,7 @@ export class GraphRunWorker implements OnModuleInit, OnModuleDestroy {
     private readonly prisma: PrismaService,
     private readonly queue: GraphRunQueueService,
     private readonly graphService: GraphService,
+    @Optional() private readonly metrics?: MetricsService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -90,6 +93,7 @@ export class GraphRunWorker implements OnModuleInit, OnModuleDestroy {
         this.logger.error(
           `Graph run job ${job?.id} failed: ${err.message} (attempt ${job?.attemptsMade}/${job?.opts?.attempts ?? "?"})`,
         );
+        this.metrics?.inc(METRIC.BULLMQ_FAILED_JOBS_TOTAL, { queue: GRAPH_RUN_QUEUE_NAME });
         const attempts = job?.opts?.attempts ?? BULL_ATTEMPTS;
         if (job && job.attemptsMade >= attempts) {
           await this.markTerminalFailure(job.data.graphRunId, err.message);
