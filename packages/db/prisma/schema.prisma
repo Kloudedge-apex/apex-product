@@ -123,6 +123,13 @@ model Org {
   name         String
   slug         String        @unique
   website      String? // company homepage URL (e.g. "acme.com") — used for auto-ICP generation
+  // CAN-SPAM §7704(a)(5) compliance: every outbound commercial email must
+  // include the sender's valid physical postal mailing address. The send
+  // worker appends these as a footer; ship-time enforcement (block
+  // APPROVED → SENT when physicalAddress is null) is a follow-up gate.
+  physicalAddress String?
+  country         String?
+  senderName      String?
   plan         Plan          @default(TRIAL)
   trialEndsAt  DateTime?
   billingId    String? // Razorpay subscription ID
