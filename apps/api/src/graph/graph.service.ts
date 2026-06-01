@@ -13,6 +13,7 @@ import { RuntimeService } from "../runtime/runtime.service";
 import { LLMService } from "../runtime/llm.service";
 import { OutreachArtifactsService } from "../outreach/outreach-artifacts.service";
 import { EvidenceLedgerService } from "../observability/evidence-ledger.service";
+import { LangSmithService } from "../observability/langsmith.service";
 import { RunLevelEvaluatorService } from "../observability/run-level-evaluator.service";
 import { PrismaCheckpointSaver } from "./prisma-checkpointer";
 import { buildPipelineGraph } from "./pipeline-graph";
@@ -25,9 +26,6 @@ const GRAPH_NAME = "pipeline-supervisor";
 export class GraphService {
   private readonly logger = new Logger(GraphService.name);
   private readonly checkpointer: PrismaCheckpointSaver;
-  private readonly compiled: ReturnType<
-    ReturnType<typeof buildPipelineGraph>["compile"]
-  >;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -39,17 +37,9 @@ export class GraphService {
     private readonly evidenceLedger: EvidenceLedgerService,
     private readonly graphRunQueue: GraphRunQueueService,
     private readonly runLevelEvaluator: RunLevelEvaluatorService,
+    private readonly langsmith: LangSmithService,
   ) {
     this.checkpointer = new PrismaCheckpointSaver(prisma);
-    this.compiled = buildPipelineGraph({
-      leads: this.leads,
-      prisma: this.prisma,
-      runtime: this.runtime,
-      llm: this.llm,
-      outreachArtifacts: this.outreachArtifacts,
-      evidenceLedger: this.evidenceLedger,
-      runLevelEvaluator: this.runLevelEvaluator,
-    }).compile({ checkpointer: this.checkpointer });
   }
 
   /**
@@ -211,6 +201,14 @@ export class GraphService {
    * supplies a Command({ resume }) and LangGraph hydrates from the saved
    * checkpoint. The worker is responsible for not re-invoking runs that are
    * already in a terminal status (see GraphRunWorker.processGraphRun).
+   *
+   * Audit P0 #12: per call we resolve the GraphRun's root LangSmith run id
+   * (creating one on `start`, reusing the persisted one on `resume`), thread
+   * it through the compiled graph's deps as `parentRunId`, and rebuild +
+   * compile the graph for this invocation. Rebuild cost is trivial relative
+   * to LLM latency (~1ms vs ~1s+) and is the cleanest way to inject the
+   * parent into closures inside every node without leaking it through
+   * `config.configurable` or per-node state.
    */
   async processGraphRun(
     runId: string,
@@ -218,13 +216,28 @@ export class GraphService {
   ): Promise<void> {
     const config = { configurable: { thread_id: runId } };
 
+    // Resolve the LangSmith root run id for this GraphRun. Resume reuses the
+    // persisted id; start mints a fresh one and persists it.
+    const parentRunId = await this.resolveParentRunId(runId, input);
+
+    const compiled = buildPipelineGraph({
+      leads: this.leads,
+      prisma: this.prisma,
+      runtime: this.runtime,
+      llm: this.llm,
+      outreachArtifacts: this.outreachArtifacts,
+      evidenceLedger: this.evidenceLedger,
+      runLevelEvaluator: this.runLevelEvaluator,
+      parentRunId: parentRunId ?? undefined,
+    }).compile({ checkpointer: this.checkpointer });
+
     try {
-      const result = (await this.compiled.invoke(input as never, config)) as PipelineState & {
+      const result = (await compiled.invoke(input as never, config)) as PipelineState & {
         __interrupt__?: unknown;
       };
 
       // Did the graph pause at an interrupt? Check checkpointer state.
-      const snapshot = await this.compiled.getState(config);
+      const snapshot = await compiled.getState(config);
       const pending = snapshot.tasks?.some((t) => t.interrupts?.length);
 
       if (pending || isInterrupted(result)) {
@@ -275,6 +288,84 @@ export class GraphService {
       this.fireRunLevelEvaluator(runId);
       throw err;
     }
+  }
+
+  /**
+   * Resolve the LangSmith root run id for this invocation of a GraphRun.
+   *
+   *  - Resume (Command kind === "resume"): use the persisted column. If the
+   *    row was created before this code shipped (legacy), mint a fresh root
+   *    so post-HITL LLM calls still attach to *something* with parent
+   *    semantics. This is best-effort — a null result is acceptable and
+   *    downstream tracing falls back to top-level runs.
+   *
+   *  - Start (partial state): always mint a fresh root and persist it on
+   *    the GraphRun row so subsequent resumes can find it.
+   *
+   * Never throws. LangSmith outage MUST NOT take down a GraphRun.
+   */
+  private async resolveParentRunId(
+    runId: string,
+    input: Partial<PipelineState> | Command,
+  ): Promise<string | null> {
+    let row: { id: string; orgId: string; langsmithRootRunId: string | null } | null = null;
+    try {
+      row = await this.prisma.graphRun.findUnique({
+        where: { id: runId },
+        select: { id: true, orgId: true, langsmithRootRunId: true },
+      });
+    } catch (err) {
+      this.logger.warn(
+        `resolveParentRunId: graphRun lookup failed for ${runId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+
+    const isResume = input instanceof Command;
+    if (isResume && row?.langsmithRootRunId) {
+      return row.langsmithRootRunId;
+    }
+
+    // Either a fresh start, or a resume of a legacy row with no persisted
+    // root — mint a new one. `createRootRun` is fail-soft and returns null
+    // on any SDK / network error.
+    const orgId = row?.orgId ?? "";
+    const created = await this.langsmith.createRootRun({
+      name: "graph_run",
+      inputs: { runId, orgId },
+      tags: [
+        `org:${orgId}`,
+        `graphRunId:${runId}`,
+        `graph:${GRAPH_NAME}`,
+      ],
+      metadata: {
+        graphRunId: runId,
+        orgId,
+        kind: isResume ? "resume_legacy" : "start",
+      },
+      runType: "chain",
+    });
+
+    if (created) {
+      try {
+        await this.prisma.graphRun.update({
+          where: { id: runId },
+          data: { langsmithRootRunId: created },
+        });
+      } catch (err) {
+        // Persistence is best-effort. A pod restart mid-run will simply mint
+        // a second root rather than reattaching to the first — annoying but
+        // not catastrophic.
+        this.logger.warn(
+          `resolveParentRunId: failed to persist langsmithRootRunId for ${runId}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+
+    return created;
   }
 
   /**

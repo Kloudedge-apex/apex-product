@@ -42,6 +42,14 @@ interface Deps {
   // Optional: forwarded to the SDR subgraph so its drafter LangSmith runId
   // is wired into the run-level evaluator (audit P0 #13).
   runLevelEvaluator?: RunLevelEvaluatorService;
+  /**
+   * Audit P0 #12: LangSmith run id of the top-level GraphRun trace. Every
+   * traced LLM call inside this graph (and any subgraph it invokes) must
+   * pass this through `ChatOptions.parentRunId` so it lands under the root
+   * RunTree instead of as its own orphaned top-level run. When undefined
+   * the graph still runs — LLM calls just trace as before (top-level).
+   */
+  parentRunId?: string;
 }
 
 const nowMsg = (
@@ -594,6 +602,10 @@ export function buildPipelineGraph(deps: Deps) {
                 outreachArtifacts: deps.outreachArtifacts,
                 evidenceLedger: deps.evidenceLedger,
                 runLevelEvaluator: deps.runLevelEvaluator,
+                // Audit P0 #12: thread the GraphRun's root LangSmith run id
+                // into the subgraph so the drafter LLM call lands as a child
+                // of the GraphRun trace, not as a separate top-level run.
+                parentRunId: deps.parentRunId,
               },
               lead,
             );

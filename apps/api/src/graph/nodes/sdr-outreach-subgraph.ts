@@ -110,6 +110,13 @@ export interface DrafterInput {
   readonly lead: SdrLeadInput;
   readonly previousAttempt?: { subject: string; body: string; issues: readonly string[] };
   readonly onRunId?: (runId: string) => void;
+  /**
+   * Audit P0 #12: GraphRun-level LangSmith root run id, propagated from the
+   * outer pipeline graph so the drafter LLM call lands as a child of the
+   * GraphRun trace. Optional — when absent, the call traces as before
+   * (top-level) so test/dev paths without a root keep working.
+   */
+  readonly parentRunId?: string;
 }
 
 export interface DrafterOutput {
@@ -128,6 +135,12 @@ export interface SubgraphDeps {
   // run-level feedback so the run completes-rate/qualified-leads/etc.
   // evaluators have a parent run to attach to. Audit P0 #13.
   readonly runLevelEvaluator?: RunLevelEvaluatorService;
+  /**
+   * Audit P0 #12: GraphRun-level LangSmith root run id. Threaded through to
+   * the drafter LLM call so it lands as a child of the GraphRun trace
+   * instead of as its own orphaned top-level run.
+   */
+  readonly parentRunId?: string;
   readonly drafter?: DrafterFn;
 }
 
@@ -324,6 +337,10 @@ async function defaultDrafter(
       agent: "sdr_agent.draft_message",
       node: "sdr_outreach.draft_message",
       tags: ["sdr_outreach", "draft_message", "customer_facing"],
+      // Audit P0 #12: anchor this LLM run under the GraphRun's root LangSmith
+      // run so cross-pod resume after HITL approval can reattach. Without
+      // this the draft lands as a separate top-level run with no parent.
+      parentRunId: input.parentRunId,
       metadata: {
         org_id: input.lead.orgId,
         person_id: input.lead.personId,
@@ -460,6 +477,10 @@ export function buildSdrOutreachSubgraph(deps: SubgraphDeps) {
             brief: state.researchBrief,
             lead: state.lead,
             previousAttempt: previous,
+            // Audit P0 #12: forward the GraphRun's root LangSmith run id so
+            // the drafter's LLM call reattaches as a child instead of a
+            // separate top-level run.
+            parentRunId: deps.parentRunId,
             onRunId: (runId): void => {
               capturedRunId = runId;
               // Audit P0 #13: forward the LangSmith root run id to the

@@ -1,5 +1,5 @@
 import { Injectable, Logger, OnModuleDestroy } from "@nestjs/common";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { getLangSmithConfig } from "./langsmith.config";
 
 interface EvaluatorRunnerLike {
@@ -144,6 +144,23 @@ export interface FeedbackInput {
   readonly correction?: Readonly<Record<string, unknown>>;
 }
 
+/**
+ * Input to {@link LangSmithService.createRootRun}. The caller mints a stable
+ * top-level LangSmith run that all subsequent traced LLM calls in the same
+ * GraphRun (across nodes, across pods on resume) reattach to via
+ * `ChatOptions.parentRunId`. Audit P0 #12: without this anchor every LLM
+ * call lands as its own orphaned top-level run, which breaks cross-pod
+ * resume after HITL and prevents run-level feedback from threading.
+ */
+export interface CreateRootRunInput {
+  readonly name: string;
+  readonly inputs: Readonly<Record<string, unknown>>;
+  readonly tags?: readonly string[];
+  readonly metadata?: Readonly<Record<string, unknown>>;
+  /** Defaults to "chain" — the LangSmith run_type for a multi-step workflow. */
+  readonly runType?: string;
+}
+
 @Injectable()
 export class LangSmithService implements OnModuleDestroy {
   private readonly logger = new Logger(LangSmithService.name);
@@ -195,6 +212,72 @@ export class LangSmithService implements OnModuleDestroy {
       this.logger.warn(
         `LangSmith shutdown flush failed: ${err instanceof Error ? err.message : String(err)}`,
       );
+    }
+  }
+
+  /**
+   * Mint a top-level LangSmith run that subsequent traced LLM calls in the
+   * same GraphRun can reattach to via {@link WrapLlmInput.parentRunId}.
+   *
+   * SDK caveat: `Client.createRun(params)` returns `void` — it does NOT echo
+   * back the server-assigned id. We therefore allocate the UUID locally with
+   * `crypto.randomUUID()` and pass it as `params.id`; the server honors a
+   * caller-supplied id (this is how `RunTree` itself works internally).
+   *
+   * Tags belong inside `extra.metadata.tags` to mirror how `RunTree` builds the
+   * payload server-side (the SDK pulls them off `extra` when persisting). We
+   * also merge the caller's `metadata` into `extra.metadata` for the same
+   * reason.
+   *
+   * Fail-soft: any throw from the SDK (network blip, missing key, schema
+   * drift) returns `null`. A LangSmith outage MUST NOT take down a GraphRun.
+   * Callers should fall back to the `null` branch (typically: skip persisting
+   * the id and continue without a parent — older behaviour).
+   */
+  async createRootRun(input: CreateRootRunInput): Promise<string | null> {
+    const config = getLangSmithConfig();
+    if (!config.apiKey || config.tracing === false) return null;
+    const id = randomUUID();
+    try {
+      const client = (await this.getClient(config.apiKey)) as LangSmithClient & {
+        createRun?: (params: {
+          id?: string;
+          name: string;
+          inputs: Record<string, unknown>;
+          run_type: string;
+          parent_run_id?: string;
+          project_name?: string;
+          extra?: Record<string, unknown>;
+        }) => Promise<void>;
+      };
+      if (typeof client.createRun !== "function") {
+        this.logger.warn(
+          `LangSmith client missing createRun — cannot mint root run for name=${input.name}`,
+        );
+        return null;
+      }
+
+      const metadata: Record<string, unknown> = { ...(input.metadata ?? {}) };
+      if (input.tags && input.tags.length > 0) {
+        metadata.tags = [...input.tags];
+      }
+
+      await client.createRun({
+        id,
+        name: input.name,
+        inputs: { ...input.inputs },
+        run_type: input.runType ?? "chain",
+        project_name: config.project,
+        extra: { metadata },
+      });
+      return id;
+    } catch (err) {
+      this.logger.warn(
+        `LangSmith createRootRun failed for name=${input.name}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return null;
     }
   }
 
