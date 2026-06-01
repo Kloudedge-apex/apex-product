@@ -1,6 +1,22 @@
 import { EvidenceLedgerService } from "../../observability/evidence-ledger.service";
 import { Tool, ToolContext, ToolResult } from "./tool.interface";
 import { fetchWithRetry, withCircuitBreaker } from "../../common/http-retry.util";
+import {
+  buildUnsubscribeMailto,
+  buildUnsubscribeUrl,
+} from "../../outreach/unsubscribe-token.util";
+
+/**
+ * Build CAN-SPAM / RFC 8058 List-Unsubscribe headers for outbound. Audit
+ * P0 #3. Returns `null` when orgId is missing (system-level / mock sends).
+ */
+function buildUnsubscribeHeaders(orgId: string | undefined, recipient: string) {
+  if (!orgId || !recipient) return null;
+  return {
+    listUnsubscribe: `<mailto:${buildUnsubscribeMailto(orgId, recipient)}>, <${buildUnsubscribeUrl(orgId, recipient)}>`,
+    listUnsubscribePost: "List-Unsubscribe=One-Click",
+  };
+}
 
 export class SendEmailTool implements Tool {
   name = "send_email";
@@ -27,8 +43,10 @@ export class SendEmailTool implements Tool {
     const outlookCreds = context.integrations.get("outlook");
     const gmailCreds = context.integrations.get("gmail");
 
+    const unsubscribeHeaders = buildUnsubscribeHeaders(context.orgId, to);
+
     if (outlookCreds?.accessToken && !outlookCreds.accessToken.startsWith("mock_")) {
-      const result = await this.sendViaGraph(to, subject, body, outlookCreds.accessToken);
+      const result = await this.sendViaGraph(to, subject, body, outlookCreds.accessToken, unsubscribeHeaders);
       if (result.success) {
         this.emitMessageSent(context, {
           to,
@@ -41,7 +59,7 @@ export class SendEmailTool implements Tool {
     }
 
     if (gmailCreds?.accessToken && !gmailCreds.accessToken.startsWith("mock_")) {
-      const result = await this.sendViaGmail(to, subject, body, gmailCreds.accessToken);
+      const result = await this.sendViaGmail(to, subject, body, gmailCreds.accessToken, unsubscribeHeaders);
       if (result.success) {
         this.emitMessageSent(context, {
           to,
@@ -87,8 +105,25 @@ export class SendEmailTool implements Tool {
     });
   }
 
-  private async sendViaGraph(to: string, subject: string, body: string, accessToken: string): Promise<ToolResult> {
+  private async sendViaGraph(
+    to: string,
+    subject: string,
+    body: string,
+    accessToken: string,
+    unsubscribe: { listUnsubscribe: string; listUnsubscribePost: string } | null,
+  ): Promise<ToolResult> {
     try {
+      const message: Record<string, unknown> = {
+        subject,
+        body: { contentType: "HTML", content: body },
+        toRecipients: [{ emailAddress: { address: to } }],
+      };
+      if (unsubscribe) {
+        message.internetMessageHeaders = [
+          { name: "List-Unsubscribe", value: unsubscribe.listUnsubscribe },
+          { name: "List-Unsubscribe-Post", value: unsubscribe.listUnsubscribePost },
+        ];
+      }
       const response = await withCircuitBreaker("graph", () =>
         fetchWithRetry(
           "https://graph.microsoft.com/v1.0/me/sendMail",
@@ -99,11 +134,7 @@ export class SendEmailTool implements Tool {
               "Content-Type": "application/json",
             },
             body: JSON.stringify({
-              message: {
-                subject,
-                body: { contentType: "HTML", content: body },
-                toRecipients: [{ emailAddress: { address: to } }],
-              },
+              message,
               saveToSentItems: true,
             }),
           },
@@ -129,11 +160,24 @@ export class SendEmailTool implements Tool {
     }
   }
 
-  private async sendViaGmail(to: string, subject: string, body: string, accessToken: string): Promise<ToolResult> {
+  private async sendViaGmail(
+    to: string,
+    subject: string,
+    body: string,
+    accessToken: string,
+    unsubscribe: { listUnsubscribe: string; listUnsubscribePost: string } | null,
+  ): Promise<ToolResult> {
     try {
-      const raw = Buffer.from(
-        `To: ${to}\r\nSubject: ${subject}\r\nContent-Type: text/html; charset=utf-8\r\n\r\n${body}`,
-      )
+      const headers: string[] = [
+        `To: ${to}`,
+        `Subject: ${subject}`,
+        "Content-Type: text/html; charset=utf-8",
+      ];
+      if (unsubscribe) {
+        headers.push(`List-Unsubscribe: ${unsubscribe.listUnsubscribe}`);
+        headers.push(`List-Unsubscribe-Post: ${unsubscribe.listUnsubscribePost}`);
+      }
+      const raw = Buffer.from(`${headers.join("\r\n")}\r\n\r\n${body}`)
         .toString("base64")
         .replace(/\+/g, "-")
         .replace(/\//g, "_")

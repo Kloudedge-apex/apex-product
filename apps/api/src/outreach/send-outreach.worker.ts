@@ -27,6 +27,7 @@ import { IntegrationsService } from "../integrations/integrations.service";
 import { LinkedInService } from "../integrations/linkedin/linkedin.service";
 import { EvidenceLedgerService } from "../observability/evidence-ledger.service";
 import { isLiveSendAllowedForOrg } from "./outreach-allowlist.util";
+import { SuppressionService } from "./suppression.service";
 
 export { isLiveSendAllowedForOrg } from "./outreach-allowlist.util";
 
@@ -81,6 +82,7 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
     private readonly prisma: PrismaService,
     private readonly queue: OutreachSendQueueService,
     private readonly integrations: IntegrationsService,
+    private readonly suppression: SuppressionService,
     @Optional() private readonly evidenceLedger?: EvidenceLedgerService,
     @Optional() private readonly linkedinService?: LinkedInService,
   ) {
@@ -226,6 +228,29 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
         `Artifact ${artifactId} is ${artifact.status} — already processed, skipping`,
       );
       return;
+    }
+
+    // Suppression check (CAN-SPAM / GDPR e-Privacy). Audit P0 #3. If the
+    // recipient has unsubscribed (or bounced / been manually suppressed)
+    // since the artifact was approved, terminate the send with a SUPPRESSED
+    // status instead of dispatching to the provider. Fail-closed: the
+    // suppression service treats a Postgres outage as "suppressed" so a
+    // DB blip cannot let a previously-unsubscribed recipient get re-mailed.
+    if (artifact.recipientRef) {
+      const suppressed = await this.suppression.isSuppressed(
+        artifact.orgId,
+        artifact.recipientRef,
+      );
+      if (suppressed) {
+        await this.prisma.outreachArtifact.update({
+          where: { id: artifactId },
+          data: { status: OutreachArtifactStatus.SUPPRESSED },
+        });
+        this.logger.log(
+          `Artifact ${artifactId} skipped — recipient ${artifact.recipientRef} is on the suppression list`,
+        );
+        return;
+      }
     }
 
     const result = await this.dispatch(artifact);

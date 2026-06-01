@@ -75,7 +75,7 @@ export interface ApprovalDeniedPayload extends Prisma.InputJsonObject {
 
 export interface ArtifactPersistedPayload extends Prisma.InputJsonObject {
   readonly kind: typeof EVIDENCE_EVENT_KIND.artifactPersisted;
-  readonly status: "DRAFT" | "PENDING_REVIEW" | "APPROVED" | "REJECTED" | "SENT";
+  readonly status: "DRAFT" | "PENDING_REVIEW" | "APPROVED" | "REJECTED" | "SENT" | "SUPPRESSED";
   readonly channel: "EMAIL" | "LINKEDIN" | "HUBSPOT_NOTE";
 }
 

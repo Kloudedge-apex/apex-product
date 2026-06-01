@@ -59,6 +59,9 @@ function mockPrisma() {
     outreachArtifact: {
       create: vi.fn(),
       findUnique: vi.fn(),
+      // findFirst added by the idempotency guard (audit P0 #9); default
+      // returns null so the create path proceeds.
+      findFirst: vi.fn().mockResolvedValue(null),
       findMany: vi.fn(),
       update: vi.fn(),
     },
@@ -66,6 +69,7 @@ function mockPrisma() {
     outreachArtifact: {
       create: ReturnType<typeof vi.fn>;
       findUnique: ReturnType<typeof vi.fn>;
+      findFirst: ReturnType<typeof vi.fn>;
       findMany: ReturnType<typeof vi.fn>;
       update: ReturnType<typeof vi.fn>;
     };

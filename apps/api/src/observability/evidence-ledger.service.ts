@@ -217,7 +217,7 @@ export class EvidenceLedgerService {
     readonly orgId: string;
     readonly runId?: string | null;
     readonly artifactId: string;
-    readonly status: "DRAFT" | "PENDING_REVIEW" | "APPROVED" | "REJECTED" | "SENT";
+    readonly status: "DRAFT" | "PENDING_REVIEW" | "APPROVED" | "REJECTED" | "SENT" | "SUPPRESSED";
     readonly channel: "EMAIL" | "LINKEDIN" | "HUBSPOT_NOTE";
   }): Promise<void> {
     return this.append({

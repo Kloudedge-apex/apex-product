@@ -82,6 +82,10 @@ enum OutreachArtifactStatus {
   APPROVED
   REJECTED
   SENT
+  // Recipient is on the OutreachSuppression list — worker skipped real send.
+  // Terminal state, same shape as REJECTED for UI purposes but produced by
+  // the system (CAN-SPAM compliance), not by a human reviewer.
+  SUPPRESSED
 }
 
 enum OutreachChannel {
@@ -137,6 +141,7 @@ model Org {
   workflowRuns WorkflowRun[]
   meetings     MeetingLedger[]
   evidenceEvents EvidenceEvent[]
+  outreachSuppressions OutreachSuppression[]
 
   @@index([slug])
 }
@@ -773,4 +778,44 @@ model MeetingLedger {
   @@index([orgId, scheduledFor])
   @@index([outreachArtifactId])
   @@index([personId])
+}
+
+// CAN-SPAM / GDPR e-Privacy suppression list. Audit P0 #3.
+//
+// Recipients land here when:
+//   • They click the one-click List-Unsubscribe URL we stamp on every send.
+//   • A provider bounce/complaint webhook marks them undeliverable.
+//   • An operator/admin adds them manually.
+//
+// OutreachSendWorker MUST query this table before any real send and skip
+// (status → SUPPRESSED on the artifact, status_reason="suppression_list")
+// if the recipient is present. The unsubscribe HMAC URL writes through
+// reason=USER_UNSUBSCRIBED.
+//
+// recipientRef matches OutreachArtifact.recipientRef (raw email, normalized
+// to lowercase trim) — kept verbatim rather than hashed so the operator UI
+// can show "who is suppressed" without a reverse-index table.
+enum OutreachSuppressionReason {
+  USER_UNSUBSCRIBED
+  BOUNCED
+  COMPLAINED
+  MANUAL
+}
+
+model OutreachSuppression {
+  id           String                     @id @default(cuid())
+  orgId        String
+  org          Org                        @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  recipientRef String
+  reason       OutreachSuppressionReason  @default(USER_UNSUBSCRIBED)
+  // Free-text source for audit ("unsubscribe_token", "provider_bounce", etc.).
+  source       String?
+  // Verbatim user-agent / IP / provider event id, retained for audit trail.
+  // Kept minimal — no full request bodies, no PII beyond what the recipient
+  // already supplied by clicking unsubscribe.
+  metadata     Json?
+  createdAt    DateTime                   @default(now())
+
+  @@unique([orgId, recipientRef])
+  @@index([orgId, createdAt])
 }

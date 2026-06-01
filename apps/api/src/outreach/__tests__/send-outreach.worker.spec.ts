@@ -101,10 +101,15 @@ describe("SendOutreachWorker.processArtifact", () => {
     queue = mockQueue();
     integrations = mockIntegrations();
     ledger = mockLedger();
+    // Suppression service stub: by default no recipient is suppressed, so
+    // the worker proceeds to dispatch. The suppression check was added in
+    // audit P0 #3 (CAN-SPAM List-Unsubscribe + Suppression table).
+    const suppression = { isSuppressed: vi.fn(async () => false) } as unknown as Parameters<typeof SendOutreachWorker>[3];
     worker = new SendOutreachWorker(
       prisma as unknown as PrismaService,
       queue,
       integrations,
+      suppression,
       ledger,
     );
   });

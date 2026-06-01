@@ -15,6 +15,10 @@ import { PrismaService } from "../../prisma/prisma.service";
 import { RuntimeService } from "../../runtime/runtime.service";
 import { encrypt, decrypt } from "../crypto.util";
 import { isLiveSendAllowedForOrg } from "../../outreach/outreach-allowlist.util";
+import {
+  buildUnsubscribeMailto,
+  buildUnsubscribeUrl,
+} from "../../outreach/unsubscribe-token.util";
 
 interface GmailTokens {
   access_token: string;
@@ -34,6 +38,19 @@ interface SendEmailOptions {
   replyTo?: string;
   inReplyTo?: string;
   threadId?: string;
+  /**
+   * When set, the send injects RFC 8058 / CAN-SPAM List-Unsubscribe +
+   * List-Unsubscribe-Post: One-Click headers, with the URL signed via
+   * unsubscribe-token.util so the public /u/:token endpoint can verify and
+   * record the suppression. Audit P0 #3.
+   *
+   * Required for any outbound that should be CAN-SPAM compliant — the send
+   * worker passes this on every approved-artifact dispatch.
+   */
+  unsubscribeContext?: {
+    readonly orgId: string;
+    readonly recipientRef: string;
+  };
 }
 
 export interface SendApprovedOutreachEmailOptions extends SendEmailOptions {
@@ -547,6 +564,18 @@ export class GmailService {
     if (options.replyTo) mimeLines.push(`Reply-To: ${options.replyTo}`);
     mimeLines.push(`Subject: ${options.subject}`);
     mimeLines.push("MIME-Version: 1.0");
+    if (options.unsubscribeContext) {
+      const url = buildUnsubscribeUrl(
+        options.unsubscribeContext.orgId,
+        options.unsubscribeContext.recipientRef,
+      );
+      const mailto = buildUnsubscribeMailto(
+        options.unsubscribeContext.orgId,
+        options.unsubscribeContext.recipientRef,
+      );
+      mimeLines.push(`List-Unsubscribe: <mailto:${mailto}>, <${url}>`);
+      mimeLines.push("List-Unsubscribe-Post: List-Unsubscribe=One-Click");
+    }
 
     if (options.html) {
       const boundary = `boundary_${Date.now()}`;

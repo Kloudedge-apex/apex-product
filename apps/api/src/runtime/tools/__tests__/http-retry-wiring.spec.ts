@@ -8,6 +8,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { circuitBreakerRegistry } from "../../../common/http-retry.util";
 import type { ToolContext, IntegrationCredentials } from "../tool.interface";
 
+// Bypass the SSRF guard's DNS check for these retry-wiring tests. The guard's
+// real-world behavior is exercised by its own spec (ssrf-guard.spec.ts) — here
+// we only care that `fetchWithRetry` is wired through the tool surface, not
+// that fake test hostnames resolve to public IPs.
+vi.mock("../../util/ssrf-guard", async () => {
+  const actual = await vi.importActual<typeof import("../../util/ssrf-guard")>("../../util/ssrf-guard");
+  return {
+    ...actual,
+    ssrfGuardedFetch: (input: string | URL, init: RequestInit, opts: { fetcher?: (u: URL, i: RequestInit) => Promise<Response> } = {}) => {
+      const url = typeof input === "string" ? new URL(input) : input;
+      const fetcher = opts.fetcher ?? ((u: URL, i: RequestInit) => fetch(u, i));
+      return fetcher(url, init);
+    },
+    assertUrlIsPublicHttp: async (input: string | URL) => (typeof input === "string" ? new URL(input) : input),
+  };
+});
+
 const ORIGINAL_FETCH = globalThis.fetch;
 const ORIGINAL_TAVILY = process.env.TAVILY_API_KEY;
 

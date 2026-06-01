@@ -96,7 +96,12 @@ describe("tool mock-data tagging", () => {
       expect(data.source).toBe("mock");
       expect(data.confidence).toBe(0);
       expect(data.reason).toMatch(/Scrape fetch failed/);
-      expect(data.reason).toMatch(/DNS failure/);
+      // SSRF guard surfaces DNS-resolution errors as "DNS lookup failed for X"
+      // before fetchWithRetry is ever called. The mocked global fetch
+      // ("DNS failure") only fires when the hostname resolves, which it
+      // doesn't here — so just confirm the underlying error reached the
+      // mock-tagging layer with a DNS-class signal.
+      expect(data.reason).toMatch(/DNS lookup failed|DNS failure|getaddrinfo|ENOTFOUND/);
       expect(typeof data.title).toBe("string");
     }, 10000);
   });

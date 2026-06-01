@@ -98,6 +98,12 @@ describe("pipeline-graph (supervisor routing)", () => {
         graphRun: {
           findFirst: async () => ({ id: "graph_1" }),
         },
+        // outreachArtifact.findFirst was added by the SDR subgraph
+        // skip-if-exists guard (audit P0 #11). Default returns null so the
+        // outer loop proceeds to the subgraph; specific tests can override.
+        outreachArtifact: {
+          findFirst: async () => null,
+        },
       } as unknown as Parameters<typeof buildPipelineGraph>[0]["prisma"],
 
       runtime: {
