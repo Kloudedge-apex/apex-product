@@ -2,13 +2,19 @@
   "name": "@apex/api",
   "version": "0.0.1",
   "private": true,
+  "prisma": {
+    "schema": "../../packages/db/prisma/schema.prisma"
+  },
   "scripts": {
+    "prisma:generate": "prisma generate --schema ../../packages/db/prisma/schema.prisma",
     "dev": "nest start --watch",
     "build": "tsc -p tsconfig.build.json --outDir dist",
     "start": "node dist/main",
     "start:prod": "node dist/main",
     "lint": "eslint \"src/**/*.ts\"",
+    "pretype-check": "pnpm prisma:generate",
     "type-check": "tsc --noEmit",
+    "pretest": "pnpm prisma:generate",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",

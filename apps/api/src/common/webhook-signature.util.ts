@@ -1,5 +1,10 @@
 import * as crypto from "crypto";
 
+export function timingSafeEqualBuffers(a: Buffer, b: Buffer): boolean {
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
 /**
  * Verifies a Clerk webhook signature.
  *
@@ -49,8 +54,7 @@ export function verifyClerkWebhookSignature(
   const expectedBuf = Buffer.from(expected, "base64");
   const match = signatures.some((sig) => {
     const sigBuf = Buffer.from(sig, "base64");
-    return sigBuf.length === expectedBuf.length &&
-      crypto.timingSafeEqual(sigBuf, expectedBuf);
+    return timingSafeEqualBuffers(sigBuf, expectedBuf);
   });
 
   if (!match) {
@@ -80,7 +84,7 @@ export function verifyRazorpayWebhookSignature(
   const expected = crypto.createHmac("sha256", secret).update(body).digest("hex");
   const sigBuf = Buffer.from(signatureHeader, "hex");
   const expBuf = Buffer.from(expected, "hex");
-  if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+  if (!timingSafeEqualBuffers(sigBuf, expBuf)) {
     throw new Error("Razorpay signature mismatch");
   }
 }
@@ -116,7 +120,7 @@ export function verifyHubspotWebhookSignature(opts: {
   const expected = crypto.createHmac("sha256", secret).update(source).digest("base64");
   const sigBuf = Buffer.from(signatureHeader, "base64");
   const expBuf = Buffer.from(expected, "base64");
-  if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+  if (!timingSafeEqualBuffers(sigBuf, expBuf)) {
     throw new Error("HubSpot signature mismatch");
   }
 }
@@ -163,7 +167,7 @@ export function verifyOAuthState(state: string): { orgId: string } {
     .digest("hex");
   const sigBuf = Buffer.from(sig, "hex");
   const expBuf = Buffer.from(expected, "hex");
-  if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+  if (!timingSafeEqualBuffers(sigBuf, expBuf)) {
     throw new Error("OAuth state signature mismatch");
   }
   return { orgId };

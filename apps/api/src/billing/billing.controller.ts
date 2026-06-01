@@ -18,6 +18,36 @@ import { SkipOrgGuard } from "../common/org-scope.guard";
 import { CreateSubscriptionDto } from "../common/dto/billing.dto";
 import { verifyRazorpayWebhookSignature } from "../common/webhook-signature.util";
 
+type RawBodyRequest = Request & { rawBody?: Buffer };
+
+const WEBHOOK_TOLERANCE_SEC = 5 * 60;
+
+function extractCreatedAtSec(rawBody: Buffer): number {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawBody.toString("utf8"));
+  } catch {
+    throw new BadRequestException("Invalid JSON body");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new BadRequestException("Invalid JSON body");
+  }
+  const createdAtRaw = (parsed as Record<string, unknown>)["created_at"];
+  if (createdAtRaw === undefined || createdAtRaw === null) {
+    throw new BadRequestException("Missing created_at");
+  }
+  const createdAt =
+    typeof createdAtRaw === "number"
+      ? createdAtRaw
+      : typeof createdAtRaw === "string"
+        ? Number(createdAtRaw)
+        : NaN;
+  if (!Number.isFinite(createdAt)) {
+    throw new BadRequestException("Invalid created_at");
+  }
+  return createdAt;
+}
+
 @Controller("billing")
 export class BillingController {
   private readonly logger = new Logger(BillingController.name);
@@ -55,13 +85,22 @@ export class BillingController {
       throw new ServiceUnavailableException("Webhook not configured");
     }
 
-    const rawBody = (req as Request & { rawBody?: Buffer }).rawBody;
+    const rawBody = (req as RawBodyRequest).rawBody;
     if (!rawBody) {
       throw new BadRequestException("Missing raw body");
     }
 
+    const createdAtSec = extractCreatedAtSec(rawBody);
+    const ageSec = Math.abs(Date.now() / 1000 - createdAtSec);
+    if (ageSec > WEBHOOK_TOLERANCE_SEC) {
+      throw new BadRequestException("Webhook timestamp outside tolerance window");
+    }
+
     const sig = req.headers["x-razorpay-signature"];
     const signature = Array.isArray(sig) ? sig[0] : sig;
+    if (!signature) {
+      throw new BadRequestException("Missing x-razorpay-signature header");
+    }
 
     try {
       verifyRazorpayWebhookSignature(rawBody, signature, secret);
