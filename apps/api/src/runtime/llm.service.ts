@@ -203,7 +203,7 @@ export class LLMService {
     const orgId = LLMService.resolveOrgId(options);
     if (orgId && this.budget) {
       const estimate = LLMService.estimateUsd(model, messages, maxTokens);
-      const charged = this.budget.tryCharge(orgId, estimate);
+      const charged = await this.budget.tryCharge(orgId, estimate);
       if (!charged.allowed) {
         throw new BadRequestException(
           `Daily LLM budget exceeded for org (spent ${charged.spentToday.toFixed(2)}/${charged.cap.toFixed(2)} USD).`,

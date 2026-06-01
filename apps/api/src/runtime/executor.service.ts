@@ -295,7 +295,7 @@ export class ExecutorService {
       // nodes + judges) is gated by the same ledger. This fast-fail surfaces
       // the cap in the run trace before the BadRequestException bubbles up.
       if (this.llmBudget) {
-        const spent = this.llmBudget.getSpentToday(agent.orgId);
+        const spent = await this.llmBudget.getSpentToday(agent.orgId);
         const cap = this.llmBudget.getCap();
         if (spent >= cap) {
           await this.addLog(
