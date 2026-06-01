@@ -21,6 +21,7 @@ import type { RuntimeService } from "../runtime/runtime.service";
 import type { LLMService } from "../runtime/llm.service";
 import type { OutreachArtifactsService } from "../outreach/outreach-artifacts.service";
 import type { EvidenceLedgerService } from "../observability/evidence-ledger.service";
+import type { RunLevelEvaluatorService } from "../observability/run-level-evaluator.service";
 import { withNodeSpan } from "../observability/graph-tracing";
 import {
   runSdrOutreachSubgraph,
@@ -38,6 +39,9 @@ interface Deps {
   llm: LLMService;
   outreachArtifacts: OutreachArtifactsService;
   evidenceLedger: EvidenceLedgerService;
+  // Optional: forwarded to the SDR subgraph so its drafter LangSmith runId
+  // is wired into the run-level evaluator (audit P0 #13).
+  runLevelEvaluator?: RunLevelEvaluatorService;
 }
 
 const nowMsg = (
@@ -545,6 +549,32 @@ export function buildPipelineGraph(deps: Deps) {
             });
             continue;
           }
+
+          // Skip-if-exists: if a prior partial run already drafted an artifact
+          // for this recipient on this graphRun, do not re-run the subgraph
+          // (do not re-burn LLM tokens, do not produce a duplicate). Audit
+          // P0 #11: the SDR subgraph is in-memory-only (no checkpointer), so
+          // a BullMQ retry mid-loop would re-run it for every target,
+          // including ones already persisted by require_human_review.
+          if (graphRun?.id) {
+            const existingArtifact = await deps.prisma.outreachArtifact.findFirst({
+              where: {
+                orgId: state.orgId,
+                graphRunId: graphRun.id,
+                recipientRef: email,
+              },
+              select: { id: true },
+            });
+            if (existingArtifact) {
+              outreachResults.push({
+                personId: person.id,
+                agentRunId: existingArtifact.id,
+                status: "queued",
+              });
+              continue;
+            }
+          }
+
           const lead: SdrLeadInput = {
             orgId: state.orgId,
             graphRunId: graphRun?.id ?? null,
@@ -563,6 +593,7 @@ export function buildPipelineGraph(deps: Deps) {
                 llm: deps.llm,
                 outreachArtifacts: deps.outreachArtifacts,
                 evidenceLedger: deps.evidenceLedger,
+                runLevelEvaluator: deps.runLevelEvaluator,
               },
               lead,
             );

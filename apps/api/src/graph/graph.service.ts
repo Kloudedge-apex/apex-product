@@ -48,6 +48,7 @@ export class GraphService {
       llm: this.llm,
       outreachArtifacts: this.outreachArtifacts,
       evidenceLedger: this.evidenceLedger,
+      runLevelEvaluator: this.runLevelEvaluator,
     }).compile({ checkpointer: this.checkpointer });
   }
 
@@ -143,17 +144,32 @@ export class GraphService {
       });
     }
 
-    if (decision.approved) {
-      await this.prisma.graphRun.update({
-        where: { id: runId },
-        data: {
-          status: "RUNNING",
-          approvedAt: new Date(),
-          approvedBy: decision.approvedBy ?? null,
-          needsApproval: false,
-        },
-      });
-    }
+    // Transition to RUNNING for BOTH approve and reject paths so the worker
+    // (which short-circuits when status !== RUNNING) actually dequeues and
+    // drives the graph to END. Audit P0 #6: previously the reject branch
+    // skipped the status update, leaving runs stuck in AWAITING_APPROVAL
+    // forever and silently dropping the user's reject decision.
+    //
+    // Also refresh startedAt so the boot-time orphan sweep (which filters on
+    // startedAt < now - BOOT_ORPHAN_AGE_MS) does NOT pick up a freshly-resumed
+    // run and re-enqueue a duplicate start job mid-resume. Audit P0 #8.
+    const resumeStartedAt = new Date();
+    await this.prisma.graphRun.update({
+      where: { id: runId },
+      data: decision.approved
+        ? {
+            status: "RUNNING",
+            startedAt: resumeStartedAt,
+            approvedAt: resumeStartedAt,
+            approvedBy: decision.approvedBy ?? null,
+            needsApproval: false,
+          }
+        : {
+            status: "RUNNING",
+            startedAt: resumeStartedAt,
+            needsApproval: false,
+          },
+    });
 
     await this.graphRunQueue.enqueueGraphRun({
       kind: "resume",

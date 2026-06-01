@@ -85,6 +85,30 @@ export class OutreachArtifactsService {
       input.toolArgs,
     );
 
+    // Idempotency: a retry of the outer outreach loop must not produce a
+    // duplicate artifact for the same (graphRunId, recipientRef, toolName)
+    // triple. Audit P0 #9: without this guard, BullMQ retries of the outer
+    // pipeline node multiplied artifacts — OUTREACH_ATTEMPTS=3 produced 3
+    // PENDING_REVIEW rows for one lead. The DB-side @@unique constraint that
+    // backs this is in docs/migrations/2026-06-01_outreach-artifact-unique.sql
+    // (operator-gated; this guard is correct on its own under steady state).
+    if (input.graphRunId && recipientRef) {
+      const existing = await this.prisma.outreachArtifact.findFirst({
+        where: {
+          orgId: input.orgId,
+          graphRunId: input.graphRunId,
+          toolName: input.toolName,
+          recipientRef,
+        },
+      });
+      if (existing) {
+        this.logger.log(
+          `OutreachArtifact already exists for graphRun=${input.graphRunId} recipient=${recipientRef} tool=${input.toolName}; returning existing id=${existing.id}`,
+        );
+        return existing;
+      }
+    }
+
     const artifact = await this.prisma.outreachArtifact.create({
       data: {
         orgId: input.orgId,

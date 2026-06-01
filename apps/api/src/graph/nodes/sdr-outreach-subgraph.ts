@@ -18,6 +18,7 @@ import type { PrismaService } from "../../prisma/prisma.service";
 import type { LLMService } from "../../runtime/llm.service";
 import type { OutreachArtifactsService } from "../../outreach/outreach-artifacts.service";
 import type { EvidenceLedgerService } from "../../observability/evidence-ledger.service";
+import type { RunLevelEvaluatorService } from "../../observability/run-level-evaluator.service";
 import { withNodeSpan } from "../../observability/graph-tracing";
 
 const log = new Logger("SdrOutreachSubgraph");
@@ -123,6 +124,10 @@ export interface SubgraphDeps {
   readonly llm: LLMService;
   readonly outreachArtifacts: OutreachArtifactsService;
   readonly evidenceLedger: EvidenceLedgerService;
+  // Optional: when supplied, the SDR drafter wires its LangSmith runId to
+  // run-level feedback so the run completes-rate/qualified-leads/etc.
+  // evaluators have a parent run to attach to. Audit P0 #13.
+  readonly runLevelEvaluator?: RunLevelEvaluatorService;
   readonly drafter?: DrafterFn;
 }
 
@@ -457,6 +462,18 @@ export function buildSdrOutreachSubgraph(deps: SubgraphDeps) {
             previousAttempt: previous,
             onRunId: (runId): void => {
               capturedRunId = runId;
+              // Audit P0 #13: forward the LangSmith root run id to the
+              // run-level evaluator so its terminal feedback (composite score,
+              // qualified-leads, send-rate, approval-drop-off) actually
+              // attaches to a parent run. Without this wire, postFeedback at
+              // run-level-evaluator.service.ts:245 logs "no langsmith root
+              // run for graphRun=..." for every terminal GraphRun.
+              if (deps.runLevelEvaluator && state.lead.graphRunId) {
+                deps.runLevelEvaluator.recordLangSmithRunId(
+                  state.lead.graphRunId,
+                  runId,
+                );
+              }
             },
           });
           return {
