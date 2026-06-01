@@ -259,43 +259,35 @@ export class PrismaCheckpointSaver extends BaseCheckpointSaver {
       const [channel, value] = writes[i];
       const [type, bytes] = await this.serde.dumpsTyped(value);
       const idx = WRITES_IDX_MAP[channel] ?? i;
-      try {
-        await this.prisma.graphCheckpointWrite.upsert({
-          where: {
-            threadId_checkpointNamespace_checkpointId_taskId_idx: {
-              threadId,
-              checkpointNamespace: checkpointNs,
-              checkpointId,
-              taskId,
-              idx,
-            },
-          },
-          create: {
+      await this.prisma.graphCheckpointWrite.upsert({
+        where: {
+          threadId_checkpointNamespace_checkpointId_taskId_idx: {
             threadId,
             checkpointNamespace: checkpointNs,
             checkpointId,
             taskId,
             idx,
-            channel,
-            type,
-            value: Buffer.from(bytes),
           },
-          update:
-            idx >= 0
-              ? {}
-              : {
-                  channel,
-                  type,
-                  value: Buffer.from(bytes),
-                },
-        });
-      } catch (err) {
-        this.logger.warn(
-          `putWrites failed for ${threadId}/${checkpointId}/${taskId}/${idx}: ${
-            err instanceof Error ? err.message : "unknown"
-          }`,
-        );
-      }
+        },
+        create: {
+          threadId,
+          checkpointNamespace: checkpointNs,
+          checkpointId,
+          taskId,
+          idx,
+          channel,
+          type,
+          value: Buffer.from(bytes),
+        },
+        update:
+          idx >= 0
+            ? {}
+            : {
+                channel,
+                type,
+                value: Buffer.from(bytes),
+              },
+      });
     }
   }
 
