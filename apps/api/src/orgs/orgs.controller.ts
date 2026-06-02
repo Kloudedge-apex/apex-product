@@ -142,6 +142,67 @@ export class OrgsController {
 
     res.status(HttpStatus.NO_CONTENT).send();
   }
+
+  /**
+   * Issues a short-lived (≤5 min) X-Reauth-Token + X-Reauth-Exp pair for
+   * the calling user against the target org. The FE flow:
+   *   1. user clicks "Delete organization" in Settings → Compliance
+   *   2. FE POSTs to /api/orgs/:id/reauth-challenge
+   *   3. FE sends the returned token + exp as headers on DELETE /api/orgs/:id
+   *
+   * Identity is enforced the same way the @Delete handler enforces it:
+   *   - OrgScopeGuard already verified the JWT and attached clerkUserId
+   *   - We re-look-up the user, assert membership of the target org, AND
+   *     assert OWNER role — non-OWNERs get a 403 so the FE can hide the
+   *     button without a separate role-probe round-trip.
+   *
+   * Note on "freshness": Clerk session freshness is enforced upstream by
+   * the FE (it triggers Clerk's step-up auth dialog before calling this).
+   * Server-side we mint with a 5-min window so a leaked token cannot be
+   * reused indefinitely.
+   */
+  @Post(":id/reauth-challenge")
+  async issueReauthChallenge(
+    @OrgId() orgId: string,
+    @Param("id") id: string,
+    @Req() req: Request,
+  ): Promise<{ token: string; exp: number; expiresInSeconds: number }> {
+    if (id !== orgId) {
+      throw new ForbiddenException("Cross-org access denied");
+    }
+
+    const clerkUserId = readClerkUserId(req);
+    if (!clerkUserId) {
+      throw new UnauthorizedException("Missing authenticated user context");
+    }
+
+    const user = await this.prisma.user.findUnique({
+      where: { clerkId: clerkUserId },
+      select: { id: true, role: true, orgId: true },
+    });
+    if (!user) {
+      throw new ForbiddenException("User not found in target org");
+    }
+    if (user.orgId !== orgId) {
+      throw new ForbiddenException("Cross-org access denied");
+    }
+    if (user.role !== "OWNER") {
+      throw new ForbiddenException("Only the org OWNER may mint a delete challenge");
+    }
+
+    const secret = process.env.ENCRYPTION_KEY;
+    if (!secret || secret.length === 0) {
+      throw new UnauthorizedException("Server re-auth secret not configured");
+    }
+
+    const expiresInSeconds = REAUTH_MAX_WINDOW_SECONDS;
+    const exp = Math.floor(Date.now() / 1000) + expiresInSeconds;
+    const token = createHmac("sha256", secret)
+      .update(`${orgId}:${user.id}:${exp}`)
+      .digest("hex");
+
+    return { token, exp, expiresInSeconds };
+  }
 }
 
 async function verifyAuth(

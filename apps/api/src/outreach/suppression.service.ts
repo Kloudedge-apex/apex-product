@@ -15,11 +15,65 @@ import { PrismaService } from "../prisma/prisma.service";
  *     unsubscribe, by provider bounce/complaint webhooks, and by operator
  *     tooling.
  */
+export interface SuppressionRow {
+  readonly id: string;
+  readonly recipientRef: string;
+  readonly reason: OutreachSuppressionReason;
+  readonly source: string | null;
+  readonly createdAt: Date;
+}
+
 @Injectable()
 export class SuppressionService {
   private readonly logger = new Logger(SuppressionService.name);
 
   constructor(private readonly prisma: PrismaService) {}
+
+  /** Page through suppression rows for an org, newest first. */
+  async listForOrg(
+    orgId: string,
+    opts: { limit?: number; cursor?: string } = {},
+  ): Promise<{ rows: SuppressionRow[]; nextCursor: string | null }> {
+    const take = Math.min(Math.max(opts.limit ?? 50, 1), 200);
+    const rows = await this.prisma.outreachSuppression.findMany({
+      where: { orgId },
+      orderBy: { createdAt: "desc" },
+      take: take + 1,
+      ...(opts.cursor ? { cursor: { id: opts.cursor }, skip: 1 } : {}),
+      select: {
+        id: true,
+        recipientRef: true,
+        reason: true,
+        source: true,
+        createdAt: true,
+      },
+    });
+    const hasMore = rows.length > take;
+    const slice = hasMore ? rows.slice(0, take) : rows;
+    return {
+      rows: slice,
+      nextCursor: hasMore ? slice[slice.length - 1].id : null,
+    };
+  }
+
+  /**
+   * Admin unsuppress — removes the row so future sends to this recipient
+   * may proceed. Operator-only path; the public /u/:token endpoint never
+   * deletes. Returns false when the row does not exist OR belongs to a
+   * different org (no enumeration leak).
+   */
+  async unsuppress(orgId: string, suppressionId: string): Promise<boolean> {
+    const row = await this.prisma.outreachSuppression.findUnique({
+      where: { id: suppressionId },
+      select: { id: true, orgId: true, recipientRef: true },
+    });
+    if (!row || row.orgId !== orgId) return false;
+    await this.prisma.outreachSuppression.delete({ where: { id: suppressionId } });
+    this.logger.log(
+      `Unsuppressed org=${orgId} recipient=${row.recipientRef} (id=${suppressionId})`,
+    );
+    return true;
+  }
 
   async isSuppressed(orgId: string, recipientRef: string): Promise<boolean> {
     if (!recipientRef) return false;
