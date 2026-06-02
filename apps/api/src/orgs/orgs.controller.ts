@@ -24,6 +24,15 @@ import { verifyClerkToken } from "../common/jwt.util";
 /** Max skew (seconds) between client-supplied X-Reauth-Exp and server clock. */
 const REAUTH_MAX_WINDOW_SECONDS = 300;
 
+/**
+ * Maximum age (seconds) of the Clerk JWT's `iat` claim when issuing a
+ * delete reauth-challenge. The FE flow uses Clerk's `useReverification`
+ * hook which forces a fresh password / 2FA prompt and re-issues the JWT,
+ * so `iat` near `now` is a proof of recent step-up. Tokens older than
+ * this window are rejected — the FE must trigger reverification first.
+ */
+const REAUTH_CHALLENGE_MAX_JWT_AGE_SECONDS = 120;
+
 @Controller("orgs")
 export class OrgsController {
   constructor(
@@ -171,13 +180,29 @@ export class OrgsController {
       throw new ForbiddenException("Cross-org access denied");
     }
 
-    const clerkUserId = readClerkUserId(req);
-    if (!clerkUserId) {
-      throw new UnauthorizedException("Missing authenticated user context");
+    // Re-verify the bearer JWT inline so we can read `iat` (Clerk's
+    // issued-at). The OrgScopeGuard already verified the token earlier in
+    // the request lifecycle, but it does not expose `iat` on the request
+    // object — so we re-parse here. This is the step-up proof: the FE
+    // must have called Clerk's reverification flow (which re-issues the
+    // JWT) within REAUTH_CHALLENGE_MAX_JWT_AGE_SECONDS.
+    const authHeader = req.headers["authorization"];
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      throw new UnauthorizedException("Missing Authorization header");
+    }
+    const payload = await verifyClerkToken(authHeader.slice(7).trim()).catch((err: unknown) => {
+      const msg = err instanceof Error ? err.message : "Invalid token";
+      throw new UnauthorizedException(msg);
+    });
+    const now = Math.floor(Date.now() / 1000);
+    if (typeof payload.iat !== "number" || now - payload.iat > REAUTH_CHALLENGE_MAX_JWT_AGE_SECONDS) {
+      throw new UnauthorizedException(
+        "JWT too stale for reauth-challenge — trigger Clerk reverification first",
+      );
     }
 
     const user = await this.prisma.user.findUnique({
-      where: { clerkId: clerkUserId },
+      where: { clerkId: payload.sub },
       select: { id: true, role: true, orgId: true },
     });
     if (!user) {
