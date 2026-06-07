@@ -758,6 +758,12 @@ export async function assembleResearchBrief(
         kind: { in: Array.from(SIGNAL_KINDS) },
       },
       orderBy: { createdAt: "desc" },
+      // NOTE: the take-limit is applied by the DB BEFORE the fresh/mock filter
+      // below. Ordering is by createdAt but freshness is judged on payload.date,
+      // so in the rare case a company has >5 signals written close together a
+      // genuinely fresh one could be crowded out by newer-but-stale rows. Safe
+      // today (signals are written near their event date); raise the limit or
+      // paginate-until-N-fresh in a follow-up if that assumption breaks.
       take: MAX_RECENT_EVIDENCE_EVENTS,
       select: { kind: true, payload: true, createdAt: true },
     });
