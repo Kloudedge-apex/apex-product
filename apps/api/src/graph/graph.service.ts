@@ -17,6 +17,8 @@ import { LangSmithService } from "../observability/langsmith.service";
 import { RunLevelEvaluatorService } from "../observability/run-level-evaluator.service";
 import { PrismaCheckpointSaver } from "./prisma-checkpointer";
 import { buildPipelineGraph } from "./pipeline-graph";
+import { SignalExtractionService } from "./nodes/research/signal-extraction.service";
+import { WebSearchTool } from "../runtime/tools/web-search.tool";
 import { NODE, PipelineState } from "./state";
 import { GraphRunQueueService } from "./graph-run-queue.service";
 
@@ -227,6 +229,7 @@ export class GraphService {
       llm: this.llm,
       outreachArtifacts: this.outreachArtifacts,
       evidenceLedger: this.evidenceLedger,
+      signalExtraction: new SignalExtractionService(new WebSearchTool()),
       runLevelEvaluator: this.runLevelEvaluator,
       parentRunId: parentRunId ?? undefined,
     }).compile({ checkpointer: this.checkpointer });

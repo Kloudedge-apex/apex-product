@@ -133,6 +133,7 @@ describe("pipeline-graph (supervisor routing)", () => {
       evidenceLedger: {
         leadSourced: async () => undefined,
         leadScored: async () => undefined,
+        recordSignal: async () => undefined,
         messageDrafted: async () => undefined,
         qaPass: async () => undefined,
         qaFail: async () => undefined,
@@ -141,6 +142,10 @@ describe("pipeline-graph (supervisor routing)", () => {
         approvalDenied: async () => undefined,
         artifactPersisted: async () => undefined,
       } as unknown as Parameters<typeof buildPipelineGraph>[0]["evidenceLedger"],
+
+      signalExtraction: {
+        extractForCompany: async () => [],
+      } as unknown as Parameters<typeof buildPipelineGraph>[0]["signalExtraction"],
     };
   });
 

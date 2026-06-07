@@ -136,6 +136,7 @@ describe("pipeline-graph parentRunId propagation (audit P0 #12)", () => {
       evidenceLedger: {
         leadSourced: async () => undefined,
         leadScored: async () => undefined,
+        recordSignal: async () => undefined,
         messageDrafted: async () => undefined,
         qaPass: async () => undefined,
         qaFail: async () => undefined,
@@ -144,6 +145,10 @@ describe("pipeline-graph parentRunId propagation (audit P0 #12)", () => {
         approvalDenied: async () => undefined,
         artifactPersisted: async () => undefined,
       } as unknown as Parameters<typeof buildPipelineGraph>[0]["evidenceLedger"],
+
+      signalExtraction: {
+        extractForCompany: async () => [],
+      } as unknown as Parameters<typeof buildPipelineGraph>[0]["signalExtraction"],
 
       // The unit under test: parentRunId must flow from here all the way
       // down to every llm.chat call inside the pipeline + subgraph.
