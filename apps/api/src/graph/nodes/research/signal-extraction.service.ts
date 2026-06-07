@@ -38,6 +38,10 @@ export type WebSearchExecutor = Pick<Tool, "execute">;
 
 // web_search keys off process.env.TAVILY_API_KEY and ignores ToolContext entirely;
 // this placeholder only satisfies the Tool.execute signature.
+// INVARIANT: if web_search ever starts reading context (per-tenant API keys,
+// rate-limit attribution, tracing), this service must instead receive real
+// org/run ids via its constructor or extractForCompany args — the empty values
+// here would silently misattribute or break those features.
 const SEARCH_CONTEXT: ToolContext = {
   orgId: "",
   agentId: "research_agent",
@@ -61,6 +65,11 @@ export class SignalExtractionService {
    * persists structured dated job data (`raw.jobs[]`), each real job with BOTH
    * a URL and a date becomes a `recent_hire` (citation contract: no undated or
    * unsourced signal is ever emitted; mock-tagged items are skipped).
+   *
+   * Assumes job dates are ISO-8601 (we slice to yyyy-mm-dd). Non-ISO formats
+   * (e.g. "05/20/2026") are out of scope until the sourcing→raw contract is
+   * defined; a malformed slice fails closed downstream — isFresh() NaN-guards
+   * it and excludes it from grounding rather than citing a wrong date.
    */
   extractFromScraped(company: CompanyForExtraction): SignalInput[] {
     const raw = company.raw;

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { markMocked } from "../../../../runtime/tools/mock-metadata";
+import { markMocked, markMockedItem } from "../../../../runtime/tools/mock-metadata";
 import {
   SignalExtractionService,
   type WebSearchExecutor,
@@ -61,6 +61,30 @@ describe("SignalExtractionService", () => {
       const out = await service.extractForCompany(company, NOW);
 
       expect(out).toHaveLength(0);
+    });
+
+    it("skips a mock-tagged result item and uses the next clean result", async () => {
+      // Outer payload is NOT mocked, but the first result item IS — this locks
+      // in the per-result `!isMocked(r)` guard (defense-in-depth): without it,
+      // the fixture item would be cited.
+      const search = fakeSearch(async () => ({
+        success: true,
+        data: {
+          results: [
+            markMockedItem({ title: "fixture", url: "https://mock.example.com" }, "no key"),
+            { title: "Lumen ships v2", url: "https://news.example.com/lumen-v2", snippet: "..." },
+          ],
+        },
+      }));
+      const service = new SignalExtractionService(search);
+
+      const out = await service.extractLiveTrigger(company, NOW);
+
+      expect(out).toHaveLength(1);
+      expect(out[0]).toMatchObject({
+        kind: "press_mention",
+        source: "https://news.example.com/lumen-v2",
+      });
     });
 
     it("emits NO live signal when the search fails (success:false)", async () => {
