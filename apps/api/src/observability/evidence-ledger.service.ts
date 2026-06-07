@@ -5,6 +5,8 @@ import {
   EVIDENCE_EVENT_KIND,
   type EvidenceEventPayload,
   type EvidenceRefType,
+  type SignalEventKind,
+  type SignalRecordedPayload,
 } from "./evidence-event.types";
 
 interface AppendEventInput<TPayload extends EvidenceEventPayload> {
@@ -94,6 +96,37 @@ export class EvidenceLedgerService {
         scored: input.scored,
         duration_ms: input.durationMs,
       },
+    });
+  }
+
+  async recordSignal(input: {
+    readonly orgId: string;
+    readonly runId?: string | null;
+    readonly companyId?: string | null;
+    readonly personId?: string | null;
+    readonly kind: SignalEventKind;
+    readonly source: string;
+    readonly date: string;
+    readonly summary?: string;
+    readonly confidence: number;
+    readonly fields?: Partial<Omit<SignalRecordedPayload, "kind" | "source" | "date" | "summary" | "confidence">>;
+  }): Promise<void> {
+    const refType: EvidenceRefType = input.companyId ? "company" : "person";
+    const refId = input.companyId ?? input.personId ?? "unknown";
+    return this.append({
+      orgId: input.orgId,
+      runId: input.runId ?? null,
+      kind: input.kind,
+      refType,
+      refId,
+      payload: {
+        kind: input.kind,
+        source: input.source,
+        date: input.date,
+        summary: input.summary,
+        confidence: input.confidence,
+        ...(input.fields ?? {}),
+      } as SignalRecordedPayload,
     });
   }
 
