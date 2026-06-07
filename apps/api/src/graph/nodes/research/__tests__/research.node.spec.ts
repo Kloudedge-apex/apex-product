@@ -38,7 +38,14 @@ describe("buildResearchNode", () => {
     const extractForCompany =
       over.extractForCompany ??
       vi.fn(async () => [
-        { kind: "recent_hire", source: "https://x.test/a", date: "2026-06-01", confidence: 0.9 },
+        {
+          kind: "recent_hire",
+          source: "https://x.test/a",
+          date: "2026-06-01",
+          confidence: 0.9,
+          summary: 'Posted "SDR".',
+          fields: { jobTitle: "SDR" },
+        },
         { kind: "press_mention", source: "https://x.test/b", date: "2026-06-02", confidence: 0.6 },
       ]);
     const recordSignal = over.recordSignal ?? vi.fn(async () => undefined);
@@ -80,6 +87,22 @@ describe("buildResearchNode", () => {
     );
     expect(recordSignal).toHaveBeenCalledWith(
       expect.objectContaining({ orgId, runId, companyId: "c1", kind: "press_mention" }),
+    );
+
+    // Full payload pass-through — guards against silently dropping a mapped
+    // field (source/date/summary/confidence/fields) in the node.
+    expect(recordSignal).toHaveBeenCalledWith(
+      expect.objectContaining({
+        orgId,
+        runId,
+        companyId: "c1",
+        kind: "recent_hire",
+        source: "https://x.test/a",
+        date: "2026-06-01",
+        summary: 'Posted "SDR".',
+        confidence: 0.9,
+        fields: { jobTitle: "SDR" },
+      }),
     );
 
     expect(update.stagesCompleted).toEqual([STAGE.RESEARCH]);

@@ -16,10 +16,15 @@ export interface ResearchNodeDeps {
 /**
  * RESEARCH node — runs after SCORING, before APPROVAL. For each unique
  * qualified (tier A/B) company among scoredLeads, extracts dated prospect
- * signals and writes them to the evidence ledger. Best-effort: a company's
- * failure is isolated and never fails the stage (the lead simply refuses at
- * draft time, which is the correct behavior, not an error). Zero signals is a
- * valid COMPLETE outcome.
+ * signals and writes them to the evidence ledger. Best-effort PER COMPANY: a
+ * single company's extraction failure is isolated and never fails the stage
+ * (the lead simply refuses at draft time, which is the correct behavior, not an
+ * error). Zero signals is a valid COMPLETE outcome.
+ *
+ * The person→company RESOLVE queries below are deliberately NOT best-effort: a
+ * Prisma throw there is genuine infra failure (DB outage), not "this company
+ * has no signal", so it escapes the node and fails the run loudly rather than
+ * silently approving with zero research. Do not wrap them in try/catch.
  */
 export function buildResearchNode(deps: ResearchNodeDeps) {
   return async (state: PipelineState): Promise<Partial<PipelineState>> =>
@@ -64,6 +69,12 @@ export function buildResearchNode(deps: ResearchNodeDeps) {
           : [];
 
         const now = new Date();
+        // NOTE: `signalsWritten` counts write ATTEMPTS, and `companiesWithError`
+        // / PARTIAL reflect EXTRACTION failures only. EvidenceLedgerService.append
+        // swallows its own Prisma errors (best-effort ledger), so a DB-level
+        // recordSignal failure resolves successfully here and does NOT flip the
+        // stage to PARTIAL. If signal-write failures ever need to surface, change
+        // append's swallow contract — not this loop.
         let signalsWritten = 0;
         let companiesWithError = 0;
         for (const company of companies) {
