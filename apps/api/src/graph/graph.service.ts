@@ -28,6 +28,9 @@ const GRAPH_NAME = "pipeline-supervisor";
 export class GraphService {
   private readonly logger = new Logger(GraphService.name);
   private readonly checkpointer: PrismaCheckpointSaver;
+  // Constructed once — stateless, keyed off process.env, no per-run state. Was
+  // previously rebuilt on every processGraphRun call (cheap, but needless).
+  private readonly signalExtraction = new SignalExtractionService(new WebSearchTool());
 
   constructor(
     private readonly prisma: PrismaService,
@@ -229,7 +232,7 @@ export class GraphService {
       llm: this.llm,
       outreachArtifacts: this.outreachArtifacts,
       evidenceLedger: this.evidenceLedger,
-      signalExtraction: new SignalExtractionService(new WebSearchTool()),
+      signalExtraction: this.signalExtraction,
       runLevelEvaluator: this.runLevelEvaluator,
       parentRunId: parentRunId ?? undefined,
     }).compile({ checkpointer: this.checkpointer });
