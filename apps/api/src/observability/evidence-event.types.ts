@@ -12,6 +12,13 @@ export const EVIDENCE_EVENT_KIND = {
   artifactPersisted: "artifact.persisted",
   messageSent: "message.sent",
   crmSynced: "crm.synced",
+  // Prospect-signal kinds. UNDERSCORE values (not dotted) because
+  // assembleResearchBrief() queries EvidenceEvent rows by exactly these strings.
+  recentHire: "recent_hire",
+  fundingEvent: "funding_event",
+  leadershipChange: "leadership_change",
+  productLaunch: "product_launch",
+  pressMention: "press_mention",
   // GDPR Art. 17 / CCPA §1798.105 — tenant erasure. Emitted when an OWNER
   // deletes their org via DELETE /orgs/:id. The DB row will be cascaded away
   // along with the rest of the org's data; the evidentiary value lives in
@@ -26,6 +33,7 @@ export type EvidenceRefType =
   | "workflow_run"
   | "graph_run"
   | "org"
+  | "company"
   | "person"
   | "outreach_artifact"
   | "outreach_tool_call"
@@ -130,6 +138,50 @@ export interface TenantDeletionPayload extends Prisma.InputJsonObject {
   };
 }
 
+/**
+ * Ledger-backed prospect-signal kinds surfaced as grounding signals in the
+ * research brief. These are a SUBSET of `SIGNAL_KINDS` in
+ * sdr-outreach-subgraph.ts: that consumer set also includes `intent_signal`,
+ * which is sourced from `company.intentSignals` rather than written to the
+ * EvidenceEvent ledger, so it has no member here.
+ */
+export const SIGNAL_EVENT_KINDS = [
+  EVIDENCE_EVENT_KIND.recentHire,
+  EVIDENCE_EVENT_KIND.fundingEvent,
+  EVIDENCE_EVENT_KIND.leadershipChange,
+  EVIDENCE_EVENT_KIND.productLaunch,
+  EVIDENCE_EVENT_KIND.pressMention,
+] as const;
+
+export type SignalEventKind = (typeof SIGNAL_EVENT_KINDS)[number];
+
+/**
+ * Prospect-signal payload. `source` is the real URL the signal came from and
+ * `date` is the ISO-8601 event date (e.g. job-post date, filing date, or the
+ * discovery date for a live press mention) — both REQUIRED so the fact is
+ * citable and freshness-checkable. Kind-specific fields are read by
+ * summarizeEvidencePayload(). `confidence` 0..1; NEVER 0 for a real signal
+ * (0 is reserved for mock data and is excluded from grounding).
+ */
+export interface SignalRecordedPayload extends Prisma.InputJsonObject {
+  readonly kind: SignalEventKind;
+  readonly source: string; // real URL
+  readonly date: string; // ISO 8601
+  readonly summary?: string;
+  readonly confidence: number; // 0..1, >0 for real signals
+  // kind-specific (all optional; summarizeEvidencePayload reads these):
+  readonly jobTitle?: string;
+  readonly amount?: string;
+  readonly round?: string;
+  readonly leadInvestor?: string;
+  readonly productName?: string;
+  readonly quote?: string;
+  readonly role?: string;
+  readonly name?: string;
+  readonly outlet?: string;
+  readonly headline?: string;
+}
+
 export type EvidenceEventPayload =
   | LeadSourcedPayload
   | LeadScoredPayload
@@ -142,4 +194,5 @@ export type EvidenceEventPayload =
   | ArtifactPersistedPayload
   | MessageSentPayload
   | CrmSyncedPayload
-  | TenantDeletionPayload;
+  | TenantDeletionPayload
+  | SignalRecordedPayload;
