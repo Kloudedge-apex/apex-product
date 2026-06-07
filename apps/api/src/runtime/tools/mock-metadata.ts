@@ -41,3 +41,12 @@ export function markMocked<T extends object>(data: T, reason: string): T & MockM
  */
 export const MOCK_DISCLAIMER_SUFFIX =
   ' Results may include items marked `source: "mock"` when external providers are unavailable. Treat mocked items as missing data — do NOT cite them as fact.';
+
+/** True if a value carries the mock metadata flag. Mock data must never be cited as fact. */
+export function isMocked(data: unknown): boolean {
+  return (
+    typeof data === "object" &&
+    data !== null &&
+    (data as { source?: unknown }).source === "mock"
+  );
+}
