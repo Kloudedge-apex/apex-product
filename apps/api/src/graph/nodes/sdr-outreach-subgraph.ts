@@ -20,6 +20,8 @@ import type { OutreachArtifactsService } from "../../outreach/outreach-artifacts
 import type { EvidenceLedgerService } from "../../observability/evidence-ledger.service";
 import type { RunLevelEvaluatorService } from "../../observability/run-level-evaluator.service";
 import { withNodeSpan } from "../../observability/graph-tracing";
+import { isMocked } from "../../runtime/tools/mock-metadata";
+import { isFresh } from "./research/freshness";
 
 const log = new Logger("SdrOutreachSubgraph");
 
@@ -743,7 +745,7 @@ export async function assembleResearchBrief(
     });
   }
 
-  // Behavioral signals (S-series) from EvidenceEvent — most recent first.
+  // Behavioral signals (S-series) from EvidenceEvent — most recent first, fresh + non-mock only.
   let signalCount = 0;
   if (company?.id) {
     const events = await prisma.evidenceEvent.findMany({
@@ -760,14 +762,18 @@ export async function assembleResearchBrief(
       select: { kind: true, payload: true, createdAt: true },
     });
     for (const ev of events) {
+      const payload = (ev.payload ?? {}) as Record<string, unknown>;
+      if (isMocked(payload)) continue; // mock never becomes a cited fact
+      const effectiveDate =
+        typeof payload.date === "string" ? payload.date : ev.createdAt.toISOString().slice(0, 10);
+      if (!isFresh(ev.kind, effectiveDate)) continue; // stale signals don't ground
       signalCount += 1;
-      const summary = summarizeEvidencePayload(ev.kind, ev.payload);
       facts.push({
         id: `S${signalCount}`,
         category: "signal",
-        source: `evidence_event.${ev.kind}`,
-        text: summary,
-        date: ev.createdAt.toISOString().slice(0, 10),
+        source: typeof payload.source === "string" ? payload.source : `evidence_event.${ev.kind}`,
+        text: summarizeEvidencePayload(ev.kind, ev.payload),
+        date: effectiveDate,
       });
     }
   }
@@ -799,7 +805,7 @@ export async function assembleResearchBrief(
     xml,
     facts,
     doNotClaim,
-    hasGroundingSignal: signalCount > 0 || Boolean(company?.intentSignals?.length),
+    hasGroundingSignal: signalCount > 0,
   };
 }
 
