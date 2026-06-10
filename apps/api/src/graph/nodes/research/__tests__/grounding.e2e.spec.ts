@@ -70,6 +70,29 @@ function makeFakePrisma(raw: unknown) {
       findFirst: async () => null,
     },
     evidenceEvent: {
+      // Idempotency probe — recordSignal's pre-INSERT existence check. Reproduces
+      // the real where: orgId + runId + refType + refId + kind + payload->>source.
+      findFirst: async ({
+        where,
+      }: {
+        where: {
+          orgId: string;
+          runId: string | null;
+          refType: string;
+          refId: string;
+          kind: string;
+          payload?: { path: string[]; equals: unknown };
+        };
+      }) =>
+        store.find(
+          (r) =>
+            r.orgId === where.orgId &&
+            (r.runId ?? null) === (where.runId ?? null) &&
+            r.refType === where.refType &&
+            r.refId === where.refId &&
+            r.kind === where.kind &&
+            r.payload?.[where.payload?.path?.[0] ?? "source"] === where.payload?.equals,
+        ) ?? null,
       // Write side — the ledger's append() calls this.
       create: async ({ data }: { data: Omit<EvidenceRow, "createdAt"> }) => {
         const row: EvidenceRow = { ...data, createdAt: new Date() };
