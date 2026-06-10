@@ -17,7 +17,7 @@ function lead(): SdrLeadInput {
   };
 }
 
-function fakePrisma(events: unknown[]) {
+function fakePrisma(events: unknown[], intentSignals: string[] = []) {
   return {
     company: {
       findFirst: vi.fn().mockResolvedValue({
@@ -30,7 +30,7 @@ function fakePrisma(events: unknown[]) {
         city: null,
         fundingStage: null,
         techStack: [],
-        intentSignals: [],
+        intentSignals,
       }),
     },
     person: {
@@ -71,6 +71,15 @@ describe("assembleResearchBrief grounding (refusal-first)", () => {
     const signal = brief.facts.find((f) => f.category === "signal");
     expect(signal?.date).toBe(freshDate);
     expect(signal?.id).toBe("S1");
+  });
+
+  it("refuses on undated intent strings alone — intentSignals never satisfy grounding", async () => {
+    // The wedge dropped the old `|| company.intentSignals?.length` OR-clause:
+    // an undated, unsourced intent string must NOT ground a lead. A company
+    // rich in intent but with zero fresh dated signals still refuses.
+    const prisma = fakePrisma([], ["hiring-spike", "budget-approved", "evaluating-vendors"]);
+    const brief = await assembleResearchBrief(prisma, lead());
+    expect(brief.hasGroundingSignal).toBe(false);
   });
 
   it("refuses when the only signal is mocked", async () => {
