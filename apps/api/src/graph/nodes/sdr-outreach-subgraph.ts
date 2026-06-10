@@ -688,7 +688,6 @@ export async function assembleResearchBrief(
       city: true,
       fundingStage: true,
       techStack: true,
-      intentSignals: true,
     },
   });
 

@@ -160,8 +160,10 @@ export type SignalEventKind = (typeof SIGNAL_EVENT_KINDS)[number];
  * `date` is the ISO-8601 event date (e.g. job-post date, filing date, or the
  * discovery date for a live press mention) — both REQUIRED so the fact is
  * citable and freshness-checkable. Kind-specific fields are read by
- * summarizeEvidencePayload(). `confidence` 0..1; NEVER 0 for a real signal
- * (0 is reserved for mock data and is excluded from grounding).
+ * summarizeEvidencePayload(). `confidence` 0..1; by convention 0 is reserved for
+ * mock data. NOTE: grounding exclusion keys on the `source: "mock"` sentinel
+ * (see isMocked / assembleResearchBrief), NOT on `confidence === 0` — the two
+ * always travel together on mock data, so the source tag alone is sufficient.
  */
 export interface SignalRecordedPayload extends Prisma.InputJsonObject {
   readonly kind: SignalEventKind;
