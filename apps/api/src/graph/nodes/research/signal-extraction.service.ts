@@ -66,10 +66,11 @@ export class SignalExtractionService {
    * a URL and a date becomes a `recent_hire` (citation contract: no undated or
    * unsourced signal is ever emitted; mock-tagged items are skipped).
    *
-   * Assumes job dates are ISO-8601 (we slice to yyyy-mm-dd). Non-ISO formats
-   * (e.g. "05/20/2026") are out of scope until the sourcing→raw contract is
-   * defined; a malformed slice fails closed downstream — isFresh() NaN-guards
-   * it and excludes it from grounding rather than citing a wrong date.
+   * Job dates MUST be strict ISO yyyy-mm-dd (full ISO datetimes are normalized
+   * to their date). Anything else — "05/20/2026", "May 20, 2026" — is REJECTED
+   * (the job is skipped), because a blind `.slice(0, 10)` of those yields a
+   * wrong-but-valid date (e.g. "May 20, 20" → year 2020), which would cite an
+   * incorrect trigger. Rejecting is the fail-closed, wedge-correct behavior.
    */
   extractFromScraped(company: CompanyForExtraction): SignalInput[] {
     const raw = company.raw;
@@ -82,10 +83,9 @@ export class SignalExtractionService {
       const j = job as Record<string, unknown>;
       const url =
         typeof j.url === "string" ? j.url : typeof j.absoluteUrl === "string" ? j.absoluteUrl : null;
-      const rawDate = j.postedAt ?? j.posted_at ?? j.updatedAt ?? j.date;
-      const date = typeof rawDate === "string" ? rawDate.slice(0, 10) : null;
+      const date = toIsoDate(j.postedAt ?? j.posted_at ?? j.updatedAt ?? j.date);
       const title = typeof j.title === "string" ? j.title : null;
-      if (!url || !date || !title) continue; // need a citable URL + date
+      if (!url || !date || !title) continue; // need a citable URL + strict-ISO date
       out.push({
         kind: "recent_hire",
         source: url,
@@ -139,4 +139,20 @@ function hostname(url: string): string {
   } catch {
     return url;
   }
+}
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Normalize a raw date value to a strict ISO `yyyy-mm-dd`, or null if it isn't
+ * one. Accepts a bare ISO date or a full ISO datetime (sliced to its date);
+ * rejects every other format so a non-ISO string can never be stored as a
+ * citation date. The post-slice `Date.parse` rejects in-range-looking but
+ * invalid dates (e.g. "2026-13-45").
+ */
+function toIsoDate(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const candidate = raw.slice(0, 10);
+  if (!ISO_DATE.test(candidate)) return null;
+  return Number.isNaN(Date.parse(`${candidate}T00:00:00Z`)) ? null : candidate;
 }

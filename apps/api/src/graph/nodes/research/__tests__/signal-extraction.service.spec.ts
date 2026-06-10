@@ -188,6 +188,33 @@ describe("SignalExtractionService", () => {
       expect(out.filter((s) => s.kind === "recent_hire")).toHaveLength(0);
     });
 
+    it("skips a job whose date is not strict ISO yyyy-mm-dd (never cites a wrong date)", () => {
+      const service = new SignalExtractionService(mockedSearch);
+      // 'May 20, 2026'.slice(0,10) === 'May 20, 20' → new Date(...) is a VALID
+      // year-2020 date, not NaN; and '05/20/2026' parses to a valid local date.
+      // Both must be rejected, not stored verbatim or mis-dated.
+      const longForm = service.extractFromScraped({
+        ...company,
+        raw: { jobs: [{ title: "Senior SDR", url: "https://jobs.example.com/1", postedAt: "May 20, 2026" }] },
+      });
+      expect(longForm.filter((s) => s.kind === "recent_hire")).toHaveLength(0);
+
+      const slashForm = service.extractFromScraped({
+        ...company,
+        raw: { jobs: [{ title: "Senior SDR", url: "https://jobs.example.com/1", postedAt: "05/20/2026" }] },
+      });
+      expect(slashForm.filter((s) => s.kind === "recent_hire")).toHaveLength(0);
+    });
+
+    it("accepts a full ISO datetime by normalizing to yyyy-mm-dd", () => {
+      const service = new SignalExtractionService(mockedSearch);
+      const out = service.extractFromScraped({
+        ...company,
+        raw: { jobs: [{ title: "Senior SDR", url: "https://jobs.example.com/1", postedAt: "2026-05-20T09:30:00Z" }] },
+      });
+      expect(out.find((s) => s.kind === "recent_hire")).toMatchObject({ date: "2026-05-20" });
+    });
+
     it("returns [] when raw is null / empty / non-object", () => {
       const service = new SignalExtractionService(mockedSearch);
       expect(service.extractFromScraped({ ...company, raw: null })).toHaveLength(0);
