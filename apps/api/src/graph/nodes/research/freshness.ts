@@ -20,8 +20,18 @@ export const FRESHNESS_WINDOWS: Record<SignalEventKind, number> = {
 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+// A signal dated slightly in the future (a TZ-ahead source, or a date-only ISO
+// compared against a `now` that carries a time-of-day) is real, not fabricated.
+// Tolerate one day of skew; anything further in the future is rejected.
+const SKEW_TOLERANCE_MS = DAY_MS;
 
-/** True if `isoDate` is within the freshness window for `kind` relative to `now`. */
+/**
+ * True if `isoDate` is within the freshness window for `kind` relative to `now`.
+ * Bounded on BOTH sides: a future-dated signal (age < 0 beyond a one-day skew
+ * tolerance) is excluded — an event that hasn't happened must never count as a
+ * "fresh" grounding fact, or a typo'd/mis-parsed future date would fabricate a
+ * trigger the wedge is meant to forbid.
+ */
 export function isFresh(kind: string, isoDate: string | undefined, now: Date = new Date()): boolean {
   const window = (FRESHNESS_WINDOWS as Record<string, number>)[kind];
   // `window === undefined` (no window for this kind), not `!window`, so a future
@@ -29,5 +39,6 @@ export function isFresh(kind: string, isoDate: string | undefined, now: Date = n
   if (window === undefined || !isoDate) return false;
   const d = new Date(isoDate);
   if (Number.isNaN(d.getTime())) return false;
-  return now.getTime() - d.getTime() <= window * DAY_MS;
+  const age = now.getTime() - d.getTime();
+  return age >= -SKEW_TOLERANCE_MS && age <= window * DAY_MS;
 }

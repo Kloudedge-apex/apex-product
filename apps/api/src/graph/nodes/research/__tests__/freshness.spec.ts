@@ -12,4 +12,14 @@ describe("isFresh", () => {
     expect(isFresh("funding_event", "2025-09-01", now)).toBe(true);
     expect(FRESHNESS_WINDOWS.funding_event).toBeGreaterThan(FRESHNESS_WINDOWS.recent_hire);
   });
+  it("excludes a future-dated signal (an event that hasn't happened cannot ground)", () => {
+    // The wedge exists to stop fabricated grounding; a future date (typo, TZ
+    // skew, or a mis-parsed non-ISO string) must NOT count as fresh.
+    expect(isFresh("recent_hire", "2026-06-12", now)).toBe(false);
+    expect(isFresh("funding_event", "2029-01-01", now)).toBe(false);
+  });
+  it("tolerates a one-day clock/TZ skew so a today/tomorrow source isn't false-stale", () => {
+    expect(isFresh("recent_hire", "2026-06-07", now)).toBe(true);
+    expect(isFresh("recent_hire", "2026-06-08", now)).toBe(true);
+  });
 });
