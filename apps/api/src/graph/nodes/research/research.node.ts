@@ -55,15 +55,17 @@ export function buildResearchNode(deps: ResearchNodeDeps) {
         }
 
         // scoredLeads has no companyId — resolve person → company, dedupe per company.
+        // Both reads are org-scoped (defense-in-depth, matching every other node in
+        // the pipeline): Person has no direct orgId, so scope it via its company.
         const personIds = qualified.map((s) => s.personId);
         const persons = await deps.prisma.person.findMany({
-          where: { id: { in: personIds } },
+          where: { id: { in: personIds }, company: { orgId: state.orgId } },
           select: { companyId: true },
         });
         const companyIds = [...new Set(persons.map((p) => p.companyId).filter(Boolean))];
         const companies = companyIds.length
           ? await deps.prisma.company.findMany({
-              where: { id: { in: companyIds } },
+              where: { id: { in: companyIds }, orgId: state.orgId },
               select: { id: true, name: true, domain: true, raw: true },
             })
           : [];
@@ -73,8 +75,10 @@ export function buildResearchNode(deps: ResearchNodeDeps) {
         // / PARTIAL reflect EXTRACTION failures only. EvidenceLedgerService.append
         // swallows its own Prisma errors (best-effort ledger), so a DB-level
         // recordSignal failure resolves successfully here and does NOT flip the
-        // stage to PARTIAL. If signal-write failures ever need to surface, change
-        // append's swallow contract — not this loop.
+        // stage to PARTIAL. Such failures are still observable: append records the
+        // exception on the active OTel span (alertable in tracing). If they ever
+        // need to gate the stage, have recordSignal return a written-boolean and
+        // count confirmed writes here — don't remove append's swallow.
         let signalsWritten = 0;
         let companiesWithError = 0;
         for (const company of companies) {

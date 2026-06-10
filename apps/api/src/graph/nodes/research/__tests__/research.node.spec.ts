@@ -60,7 +60,7 @@ describe("buildResearchNode", () => {
   }
 
   it("happy path: dedupes companies, writes one signal per extracted input", async () => {
-    const { deps, personFindMany, extractForCompany, recordSignal } = makeDeps({});
+    const { deps, personFindMany, companyFindMany, extractForCompany, recordSignal } = makeDeps({});
     const node = buildResearchNode(deps);
 
     const update = await node(
@@ -76,6 +76,11 @@ describe("buildResearchNode", () => {
     // Only qualified (A/B) person ids are resolved — C is excluded.
     expect(personFindMany).toHaveBeenCalledTimes(1);
     expect(personFindMany.mock.calls[0][0].where.id.in).toEqual(["p1", "p2"]);
+
+    // Both resolve queries are org-scoped (defense-in-depth, matching every
+    // other node in the pipeline). Person has no direct orgId → scope via company.
+    expect(personFindMany.mock.calls[0][0].where.company).toEqual({ orgId });
+    expect(companyFindMany.mock.calls[0][0].where.orgId).toBe(orgId);
 
     // Two qualified people share company c1 → extract runs once (dedup).
     expect(extractForCompany).toHaveBeenCalledTimes(1);
