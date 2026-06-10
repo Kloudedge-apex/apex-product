@@ -20,6 +20,8 @@ import type { OutreachArtifactsService } from "../../outreach/outreach-artifacts
 import type { EvidenceLedgerService } from "../../observability/evidence-ledger.service";
 import type { RunLevelEvaluatorService } from "../../observability/run-level-evaluator.service";
 import { withNodeSpan } from "../../observability/graph-tracing";
+import { isMocked } from "../../runtime/tools/mock-metadata";
+import { isFresh } from "./research/freshness";
 
 const log = new Logger("SdrOutreachSubgraph");
 
@@ -686,7 +688,6 @@ export async function assembleResearchBrief(
       city: true,
       fundingStage: true,
       techStack: true,
-      intentSignals: true,
     },
   });
 
@@ -743,7 +744,7 @@ export async function assembleResearchBrief(
     });
   }
 
-  // Behavioral signals (S-series) from EvidenceEvent — most recent first.
+  // Behavioral signals (S-series) from EvidenceEvent — most recent first, fresh + non-mock only.
   let signalCount = 0;
   if (company?.id) {
     const events = await prisma.evidenceEvent.findMany({
@@ -756,18 +757,28 @@ export async function assembleResearchBrief(
         kind: { in: Array.from(SIGNAL_KINDS) },
       },
       orderBy: { createdAt: "desc" },
+      // NOTE: the take-limit is applied by the DB BEFORE the fresh/mock filter
+      // below. Ordering is by createdAt but freshness is judged on payload.date,
+      // so in the rare case a company has >5 signals written close together a
+      // genuinely fresh one could be crowded out by newer-but-stale rows. Safe
+      // today (signals are written near their event date); raise the limit or
+      // paginate-until-N-fresh in a follow-up if that assumption breaks.
       take: MAX_RECENT_EVIDENCE_EVENTS,
       select: { kind: true, payload: true, createdAt: true },
     });
     for (const ev of events) {
+      const payload = (ev.payload ?? {}) as Record<string, unknown>;
+      if (isMocked(payload)) continue; // mock never becomes a cited fact
+      const effectiveDate =
+        typeof payload.date === "string" ? payload.date : ev.createdAt.toISOString().slice(0, 10);
+      if (!isFresh(ev.kind, effectiveDate)) continue; // stale signals don't ground
       signalCount += 1;
-      const summary = summarizeEvidencePayload(ev.kind, ev.payload);
       facts.push({
         id: `S${signalCount}`,
         category: "signal",
-        source: `evidence_event.${ev.kind}`,
-        text: summary,
-        date: ev.createdAt.toISOString().slice(0, 10),
+        source: typeof payload.source === "string" ? payload.source : `evidence_event.${ev.kind}`,
+        text: summarizeEvidencePayload(ev.kind, ev.payload),
+        date: effectiveDate,
       });
     }
   }
@@ -799,7 +810,7 @@ export async function assembleResearchBrief(
     xml,
     facts,
     doNotClaim,
-    hasGroundingSignal: signalCount > 0 || Boolean(company?.intentSignals?.length),
+    hasGroundingSignal: signalCount > 0,
   };
 }
 

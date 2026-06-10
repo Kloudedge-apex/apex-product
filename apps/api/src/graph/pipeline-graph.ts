@@ -27,6 +27,8 @@ import {
   runSdrOutreachSubgraph,
   type SdrLeadInput,
 } from "./nodes/sdr-outreach-subgraph";
+import { buildResearchNode } from "./nodes/research/research.node";
+import type { SignalExtractionService } from "./nodes/research/signal-extraction.service";
 import { tierForScore } from "../common/qualification.constants";
 
 const MAX_OUTREACH = 10;
@@ -39,6 +41,7 @@ interface Deps {
   llm: LLMService;
   outreachArtifacts: OutreachArtifactsService;
   evidenceLedger: EvidenceLedgerService;
+  signalExtraction: SignalExtractionService;
   // Optional: forwarded to the SDR subgraph so its drafter LangSmith runId
   // is wired into the run-level evaluator (audit P0 #13).
   runLevelEvaluator?: RunLevelEvaluatorService;
@@ -646,12 +649,19 @@ export function buildPipelineGraph(deps: Deps) {
     );
   };
 
+  const researchAgent = buildResearchNode({
+    prisma: deps.prisma,
+    signalExtraction: deps.signalExtraction,
+    evidenceLedger: deps.evidenceLedger,
+  });
+
   const graph = new StateGraph(PipelineStateAnnotation)
     .addNode(NODE.SUPERVISOR, supervisor, {
       ends: [
         NODE.SOURCING,
         NODE.ENRICHMENT,
         NODE.SCORING,
+        NODE.RESEARCH,
         NODE.APPROVAL,
         NODE.OUTREACH,
         END,
@@ -660,12 +670,14 @@ export function buildPipelineGraph(deps: Deps) {
     .addNode(NODE.SOURCING, sourcingAgent)
     .addNode(NODE.ENRICHMENT, enrichmentAgent)
     .addNode(NODE.SCORING, scoringAgent)
+    .addNode(NODE.RESEARCH, researchAgent)
     .addNode(NODE.APPROVAL, humanApproval)
     .addNode(NODE.OUTREACH, outreachAgent)
     .addEdge(START, NODE.SUPERVISOR)
     .addEdge(NODE.SOURCING, NODE.SUPERVISOR)
     .addEdge(NODE.ENRICHMENT, NODE.SUPERVISOR)
     .addEdge(NODE.SCORING, NODE.SUPERVISOR)
+    .addEdge(NODE.RESEARCH, NODE.SUPERVISOR)
     .addEdge(NODE.APPROVAL, NODE.SUPERVISOR)
     .addEdge(NODE.OUTREACH, NODE.SUPERVISOR);
 
@@ -677,6 +689,7 @@ function pickNext(done: Set<string>, approved: boolean): string {
   if (!done.has(STAGE.SOURCING)) return NODE.SOURCING;
   if (!done.has(STAGE.ENRICHMENT)) return NODE.ENRICHMENT;
   if (!done.has(STAGE.SCORING)) return NODE.SCORING;
+  if (!done.has(STAGE.RESEARCH)) return NODE.RESEARCH;
   if (!done.has(STAGE.APPROVAL)) return NODE.APPROVAL;
   if (approved && !done.has(STAGE.OUTREACH)) return NODE.OUTREACH;
   return "END";

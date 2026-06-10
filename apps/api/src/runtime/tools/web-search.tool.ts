@@ -21,12 +21,19 @@ export class WebSearchTool implements Tool {
     }
 
     const tavilyKey = process.env.TAVILY_API_KEY;
-
     if (tavilyKey) {
       return this.searchWithTavily(query, maxResults, tavilyKey);
     }
 
-    return this.mockSearch(query, maxResults, "TAVILY_API_KEY not configured");
+    // Fall back to Serper, which prod already has a key for. Without this, prod
+    // (Tavily-less) would always mock the live trigger → the Evidence-Engine
+    // grounding signal never lands and every lead refuses.
+    const serperKey = process.env.SERPER_API_KEY;
+    if (serperKey) {
+      return this.searchWithSerper(query, maxResults, serperKey);
+    }
+
+    return this.mockSearch(query, maxResults, "no web_search provider configured (TAVILY_API_KEY / SERPER_API_KEY)");
   }
 
   private async searchWithTavily(query: string, maxResults: number, apiKey: string): Promise<ToolResult> {
@@ -71,6 +78,49 @@ export class WebSearchTool implements Tool {
       };
     } catch (error) {
       const reason = `Tavily provider failed: ${error instanceof Error ? error.message : String(error)}`;
+      return this.mockSearch(query, maxResults, reason);
+    }
+  }
+
+  private async searchWithSerper(query: string, maxResults: number, apiKey: string): Promise<ToolResult> {
+    try {
+      const response = await withCircuitBreaker("serper", () =>
+        fetchWithRetry(
+          "https://google.serper.dev/search",
+          {
+            method: "POST",
+            headers: { "X-API-KEY": apiKey, "Content-Type": "application/json" },
+            body: JSON.stringify({ q: query, num: Math.min(maxResults, 10) }),
+          },
+          { provider: "serper" },
+        ),
+      );
+
+      if (!response.ok) {
+        throw new Error(`Serper API error: ${response.status}`);
+      }
+
+      const data = (await response.json()) as {
+        organic?: Array<{ title?: string; link?: string; snippet?: string }>;
+      };
+
+      // Map Serper's `organic[].link` → `url` so the result shape matches Tavily's
+      // and SignalExtractionService.extractLiveTrigger consumes it unchanged. A
+      // result missing a link yields url:"" and is dropped by extraction's
+      // url-length guard (never cited).
+      return {
+        success: true,
+        data: {
+          results: (data.organic ?? []).map((r) => ({
+            title: r.title ?? "",
+            url: r.link ?? "",
+            snippet: r.snippet,
+            content: r.snippet,
+          })),
+        },
+      };
+    } catch (error) {
+      const reason = `Serper provider failed: ${error instanceof Error ? error.message : String(error)}`;
       return this.mockSearch(query, maxResults, reason);
     }
   }

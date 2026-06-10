@@ -109,6 +109,7 @@ export const NODE = {
   SOURCING: "sourcing_agent",
   ENRICHMENT: "enrichment_agent",
   SCORING: "scoring_agent",
+  RESEARCH: "research_agent",
   APPROVAL: "human_approval",
   OUTREACH: "outreach_agent",
 } as const;
@@ -120,6 +121,7 @@ export const STAGE = {
   SOURCING: "sourcing",
   ENRICHMENT: "enrichment",
   SCORING: "scoring",
+  RESEARCH: "research",
   APPROVAL: "approval",
   OUTREACH: "outreach",
 } as const;

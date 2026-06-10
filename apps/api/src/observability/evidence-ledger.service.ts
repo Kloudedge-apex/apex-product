@@ -1,10 +1,12 @@
 import { Injectable, Logger } from "@nestjs/common";
-import { trace } from "@opentelemetry/api";
+import { trace, SpanStatusCode } from "@opentelemetry/api";
 import { PrismaService } from "../prisma/prisma.service";
 import {
   EVIDENCE_EVENT_KIND,
   type EvidenceEventPayload,
   type EvidenceRefType,
+  type SignalEventKind,
+  type SignalRecordedPayload,
 } from "./evidence-event.types";
 
 interface AppendEventInput<TPayload extends EvidenceEventPayload> {
@@ -47,6 +49,12 @@ export class EvidenceLedgerService {
         },
       });
     } catch (err) {
+      // Best-effort ledger: a write failure must not fail the run. But it MUST be
+      // observable — record it on the active span so a write-failure spike is
+      // alertable in tracing rather than silently looking healthy (a logger.warn
+      // alone is easy to miss when the stage still reports COMPLETE).
+      active?.recordException(err instanceof Error ? err : new Error(String(err)));
+      active?.setStatus({ code: SpanStatusCode.ERROR, message: "evidence_event_append_failed" });
       this.logger.warn(
         `Failed to append EvidenceEvent kind=${input.kind} refType=${input.refType} refId=${input.refId}: ${
           err instanceof Error ? err.message : String(err)
@@ -94,6 +102,71 @@ export class EvidenceLedgerService {
         scored: input.scored,
         duration_ms: input.durationMs,
       },
+    });
+  }
+
+  async recordSignal(input: {
+    readonly orgId: string;
+    readonly runId?: string | null;
+    readonly companyId?: string | null;
+    readonly personId?: string | null;
+    readonly kind: SignalEventKind;
+    readonly source: string;
+    readonly date: string;
+    readonly summary?: string;
+    readonly confidence: number;
+    readonly fields?: Partial<Omit<SignalRecordedPayload, "kind" | "source" | "date" | "summary" | "confidence">>;
+  }): Promise<void> {
+    // Fail-closed on the citation invariant AT THE WRITER: no signal is ever
+    // persisted without a real source + date. The contract no longer depends on
+    // every caller pre-filtering empties (e.g. a future extractor or a refactor
+    // of the upstream guards).
+    if (!input.source?.trim() || !input.date?.trim()) {
+      this.logger.warn(
+        `Skipped uncitable signal kind=${input.kind} (empty source or date) for org=${input.orgId} run=${input.runId ?? "-"}`,
+      );
+      return;
+    }
+
+    const refType: EvidenceRefType = input.companyId ? "company" : "person";
+    const refId = input.companyId ?? input.personId ?? "unknown";
+
+    // Idempotency (spec §Components.2): skip if an identical signal already
+    // exists for this run, so a graph resume/retry — which may replay the node
+    // after some companies were already written — does not duplicate facts. This
+    // is a pre-INSERT READ, compatible with the append-only trigger (which
+    // forbids UPDATE/DELETE on evidence_event).
+    if (this.isEnabled()) {
+      const existing = await this.prisma.evidenceEvent.findFirst({
+        where: {
+          orgId: input.orgId,
+          runId: input.runId ?? null,
+          refType,
+          refId,
+          kind: input.kind,
+          payload: { path: ["source"], equals: input.source },
+        },
+        select: { id: true },
+      });
+      if (existing) return;
+    }
+
+    return this.append({
+      orgId: input.orgId,
+      runId: input.runId ?? null,
+      kind: input.kind,
+      refType,
+      refId,
+      // Canonical citation keys are spread LAST so a stray `source`/`date` in
+      // `fields` can never override the real, validated values above.
+      payload: {
+        ...(input.fields ?? {}),
+        kind: input.kind,
+        source: input.source,
+        date: input.date,
+        summary: input.summary,
+        confidence: input.confidence,
+      } as SignalRecordedPayload,
     });
   }
 
