@@ -109,6 +109,12 @@ pipelines:
     'phase-2.5-*':
       - step: *install-and-test
 
+    # Prod ships from release/go-live-* (manual `az acr build` + containerapp
+    # roll — see scripts/deploy-prod.sh), so the release branch gets the same
+    # blocking test gate as master. Build/deploy stays manual on purpose.
+    'release/go-live-*':
+      - step: *install-and-test
+
   # Manual: trigger from Bitbucket UI when you want to roll without a push
   # (e.g. re-deploy current master image, or roll back to a specific SHA /
   # timestamp tag). Set IMAGE_TAG in the "Run pipeline" dialog — defaults to

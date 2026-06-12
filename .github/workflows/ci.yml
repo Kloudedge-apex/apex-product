@@ -1,10 +1,22 @@
+# Apex CI — gates on the path to prod (audit B7).
+#
+# Prod ships from release/go-live-* via manual `az acr build` +
+# `az containerapp update` (see scripts/deploy-prod.sh). This workflow does
+# NOT deploy — it blocks the ship path: pushes to master and release/**, and
+# PRs targeting either, must pass lint/type-check/build AND the API test
+# suite before an image may be built from that commit.
+
 name: CI
 
 on:
   push:
-    branches: [master]
+    branches:
+      - master
+      - "release/**"
   pull_request:
-    branches: [master]
+    branches:
+      - master
+      - "release/**"
 
 env:
   NODE_VERSION: "20"
@@ -40,3 +52,34 @@ jobs:
         run: pnpm build
         env:
           NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY }}
+
+  test:
+    name: API Tests (blocking)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # pnpm version is read from the root package.json `packageManager` field.
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: pnpm db:generate
+
+      - name: Type check
+        run: pnpm type-check
+
+      - name: Run API tests
+        working-directory: apps/api
+        run: pnpm vitest run
