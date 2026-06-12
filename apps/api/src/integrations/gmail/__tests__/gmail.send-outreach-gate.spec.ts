@@ -5,6 +5,7 @@ import { AdminOrManagerGuard } from "../../../common/admin-or-manager.guard";
 import type { PrismaService } from "../../../prisma/prisma.service";
 import type { ConfigService } from "@nestjs/config";
 import type { RuntimeService } from "../../../runtime/runtime.service";
+import type { SuppressionService } from "../../../outreach/suppression.service";
 
 function createMockPrisma() {
   return {
@@ -28,6 +29,10 @@ function createMockConfig() {
 
 function createMockRuntime() {
   return {} as unknown as RuntimeService;
+}
+
+function createMockSuppression() {
+  return {} as unknown as SuppressionService;
 }
 
 function createExecutionContext(request: Record<string, unknown>): ExecutionContext {
@@ -54,7 +59,12 @@ describe("Gmail send outreach gating", () => {
     process.env.OUTREACH_LIVE_FOR_ORGS = "org_allowed";
 
     const prisma = createMockPrisma();
-    const service = new GmailService(prisma, createMockConfig(), createMockRuntime());
+    const service = new GmailService(
+      prisma,
+      createMockConfig(),
+      createMockRuntime(),
+      createMockSuppression(),
+    );
 
     await expect(
       service.sendApprovedOutreachEmail("org_denied", {
@@ -74,7 +84,12 @@ describe("Gmail send outreach gating", () => {
     const prisma = createMockPrisma();
     prisma.outreachArtifact.findUnique.mockResolvedValue(null);
 
-    const service = new GmailService(prisma, createMockConfig(), createMockRuntime());
+    const service = new GmailService(
+      prisma,
+      createMockConfig(),
+      createMockRuntime(),
+      createMockSuppression(),
+    );
 
     await expect(
       service.sendApprovedOutreachEmail("org_1", {
@@ -102,7 +117,12 @@ describe("Gmail send outreach gating", () => {
       },
     });
 
-    const service = new GmailService(prisma, createMockConfig(), createMockRuntime());
+    const service = new GmailService(
+      prisma,
+      createMockConfig(),
+      createMockRuntime(),
+      createMockSuppression(),
+    );
 
     await expect(
       service.sendApprovedOutreachEmail("org_1", {
@@ -142,7 +162,12 @@ describe("Gmail send outreach gating", () => {
       status: "SENT",
     });
 
-    const service = new GmailService(prisma, createMockConfig(), createMockRuntime());
+    const service = new GmailService(
+      prisma,
+      createMockConfig(),
+      createMockRuntime(),
+      createMockSuppression(),
+    );
     const sendSpy = vi
       .spyOn(service, "sendEmail")
       .mockResolvedValue({ id: "msg_1", threadId: "thr_1" });

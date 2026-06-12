@@ -3,6 +3,7 @@ import { UnauthorizedException, BadRequestException } from "@nestjs/common";
 import { GmailService } from "../gmail.service";
 import { PrismaService } from "../../../prisma/prisma.service";
 import { RuntimeService } from "../../../runtime/runtime.service";
+import { SuppressionService } from "../../../outreach/suppression.service";
 import { ConfigService } from "@nestjs/config";
 import { encrypt } from "../../crypto.util";
 
@@ -152,6 +153,12 @@ function createMockRuntime() {
   } as unknown as RuntimeService;
 }
 
+function createMockSuppression() {
+  return {
+    suppress: vi.fn().mockResolvedValue({ created: true }),
+  } as unknown as SuppressionService;
+}
+
 function createMockConfig() {
   const configMap: Record<string, string> = {
     GOOGLE_CLIENT_ID: "mock_client_id",
@@ -198,7 +205,12 @@ describe("GmailService", () => {
     mockPrisma = createMockPrisma();
     mockConfig = createMockConfig();
     mockRuntime = createMockRuntime();
-    service = new GmailService(mockPrisma, mockConfig, mockRuntime);
+    service = new GmailService(
+      mockPrisma,
+      mockConfig,
+      mockRuntime,
+      createMockSuppression(),
+    );
   });
 
   describe("getAuthUrl", () => {
@@ -370,6 +382,7 @@ describe("GmailService", () => {
         createMockPrisma(),
         blankConfig,
         createMockRuntime(),
+        createMockSuppression(),
       );
       expect(await blankService.verifyPushAuth("Bearer anything")).toBe(false);
     });
