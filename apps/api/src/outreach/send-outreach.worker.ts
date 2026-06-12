@@ -62,11 +62,21 @@ export function isOutreachWorkerEnabled(
  *
  * Orgs NOT in the allowlist still progress through the worker, but their
  * integrations Map is left empty so SendEmailTool / LinkedInSendMessageTool
- * fall back to their mock branches. Artifacts get marked SENT with a mock
- * receipt — the audit trail records the attempt without an external call.
+ * fall back to their mock branches. Artifacts get marked SIMULATED with a
+ * mock receipt — the audit trail records the attempt without an external
+ * call, and dashboards never count it as delivered mail.
  */
 const IN_MEMORY_POLL_INTERVAL_MS = 5_000;
 const IN_MEMORY_BATCH_SIZE = 10;
+
+// Reconcile sweep cadence + thresholds. APPROVED rows older than the requeue
+// age have lost their BullMQ job (Redis flush, enqueue failure post-approve);
+// SENDING claims older than the stale age belong to a worker that died
+// mid-send (the window enableShutdownHooks cannot cover, e.g. OOM-kill).
+const RECONCILE_INTERVAL_MS = 5 * 60_000;
+const APPROVED_REQUEUE_AGE_MS = 10 * 60_000;
+const SENDING_STALE_AGE_MS = 15 * 60_000;
+const RECONCILE_BATCH_LIMIT = 100;
 
 @Injectable()
 export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
@@ -74,7 +84,9 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
 
   private bullWorker: Worker<SendJobData> | null = null;
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
+  private reconcileHandle: ReturnType<typeof setInterval> | null = null;
   private inFlight = false;
+  private reconcileInFlight = false;
 
   private readonly sendEmailTool = new SendEmailTool();
   private readonly linkedinSendTool: LinkedInSendMessageTool;
@@ -148,12 +160,27 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
         `SendOutreachWorker enabled (in-memory polling every ${IN_MEMORY_POLL_INTERVAL_MS}ms, batch=${IN_MEMORY_BATCH_SIZE})`,
       );
     }
+
+    // Periodic reconcile sweep (mirrors GraphRunWorker's crash-recovery
+    // sweep, but on an interval because send work is continuous): re-enqueue
+    // stranded APPROVED rows and release stale SENDING claims. Runs once at
+    // boot so a restart doesn't wait a full interval to recover rows the
+    // previous pod left behind.
+    this.reconcileHandle = setInterval(
+      () => void this.runReconcileSweep(),
+      RECONCILE_INTERVAL_MS,
+    );
+    await this.runReconcileSweep();
   }
 
   async onModuleDestroy(): Promise<void> {
     if (this.intervalHandle) {
       clearInterval(this.intervalHandle);
       this.intervalHandle = null;
+    }
+    if (this.reconcileHandle) {
+      clearInterval(this.reconcileHandle);
+      this.reconcileHandle = null;
     }
     if (this.bullWorker) {
       await this.bullWorker.close();
@@ -205,8 +232,14 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Core idempotent processing path. Re-reads the artifact, aborts unless it
-   * is still APPROVED, dispatches the send, and either marks SENT or rethrows
-   * to trigger BullMQ retry.
+   * is still APPROVED, CAS-claims it (APPROVED → SENDING) so concurrent
+   * workers cannot double-dispatch, sends, and finishes the claim:
+   *
+   *   live send succeeded   → SENT
+   *   forced-mock succeeded → SIMULATED (mock receipt kept for the audit
+   *                           trail; never counted as delivered mail)
+   *   dispatch failed       → claim released back to APPROVED, then rethrow
+   *                           so BullMQ's retry envelope re-picks it up.
    */
   async processArtifact(artifactId: string, orgId: string): Promise<void> {
     const artifact = await this.prisma.outreachArtifact.findUnique({
@@ -254,23 +287,62 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    const result = await this.dispatch(artifact);
+    // CAS claim: APPROVED → SENDING. updateMany returns a count instead of
+    // throwing, so a concurrent worker that lost the race sees count === 0
+    // and skips cleanly. This is what makes dispatch single-owner — the
+    // findUnique status guard above is only advisory under concurrency.
+    const claim = await this.prisma.outreachArtifact.updateMany({
+      where: { id: artifactId, status: OutreachArtifactStatus.APPROVED },
+      data: { status: OutreachArtifactStatus.SENDING },
+    });
+    if (claim.count === 0) {
+      this.logger.log(
+        `Artifact ${artifactId} already claimed by another worker — skipping`,
+      );
+      return;
+    }
+
+    // Evaluate the live-send gate once so the dispatch branch and the
+    // terminal status cannot disagree about whether this was a real send.
+    const liveAllowed = isLiveSendAllowedForOrg(artifact.orgId);
+
+    let result: ToolResult;
+    try {
+      result = await this.dispatch(artifact, liveAllowed);
+    } catch (err) {
+      // Release the claim before rethrowing so the BullMQ retry envelope
+      // still finds the row in APPROVED on the next attempt.
+      await this.releaseClaim(artifactId);
+      throw err;
+    }
     if (!result.success) {
-      // Throw so BullMQ records the failure and applies retry/backoff. Status
-      // stays APPROVED so the next attempt re-picks it up.
+      // Same contract as a thrown dispatch: release, then throw so BullMQ
+      // records the failure and applies retry/backoff.
+      await this.releaseClaim(artifactId);
       throw new Error(result.error ?? "send failed (no error message)");
     }
 
     const receiptId = extractReceiptId(result);
     const provider = extractProvider(result);
 
+    // Forced-mock sends terminate as SIMULATED, not SENT — dashboards and the
+    // guarantee ledger must never count simulated traffic as delivered mail.
+    // The mock_ receipt is kept so the audit trail still shows what happened,
+    // but sentAt stays null: per the schema, sentAt + sendReceiptId together
+    // prove a REAL send, and DashboardService.stats counts emailsSent via
+    // sentAt != null.
     await this.prisma.outreachArtifact.update({
       where: { id: artifactId },
-      data: {
-        status: OutreachArtifactStatus.SENT,
-        sentAt: new Date(),
-        sendReceiptId: receiptId,
-      },
+      data: liveAllowed
+        ? {
+            status: OutreachArtifactStatus.SENT,
+            sentAt: new Date(),
+            sendReceiptId: receiptId,
+          }
+        : {
+            status: OutreachArtifactStatus.SIMULATED,
+            sendReceiptId: receiptId,
+          },
     });
 
     void this.evidenceLedger?.messageSent({
@@ -285,12 +357,19 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  /** Channel-dispatch. Add new branches as more send tools come online. */
-  private async dispatch(artifact: OutreachArtifact): Promise<ToolResult> {
+  /**
+   * Channel-dispatch. Add new branches as more send tools come online.
+   * `liveAllowed` is evaluated once by the caller (processArtifact) so the
+   * mock/live branch here and the SENT/SIMULATED terminal status stay in
+   * lockstep.
+   */
+  private async dispatch(
+    artifact: OutreachArtifact,
+    liveAllowed: boolean,
+  ): Promise<ToolResult> {
     // Gate: only allowlisted orgs may load real credentials. For non-listed
     // orgs we pass an empty Map, which causes the send tools to take their
     // mock branch — same shape as having no integration connected.
-    const liveAllowed = isLiveSendAllowedForOrg(artifact.orgId);
     if (!liveAllowed) {
       this.logger.log(
         `Org ${artifact.orgId} not in OUTREACH_LIVE_FOR_ORGS — forcing mock send for artifact ${artifact.id}`,
@@ -425,6 +504,135 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Releases a SENDING claim back to APPROVED after a failed dispatch. The
+   * guarded updateMany (status: SENDING) means a row that somehow raced to a
+   * terminal state is left untouched. Best-effort: if the release itself
+   * fails (DB blip) the row stays SENDING and the reconcile sweep returns it
+   * to APPROVED after SENDING_STALE_AGE_MS.
+   */
+  private async releaseClaim(artifactId: string): Promise<void> {
+    try {
+      await this.prisma.outreachArtifact.updateMany({
+        where: { id: artifactId, status: OutreachArtifactStatus.SENDING },
+        data: { status: OutreachArtifactStatus.APPROVED },
+      });
+    } catch (err) {
+      this.logger.error(
+        `Failed to release SENDING claim for ${artifactId}: ${
+          err instanceof Error ? err.message : String(err)
+        } — reconcile sweep will recover it`,
+      );
+    }
+  }
+
+  /**
+   * Single-flight wrapper around the reconcile sweep so a slow pass can't
+   * stack with the next interval tick. Failures are logged, never thrown —
+   * the sweep is best-effort recovery, not a correctness dependency.
+   */
+  private async runReconcileSweep(): Promise<void> {
+    if (this.reconcileInFlight) return;
+    this.reconcileInFlight = true;
+    try {
+      const { released, requeued } = await this.reconcileStuckArtifacts();
+      if (released > 0 || requeued > 0) {
+        this.logger.log(
+          `Reconcile sweep: released ${released} stale SENDING claim(s), re-enqueued ${requeued} stranded artifact(s)`,
+        );
+      }
+    } catch (err) {
+      this.logger.error(
+        `Reconcile sweep failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    } finally {
+      this.reconcileInFlight = false;
+    }
+  }
+
+  /**
+   * Recovery sweep (public so tests can drive it deterministically, mirroring
+   * GraphRunWorker.recoverOrphanedRuns):
+   *
+   *  1. SENDING claims whose updatedAt is older than SENDING_STALE_AGE_MS are
+   *     released back to APPROVED and re-enqueued. A claim that old means the
+   *     worker that won the CAS died before flipping the row terminal; the
+   *     guarded updateMany never clobbers a row that raced to
+   *     SENT/SIMULATED/SUPPRESSED in the meantime.
+   *  2. APPROVED rows whose updatedAt is older than APPROVED_REQUEUE_AGE_MS
+   *     are re-enqueued — their BullMQ job was lost (Redis flush, enqueue
+   *     failure after approve). jobId == artifactId, so a still-live job
+   *     dedupes the add and the sweep stays idempotent.
+   *
+   * Both queries cap at RECONCILE_BATCH_LIMIT to avoid a thundering herd
+   * after a long outage — the next interval picks up the remainder.
+   */
+  async reconcileStuckArtifacts(): Promise<{
+    released: number;
+    requeued: number;
+  }> {
+    let released = 0;
+    let requeued = 0;
+
+    const staleClaims = await this.prisma.outreachArtifact.findMany({
+      where: {
+        status: OutreachArtifactStatus.SENDING,
+        updatedAt: { lt: new Date(Date.now() - SENDING_STALE_AGE_MS) },
+      },
+      orderBy: { updatedAt: "asc" },
+      take: RECONCILE_BATCH_LIMIT,
+    });
+    for (const artifact of staleClaims) {
+      try {
+        const releasedNow = await this.prisma.outreachArtifact.updateMany({
+          where: { id: artifact.id, status: OutreachArtifactStatus.SENDING },
+          data: { status: OutreachArtifactStatus.APPROVED },
+        });
+        // count 0 → the claim resolved (terminal or re-released) between the
+        // findMany and the CAS — leave it alone.
+        if (releasedNow.count === 0) continue;
+        released++;
+        await this.queue.enqueue({
+          artifactId: artifact.id,
+          orgId: artifact.orgId,
+        });
+        requeued++;
+      } catch (err) {
+        this.logger.warn(
+          `Failed to release stale SENDING claim ${artifact.id}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+
+    const staleApproved = await this.prisma.outreachArtifact.findMany({
+      where: {
+        status: OutreachArtifactStatus.APPROVED,
+        updatedAt: { lt: new Date(Date.now() - APPROVED_REQUEUE_AGE_MS) },
+      },
+      orderBy: { updatedAt: "asc" },
+      take: RECONCILE_BATCH_LIMIT,
+    });
+    for (const artifact of staleApproved) {
+      try {
+        await this.queue.enqueue({
+          artifactId: artifact.id,
+          orgId: artifact.orgId,
+        });
+        requeued++;
+      } catch (err) {
+        this.logger.warn(
+          `Failed to re-enqueue stale APPROVED artifact ${artifact.id}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+
+    return { released, requeued };
+  }
+
+  /**
    * Called when BullMQ has exhausted retries. There is no FAILED status on
    * OutreachArtifactStatus today (would require a prisma migrate), so we
    * reuse REJECTED with a `reviewerNote="auto-failed: <reason>"` marker as a
@@ -443,10 +651,18 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
       const artifact = await this.prisma.outreachArtifact.findUnique({
         where: { id: artifactId },
       });
-      // Only flip if we still own the row (still APPROVED) and it belongs to
-      // the expected org. If it raced to SENT, leave it alone.
+      // Only flip if we still own the row and it belongs to the expected
+      // org. "Own" means APPROVED, or a SENDING claim whose release failed —
+      // jobId == artifactId keeps the job single-owner, so a SENDING row at
+      // retry exhaustion can only be ours. If it raced to SENT/SIMULATED,
+      // leave it alone.
       if (!artifact || artifact.orgId !== orgId) return;
-      if (artifact.status !== OutreachArtifactStatus.APPROVED) return;
+      if (
+        artifact.status !== OutreachArtifactStatus.APPROVED &&
+        artifact.status !== OutreachArtifactStatus.SENDING
+      ) {
+        return;
+      }
 
       await this.prisma.outreachArtifact.update({
         where: { id: artifactId },
