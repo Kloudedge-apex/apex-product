@@ -31,11 +31,30 @@ export function isGraphRunWorkerEnabled(
 
 const IN_MEMORY_POLL_INTERVAL_MS = 5_000;
 const IN_MEMORY_ORPHAN_AGE_MS = 30_000;
-const BOOT_ORPHAN_AGE_MS = 60_000;
+// Audit LGS-04: 10 minutes, up from 60s. `startedAt` is the run's activity
+// anchor — it is set on creation AND refreshed by the HITL resume path
+// (graph.service.ts, audit P0 #8) — so a freshly-resumed run sits well inside
+// this window and the boot sweep cannot race a live resume driving the same
+// LangGraph thread_id from another pod. GraphRun has no `updatedAt` column;
+// if one is ever added it would be a strictly stronger gate than startedAt.
+const BOOT_ORPHAN_AGE_MS = 600_000;
 const BOOT_RECOVERY_LIMIT = 100;
 const IN_MEMORY_BATCH_SIZE = 10;
 const BULL_CONCURRENCY = 5;
 const BULL_ATTEMPTS = 3;
+
+/**
+ * LangGraph resume sentinel: invoking a compiled graph with `null` input
+ * means "seed nothing — continue from the last persisted checkpoint".
+ * GraphService.processGraphRun forwards its input verbatim to
+ * `compiled.invoke()` (and only inspects it via `instanceof Command`, which
+ * is null-safe), but its signature predates the recovery path and does not
+ * admit `null` — hence the cast. Widening that signature lives in
+ * graph.service.ts, which is out of scope this week.
+ */
+const RESUME_FROM_CHECKPOINT = null as unknown as Parameters<
+  GraphService["processGraphRun"]
+>[1];
 
 /**
  * Worker that drives queued GraphRun jobs through GraphService.processGraphRun.
@@ -51,8 +70,11 @@ const BULL_ATTEMPTS = 3;
  *    worker has to catch on its own.
  *
  * Either way, onModuleInit runs a one-shot crash-recovery sweep: any
- * GraphRun in RUNNING status older than 60s gets re-enqueued (capped at 100
- * to avoid a thundering herd on a multi-node deploy).
+ * GraphRun in RUNNING status whose startedAt is older than 10 minutes gets
+ * atomically claimed (updateMany status+staleness guard, audit LGS-04) and
+ * re-enqueued (capped at 100 to avoid a thundering herd on a multi-node
+ * deploy). Recovery re-enters the graph via a null input so LangGraph
+ * resumes from the last persisted checkpoint instead of re-seeding state.
  */
 @Injectable()
 export class GraphRunWorker implements OnModuleInit, OnModuleDestroy {
@@ -170,11 +192,13 @@ export class GraphRunWorker implements OnModuleInit, OnModuleDestroy {
       });
       for (const run of orphans) {
         try {
-          // The in-memory poll path drives the run as a "start" — the
-          // checkpointer will pick up from the last checkpoint anyway because
-          // thread_id == graphRunId. If a resume is needed (AWAITING_APPROVAL),
-          // the user-driven path is what triggers it; the poller never resumes
-          // HITL-paused runs (those are filtered out by status above).
+          // Recovery via the shared processGraphRun path: a "start" job with
+          // no icpProfileIds means "resume from checkpoint with null input" —
+          // the saved checkpoint (thread_id == graphRunId) already holds the
+          // seed, and fabricating one here would clobber it. If a resume is
+          // needed (AWAITING_APPROVAL), the user-driven path is what triggers
+          // it; the poller never resumes HITL-paused runs (those are filtered
+          // out by status above).
           await this.processGraphRun({
             kind: "start",
             graphRunId: run.id,
@@ -247,22 +271,38 @@ export class GraphRunWorker implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    // start: seed PipelineState with the static context. If the checkpointer
-    // has prior state for this thread_id (crash recovery), LangGraph picks up
-    // from that checkpoint and our partial-state input is ignored for fields
-    // that already exist in the saved state.
+    // start: two flavors share this kind.
+    //  - Fresh start (runPipelineGraph): carries a non-empty ICP seed and
+    //    boots the graph with the static entry state.
+    //  - Crash recovery (boot sweep / in-memory poller): carries NO seed.
+    //    Re-seeding here would clobber the checkpoint's saved icpProfileIds
+    //    AND re-trigger the graph from START instead of continuing where the
+    //    dead pod left off — so recovery hands LangGraph a null input and
+    //    lets PrismaCheckpointSaver re-hydrate everything from the last
+    //    persisted checkpoint. An empty/missing seed can only mean recovery:
+    //    runPipelineGraph rejects empty icpProfileIds before enqueueing.
+    if (!data.icpProfileIds || data.icpProfileIds.length === 0) {
+      await this.graphService.processGraphRun(run.id, RESUME_FROM_CHECKPOINT);
+      return;
+    }
+
     await this.graphService.processGraphRun(run.id, {
       orgId: run.orgId,
       runId: run.id,
-      icpProfileIds: data.icpProfileIds ? [...data.icpProfileIds] : [],
+      icpProfileIds: [...data.icpProfileIds],
     });
   }
 
   /**
    * One-shot boot sweep: find RUNNING GraphRuns whose startedAt is older
-   * than BOOT_ORPHAN_AGE_MS and re-enqueue them. Capped at
-   * BOOT_RECOVERY_LIMIT to avoid a thundering herd if a long-down deploy
-   * comes back up. Returns the count of re-enqueued runs.
+   * than BOOT_ORPHAN_AGE_MS, atomically claim each one, and re-enqueue it.
+   * Capped at BOOT_RECOVERY_LIMIT to avoid a thundering herd if a long-down
+   * deploy comes back up. Returns the count of re-enqueued runs.
+   *
+   * Audit LGS-04: the claim is an updateMany that re-asserts RUNNING +
+   * staleness and bumps startedAt forward in the same statement, so when
+   * several pods boot concurrently exactly one wins each run — the losers'
+   * claims match 0 rows because the winner already refreshed startedAt.
    *
    * Exposed (public) so tests can drive it deterministically without having
    * to spin up the BullMQ worker.
@@ -281,14 +321,38 @@ export class GraphRunWorker implements OnModuleInit, OnModuleDestroy {
     let count = 0;
     for (const run of orphans) {
       try {
+        // Atomic claim. startedAt doubles as the run's activity anchor (the
+        // HITL resume path refreshes it too — audit P0 #8), so bumping it
+        // here simultaneously (a) voids any concurrent pod's claim and
+        // (b) grants the recovered run a fresh BOOT_ORPHAN_AGE_MS grace
+        // window before the next sweep may touch it. count === 0 means
+        // another pod won, or the run progressed (resumed / went terminal)
+        // between our read and this write — either way it is not ours.
+        const claimed = await this.prisma.graphRun.updateMany({
+          where: {
+            id: run.id,
+            status: GraphRunStatus.RUNNING,
+            startedAt: { lt: cutoff },
+          },
+          data: { startedAt: new Date() },
+        });
+        if (claimed.count === 0) continue;
+
         await this.queue.enqueueGraphRun({
           kind: "start",
           graphRunId: run.id,
           orgId: run.orgId,
+          // Empty on purpose: an empty seed marks the job as crash recovery,
+          // which processGraphRun turns into a null-input checkpoint resume
+          // instead of fabricated entry state (fresh starts are guaranteed a
+          // non-empty seed by runPipelineGraph).
           icpProfileIds: [],
         });
         count++;
       } catch (err) {
+        // If the enqueue fails after a successful claim, the bumped
+        // startedAt defers retry to the next boot sweep / orphan window —
+        // safe (the run stays RUNNING) but worth the warn for operators.
         this.logger.warn(
           `Failed to re-enqueue orphaned run ${run.id}: ${
             err instanceof Error ? err.message : String(err)
