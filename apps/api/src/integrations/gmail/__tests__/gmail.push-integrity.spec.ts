@@ -404,7 +404,7 @@ describe("GmailService push integrity (audit B8)", () => {
       expect(mockRuntime.triggerRun).not.toHaveBeenCalled();
     });
 
-    it("still dispatches the Reply Handler for a regular prospect reply", async () => {
+    it("still dispatches the Reply Handler for a regular prospect reply (and never suppresses it as a bounce)", async () => {
       setupConnectedIntegration();
       pushOneMessage(
         gmailMessageResponse({
@@ -420,7 +420,169 @@ describe("GmailService push integrity (audit B8)", () => {
       });
 
       expect(mockRuntime.triggerRun).toHaveBeenCalledWith("agent_reply", "org_1");
+      // GL6a: the reply DOES suppress the sender — but as a reply
+      // (MANUAL/gmail_reply), never as a BOUNCED/gmail_dsn row.
+      expect(mockSuppression.suppress).not.toHaveBeenCalledWith(
+        expect.objectContaining({ reason: OutreachSuppressionReason.BOUNCED }),
+      );
+      expect(mockSuppression.suppress).not.toHaveBeenCalledWith(
+        expect.objectContaining({ source: "gmail_dsn" }),
+      );
+    });
+  });
+
+  describe("reply → stop outreach (GL6a)", () => {
+    function pushOneMessage(response: ReturnType<typeof gmailMessageResponse>) {
+      historyList.mockResolvedValue({
+        data: {
+          history: [
+            { messagesAdded: [{ message: { id: response.data.id } }] },
+          ],
+        },
+      });
+      messagesGet.mockResolvedValue(response);
+    }
+
+    it("suppresses the replying sender (MANUAL/gmail_reply) AND still dispatches the Reply Handler", async () => {
+      setupConnectedIntegration();
+      pushOneMessage(
+        gmailMessageResponse({
+          id: "msg_reply_1",
+          from: "Pat Prospect <Prospect@Acme.com>",
+          subject: "Re: quick question",
+          bodyText: "Sure, let's chat next week.",
+        }),
+      );
+
+      await service.handlePushNotification({
+        emailAddress: "owner@example.com",
+        historyId: "200",
+      });
+
+      expect(mockSuppression.suppress).toHaveBeenCalledTimes(1);
+      expect(mockSuppression.suppress).toHaveBeenCalledWith({
+        orgId: "org_1",
+        recipientRef: "prospect@acme.com",
+        reason: OutreachSuppressionReason.MANUAL,
+        source: "gmail_reply",
+        metadata: {
+          gmailMessageId: "msg_reply_1",
+          threadId: "thread_new",
+        },
+      });
+      expect(mockRuntime.triggerRun).toHaveBeenCalledWith("agent_reply", "org_1");
+    });
+
+    it("suppresses the sender even when no Reply Handler agent is configured", async () => {
+      setupConnectedIntegration();
+      (mockPrisma.agent.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+      pushOneMessage(
+        gmailMessageResponse({
+          from: "prospect@acme.com",
+          subject: "Re: quick question",
+        }),
+      );
+
+      await service.handlePushNotification({
+        emailAddress: "owner@example.com",
+        historyId: "200",
+      });
+
+      expect(mockSuppression.suppress).toHaveBeenCalledWith(
+        expect.objectContaining({
+          recipientRef: "prospect@acme.com",
+          reason: OutreachSuppressionReason.MANUAL,
+          source: "gmail_reply",
+        }),
+      );
+      expect(mockRuntime.triggerRun).not.toHaveBeenCalled();
+    });
+
+    it("still dispatches the Reply Handler when the suppression write fails (best-effort)", async () => {
+      setupConnectedIntegration();
+      (mockSuppression.suppress as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new Error("db down"),
+      );
+      pushOneMessage(
+        gmailMessageResponse({
+          from: "prospect@acme.com",
+          subject: "Re: quick question",
+        }),
+      );
+
+      await expect(
+        service.handlePushNotification({
+          emailAddress: "owner@example.com",
+          historyId: "200",
+        }),
+      ).resolves.not.toThrow();
+
+      expect(mockRuntime.triggerRun).toHaveBeenCalledWith("agent_reply", "org_1");
+    });
+
+    it("does NOT reply-suppress our own outbound (self / SENT-labelled messages)", async () => {
+      setupConnectedIntegration();
+      pushOneMessage(
+        gmailMessageResponse({
+          from: "Me <owner@example.com>",
+          subject: "Re: quick question",
+        }),
+      );
+
+      await service.handlePushNotification({
+        emailAddress: "owner@example.com",
+        historyId: "200",
+      });
+
       expect(mockSuppression.suppress).not.toHaveBeenCalled();
+      expect(mockRuntime.triggerRun).not.toHaveBeenCalled();
+    });
+
+    it("does NOT reply-suppress a DSN — bounce handling owns that path (reason stays BOUNCED)", async () => {
+      setupConnectedIntegration();
+      pushOneMessage(
+        gmailMessageResponse({
+          from: "Mail Delivery Subsystem <mailer-daemon@googlemail.com>",
+          subject: "Delivery Status Notification (Failure)",
+          extraHeaders: [
+            { name: "X-Failed-Recipients", value: "prospect@acme.com" },
+          ],
+        }),
+      );
+
+      await service.handlePushNotification({
+        emailAddress: "owner@example.com",
+        historyId: "200",
+      });
+
+      expect(mockSuppression.suppress).toHaveBeenCalledTimes(1);
+      expect(mockSuppression.suppress).toHaveBeenCalledWith(
+        expect.objectContaining({
+          reason: OutreachSuppressionReason.BOUNCED,
+          source: "gmail_dsn",
+        }),
+      );
+      expect(mockSuppression.suppress).not.toHaveBeenCalledWith(
+        expect.objectContaining({ source: "gmail_reply" }),
+      );
+    });
+
+    it("skips reply suppression (but still dispatches) when From has no extractable email", async () => {
+      setupConnectedIntegration();
+      pushOneMessage(
+        gmailMessageResponse({
+          from: "Undisclosed Sender",
+          subject: "Re: quick question",
+        }),
+      );
+
+      await service.handlePushNotification({
+        emailAddress: "owner@example.com",
+        historyId: "200",
+      });
+
+      expect(mockSuppression.suppress).not.toHaveBeenCalled();
+      expect(mockRuntime.triggerRun).toHaveBeenCalledWith("agent_reply", "org_1");
     });
   });
 });
