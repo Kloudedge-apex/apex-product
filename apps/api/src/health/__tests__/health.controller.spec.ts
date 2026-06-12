@@ -1,10 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { ServiceUnavailableException } from "@nestjs/common";
 import { HealthController } from "../health.controller";
+import type { WorkerHealthReport } from "../worker-health.service";
 
 type FakePrismaService = { $queryRaw: ReturnType<typeof vi.fn> };
 type FakeQueue = { client: Promise<{ ping: ReturnType<typeof vi.fn> }> };
 type FakeQueueService = { getBullQueue: () => FakeQueue | null };
+type FakeWorkerHealth = { check: ReturnType<typeof vi.fn> };
 
 function makePrisma(opts: { failsWith?: Error } = {}): FakePrismaService {
   return {
@@ -28,15 +30,44 @@ function makeQueueService(opts: { redisOk?: boolean; nullQueue?: boolean } = { r
   };
 }
 
+function makeWorkerHealth(report: WorkerHealthReport): FakeWorkerHealth {
+  return { check: vi.fn(async () => report) };
+}
+
+const HEALTHY_REPORT: WorkerHealthReport = {
+  healthy: true,
+  stallWindowMs: 300_000,
+  queues: [],
+};
+
+const UNHEALTHY_REPORT: WorkerHealthReport = {
+  healthy: false,
+  stallWindowMs: 300_000,
+  queues: [
+    {
+      queue: "graph-runs",
+      mode: "bullmq",
+      healthy: false,
+      reasons: ["3 job(s) backlogged on \"graph-runs\" with zero BullMQ consumers attached"],
+      workerCount: 0,
+      backlog: 3,
+      counts: { waiting: 3, active: 0, delayed: 0, failed: 0, completed: 0 },
+      observedWindowMs: null,
+    },
+  ],
+};
+
 describe("HealthController", () => {
   let prisma: FakePrismaService;
   let queueSvc: FakeQueueService;
+  let workerHealth: FakeWorkerHealth;
   let controller: HealthController;
 
   beforeEach(() => {
     prisma = makePrisma();
     queueSvc = makeQueueService();
-    controller = new HealthController(prisma as never, queueSvc as never);
+    workerHealth = makeWorkerHealth(HEALTHY_REPORT);
+    controller = new HealthController(prisma as never, queueSvc as never, workerHealth as never);
   });
 
   it("/live returns static OK without touching deps", () => {
@@ -55,19 +86,19 @@ describe("HealthController", () => {
 
   it("/ready throws 503 when postgres is down", async () => {
     prisma = makePrisma({ failsWith: new Error("connect ECONNREFUSED") });
-    controller = new HealthController(prisma as never, queueSvc as never);
+    controller = new HealthController(prisma as never, queueSvc as never, workerHealth as never);
     await expect(controller.ready()).rejects.toBeInstanceOf(ServiceUnavailableException);
   });
 
   it("/ready throws 503 when redis ping fails", async () => {
     queueSvc = makeQueueService({ redisOk: false });
-    controller = new HealthController(prisma as never, queueSvc as never);
+    controller = new HealthController(prisma as never, queueSvc as never, workerHealth as never);
     await expect(controller.ready()).rejects.toBeInstanceOf(ServiceUnavailableException);
   });
 
   it("/ready returns ok when bullQueue is null (dev DB-polling fallback)", async () => {
     queueSvc = makeQueueService({ nullQueue: true });
-    controller = new HealthController(prisma as never, queueSvc as never);
+    controller = new HealthController(prisma as never, queueSvc as never, workerHealth as never);
     const out = await controller.ready();
     expect(out.checks.redis).toBe("ok");
   });
@@ -76,5 +107,22 @@ describe("HealthController", () => {
     const out = controller.check();
     expect(out.status).toBe("ok");
     expect(prisma.$queryRaw).not.toHaveBeenCalled();
+  });
+
+  it("/worker returns 200 with the report when consumers are healthy", async () => {
+    const out = await controller.worker();
+    expect(out.status).toBe("ok");
+    expect(out.stallWindowMs).toBe(300_000);
+    expect(workerHealth.check).toHaveBeenCalledTimes(1);
+  });
+
+  it("/worker throws 503 carrying queue verdicts when consumers are not consuming", async () => {
+    workerHealth = makeWorkerHealth(UNHEALTHY_REPORT);
+    controller = new HealthController(prisma as never, queueSvc as never, workerHealth as never);
+    const err = await controller.worker().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ServiceUnavailableException);
+    const body = (err as ServiceUnavailableException).getResponse() as Record<string, unknown>;
+    expect(body.status).toBe("degraded");
+    expect(body.queues).toEqual(UNHEALTHY_REPORT.queues);
   });
 });

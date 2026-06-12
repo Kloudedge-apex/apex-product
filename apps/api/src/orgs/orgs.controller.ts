@@ -62,6 +62,12 @@ export class OrgsController {
   /**
    * Returns the authenticated user's org (chicken-and-egg safe: this works
    * even before an `org_id` claim exists on the JWT).
+   *
+   * The response carries a computed `sendReadiness` object (GL5) so the FE
+   * can render live-send truth instead of guessing:
+   *   { liveSendAllowed, physicalAddressSet, senderNameSet,
+   *     mailboxConnected, dailyCapRemaining }
+   * See OrgsService.computeSendReadiness for derivation.
    */
   @Get("me")
   @SkipOrgGuard()

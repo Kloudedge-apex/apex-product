@@ -109,6 +109,23 @@ export function validateEnv(
         issues.push(`${name} is required when NODE_ENV=production`);
       }
     }
+
+    // Outreach wildcard guard (GL8c). OUTREACH_LIVE_FOR_ORGS="*" arms live
+    // outbound email for EVERY org — refuse to boot a production container
+    // with it unless OUTREACH_ALLOW_WILDCARD="true" is set as an explicit,
+    // auditable escape hatch. Deployed-env reality check: only the worker
+    // Container App carries OUTREACH_LIVE_FOR_ORGS, so this never REQUIRES
+    // the var (the api app stays valid with it unset) — it only rejects the
+    // wildcard value. Runtime mirror lives in outreach-allowlist.util.ts.
+    if (
+      env.OUTREACH_LIVE_FOR_ORGS?.trim() === "*" &&
+      env.OUTREACH_ALLOW_WILDCARD !== "true"
+    ) {
+      issues.push(
+        'OUTREACH_LIVE_FOR_ORGS="*" enables live outreach for ALL orgs and is refused when NODE_ENV=production. ' +
+          "List org ids explicitly, or set OUTREACH_ALLOW_WILDCARD=true to override deliberately.",
+      );
+    }
   }
 
   return { issues, encryptionKeyFingerprint };

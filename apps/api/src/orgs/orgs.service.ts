@@ -9,7 +9,35 @@ import {
 import { Plan } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { EvidenceLedgerService } from "../observability/evidence-ledger.service";
+import { isLiveSendAllowedForOrg } from "../outreach/outreach-allowlist.util";
+import { getDailySendCapPerOrg } from "../outreach/send-outreach.worker";
 import { isIP } from "node:net";
+
+/**
+ * Computed live-send truth for an org (GL5). The FE renders Dry Run / Live
+ * badges and the Settings go-live checklist from this object instead of
+ * guessing. Every field mirrors a gate the send worker actually enforces:
+ *
+ *   liveSendAllowed    → OUTREACH_LIVE_FOR_ORGS allowlist — the SAME helper
+ *                        the worker uses to pick SENT vs SIMULATED
+ *   physicalAddressSet → CAN-SPAM §7704(a)(5) fail-closed gate on live email
+ *   senderNameSet      → sender-identity footer field
+ *   mailboxConnected   → a CONNECTED gmail/outlook Integration row exists
+ *   dailyCapRemaining  → GL8a per-org daily cap headroom for the current UTC
+ *                        day, clamped at 0; null is reserved for "cap helper
+ *                        unavailable" (not currently the case — the helper
+ *                        imports cleanly with no module cycle)
+ */
+export interface SendReadiness {
+  liveSendAllowed: boolean;
+  physicalAddressSet: boolean;
+  senderNameSet: boolean;
+  mailboxConnected: boolean;
+  dailyCapRemaining: number | null;
+}
+
+/** Integration.provider values that count as a sending mailbox for email. */
+const MAILBOX_PROVIDERS: string[] = ["gmail", "outlook"];
 
 /**
  * Optional best-effort LangSmith handle. We keep the interface here (instead of
@@ -112,13 +140,58 @@ export class OrgsService {
     return org;
   }
 
+  /**
+   * Org payload for GET /orgs/me — the read the FE/BFF settings + dashboard
+   * paths poll. Extends the raw org row with `sendReadiness` so the FE can
+   * stop inferring live-send state from env-shaped guesses (GL5).
+   */
   async findByClerkUser(clerkId: string) {
     const user = await this.prisma.user.findUnique({
       where: { clerkId },
       include: { org: { include: { agents: true, integrations: true } } },
     });
     if (!user) return null;
-    return user.org;
+    const sendReadiness = await this.computeSendReadiness(user.org);
+    return { ...user.org, sendReadiness };
+  }
+
+  /**
+   * Derives SendReadiness from the already-loaded org row plus two cheap
+   * org-scoped count queries (run in parallel). Takes the org fields as an
+   * argument so callers that just fetched the row don't pay a refetch.
+   */
+  async computeSendReadiness(org: {
+    id: string;
+    physicalAddress: string | null;
+    senderName: string | null;
+  }): Promise<SendReadiness> {
+    const [mailboxCount, sentToday] = await Promise.all([
+      this.prisma.integration.count({
+        where: {
+          orgId: org.id,
+          status: "CONNECTED",
+          provider: { in: MAILBOX_PROVIDERS },
+        },
+      }),
+      // Same window the GL8a cap gate in send-outreach.worker.ts counts:
+      // real sends only (status SENT — SIMULATED rows never set sentAt),
+      // since midnight UTC of the current day.
+      this.prisma.outreachArtifact.count({
+        where: {
+          orgId: org.id,
+          status: "SENT",
+          sentAt: { gte: startOfUtcDay(new Date()) },
+        },
+      }),
+    ]);
+
+    return {
+      liveSendAllowed: isLiveSendAllowedForOrg(org.id),
+      physicalAddressSet: (org.physicalAddress ?? "").trim().length > 0,
+      senderNameSet: (org.senderName ?? "").trim().length > 0,
+      mailboxConnected: mailboxCount > 0,
+      dailyCapRemaining: Math.max(0, getDailySendCapPerOrg() - sentToday),
+    };
   }
 
   async update(
@@ -472,6 +545,18 @@ export class OrgsService {
       runsByDomain,
     };
   }
+}
+
+/**
+ * Midnight UTC of the day containing `now` — the daily-cap window floor.
+ * Mirrors the private startOfUtcDay in outreach/send-outreach.worker.ts
+ * (GL8a), which is not exported; keep the two in lockstep if the cap window
+ * ever changes.
+ */
+function startOfUtcDay(now: Date): Date {
+  return new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
+  );
 }
 
 function validateOrgWebsiteOrThrow(input: string): string {

@@ -204,7 +204,7 @@ export class SendEmailTool implements Tool {
     } catch (error) {
       return {
         success: false,
-        data: { sent: false },
+        data: { sent: false, provider: "outlook" },
         error: error instanceof Error ? error.message : "Failed to send email via Graph API",
       };
     }
@@ -260,7 +260,7 @@ export class SendEmailTool implements Tool {
     } catch (error) {
       return {
         success: false,
-        data: { sent: false },
+        data: { sent: false, provider: "gmail" },
         error: error instanceof Error ? error.message : "Failed to send email via Gmail API",
       };
     }
@@ -281,6 +281,25 @@ export class SendEmailTool implements Tool {
       },
     };
   }
+}
+
+/**
+ * True when a send-tool result reports MOCK mode — i.e. no real provider call
+ * happened and the receipt is synthetic. Every send tool stamps its result
+ * data with the provider it actually used (`provider: "outlook" | "gmail" |
+ * "linkedin" | "mock"`) and mock branches additionally set `mock: true`, so
+ * consumers that REQUIRE a live send (SendOutreachWorker for allowlisted
+ * orgs — GL2) can detect a silent mock fallback and refuse to record SENT.
+ *
+ * Conservative on malformed data: a result without an object payload is NOT
+ * treated as mock (the worker's separate success/receipt checks own that).
+ */
+export function isMockModeResult(result: ToolResult): boolean {
+  if (!result.data || typeof result.data !== "object" || Array.isArray(result.data)) {
+    return false;
+  }
+  const data = result.data as Record<string, unknown>;
+  return data.mock === true || data.provider === "mock";
 }
 
 /**

@@ -138,6 +138,58 @@ describe("validateEnv", () => {
     expect(issues.some((i) => i.includes("OPENAI_API_KEY / AZURE_OPENAI_KEY / ANTHROPIC_API_KEY"))).toBe(true);
   });
 
+  describe("outreach wildcard guard (GL8c)", () => {
+    const wildcardIssue = (issues: readonly string[]) =>
+      issues.some((i) => i.includes("OUTREACH_LIVE_FOR_ORGS"));
+
+    it("rejects OUTREACH_LIVE_FOR_ORGS='*' in production", () => {
+      const env = baseProdEnv();
+      env.OUTREACH_LIVE_FOR_ORGS = "*";
+      const { issues } = validateEnv(env);
+      expect(wildcardIssue(issues)).toBe(true);
+    });
+
+    it("rejects a whitespace-padded wildcard too", () => {
+      const env = baseProdEnv();
+      env.OUTREACH_LIVE_FOR_ORGS = "  *  ";
+      const { issues } = validateEnv(env);
+      expect(wildcardIssue(issues)).toBe(true);
+    });
+
+    it("accepts the wildcard with the explicit OUTREACH_ALLOW_WILDCARD=true escape hatch", () => {
+      const env = baseProdEnv();
+      env.OUTREACH_LIVE_FOR_ORGS = "*";
+      env.OUTREACH_ALLOW_WILDCARD = "true";
+      const { issues } = validateEnv(env);
+      expect(wildcardIssue(issues)).toBe(false);
+    });
+
+    it("accepts an explicit org allowlist in production", () => {
+      const env = baseProdEnv();
+      env.OUTREACH_LIVE_FOR_ORGS = "tenant-zero,org_pilot_1";
+      const { issues } = validateEnv(env);
+      expect(wildcardIssue(issues)).toBe(false);
+    });
+
+    it("never REQUIRES the var — the api container does not carry it (deployed-env reality check)", () => {
+      // baseProdEnv has OUTREACH_LIVE_FOR_ORGS unset, mirroring the api app.
+      const { issues } = validateEnv(baseProdEnv());
+      expect(wildcardIssue(issues)).toBe(false);
+      expect(issues).toEqual([]);
+    });
+
+    it("does not reject the wildcard outside production", () => {
+      const env: NodeJS.ProcessEnv = {
+        NODE_ENV: "development",
+        DATABASE_URL: "postgresql://localhost/test",
+        ENCRYPTION_KEY: HEX_KEY,
+        OUTREACH_LIVE_FOR_ORGS: "*",
+      } as NodeJS.ProcessEnv;
+      const { issues } = validateEnv(env);
+      expect(wildcardIssue(issues)).toBe(false);
+    });
+  });
+
   it("does NOT require prod credentials outside production", () => {
     const env: NodeJS.ProcessEnv = {
       NODE_ENV: "development",

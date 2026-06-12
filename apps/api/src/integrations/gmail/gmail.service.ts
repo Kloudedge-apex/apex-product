@@ -1,6 +1,8 @@
 import {
   Injectable,
   Logger,
+  OnModuleDestroy,
+  OnModuleInit,
   UnauthorizedException,
   BadRequestException,
   ForbiddenException,
@@ -17,6 +19,7 @@ import {
 } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { RuntimeService } from "../../runtime/runtime.service";
+import { isWorkerEnabled } from "../../runtime/worker.service";
 import { SuppressionService } from "../../outreach/suppression.service";
 import { encrypt, decrypt } from "../crypto.util";
 import { isLiveSendAllowedForOrg } from "../../outreach/outreach-allowlist.util";
@@ -104,8 +107,13 @@ const GMAIL_SCOPES = [
   "https://www.googleapis.com/auth/gmail.modify",
 ];
 
+// Gmail watches expire after ~7 days (see registerWatch). A daily sweep keeps
+// every connected mailbox comfortably inside that window — losing the watch
+// silently kills DSN auto-suppress AND reply→stop-outreach. GL7.
+const WATCH_RENEWAL_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
 @Injectable()
-export class GmailService {
+export class GmailService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(GmailService.name);
   private readonly clientId: string;
   private readonly clientSecret: string;
@@ -122,6 +130,10 @@ export class GmailService {
    * persists write-through so the reply window survives deploys. Audit B8.
    */
   private readonly historyWatermark = new Map<string, string>();
+
+  /** Daily watch-renewal sweep state (GL7). Worker-process only. */
+  private watchRenewalHandle: ReturnType<typeof setInterval> | null = null;
+  private watchRenewalInFlight = false;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -142,6 +154,100 @@ export class GmailService {
       "",
     );
     this.pushPubsubTopic = this.config.get<string>("GMAIL_PUBSUB_TOPIC", "");
+  }
+
+  /**
+   * GL7: Gmail watches expire after ~7 days. Until now registerWatch only ran
+   * at OAuth callback + the manual backfill endpoint, so a week after connect
+   * every mailbox silently stopped pushing — no DSN auto-suppress, no
+   * reply→stop-outreach. This boot-time hook (mirroring SendOutreachWorker /
+   * GraphRunWorker's onModuleInit registration pattern) schedules a daily
+   * renewal sweep, gated to the worker process so the api pods don't all race
+   * the same renewals.
+   */
+  async onModuleInit(): Promise<void> {
+    if (!isWorkerEnabled()) {
+      this.logger.log(
+        "Gmail watch renewal sweep disabled in this process (set WORKER_ENABLED=true to enable)",
+      );
+      return;
+    }
+    this.watchRenewalHandle = setInterval(
+      () => void this.runWatchRenewalSweep(),
+      WATCH_RENEWAL_INTERVAL_MS,
+    );
+    // Run once at boot so a worker that was down across an expiry window
+    // re-arms every mailbox immediately instead of waiting a full day.
+    await this.runWatchRenewalSweep();
+  }
+
+  onModuleDestroy(): void {
+    if (this.watchRenewalHandle) {
+      clearInterval(this.watchRenewalHandle);
+      this.watchRenewalHandle = null;
+    }
+  }
+
+  /**
+   * Single-flight wrapper: a slow sweep (many orgs × Gmail API latency) must
+   * not stack with the next interval tick. Failures are logged, never thrown —
+   * renewal is best-effort recovery, the next tick retries.
+   */
+  private async runWatchRenewalSweep(): Promise<void> {
+    try {
+      const { renewed, failed } = await this.renewWatchesForConnectedIntegrations();
+      if (renewed > 0 || failed > 0) {
+        this.logger.log("gmail.watch renewal sweep complete", { renewed, failed });
+      }
+    } catch (err) {
+      this.logger.error("gmail.watch renewal sweep failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Re-registers the Pub/Sub watch for every CONNECTED gmail integration.
+   * Per-org failures (revoked token, deleted mailbox, Gmail 5xx) are logged
+   * and counted but never abort the loop — one broken org must not kill
+   * inbound detection for the rest of the fleet. Public so tests can drive
+   * the sweep deterministically (mirrors reconcileStuckArtifacts).
+   */
+  async renewWatchesForConnectedIntegrations(): Promise<{
+    renewed: number;
+    failed: number;
+  }> {
+    if (this.watchRenewalInFlight) return { renewed: 0, failed: 0 };
+    this.watchRenewalInFlight = true;
+    try {
+      if (!this.pushPubsubTopic) {
+        this.logger.debug(
+          "gmail.watch renewal sweep skipped — GMAIL_PUBSUB_TOPIC unset",
+        );
+        return { renewed: 0, failed: 0 };
+      }
+      const integrations = await this.prisma.integration.findMany({
+        where: { provider: "gmail", status: "CONNECTED" },
+        select: { orgId: true },
+      });
+      let renewed = 0;
+      let failed = 0;
+      for (const integration of integrations) {
+        try {
+          await this.registerWatch(integration.orgId);
+          renewed++;
+        } catch (err) {
+          failed++;
+          this.logger.warn("gmail.watch renewal failed for org", {
+            orgId: integration.orgId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      return { renewed, failed };
+    } finally {
+      this.watchRenewalInFlight = false;
+    }
   }
 
   /**
@@ -308,6 +414,14 @@ export class GmailService {
       return;
     }
 
+    // GL6a reply→stop-outreach: past the SENT/self/DSN guards this is a
+    // genuine prospect reply — the conversation is now human-owned, so the
+    // send worker must never fire another sequenced touch at this sender.
+    // Runs BEFORE the Reply Handler lookup so orgs without a configured
+    // handler still stop outreach, and best-effort so a suppression-write
+    // failure cannot block handler dispatch.
+    await this.suppressReplyingSender(orgId, message);
+
     // Look up the Reply Handler agent for this org. Template slug is
     // "reply-handler"; the seeded AgentTemplate row has name "Reply Handler".
     const agent = await this.prisma.agent.findFirst({
@@ -346,6 +460,58 @@ export class GmailService {
         metadata: context as unknown as Prisma.InputJsonValue,
       },
     });
+  }
+
+  /**
+   * GL6a: suppress a prospect who replied so outreach stops immediately.
+   * OutreachSuppressionReason has no REPLIED value (USER_UNSUBSCRIBED /
+   * BOUNCED / COMPLAINED / MANUAL only — adding enum values needs a prod
+   * migration), so we use the closest existing one, MANUAL, and disambiguate
+   * via source="gmail_reply". SuppressionService.suppress is idempotent on
+   * (orgId, recipientRef), so duplicate pushes of the same reply no-op.
+   *
+   * Best-effort by design: a failed suppression write logs at error level but
+   * never throws — handler dispatch must still happen, and the send worker's
+   * isSuppressed already fails closed on DB errors as the backstop.
+   */
+  private async suppressReplyingSender(
+    orgId: string,
+    message: GmailMessage,
+  ): Promise<void> {
+    const senderMatch = message.from.match(EMAIL_PATTERN);
+    if (!senderMatch) {
+      this.logger.warn(
+        "gmail.push reply without extractable sender — skipping reply suppression",
+        { orgId, messageId: message.id, from: message.from },
+      );
+      return;
+    }
+    const sender = senderMatch[0].toLowerCase();
+    try {
+      const { created } = await this.suppression.suppress({
+        orgId,
+        recipientRef: sender,
+        reason: OutreachSuppressionReason.MANUAL,
+        source: "gmail_reply",
+        metadata: {
+          gmailMessageId: message.id,
+          threadId: message.threadId,
+        },
+      });
+      this.logger.log("gmail.push reply detected — sender suppressed", {
+        orgId,
+        messageId: message.id,
+        recipientRef: sender,
+        created,
+      });
+    } catch (err) {
+      this.logger.error("gmail.push failed to suppress replying sender", {
+        orgId,
+        messageId: message.id,
+        recipientRef: sender,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   /**
