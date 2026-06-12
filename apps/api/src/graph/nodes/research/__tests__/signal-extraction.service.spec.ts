@@ -21,7 +21,7 @@ const company: CompanyForExtraction = {
 
 describe("SignalExtractionService", () => {
   describe("extractForCompany — live trigger", () => {
-    it("turns a real web_search result into a press_mention", async () => {
+    it("turns a real, dated web_search result into a press_mention dated by the RESULT", async () => {
       const search = fakeSearch(async () => ({
         success: true,
         data: {
@@ -30,6 +30,7 @@ describe("SignalExtractionService", () => {
               title: "Lumen raises $20M",
               url: "https://news.example.com/lumen",
               snippet: "...",
+              date: "2026-06-01",
             },
           ],
         },
@@ -42,17 +43,36 @@ describe("SignalExtractionService", () => {
       expect(press).toBeDefined();
       expect(press).toMatchObject({
         source: "https://news.example.com/lumen",
-        date: "2026-06-07",
+        // The result's OWN publication date — NOT the search day (2026-06-07).
+        date: "2026-06-01",
       });
       expect(press?.fields?.outlet).toBe("news.example.com");
       expect(press?.fields?.headline).toBe("Lumen raises $20M");
+    });
+
+    it("requests the NEWS vertical — the dated-results endpoint — for the live-trigger search", async () => {
+      // Organic search rarely carries a date; with fail-closed undated rejection
+      // that meant ~100% trigger rejection. The news vertical is what makes
+      // dated triggers actually land in prod.
+      const calls: Array<Record<string, unknown>> = [];
+      const search = fakeSearch(async (params) => {
+        calls.push(params);
+        return { success: true, data: { results: [] } };
+      });
+      const service = new SignalExtractionService(search);
+
+      await service.extractLiveTrigger(company, NOW);
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({ vertical: "news", max_results: 3 });
+      expect(String(calls[0].query)).toContain("Lumen");
     });
 
     it("emits NO signal when web_search returns mock data", async () => {
       const search = fakeSearch(async () => ({
         success: true,
         data: markMocked(
-          { results: [{ title: "x", url: "https://x" }] },
+          { results: [{ title: "x", url: "https://x", date: "2026-06-01" }] },
           "no key",
         ),
       }));
@@ -71,8 +91,16 @@ describe("SignalExtractionService", () => {
         success: true,
         data: {
           results: [
-            markMockedItem({ title: "fixture", url: "https://mock.example.com" }, "no key"),
-            { title: "Lumen ships v2", url: "https://news.example.com/lumen-v2", snippet: "..." },
+            markMockedItem(
+              { title: "fixture", url: "https://mock.example.com", date: "2026-06-01" },
+              "no key",
+            ),
+            {
+              title: "Lumen ships v2",
+              url: "https://news.example.com/lumen-v2",
+              snippet: "...",
+              date: "2026-06-02",
+            },
           ],
         },
       }));
@@ -84,6 +112,7 @@ describe("SignalExtractionService", () => {
       expect(out[0]).toMatchObject({
         kind: "press_mention",
         source: "https://news.example.com/lumen-v2",
+        date: "2026-06-02",
       });
     });
 
@@ -104,6 +133,186 @@ describe("SignalExtractionService", () => {
       const search = fakeSearch(async () => {
         throw new Error("network down");
       });
+      const service = new SignalExtractionService(search);
+
+      const out = await service.extractLiveTrigger(company, NOW);
+
+      expect(out).toHaveLength(0);
+    });
+  });
+
+  describe("extractLiveTrigger — trigger dating (audit B3: result's own date or nothing)", () => {
+    it("REJECTS an undated result entirely — never stamps the search day", async () => {
+      // Pre-keystone code stamped `now` onto every hit, fabricating "recent"
+      // triggers out of years-old pages. An undated result must yield NO signal.
+      const search = fakeSearch(async () => ({
+        success: true,
+        data: {
+          results: [
+            { title: "Lumen raises $20M", url: "https://news.example.com/lumen", snippet: "..." },
+          ],
+        },
+      }));
+      const service = new SignalExtractionService(search);
+
+      const out = await service.extractLiveTrigger(company, NOW);
+
+      expect(out).toHaveLength(0);
+    });
+
+    it("parses Serper-news relative dates against the search time", async () => {
+      const search = fakeSearch(async () => ({
+        success: true,
+        data: {
+          results: [
+            { title: "Lumen ships v2", url: "https://news.example.com/lumen", date: "2 days ago" },
+          ],
+        },
+      }));
+      const service = new SignalExtractionService(search);
+
+      const out = await service.extractLiveTrigger(company, NOW);
+
+      expect(out).toHaveLength(1);
+      expect(out[0].date).toBe("2026-06-05");
+    });
+
+    it("parses Serper absolute dates like 'Jun 5, 2026'", async () => {
+      const search = fakeSearch(async () => ({
+        success: true,
+        data: {
+          results: [
+            { title: "Lumen ships v2", url: "https://news.example.com/lumen", date: "Jun 5, 2026" },
+          ],
+        },
+      }));
+      const service = new SignalExtractionService(search);
+
+      const out = await service.extractLiveTrigger(company, NOW);
+
+      expect(out).toHaveLength(1);
+      expect(out[0].date).toBe("2026-06-05");
+    });
+
+    it("accepts a Tavily-style published_date field", async () => {
+      const search = fakeSearch(async () => ({
+        success: true,
+        data: {
+          results: [
+            {
+              title: "Lumen ships v2",
+              url: "https://news.example.com/lumen",
+              published_date: "2026-06-03",
+            },
+          ],
+        },
+      }));
+      const service = new SignalExtractionService(search);
+
+      const out = await service.extractLiveTrigger(company, NOW);
+
+      expect(out).toHaveLength(1);
+      expect(out[0].date).toBe("2026-06-03");
+    });
+
+    it("REJECTS unparseable date strings rather than guessing", async () => {
+      const search = fakeSearch(async () => ({
+        success: true,
+        data: {
+          results: [
+            { title: "a", url: "https://news.example.com/a", date: "last Tuesday" },
+            { title: "b", url: "https://news.example.com/b", date: "recently" },
+          ],
+        },
+      }));
+      const service = new SignalExtractionService(search);
+
+      const out = await service.extractLiveTrigger(company, NOW);
+
+      expect(out).toHaveLength(0);
+    });
+
+    it("skips an undated first hit and cites the next dated one", async () => {
+      const search = fakeSearch(async () => ({
+        success: true,
+        data: {
+          results: [
+            { title: "undated", url: "https://news.example.com/undated" },
+            { title: "dated", url: "https://news.example.com/dated", date: "2026-06-04" },
+          ],
+        },
+      }));
+      const service = new SignalExtractionService(search);
+
+      const out = await service.extractLiveTrigger(company, NOW);
+
+      expect(out).toHaveLength(1);
+      expect(out[0]).toMatchObject({
+        source: "https://news.example.com/dated",
+        date: "2026-06-04",
+      });
+    });
+  });
+
+  describe("extractLiveTrigger — domain exclusions (audit B3)", () => {
+    it("excludes hits on the company's own domain (incl. subdomains) — self-published is not a trigger", async () => {
+      const search = fakeSearch(async () => ({
+        success: true,
+        data: {
+          results: [
+            { title: "own blog", url: "https://lumen.com/blog/launch", date: "2026-06-01" },
+            { title: "own subdomain", url: "https://blog.lumen.com/launch", date: "2026-06-01" },
+            { title: "third party", url: "https://news.example.com/lumen", date: "2026-06-02" },
+          ],
+        },
+      }));
+      const service = new SignalExtractionService(search);
+
+      const out = await service.extractLiveTrigger(company, NOW);
+
+      expect(out).toHaveLength(1);
+      expect(out[0].source).toBe("https://news.example.com/lumen");
+    });
+
+    it.each([
+      ["linkedin", "https://www.linkedin.com/posts/lumen-update"],
+      ["twitter", "https://twitter.com/lumen/status/1"],
+      ["x", "https://x.com/lumen/status/1"],
+      ["facebook", "https://www.facebook.com/lumen/posts/1"],
+    ])("excludes %s hits — social feeds are not citable dated coverage", async (_name, url) => {
+      const search = fakeSearch(async () => ({
+        success: true,
+        data: { results: [{ title: "social post", url, date: "2026-06-01" }] },
+      }));
+      const service = new SignalExtractionService(search);
+
+      const out = await service.extractLiveTrigger(company, NOW);
+
+      expect(out).toHaveLength(0);
+    });
+
+    it("matches exclusions exact-or-subdomain, not substring (xerox.com / newsx.com pass)", async () => {
+      const search = fakeSearch(async () => ({
+        success: true,
+        data: {
+          results: [
+            { title: "not x.com", url: "https://newsx.com/lumen", date: "2026-06-01" },
+          ],
+        },
+      }));
+      const service = new SignalExtractionService(search);
+
+      const out = await service.extractLiveTrigger(company, NOW);
+
+      expect(out).toHaveLength(1);
+      expect(out[0].fields?.outlet).toBe("newsx.com");
+    });
+
+    it("rejects a result whose url does not parse — no attributable outlet", async () => {
+      const search = fakeSearch(async () => ({
+        success: true,
+        data: { results: [{ title: "broken", url: "not-a-url", date: "2026-06-01" }] },
+      }));
       const service = new SignalExtractionService(search);
 
       const out = await service.extractLiveTrigger(company, NOW);

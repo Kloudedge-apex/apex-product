@@ -3,6 +3,7 @@ import {
   buildSdrOutreachSubgraph,
   runSdrOutreachSubgraph,
   _internalForTests,
+  type BriefFact,
   type SdrLeadInput,
   type SubgraphDeps,
 } from "../nodes/sdr-outreach-subgraph";
@@ -10,6 +11,48 @@ import {
 const { qaCheck, parseDrafterJson } = _internalForTests;
 
 const VALID_BODY = "Hi Alice, noticed Acme is scaling SaaS at 50-200 headcount and rolling out new product lines. We help teams at your stage tighten SDR pipeline without adding reps. Worth a 15-min call next week?";
+
+// Inside the press_mention freshness window (90d) so the default brief grounds.
+const FRESH_SIGNAL_DATE = new Date(Date.now() - 5 * 86400000).toISOString().slice(0, 10);
+
+/**
+ * A fresh, dated, sourced press_mention evidence event. mockDeps returns it by
+ * default so `hasGroundingSignal` is true and the brief carries an S1 fact —
+ * the in-code evidence gate (audit B3) would otherwise refuse before the
+ * drafter runs, making every drafter-behavior test vacuous.
+ */
+function freshEvidenceEvent() {
+  return {
+    kind: "press_mention",
+    payload: {
+      date: FRESH_SIGNAL_DATE,
+      source: "https://news.example.com/acme-raises",
+      outlet: "news.example.com",
+      headline: "Acme raises $20M",
+      confidence: 0.6,
+    },
+    createdAt: new Date(),
+  };
+}
+
+// Brief-fact fixture for qaCheck unit tests: one firmographic + one dated signal.
+const BRIEF_FACTS: readonly BriefFact[] = [
+  {
+    id: "F1",
+    category: "firmographic",
+    source: "company.registry",
+    text: "Company: Acme (acme.io); industry: SaaS.",
+  },
+  {
+    id: "S1",
+    category: "signal",
+    source: "https://news.example.com/acme-raises",
+    text: 'Mentioned in news.example.com: "Acme raises $20M".',
+    date: FRESH_SIGNAL_DATE,
+  },
+];
+
+const GROUNDED_SELF_CHECK = { citedFactIds: ["S1"], unsupportedClaims: [] };
 
 function lead(overrides: Partial<SdrLeadInput> = {}): SdrLeadInput {
   return {
@@ -27,7 +70,12 @@ function lead(overrides: Partial<SdrLeadInput> = {}): SdrLeadInput {
 }
 
 function mockDeps(
-  overrides: { drafter?: SubgraphDeps["drafter"]; recordDryRun?: ReturnType<typeof vi.fn> } = {},
+  overrides: {
+    drafter?: SubgraphDeps["drafter"];
+    recordDryRun?: ReturnType<typeof vi.fn>;
+    /** Evidence events the brief reads. Defaults to one fresh grounded signal; pass [] to exercise the ungrounded gate. */
+    evidenceEvents?: unknown[];
+  } = {},
 ): SubgraphDeps & { _recorded: ReturnType<typeof vi.fn> } {
   const recordDryRun = overrides.recordDryRun
     ?? vi.fn().mockResolvedValue({ id: "art_test" });
@@ -51,7 +99,7 @@ function mockDeps(
         findFirst: vi.fn().mockResolvedValue(null),
       },
       evidenceEvent: {
-        findMany: vi.fn().mockResolvedValue([]),
+        findMany: vi.fn().mockResolvedValue(overrides.evidenceEvents ?? [freshEvidenceEvent()]),
       },
       leadScore: {
         findFirst: vi.fn().mockResolvedValue(null),
@@ -80,31 +128,41 @@ function mockDeps(
 }
 
 describe("qaCheck", () => {
-  it("returns no issues for a well-formed message", () => {
-    expect(qaCheck("Quick question about Acme", VALID_BODY, null)).toEqual([]);
+  it("returns no issues for a well-formed, grounded message", () => {
+    expect(
+      qaCheck("Quick question about Acme", VALID_BODY, null, GROUNDED_SELF_CHECK, BRIEF_FACTS),
+    ).toEqual([]);
   });
 
   it("flags empty subject", () => {
-    expect(qaCheck("", VALID_BODY, null)).toContain("empty_subject");
+    expect(qaCheck("", VALID_BODY, null, GROUNDED_SELF_CHECK, BRIEF_FACTS)).toContain(
+      "empty_subject",
+    );
   });
 
   it("flags body too short", () => {
-    const issues = qaCheck("Subject", "hi", null);
+    const issues = qaCheck("Subject", "hi", null, GROUNDED_SELF_CHECK, BRIEF_FACTS);
     expect(issues.some((i) => i.startsWith("body_too_short"))).toBe(true);
   });
 
   it("flags placeholder leaks", () => {
-    const issues = qaCheck("Hello {{firstName}}", VALID_BODY, null);
+    const issues = qaCheck("Hello {{firstName}}", VALID_BODY, null, GROUNDED_SELF_CHECK, BRIEF_FACTS);
     expect(issues.some((i) => i.includes("placeholder_leak"))).toBe(true);
   });
 
   it("flags placeholder leaks in the body too", () => {
-    const issues = qaCheck("Subject", `${VALID_BODY} TODO finish this`, null);
+    const issues = qaCheck(
+      "Subject",
+      `${VALID_BODY} TODO finish this`,
+      null,
+      GROUNDED_SELF_CHECK,
+      BRIEF_FACTS,
+    );
     expect(issues.some((i) => i.includes("TODO"))).toBe(true);
   });
 
   it("flags subject too long", () => {
-    const issues = qaCheck("x".repeat(200), VALID_BODY, null);
+    const issues = qaCheck("x".repeat(200), VALID_BODY, null, GROUNDED_SELF_CHECK, BRIEF_FACTS);
     expect(issues.some((i) => i.startsWith("subject_too_long"))).toBe(true);
   });
 
@@ -113,8 +171,52 @@ describe("qaCheck", () => {
       "",
       "",
       { reason: "insufficient_grounding", missing: ["recent_hire"] },
+      null,
+      BRIEF_FACTS,
     );
     expect(issues).toEqual(["refusal:insufficient_grounding"]);
+  });
+
+  // ── Citation gate (audit B3) ─────────────────────────────────────────────
+
+  it("flags no_cited_facts when the self-check cites nothing", () => {
+    const issues = qaCheck(
+      "Quick question about Acme",
+      VALID_BODY,
+      null,
+      { citedFactIds: [], unsupportedClaims: [] },
+      BRIEF_FACTS,
+    );
+    expect(issues).toContain("no_cited_facts");
+  });
+
+  it("flags no_cited_facts when the self-check is missing entirely (null)", () => {
+    const issues = qaCheck("Quick question about Acme", VALID_BODY, null, null, BRIEF_FACTS);
+    expect(issues).toContain("no_cited_facts");
+  });
+
+  it("flags every cited fact id not present in the brief", () => {
+    const issues = qaCheck(
+      "Quick question about Acme",
+      VALID_BODY,
+      null,
+      { citedFactIds: ["S1", "S9", "F7"], unsupportedClaims: [] },
+      BRIEF_FACTS,
+    );
+    expect(issues).toContain("unknown_fact_id(S9)");
+    expect(issues).toContain("unknown_fact_id(F7)");
+    expect(issues.some((i) => i.includes("S1)"))).toBe(false); // S1 is real — never flagged
+  });
+
+  it("flags unsupported_claims when the model self-reports ungrounded sentences", () => {
+    const issues = qaCheck(
+      "Quick question about Acme",
+      VALID_BODY,
+      null,
+      { citedFactIds: ["S1"], unsupportedClaims: ["Acme runs on Kubernetes"] },
+      BRIEF_FACTS,
+    );
+    expect(issues).toContain("unsupported_claims(1)");
   });
 });
 
@@ -172,8 +274,15 @@ describe("parseDrafterJson", () => {
   });
 });
 
+// Fixture drafts cite the S1 signal the default mockDeps brief always contains,
+// so they pass the citation gate and each test stays about its own concern.
 function draft(subject: string, body: string) {
-  return { subject, body, refusal: null, groundednessSelfCheck: null };
+  return {
+    subject,
+    body,
+    refusal: null,
+    groundednessSelfCheck: { citedFactIds: ["S1"], unsupportedClaims: [] },
+  };
 }
 
 describe("SDR outreach subgraph", () => {
@@ -316,6 +425,127 @@ describe("SDR outreach subgraph", () => {
     expect(recordedArgs.brief_facts[0]).toHaveProperty("source");
     expect(recordedArgs.groundedness_self_check.citedFactIds).toEqual(["F1", "P1"]);
     expect(Array.isArray(recordedArgs.brief_do_not_claim)).toBe(true);
+  });
+});
+
+describe("SDR outreach subgraph — evidence gate (audit B3)", () => {
+  it("hard-gates an ungrounded brief IN CODE: refuses without ever invoking the drafter", async () => {
+    // No evidence events → hasGroundingSignal=false. The refusal must come
+    // from the draft node itself, deterministically — the LLM (and its
+    // <refusal_protocol> prompt) must never even be consulted.
+    const drafter = vi.fn();
+    const deps = mockDeps({ drafter, evidenceEvents: [] });
+
+    const result = await runSdrOutreachSubgraph(deps, lead());
+
+    expect(drafter).not.toHaveBeenCalled();
+    expect(deps.llm.chat).not.toHaveBeenCalled();
+    expect(result.refusal).toEqual({ reason: "insufficient_grounding", missing: ["signals"] });
+    expect(result.qaIssues).toEqual(["refusal:insufficient_grounding"]);
+    expect(result.subject).toBe("");
+    expect(result.body).toBe("");
+    // Refusals are a first-class outcome: exactly one attempt, no retry, and
+    // the artifact is still persisted so the reviewer sees the refusal.
+    expect(result.draftAttempts).toBe(1);
+    expect(deps._recorded).toHaveBeenCalledTimes(1);
+    const recordedArgs = deps._recorded.mock.calls[0][0].toolArgs;
+    expect(recordedArgs.refusal).toEqual({
+      reason: "insufficient_grounding",
+      missing: ["signals"],
+    });
+  });
+
+  it("hard-gates a stale-only brief the same way (freshness feeds the gate)", async () => {
+    // A years-old press mention is excluded by isFresh at brief assembly, so
+    // the brief is ungrounded and the in-code gate refuses pre-LLM.
+    const drafter = vi.fn();
+    const deps = mockDeps({
+      drafter,
+      evidenceEvents: [
+        {
+          kind: "press_mention",
+          payload: { date: "2024-01-01", source: "https://news.example.com/old", confidence: 0.6 },
+          createdAt: new Date(),
+        },
+      ],
+    });
+
+    const result = await runSdrOutreachSubgraph(deps, lead());
+
+    expect(drafter).not.toHaveBeenCalled();
+    expect(result.refusal).toEqual({ reason: "insufficient_grounding", missing: ["signals"] });
+  });
+
+  it("fails QA and retries when the draft cites a fact id not in the brief", async () => {
+    const drafter = vi.fn().mockResolvedValue({
+      subject: "Subject here",
+      body: VALID_BODY,
+      refusal: null,
+      groundednessSelfCheck: { citedFactIds: ["S9"], unsupportedClaims: [] },
+    });
+    const deps = mockDeps({ drafter });
+
+    const result = await runSdrOutreachSubgraph(deps, lead());
+
+    // Citation issues retry like any other QA issue, then land on review.
+    expect(drafter).toHaveBeenCalledTimes(2);
+    expect(result.qaIssues).toContain("unknown_fact_id(S9)");
+    expect(deps._recorded).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails QA when the drafter omits the groundedness self-check entirely", async () => {
+    const drafter = vi.fn().mockResolvedValue({
+      subject: "Subject here",
+      body: VALID_BODY,
+      refusal: null,
+      groundednessSelfCheck: null,
+    });
+    const deps = mockDeps({ drafter });
+
+    const result = await runSdrOutreachSubgraph(deps, lead());
+
+    expect(result.qaIssues).toContain("no_cited_facts");
+    expect(deps._recorded).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails QA when the draft self-reports unsupported claims", async () => {
+    const drafter = vi.fn().mockResolvedValue({
+      subject: "Subject here",
+      body: VALID_BODY,
+      refusal: null,
+      groundednessSelfCheck: {
+        citedFactIds: ["S1"],
+        unsupportedClaims: ["Acme runs on Kubernetes", "Alice used to work at Google"],
+      },
+    });
+    const deps = mockDeps({ drafter });
+
+    const result = await runSdrOutreachSubgraph(deps, lead());
+
+    expect(result.qaIssues).toContain("unsupported_claims(2)");
+  });
+
+  it("recovers when the retry fixes its citations", async () => {
+    let attempt = 0;
+    const drafter = vi.fn().mockImplementation(async () => {
+      attempt += 1;
+      if (attempt === 1) {
+        return {
+          subject: "Subject here",
+          body: VALID_BODY,
+          refusal: null,
+          groundednessSelfCheck: { citedFactIds: [], unsupportedClaims: [] },
+        };
+      }
+      return draft("Grounded subject", VALID_BODY);
+    });
+    const deps = mockDeps({ drafter });
+
+    const result = await runSdrOutreachSubgraph(deps, lead());
+
+    expect(result.draftAttempts).toBe(2);
+    expect(result.qaIssues).toEqual([]);
+    expect(result.subject).toBe("Grounded subject");
   });
 });
 

@@ -219,6 +219,8 @@ function qaCheck(
   subject: string,
   body: string,
   refusal: DrafterRefusal | null,
+  selfCheck: GroundednessSelfCheck | null,
+  briefFacts: readonly BriefFact[],
 ): string[] {
   // Refusals are not "QA failures" to retry — they're a first-class outcome
   // and route straight to human review with the reason preserved.
@@ -236,8 +238,40 @@ function qaCheck(
       issues.push(`placeholder_leak(${needle})`);
     }
   }
+  // Citation gate (audit B3): a non-refusal draft must declare which brief
+  // facts it used, every cited id must exist in the brief, and the model must
+  // not have flagged its own sentences as unsupported. The prompt's
+  // `groundedness_self_check` field proves nothing on its own — this is where
+  // "every email cites a real, dated trigger or refuses" actually fails a
+  // draft. Citation issues retry like any other QA issue (the refusal
+  // early-return above keeps refusals un-retried), then land on human review
+  // with the issues attached.
+  const cited = selfCheck?.citedFactIds ?? [];
+  if (cited.length === 0) {
+    issues.push("no_cited_facts");
+  } else {
+    const knownIds = new Set(briefFacts.map((f) => f.id));
+    for (const id of cited) {
+      if (!knownIds.has(id)) issues.push(`unknown_fact_id(${id})`);
+    }
+  }
+  const unsupported = selfCheck?.unsupportedClaims ?? [];
+  if (unsupported.length > 0) {
+    issues.push(`unsupported_claims(${unsupported.length})`);
+  }
   return issues;
 }
+
+/**
+ * Refusal envelope emitted by the in-code evidence gate (audit B3). Mirrors
+ * the prompt's <refusal_protocol> shape exactly so a code refusal and a model
+ * refusal are indistinguishable downstream (QA routing, artifact payload,
+ * reviewer UI).
+ */
+const UNGROUNDED_REFUSAL: DrafterRefusal = {
+  reason: "insufficient_grounding",
+  missing: ["signals"],
+};
 
 // XML-scaffolded SDR draft prompt. The grounding rules + refusal protocol +
 // `groundedness_self_check` field together collapse the previous 3-line prompt's
@@ -468,6 +502,23 @@ export function buildSdrOutreachSubgraph(deps: SubgraphDeps) {
         "apex.lead.person_id": state.lead.personId,
       },
       async () => {
+        // Evidence gate (audit B3): refusal on an ungrounded brief is enforced
+        // IN CODE, before any LLM call. Zero dated grounding signals means
+        // there is nothing citable, so drafting must not start — the prompt's
+        // <refusal_protocol> stays as defense-in-depth, but trusting the model
+        // to refuse would make the wedge probabilistic. Same envelope as a
+        // model refusal so routeAfterQa sends it straight to human review.
+        if (!state.researchBrief.hasGroundingSignal) {
+          return {
+            subject: "",
+            body: "",
+            refusal: UNGROUNDED_REFUSAL,
+            groundednessSelfCheck: { citedFactIds: [], unsupportedClaims: [] },
+            draftAttempts: state.draftAttempts + 1,
+            langsmithRunId: null,
+          };
+        }
+
         const previous =
           state.draftAttempts > 0 && state.qaIssues.length > 0
             ? { subject: state.subject, body: state.body, issues: state.qaIssues }
@@ -535,7 +586,13 @@ export function buildSdrOutreachSubgraph(deps: SubgraphDeps) {
       },
       async () => {
         const startedAt = Date.now();
-        const issues = qaCheck(state.subject, state.body, state.refusal);
+        const issues = qaCheck(
+          state.subject,
+          state.body,
+          state.refusal,
+          state.groundednessSelfCheck,
+          state.researchBrief.facts,
+        );
 
         if (issues.length === 0) {
           void deps.evidenceLedger.qaPass({
