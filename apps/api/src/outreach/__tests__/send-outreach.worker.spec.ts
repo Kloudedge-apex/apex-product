@@ -7,6 +7,7 @@ import {
 import {
   SendOutreachWorker,
   isLiveSendAllowedForOrg,
+  getDailySendCapPerOrg,
 } from "../send-outreach.worker";
 import { OutreachSendQueueService } from "../outreach-send-queue.service";
 import { PrismaService } from "../../prisma/prisma.service";
@@ -49,6 +50,11 @@ function mockPrisma() {
       // claim") so existing happy-path tests proceed without modification.
       updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       findMany: vi.fn(),
+      // GL8b recipient-cooldown lookup. Default null ("no recent send") so
+      // existing happy-path tests proceed without modification.
+      findFirst: vi.fn().mockResolvedValue(null),
+      // GL8a daily-cap count. Default 0 ("no sends today") — under cap.
+      count: vi.fn().mockResolvedValue(0),
     },
     integration: {
       findMany: vi.fn().mockResolvedValue([]),
@@ -71,18 +77,36 @@ function mockPrisma() {
       update: ReturnType<typeof vi.fn>;
       updateMany: ReturnType<typeof vi.fn>;
       findMany: ReturnType<typeof vi.fn>;
+      findFirst: ReturnType<typeof vi.fn>;
+      count: ReturnType<typeof vi.fn>;
     };
     integration: { findMany: ReturnType<typeof vi.fn> };
     org: { findUnique: ReturnType<typeof vi.fn> };
   };
 }
 
-function mockQueue(): OutreachSendQueueService & {
+/**
+ * Minimal stand-in for the BullMQ Queue surface requeueArtifact touches.
+ * Tests inject it through mockQueue(bullQueue) to exercise the completed-
+ * jobId cleanup (GL8a deferred-send interplay).
+ */
+interface FakeBullQueue {
+  getJob: ReturnType<typeof vi.fn>;
+}
+
+function fakeBullJob(completed: boolean) {
+  return {
+    isCompleted: vi.fn(async () => completed),
+    remove: vi.fn(async () => undefined),
+  };
+}
+
+function mockQueue(bullQueue: FakeBullQueue | null = null): OutreachSendQueueService & {
   enqueue: ReturnType<typeof vi.fn>;
 } {
   return {
-    isBullMode: () => false,
-    getBullQueue: () => null,
+    isBullMode: () => bullQueue !== null,
+    getBullQueue: () => bullQueue,
     getConnection: () => null,
     enqueue: vi.fn().mockResolvedValue(undefined),
     onModuleDestroy: vi.fn(),
@@ -529,6 +553,391 @@ describe("SendOutreachWorker.processArtifact", () => {
   });
 });
 
+describe("SendOutreachWorker GL2 — mock-mode result while live send is required", () => {
+  let prisma: ReturnType<typeof mockPrisma>;
+  let ledger: ReturnType<typeof mockLedger>;
+  let worker: SendOutreachWorker;
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    prisma = mockPrisma();
+    ledger = mockLedger();
+    const suppression = { isSuppressed: vi.fn(async () => false) } as unknown as Parameters<typeof SendOutreachWorker>[3];
+    worker = new SendOutreachWorker(
+      prisma as unknown as PrismaService,
+      mockQueue(),
+      mockIntegrations(),
+      suppression,
+      ledger,
+    );
+  });
+
+  afterEach(() => {
+    delete process.env.OUTREACH_LIVE_FOR_ORGS;
+  });
+
+  it("treats a mock-mode 'success' as a FAILURE for an allowlisted org — never SENT", async () => {
+    process.env.OUTREACH_LIVE_FOR_ORGS = "org_1";
+    prisma.outreachArtifact.findUnique.mockResolvedValue(artifactRow());
+    // loadIntegrations yielded nothing usable (catch-skip path) → the tool
+    // silently fell back to mockSend and reported success.
+    vi.spyOn(SendEmailTool.prototype, "execute").mockResolvedValueOnce({
+      success: true,
+      data: {
+        sent: false,
+        mock: true,
+        provider: "mock",
+        messageId: "mock_outage_1",
+        to: "dest@example.com",
+        subject: "Hi",
+      },
+    });
+
+    await expect(worker.processArtifact("art_1", "org_1")).rejects.toThrow(
+      /mock mode.*refusing to record SENT/,
+    );
+
+    // Claim released back to APPROVED so the BullMQ retry envelope (and at
+    // exhaustion the auto-failed terminal handler) owns the outcome.
+    expect(prisma.outreachArtifact.updateMany).toHaveBeenCalledWith({
+      where: { id: "art_1", status: OutreachArtifactStatus.SENDING },
+      data: { status: OutreachArtifactStatus.APPROVED },
+    });
+    // No terminal SENT/SIMULATED write, no sentAt, no evidence.
+    expect(prisma.outreachArtifact.update).not.toHaveBeenCalled();
+    expect(ledger.messageSent).not.toHaveBeenCalled();
+  });
+
+  it("detects mock mode via provider==='mock' even without the mock flag", async () => {
+    process.env.OUTREACH_LIVE_FOR_ORGS = "org_1";
+    prisma.outreachArtifact.findUnique.mockResolvedValue(artifactRow());
+    vi.spyOn(SendEmailTool.prototype, "execute").mockResolvedValueOnce({
+      success: true,
+      data: { sent: false, provider: "mock", messageId: "mock_2" },
+    });
+
+    await expect(worker.processArtifact("art_1", "org_1")).rejects.toThrow(
+      /mock mode/,
+    );
+    expect(prisma.outreachArtifact.update).not.toHaveBeenCalled();
+  });
+
+  it("also refuses a LinkedIn mock receipt (mock:true, provider:'linkedin') for a liveAllowed org", async () => {
+    process.env.OUTREACH_LIVE_FOR_ORGS = "org_1";
+    prisma.outreachArtifact.findUnique.mockResolvedValue(
+      artifactRow({
+        channel: OutreachChannel.LINKEDIN,
+        recipientRef: "urn:li:person:abc",
+        bodyText: "hi",
+        payload: { recipient_urn: "urn:li:person:abc", body: "hi" },
+      }),
+    );
+    vi.spyOn(LinkedInSendMessageTool.prototype, "execute").mockResolvedValueOnce({
+      success: true,
+      data: {
+        sent: false,
+        mock: true,
+        provider: "linkedin",
+        messageId: "mock_linkedin_1",
+      },
+    });
+
+    await expect(worker.processArtifact("art_1", "org_1")).rejects.toThrow(
+      /mock mode/,
+    );
+    expect(prisma.outreachArtifact.update).not.toHaveBeenCalled();
+    expect(ledger.messageSent).not.toHaveBeenCalled();
+  });
+
+  it("keeps the honest SIMULATED path for non-allowlisted orgs (mock result, no throw)", async () => {
+    // env unset → org_1 not allowlisted.
+    prisma.outreachArtifact.findUnique.mockResolvedValue(artifactRow());
+    prisma.outreachArtifact.update.mockResolvedValue(
+      artifactRow({ status: OutreachArtifactStatus.SIMULATED }),
+    );
+    vi.spyOn(SendEmailTool.prototype, "execute").mockResolvedValueOnce({
+      success: true,
+      data: { sent: false, mock: true, provider: "mock", messageId: "mock_3" },
+    });
+
+    await expect(worker.processArtifact("art_1", "org_1")).resolves.toBeUndefined();
+
+    expect(prisma.outreachArtifact.update).toHaveBeenCalledWith({
+      where: { id: "art_1" },
+      data: expect.objectContaining({
+        status: OutreachArtifactStatus.SIMULATED,
+        sendReceiptId: "mock_3",
+      }),
+    });
+  });
+});
+
+describe("SendOutreachWorker GL8a — per-org daily send cap", () => {
+  let prisma: ReturnType<typeof mockPrisma>;
+  let ledger: ReturnType<typeof mockLedger>;
+  let worker: SendOutreachWorker;
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    prisma = mockPrisma();
+    ledger = mockLedger();
+    const suppression = { isSuppressed: vi.fn(async () => false) } as unknown as Parameters<typeof SendOutreachWorker>[3];
+    worker = new SendOutreachWorker(
+      prisma as unknown as PrismaService,
+      mockQueue(),
+      mockIntegrations(),
+      suppression,
+      ledger,
+    );
+  });
+
+  afterEach(() => {
+    delete process.env.OUTREACH_LIVE_FOR_ORGS;
+    delete process.env.OUTREACH_DAILY_CAP_PER_ORG;
+  });
+
+  it("defers (returns cleanly, row stays APPROVED, no claim) when today's SENT count reaches the cap", async () => {
+    process.env.OUTREACH_LIVE_FOR_ORGS = "org_1";
+    prisma.outreachArtifact.findUnique.mockResolvedValue(artifactRow());
+    prisma.outreachArtifact.count.mockResolvedValue(40); // default cap
+    const sendSpy = vi.spyOn(SendEmailTool.prototype, "execute");
+
+    await expect(worker.processArtifact("art_1", "org_1")).resolves.toBeUndefined();
+
+    // No CAS claim, no dispatch, no terminal write — the row stays APPROVED
+    // with its old updatedAt so the reconcile sweep retries it tomorrow.
+    expect(prisma.outreachArtifact.updateMany).not.toHaveBeenCalled();
+    expect(prisma.outreachArtifact.update).not.toHaveBeenCalled();
+    expect(sendSpy).not.toHaveBeenCalled();
+    expect(ledger.messageSent).not.toHaveBeenCalled();
+  });
+
+  it("counts org-scoped SENT artifacts with sentAt >= start of the current UTC day", async () => {
+    process.env.OUTREACH_LIVE_FOR_ORGS = "org_1";
+    prisma.outreachArtifact.findUnique.mockResolvedValue(artifactRow());
+    prisma.outreachArtifact.count.mockResolvedValue(99);
+
+    await worker.processArtifact("art_1", "org_1");
+
+    expect(prisma.outreachArtifact.count).toHaveBeenCalledTimes(1);
+    const arg = prisma.outreachArtifact.count.mock.calls[0]?.[0] as {
+      where: {
+        orgId: string;
+        status: OutreachArtifactStatus;
+        sentAt: { gte: Date };
+      };
+    };
+    expect(arg.where.orgId).toBe("org_1");
+    expect(arg.where.status).toBe(OutreachArtifactStatus.SENT);
+    const cutoff = arg.where.sentAt.gte;
+    // Must be exactly midnight UTC of today.
+    expect(cutoff.getUTCHours()).toBe(0);
+    expect(cutoff.getUTCMinutes()).toBe(0);
+    expect(cutoff.getUTCSeconds()).toBe(0);
+    expect(cutoff.getUTCMilliseconds()).toBe(0);
+    const age = Date.now() - cutoff.getTime();
+    expect(age).toBeGreaterThanOrEqual(0);
+    expect(age).toBeLessThan(24 * 60 * 60 * 1000);
+  });
+
+  it("honors the OUTREACH_DAILY_CAP_PER_ORG override", async () => {
+    process.env.OUTREACH_LIVE_FOR_ORGS = "org_1";
+    process.env.OUTREACH_DAILY_CAP_PER_ORG = "2";
+    prisma.outreachArtifact.findUnique.mockResolvedValue(artifactRow());
+    prisma.outreachArtifact.count.mockResolvedValue(2);
+    const sendSpy = vi.spyOn(SendEmailTool.prototype, "execute");
+
+    await worker.processArtifact("art_1", "org_1");
+
+    expect(sendSpy).not.toHaveBeenCalled();
+    expect(prisma.outreachArtifact.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("proceeds to dispatch when under the cap", async () => {
+    process.env.OUTREACH_LIVE_FOR_ORGS = "org_1";
+    process.env.OUTREACH_DAILY_CAP_PER_ORG = "2";
+    prisma.outreachArtifact.findUnique.mockResolvedValue(artifactRow());
+    prisma.outreachArtifact.count.mockResolvedValue(1);
+    prisma.outreachArtifact.update.mockResolvedValue(
+      artifactRow({ status: OutreachArtifactStatus.SENT }),
+    );
+    const sendSpy = vi
+      .spyOn(SendEmailTool.prototype, "execute")
+      .mockResolvedValueOnce({
+        success: true,
+        data: { sent: true, provider: "gmail", messageId: "g_1" },
+      });
+
+    await worker.processArtifact("art_1", "org_1");
+
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    expect(prisma.outreachArtifact.update).toHaveBeenCalledWith({
+      where: { id: "art_1" },
+      data: expect.objectContaining({ status: OutreachArtifactStatus.SENT }),
+    });
+  });
+
+  it("does not run the cap query for non-allowlisted orgs (SIMULATED traffic is uncapped)", async () => {
+    // env unset → forced-mock path.
+    prisma.outreachArtifact.findUnique.mockResolvedValue(artifactRow());
+    prisma.outreachArtifact.update.mockResolvedValue(
+      artifactRow({ status: OutreachArtifactStatus.SIMULATED }),
+    );
+    vi.spyOn(SendEmailTool.prototype, "execute").mockResolvedValueOnce({
+      success: true,
+      data: { sent: false, mock: true, provider: "mock", messageId: "m_1" },
+    });
+
+    await worker.processArtifact("art_1", "org_1");
+
+    expect(prisma.outreachArtifact.count).not.toHaveBeenCalled();
+  });
+});
+
+describe("getDailySendCapPerOrg", () => {
+  it("defaults to 40 when the env var is unset or empty", () => {
+    expect(getDailySendCapPerOrg({})).toBe(40);
+    expect(getDailySendCapPerOrg({ OUTREACH_DAILY_CAP_PER_ORG: "" })).toBe(40);
+    expect(getDailySendCapPerOrg({ OUTREACH_DAILY_CAP_PER_ORG: "  " })).toBe(40);
+  });
+
+  it("parses a positive integer override", () => {
+    expect(getDailySendCapPerOrg({ OUTREACH_DAILY_CAP_PER_ORG: "5" })).toBe(5);
+    expect(getDailySendCapPerOrg({ OUTREACH_DAILY_CAP_PER_ORG: " 100 " })).toBe(100);
+  });
+
+  it("falls back to the default on zero, negative, or garbage (typo cannot disable the cap)", () => {
+    expect(getDailySendCapPerOrg({ OUTREACH_DAILY_CAP_PER_ORG: "0" })).toBe(40);
+    expect(getDailySendCapPerOrg({ OUTREACH_DAILY_CAP_PER_ORG: "-3" })).toBe(40);
+    expect(getDailySendCapPerOrg({ OUTREACH_DAILY_CAP_PER_ORG: "lots" })).toBe(40);
+  });
+});
+
+describe("SendOutreachWorker GL8b — recipient cooldown", () => {
+  let prisma: ReturnType<typeof mockPrisma>;
+  let ledger: ReturnType<typeof mockLedger>;
+  let worker: SendOutreachWorker;
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    prisma = mockPrisma();
+    ledger = mockLedger();
+    const suppression = { isSuppressed: vi.fn(async () => false) } as unknown as Parameters<typeof SendOutreachWorker>[3];
+    worker = new SendOutreachWorker(
+      prisma as unknown as PrismaService,
+      mockQueue(),
+      mockIntegrations(),
+      suppression,
+      ledger,
+    );
+  });
+
+  afterEach(() => {
+    delete process.env.OUTREACH_LIVE_FOR_ORGS;
+  });
+
+  it("flips to SUPPRESSED with a policy-skip reviewerNote when the recipient was SENT to within 14 days", async () => {
+    process.env.OUTREACH_LIVE_FOR_ORGS = "org_1";
+    prisma.outreachArtifact.findUnique.mockResolvedValue(artifactRow());
+    prisma.outreachArtifact.findFirst.mockResolvedValue({
+      id: "art_prev",
+      sentAt: new Date("2026-06-10T08:00:00Z"),
+    });
+    const sendSpy = vi.spyOn(SendEmailTool.prototype, "execute");
+
+    await expect(worker.processArtifact("art_1", "org_1")).resolves.toBeUndefined();
+
+    expect(prisma.outreachArtifact.update).toHaveBeenCalledWith({
+      where: { id: "art_1" },
+      data: expect.objectContaining({
+        status: OutreachArtifactStatus.SUPPRESSED,
+        reviewerNote: expect.stringContaining("policy-skip:"),
+      }),
+    });
+    const note = (
+      prisma.outreachArtifact.update.mock.calls[0]?.[0] as {
+        data: { reviewerNote: string };
+      }
+    ).data.reviewerNote;
+    expect(note).toContain("art_prev");
+    // No claim, no dispatch, no cap query (cooldown runs first), no evidence.
+    expect(prisma.outreachArtifact.updateMany).not.toHaveBeenCalled();
+    expect(sendSpy).not.toHaveBeenCalled();
+    expect(prisma.outreachArtifact.count).not.toHaveBeenCalled();
+    expect(ledger.messageSent).not.toHaveBeenCalled();
+  });
+
+  it("queries org-scoped SENT artifacts for the same recipientRef within the last 14 days", async () => {
+    prisma.outreachArtifact.findUnique.mockResolvedValue(artifactRow());
+    prisma.outreachArtifact.update.mockResolvedValue(
+      artifactRow({ status: OutreachArtifactStatus.SIMULATED }),
+    );
+    vi.spyOn(SendEmailTool.prototype, "execute").mockResolvedValueOnce({
+      success: true,
+      data: { sent: false, mock: true, provider: "mock", messageId: "m_1" },
+    });
+    const before = Date.now();
+
+    await worker.processArtifact("art_1", "org_1");
+
+    expect(prisma.outreachArtifact.findFirst).toHaveBeenCalledTimes(1);
+    const arg = prisma.outreachArtifact.findFirst.mock.calls[0]?.[0] as {
+      where: {
+        orgId: string;
+        recipientRef: string;
+        status: OutreachArtifactStatus;
+        sentAt: { gte: Date };
+      };
+    };
+    expect(arg.where.orgId).toBe("org_1");
+    expect(arg.where.recipientRef).toBe("dest@example.com");
+    expect(arg.where.status).toBe(OutreachArtifactStatus.SENT);
+    const windowMs = before - arg.where.sentAt.gte.getTime();
+    expect(windowMs).toBeGreaterThanOrEqual(14 * 24 * 60 * 60 * 1000 - 1_000);
+    expect(windowMs).toBeLessThan(14 * 24 * 60 * 60 * 1000 + 5_000);
+  });
+
+  it("proceeds normally when there is no recent send to that recipient", async () => {
+    process.env.OUTREACH_LIVE_FOR_ORGS = "org_1";
+    prisma.outreachArtifact.findUnique.mockResolvedValue(artifactRow());
+    prisma.outreachArtifact.findFirst.mockResolvedValue(null);
+    prisma.outreachArtifact.update.mockResolvedValue(
+      artifactRow({ status: OutreachArtifactStatus.SENT }),
+    );
+    const sendSpy = vi
+      .spyOn(SendEmailTool.prototype, "execute")
+      .mockResolvedValueOnce({
+        success: true,
+        data: { sent: true, provider: "gmail", messageId: "g_2" },
+      });
+
+    await worker.processArtifact("art_1", "org_1");
+
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    expect(prisma.outreachArtifact.update).toHaveBeenCalledWith({
+      where: { id: "art_1" },
+      data: expect.objectContaining({ status: OutreachArtifactStatus.SENT }),
+    });
+  });
+
+  it("skips the cooldown query when the artifact has no recipientRef", async () => {
+    prisma.outreachArtifact.findUnique.mockResolvedValue(
+      artifactRow({ recipientRef: null }),
+    );
+    prisma.outreachArtifact.update.mockResolvedValue(
+      artifactRow({ status: OutreachArtifactStatus.SIMULATED }),
+    );
+    vi.spyOn(SendEmailTool.prototype, "execute").mockResolvedValueOnce({
+      success: true,
+      data: { sent: false, mock: true, provider: "mock", messageId: "m_2" },
+    });
+
+    await worker.processArtifact("art_1", "org_1");
+
+    expect(prisma.outreachArtifact.findFirst).not.toHaveBeenCalled();
+  });
+});
+
 describe("SendOutreachWorker.reconcileStuckArtifacts (recovery sweep)", () => {
   let prisma: ReturnType<typeof mockPrisma>;
   let queue: ReturnType<typeof mockQueue>;
@@ -640,6 +1049,127 @@ describe("SendOutreachWorker.reconcileStuckArtifacts (recovery sweep)", () => {
     expect(before - approvedCutoff).toBeGreaterThanOrEqual(10 * 60_000 - 100);
     expect(before - approvedCutoff).toBeLessThan(10 * 60_000 + 1_000);
     expect(approvedCall.take).toBe(100);
+  });
+});
+
+describe("SendOutreachWorker reconcile sweep — completed-jobId cleanup (GL8a deferred sends)", () => {
+  let prisma: ReturnType<typeof mockPrisma>;
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    prisma = mockPrisma();
+  });
+
+  function buildWorker(queue: ReturnType<typeof mockQueue>): SendOutreachWorker {
+    const suppression = { isSuppressed: vi.fn(async () => false) } as unknown as Parameters<typeof SendOutreachWorker>[3];
+    return new SendOutreachWorker(
+      prisma as unknown as PrismaService,
+      queue,
+      mockIntegrations(),
+      suppression,
+      mockLedger(),
+    );
+  }
+
+  it("removes a COMPLETED job under the artifact id before re-enqueueing a stranded APPROVED row", async () => {
+    const job = fakeBullJob(true);
+    const bullQueue: FakeBullQueue = { getJob: vi.fn(async () => job) };
+    const queue = mockQueue(bullQueue);
+    const worker = buildWorker(queue);
+    prisma.outreachArtifact.findMany
+      .mockResolvedValueOnce([]) // SENDING pass
+      .mockResolvedValueOnce([artifactRow({ id: "art_deferred", orgId: "org_1" })]);
+
+    const result = await worker.reconcileStuckArtifacts();
+
+    expect(result).toEqual({ released: 0, requeued: 1 });
+    expect(bullQueue.getJob).toHaveBeenCalledWith("art_deferred");
+    expect(job.remove).toHaveBeenCalledTimes(1);
+    expect(queue.enqueue).toHaveBeenCalledWith({
+      artifactId: "art_deferred",
+      orgId: "org_1",
+    });
+    // Removal must happen before the re-enqueue, or add() dedups against the
+    // completed job and the deferred send starves until removeOnComplete.
+    const removeOrder = job.remove.mock.invocationCallOrder[0];
+    const enqueueOrder = queue.enqueue.mock.invocationCallOrder[0];
+    expect(removeOrder).toBeLessThan(enqueueOrder);
+  });
+
+  it("leaves non-completed jobs alone (BullMQ owns active/failed/delayed lifecycles)", async () => {
+    const job = fakeBullJob(false);
+    const bullQueue: FakeBullQueue = { getJob: vi.fn(async () => job) };
+    const queue = mockQueue(bullQueue);
+    const worker = buildWorker(queue);
+    prisma.outreachArtifact.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([artifactRow({ id: "art_live_job", orgId: "org_1" })]);
+
+    await worker.reconcileStuckArtifacts();
+
+    expect(job.remove).not.toHaveBeenCalled();
+    expect(queue.enqueue).toHaveBeenCalledWith({
+      artifactId: "art_live_job",
+      orgId: "org_1",
+    });
+  });
+
+  it("just enqueues when no job exists under the id", async () => {
+    const bullQueue: FakeBullQueue = { getJob: vi.fn(async () => undefined) };
+    const queue = mockQueue(bullQueue);
+    const worker = buildWorker(queue);
+    prisma.outreachArtifact.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([artifactRow({ id: "art_no_job", orgId: "org_1" })]);
+
+    await worker.reconcileStuckArtifacts();
+
+    expect(queue.enqueue).toHaveBeenCalledWith({
+      artifactId: "art_no_job",
+      orgId: "org_1",
+    });
+  });
+
+  it("a getJob failure does not block the re-enqueue (cleanup is best-effort)", async () => {
+    const bullQueue: FakeBullQueue = {
+      getJob: vi.fn(async () => {
+        throw new Error("redis blip");
+      }),
+    };
+    const queue = mockQueue(bullQueue);
+    const worker = buildWorker(queue);
+    prisma.outreachArtifact.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([artifactRow({ id: "art_blip", orgId: "org_1" })]);
+
+    const result = await worker.reconcileStuckArtifacts();
+
+    expect(result).toEqual({ released: 0, requeued: 1 });
+    expect(queue.enqueue).toHaveBeenCalledWith({
+      artifactId: "art_blip",
+      orgId: "org_1",
+    });
+  });
+
+  it("also clears completed jobs on the stale-SENDING release path", async () => {
+    const job = fakeBullJob(true);
+    const bullQueue: FakeBullQueue = { getJob: vi.fn(async () => job) };
+    const queue = mockQueue(bullQueue);
+    const worker = buildWorker(queue);
+    prisma.outreachArtifact.findMany
+      .mockResolvedValueOnce([
+        artifactRow({ id: "art_stale", orgId: "org_1", status: OutreachArtifactStatus.SENDING }),
+      ])
+      .mockResolvedValueOnce([]);
+
+    const result = await worker.reconcileStuckArtifacts();
+
+    expect(result).toEqual({ released: 1, requeued: 1 });
+    expect(job.remove).toHaveBeenCalledTimes(1);
+    expect(queue.enqueue).toHaveBeenCalledWith({
+      artifactId: "art_stale",
+      orgId: "org_1",
+    });
   });
 });
 

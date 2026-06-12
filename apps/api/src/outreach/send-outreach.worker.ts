@@ -17,7 +17,7 @@ import {
   OutreachSendQueueService,
   OUTREACH_SEND_QUEUE_NAME,
 } from "./outreach-send-queue.service";
-import { SendEmailTool } from "../runtime/tools/send-email.tool";
+import { SendEmailTool, isMockModeResult } from "../runtime/tools/send-email.tool";
 import { LinkedInSendMessageTool } from "../runtime/tools/linkedin-send-message.tool";
 import {
   IntegrationCredentials,
@@ -78,6 +78,43 @@ const APPROVED_REQUEUE_AGE_MS = 10 * 60_000;
 const SENDING_STALE_AGE_MS = 15 * 60_000;
 const RECONCILE_BATCH_LIMIT = 100;
 
+// GL8a: per-org daily live-send cap. Counts SENT artifacts with sentAt in the
+// current UTC day; over-cap artifacts are deferred (left APPROVED, job
+// completes) — never terminal-failed — and the reconcile sweep retries them
+// until the UTC-midnight reset clears headroom.
+const DEFAULT_DAILY_SEND_CAP_PER_ORG = 40;
+
+// GL8b: per-recipient cooldown. A recipient SENT to within this window (same
+// org) is not mailed again — the artifact terminates as SUPPRESSED with a
+// "policy-skip:" reviewerNote marker (no new enum value; SUPPRESSED already
+// reads correctly as "we chose not to contact this person").
+const RECIPIENT_COOLDOWN_DAYS = 14;
+const RECIPIENT_COOLDOWN_MS = RECIPIENT_COOLDOWN_DAYS * 24 * 60 * 60 * 1000;
+
+/**
+ * Resolves the per-org daily send cap. OUTREACH_DAILY_CAP_PER_ORG overrides
+ * the default (40); non-numeric or non-positive values fall back to the
+ * default so a typo can never disable the cap (fail-closed).
+ */
+export function getDailySendCapPerOrg(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  const raw = env.OUTREACH_DAILY_CAP_PER_ORG?.trim();
+  if (!raw) return DEFAULT_DAILY_SEND_CAP_PER_ORG;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return DEFAULT_DAILY_SEND_CAP_PER_ORG;
+  }
+  return parsed;
+}
+
+/** Midnight UTC of the day containing `now` — the daily-cap window floor. */
+function startOfUtcDay(now: Date): Date {
+  return new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
+  );
+}
+
 @Injectable()
 export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(SendOutreachWorker.name);
@@ -102,8 +139,9 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
     // Build the LinkedIn tool with the optional service + ledger so worker-
     // dispatched sends use the same code path as in-loop agent calls. When
     // LinkedInService is absent (e.g. dev with no IntegrationsModule wiring),
-    // the tool returns a mock receipt and the artifact gets flipped to SENT
-    // with a synthetic mock id — same shape as the email channel's fallback.
+    // the tool returns a mock receipt — for non-allowlisted orgs that ends as
+    // SIMULATED; for liveAllowed orgs the GL2 guard in processArtifact treats
+    // it as a failed dispatch (mock mode must never be recorded as SENT).
     this.linkedinSendTool = new LinkedInSendMessageTool(
       this.linkedinService,
       this.evidenceLedger,
@@ -232,12 +270,19 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Core idempotent processing path. Re-reads the artifact, aborts unless it
-   * is still APPROVED, CAS-claims it (APPROVED → SENDING) so concurrent
-   * workers cannot double-dispatch, sends, and finishes the claim:
+   * is still APPROVED, runs the policy gates (suppression list, GL8b
+   * recipient cooldown, GL8a daily cap), CAS-claims it (APPROVED → SENDING)
+   * so concurrent workers cannot double-dispatch, sends, and finishes:
    *
    *   live send succeeded   → SENT
    *   forced-mock succeeded → SIMULATED (mock receipt kept for the audit
    *                           trail; never counted as delivered mail)
+   *   mock result while live→ FAILURE (GL2): claim released, throw — a mock
+   *                           fallback for a liveAllowed org is a delivery
+   *                           outage and must never be recorded SENT
+   *   recipient in cooldown → SUPPRESSED with "policy-skip:" reviewerNote
+   *   daily cap reached     → deferred: row left APPROVED (no claim), the
+   *                           reconcile sweep retries after midnight UTC
    *   dispatch failed       → claim released back to APPROVED, then rethrow
    *                           so BullMQ's retry envelope re-picks it up.
    */
@@ -287,6 +332,71 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
       }
     }
 
+    // GL8b recipient cooldown: if this org already real-SENT to the same
+    // recipient within the cooldown window, do not mail them again. This is
+    // a policy skip, not a failure — reuse SUPPRESSED with a "policy-skip:"
+    // reviewerNote marker so the UI can distinguish it from list-based
+    // suppression and from auto-failed rejections. Only real sends count:
+    // the query filters on status=SENT + sentAt, which SIMULATED rows never
+    // set, so dry-run orgs are unaffected.
+    if (artifact.recipientRef) {
+      const cooldownFloor = new Date(Date.now() - RECIPIENT_COOLDOWN_MS);
+      const recentSend = await this.prisma.outreachArtifact.findFirst({
+        where: {
+          orgId: artifact.orgId,
+          recipientRef: artifact.recipientRef,
+          status: OutreachArtifactStatus.SENT,
+          sentAt: { gte: cooldownFloor },
+        },
+        select: { id: true, sentAt: true },
+      });
+      if (recentSend) {
+        await this.prisma.outreachArtifact.update({
+          where: { id: artifactId },
+          data: {
+            status: OutreachArtifactStatus.SUPPRESSED,
+            reviewerNote:
+              `policy-skip: recipient contacted within ${RECIPIENT_COOLDOWN_DAYS}-day cooldown ` +
+              `(last SENT ${recentSend.sentAt?.toISOString() ?? "<unknown>"} via artifact ${recentSend.id})`.slice(
+                0,
+                1000,
+              ),
+          },
+        });
+        this.logger.log(
+          `Artifact ${artifactId} policy-skipped — recipient ${artifact.recipientRef} was SENT to within the last ${RECIPIENT_COOLDOWN_DAYS} days (org ${artifact.orgId})`,
+        );
+        return;
+      }
+    }
+
+    // Evaluate the live-send gate once so the dispatch branch and the
+    // terminal status cannot disagree about whether this was a real send.
+    const liveAllowed = isLiveSendAllowedForOrg(artifact.orgId);
+
+    // GL8a per-org daily cap — live sends only (SIMULATED traffic never sets
+    // sentAt, so capping it would only stall demos). Over-cap is a DEFERRAL:
+    // return without claiming so the row stays APPROVED with its old
+    // updatedAt, and the reconcile sweep re-enqueues it (clearing the
+    // completed jobId first — see requeueArtifact) until the UTC day rolls
+    // over and headroom returns. Never terminal-fail an over-cap artifact.
+    if (liveAllowed) {
+      const cap = getDailySendCapPerOrg();
+      const sentToday = await this.prisma.outreachArtifact.count({
+        where: {
+          orgId: artifact.orgId,
+          status: OutreachArtifactStatus.SENT,
+          sentAt: { gte: startOfUtcDay(new Date()) },
+        },
+      });
+      if (sentToday >= cap) {
+        this.logger.warn(
+          `Daily send cap reached for org ${artifact.orgId} (${sentToday}/${cap} SENT today, UTC) — deferring artifact ${artifactId}; row stays APPROVED for the reconcile sweep to retry after midnight UTC`,
+        );
+        return;
+      }
+    }
+
     // CAS claim: APPROVED → SENDING. updateMany returns a count instead of
     // throwing, so a concurrent worker that lost the race sees count === 0
     // and skips cleanly. This is what makes dispatch single-owner — the
@@ -302,10 +412,6 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    // Evaluate the live-send gate once so the dispatch branch and the
-    // terminal status cannot disagree about whether this was a real send.
-    const liveAllowed = isLiveSendAllowedForOrg(artifact.orgId);
-
     let result: ToolResult;
     try {
       result = await this.dispatch(artifact, liveAllowed);
@@ -320,6 +426,24 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
       // records the failure and applies retry/backoff.
       await this.releaseClaim(artifactId);
       throw new Error(result.error ?? "send failed (no error message)");
+    }
+
+    // GL2 — the worst lie in the system: when liveAllowed but every
+    // credential failed to load (loadIntegrations catch-skip, expired token,
+    // mock_ placeholder creds), the send tools "succeed" in mock mode. That
+    // is a delivery OUTAGE, not a delivery. Recording SENT+sentAt here would
+    // tell the customer their email went out when nothing left the building.
+    // Treat it exactly like a failed dispatch: release the claim and throw so
+    // BullMQ's retry envelope re-attempts and, at exhaustion, the failed
+    // handler marks the artifact terminal auto-failed. Non-allowlisted orgs
+    // never reach this branch — their mock results stay on the honest
+    // SIMULATED path below.
+    if (liveAllowed && isMockModeResult(result)) {
+      await this.releaseClaim(artifactId);
+      throw new Error(
+        `live send required for org ${artifact.orgId} but dispatch fell back to mock mode ` +
+          `(provider=${extractProvider(result) ?? "<unknown>"}) — no usable credential; refusing to record SENT`,
+      );
     }
 
     const receiptId = extractReceiptId(result);
@@ -591,10 +715,7 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
         // findMany and the CAS — leave it alone.
         if (releasedNow.count === 0) continue;
         released++;
-        await this.queue.enqueue({
-          artifactId: artifact.id,
-          orgId: artifact.orgId,
-        });
+        await this.requeueArtifact(artifact.id, artifact.orgId);
         requeued++;
       } catch (err) {
         this.logger.warn(
@@ -615,10 +736,7 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
     });
     for (const artifact of staleApproved) {
       try {
-        await this.queue.enqueue({
-          artifactId: artifact.id,
-          orgId: artifact.orgId,
-        });
+        await this.requeueArtifact(artifact.id, artifact.orgId);
         requeued++;
       } catch (err) {
         this.logger.warn(
@@ -630,6 +748,40 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
     }
 
     return { released, requeued };
+  }
+
+  /**
+   * Re-enqueue an artifact for the reconcile sweep, first clearing a stale
+   * COMPLETED BullMQ job under the same id. jobId == artifactId for dedup,
+   * but a cap-deferred send (GL8a) completes its job while the row stays
+   * APPROVED — and queue.add() against a completed jobId is a silent no-op
+   * until removeOnComplete prunes it (up to 24h). Removing the completed job
+   * first lets the deferred retry actually enqueue. Jobs in any other state
+   * (active / delayed / waiting / failed) are left alone: BullMQ owns their
+   * lifecycle and the add() dedup is then the behavior we want. In-memory
+   * mode (getBullQueue() === null) skips straight to enqueue, which is a
+   * no-op there anyway — the poller reads the DB directly.
+   */
+  private async requeueArtifact(
+    artifactId: string,
+    orgId: string,
+  ): Promise<void> {
+    const bullQueue = this.queue.getBullQueue();
+    if (bullQueue) {
+      try {
+        const existing = await bullQueue.getJob(artifactId);
+        if (existing && (await existing.isCompleted())) {
+          await existing.remove();
+        }
+      } catch (err) {
+        this.logger.warn(
+          `Failed to clear completed job for artifact ${artifactId} before re-enqueue: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+    await this.queue.enqueue({ artifactId, orgId });
   }
 
   /**
