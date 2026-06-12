@@ -156,3 +156,89 @@ export function registerCanonicalMetrics(svc: MetricsService): void {
     "Count of evaluator score floor breaches by evaluator and org.",
   );
 }
+
+// ── Queue depth wiring (GO-LIVE GL9) ──────────────────────────────────────
+//
+// The bullmq_queue_depth gauge existed since audit P0 #15 but nothing set it.
+// The queue services (graph/graph-run-queue.service.ts and
+// outreach/outreach-send-queue.service.ts) now poll their BullMQ counts on a
+// timer and publish through `publishQueueDepth` below. The shared types live
+// HERE (not in graph/ or outreach/) so neither queue service has to import
+// the other's domain and the health module can consume the same shape — see
+// outreach/suppression.module.ts for why we keep cross-domain import edges
+// minimal (boot-cycle incident, 2026-06-12).
+
+/** Per-state job counts as returned by BullMQ's Queue.getJobCounts(). */
+export interface QueueDepthCounts {
+  readonly waiting: number;
+  readonly active: number;
+  readonly delayed: number;
+  readonly failed: number;
+  readonly completed: number;
+}
+
+/** Counts plus consumer attachment info, for the worker health heuristic. */
+export interface QueueStats extends QueueDepthCounts {
+  readonly queueName: string;
+  /** Number of BullMQ consumers attached to the queue (Queue.getWorkers() —
+   * fleet-wide via Redis CLIENT LIST, not per-process). */
+  readonly workerCount: number;
+}
+
+/**
+ * Stable log marker for the depth-based fallback alert. Azure Container Apps
+ * has no managed Prometheus scrape of /api/metrics, so scripts/setup-alerts.sh
+ * creates a Log Analytics scheduled-query alert matching this exact token in
+ * container console logs. Do not reword without updating that script.
+ */
+export const QUEUE_DEPTH_HIGH_LOG_MARKER = "QUEUE_DEPTH_HIGH";
+
+export const DEFAULT_QUEUE_DEPTH_ALERT_THRESHOLD = 25;
+
+/** waiting+active threshold above which the poller emits the alert marker. */
+export function queueDepthAlertThreshold(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  const raw = env.BULLMQ_QUEUE_DEPTH_ALERT_THRESHOLD;
+  const parsed = raw === undefined || raw === "" ? NaN : Number(raw);
+  return Number.isFinite(parsed) && parsed > 0
+    ? parsed
+    : DEFAULT_QUEUE_DEPTH_ALERT_THRESHOLD;
+}
+
+const QUEUE_DEPTH_STATES: ReadonlyArray<keyof QueueDepthCounts> = [
+  "waiting",
+  "active",
+  "delayed",
+  "failed",
+  "completed",
+];
+
+/**
+ * Publishes one bullmq_queue_depth series per (queue, state) and emits the
+ * QUEUE_DEPTH_HIGH log marker when waiting+active reaches the alert
+ * threshold. `set()` is idempotent per label-set, so multiple service
+ * instances refreshing the same queue (GraphModule + HealthModule each
+ * provide a GraphRunQueueService) converge instead of double-counting.
+ */
+export function publishQueueDepth(
+  svc: MetricsService,
+  stats: QueueStats,
+  opts: { logger?: Logger; alertThreshold?: number } = {},
+): void {
+  for (const state of QUEUE_DEPTH_STATES) {
+    svc.set(
+      METRIC.BULLMQ_QUEUE_DEPTH,
+      { queue: stats.queueName, state },
+      stats[state],
+    );
+  }
+  const backlog = stats.waiting + stats.active;
+  const threshold = opts.alertThreshold ?? queueDepthAlertThreshold();
+  if (backlog >= threshold) {
+    opts.logger?.warn(
+      `${QUEUE_DEPTH_HIGH_LOG_MARKER} queue=${stats.queueName} waiting=${stats.waiting} ` +
+        `active=${stats.active} backlog=${backlog} threshold=${threshold} workers=${stats.workerCount}`,
+    );
+  }
+}
