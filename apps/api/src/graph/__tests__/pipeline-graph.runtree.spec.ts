@@ -18,6 +18,10 @@ describe("pipeline-graph parentRunId propagation (audit P0 #12)", () => {
   const orgId = "org_runtree";
   const icpId = "icp_runtree";
   const ROOT = "root-test-xyz";
+  // Inside the press_mention freshness window (90d) so the brief grounds —
+  // the in-code evidence gate (audit B3) refuses ungrounded briefs BEFORE any
+  // llm.chat call, which would make this propagation spec vacuous.
+  const FRESH_SIGNAL_DATE = new Date(Date.now() - 5 * 86400000).toISOString().slice(0, 10);
   let chatCalls: Array<{ messages: ChatMessage[]; options?: ChatOptions }>;
   let deps: Parameters<typeof buildPipelineGraph>[0];
 
@@ -30,7 +34,9 @@ describe("pipeline-graph parentRunId propagation (audit P0 #12)", () => {
         "Hi Alice, noticed Acme is at 50-200 headcount and scaling SaaS. " +
         "Curious how you handle SDR pipeline. Worth a 15-min look?",
       refusal: null,
-      groundedness_self_check: { cited_fact_ids: ["F1"], unsupported_claims: [] },
+      // S1 is the fresh press_mention signal below; citing it (plus the F1
+      // firmographic) satisfies the QA citation gate so the draft passes QA.
+      groundedness_self_check: { cited_fact_ids: ["F1", "S1"], unsupported_claims: [] },
     });
 
     deps = {
@@ -89,7 +95,21 @@ describe("pipeline-graph parentRunId propagation (audit P0 #12)", () => {
           }),
         },
         evidenceEvent: {
-          findMany: async () => [],
+          // One fresh, dated, non-mock signal so `hasGroundingSignal` is true
+          // and the SDR drafter actually reaches llm.chat (see audit B3 gate).
+          findMany: async () => [
+            {
+              kind: "press_mention",
+              payload: {
+                date: FRESH_SIGNAL_DATE,
+                source: "https://news.example.com/acme-raises",
+                outlet: "news.example.com",
+                headline: "Acme raises $20M",
+                confidence: 0.6,
+              },
+              createdAt: new Date(),
+            },
+          ],
         },
         leadScore: {
           findMany: async () => [{ personId: "p1", score: 92 }],

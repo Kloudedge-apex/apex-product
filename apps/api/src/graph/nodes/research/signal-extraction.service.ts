@@ -49,6 +49,14 @@ const SEARCH_CONTEXT: ToolContext = {
   integrations: new Map(),
 };
 
+/**
+ * Hosts that can never anchor a live trigger. The company's OWN domain is
+ * excluded separately (self-published content is not a third-party trigger);
+ * these social platforms are excluded because their hits are profile/feed
+ * noise, not dated third-party coverage a cold email may cite.
+ */
+const EXCLUDED_TRIGGER_PLATFORMS = ["linkedin.com", "twitter.com", "x.com", "facebook.com"] as const;
+
 export class SignalExtractionService {
   constructor(private readonly webSearch: WebSearchExecutor) {}
 
@@ -101,12 +109,31 @@ export class SignalExtractionService {
   /**
    * One live web_search per company → at most one `press_mention`. Mock or
    * failed search yields NO signal (mock-never-a-fact) → the lead refuses.
+   * The search requests the NEWS vertical (`vertical: "news"`): Serper's news
+   * endpoint (and Tavily's news topic) return results with their own `date`
+   * far more reliably than organic search, so dated triggers actually land
+   * instead of every hit being rejected as undated.
+   *
+   * Citation contract (audit B3): the trigger's `date` is the RESULT'S OWN
+   * publication date (`date` / `published_date` on the result, as provided by
+   * the Serper news vertical) — never a stamp of the search day, which the
+   * pre-keystone code applied and which fabricated "recent" triggers out of
+   * years-old pages. `now` only anchors relative dates ("2 days ago").
+   * Fail-closed rejections, each of which yields NO signal:
+   *   - undated results (no parseable date → nothing citable as a trigger)
+   *   - results whose URL does not parse (no attributable outlet)
+   *   - hits on the company's own domain (self-published ≠ third-party trigger)
+   *   - hits on social platforms (linkedin/twitter/x/facebook feed noise)
    */
   async extractLiveTrigger(company: CompanyForExtraction, now: Date): Promise<SignalInput[]> {
     let result;
     try {
       result = await this.webSearch.execute(
-        { query: `"${company.name}" funding OR launches OR partnership OR hires`, max_results: 3 },
+        {
+          query: `"${company.name}" funding OR launches OR partnership OR hires`,
+          max_results: 3,
+          vertical: "news",
+        },
         SEARCH_CONTEXT,
       );
     } catch {
@@ -115,30 +142,48 @@ export class SignalExtractionService {
     if (!result || !result.success || isMocked(result.data)) return [];
     const data = result.data as { results?: Array<Record<string, unknown>> };
     const results = Array.isArray(data?.results) ? data.results : [];
-    const top = results.find(
-      (r) => !isMocked(r) && typeof r.url === "string" && (r.url as string).length > 0,
-    );
-    if (!top || typeof top.url !== "string") return [];
-    const title = typeof top.title === "string" ? top.title : "Recent mention";
-    return [
-      {
-        kind: "press_mention",
-        source: top.url,
-        date: now.toISOString().slice(0, 10),
-        summary: title,
-        confidence: 0.6,
-        fields: { outlet: hostname(top.url), headline: title },
-      },
-    ];
+    for (const r of results) {
+      if (isMocked(r) || typeof r.url !== "string" || r.url.length === 0) continue;
+      const host = parseHostname(r.url);
+      if (!host || isExcludedTriggerHost(host, company.domain)) continue;
+      const date = toTriggerDate(r.date ?? r.published_date, now);
+      if (!date) continue; // undated → never cited; search-day stamping is forbidden
+      const title = typeof r.title === "string" ? r.title : "Recent mention";
+      return [
+        {
+          kind: "press_mention",
+          source: r.url,
+          date,
+          summary: title,
+          confidence: 0.6,
+          fields: { outlet: host, headline: title },
+        },
+      ];
+    }
+    return [];
   }
 }
 
-function hostname(url: string): string {
+/** Strictly-parsed lowercase hostname, or null — an unparseable URL has no attributable outlet. */
+function parseHostname(url: string): string | null {
   try {
-    return new URL(url).hostname;
+    return new URL(url).hostname.toLowerCase();
   } catch {
-    return url;
+    return null;
   }
+}
+
+/**
+ * True if `host` may not anchor a live trigger: it is (a subdomain of) the
+ * company's own domain or one of the excluded social platforms. Matching is
+ * exact-or-dot-suffix so "x.com"/"www.x.com" are excluded but "xerox.com" and
+ * "newsx.com" are not.
+ */
+function isExcludedTriggerHost(host: string, companyDomain: string): boolean {
+  const matches = (domain: string): boolean => host === domain || host.endsWith(`.${domain}`);
+  const own = companyDomain.trim().toLowerCase();
+  if (own.length > 0 && matches(own)) return true;
+  return EXCLUDED_TRIGGER_PLATFORMS.some(matches);
 }
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -155,4 +200,61 @@ function toIsoDate(raw: unknown): string | null {
   const candidate = raw.slice(0, 10);
   if (!ISO_DATE.test(candidate)) return null;
   return Number.isNaN(Date.parse(`${candidate}T00:00:00Z`)) ? null : candidate;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+const RELATIVE_DATE = /^(\d{1,3})\s+(second|minute|hour|day|week|month)s?\s+ago$/i;
+const RELATIVE_UNIT_MS: Record<string, number> = {
+  second: 1000,
+  minute: 60 * 1000,
+  hour: 60 * 60 * 1000,
+  day: DAY_MS,
+  week: 7 * DAY_MS,
+  month: 30 * DAY_MS,
+};
+
+// "Jun 5, 2026" / "Jun. 5, 2026" — the Serper absolute-date idiom for older hits.
+const ABSOLUTE_DATE = /^([A-Za-z]{3})\.?\s+(\d{1,2}),\s+(\d{4})$/;
+const MONTH_NUMBERS: Record<string, string | undefined> = {
+  jan: "01", feb: "02", mar: "03", apr: "04", may: "05", jun: "06",
+  jul: "07", aug: "08", sep: "09", oct: "10", nov: "11", dec: "12",
+};
+
+/**
+ * Normalize a live search result's own date field to strict ISO `yyyy-mm-dd`,
+ * or null (→ the result is rejected as undated; it is NEVER stamped with the
+ * search day). Accepted forms, everything else rejected fail-closed:
+ *   - strict ISO date / ISO datetime (via `toIsoDate`)
+ *   - Serper-news relative dates: "3 hours ago", "2 days ago", "1 month ago",
+ *     anchored on `now` (weeks = 7 days, months = 30 days — an approximation
+ *     that only feeds freshness gating and citation display)
+ *   - Serper absolute dates: "Jun 5, 2026", parsed via an explicit month map —
+ *     never a blind `Date.parse` of a free-form string, for the same
+ *     mis-dating reason documented on `extractFromScraped`.
+ */
+function toTriggerDate(raw: unknown, now: Date): string | null {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+
+  const iso = toIsoDate(trimmed);
+  if (iso) return iso;
+
+  const relative = trimmed.match(RELATIVE_DATE);
+  if (relative) {
+    const unitMs = RELATIVE_UNIT_MS[relative[2].toLowerCase()];
+    return new Date(now.getTime() - Number(relative[1]) * unitMs).toISOString().slice(0, 10);
+  }
+
+  const absolute = trimmed.match(ABSOLUTE_DATE);
+  if (absolute) {
+    const month = MONTH_NUMBERS[absolute[1].toLowerCase()];
+    if (!month) return null;
+    const candidate = `${absolute[3]}-${month}-${absolute[2].padStart(2, "0")}`;
+    // Same round-trip guard as toIsoDate: rejects in-range-looking but invalid
+    // dates (e.g. "Feb 30, 2026").
+    return Number.isNaN(Date.parse(`${candidate}T00:00:00Z`)) ? null : candidate;
+  }
+
+  return null;
 }

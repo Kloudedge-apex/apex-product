@@ -5,17 +5,29 @@ import {
   Param,
   Body,
   Query,
+  Req,
   BadRequestException,
+  UnauthorizedException,
+  UseGuards,
 } from "@nestjs/common";
+import { Request } from "express";
 import { OutreachArtifactStatus } from "@prisma/client";
 import { OrgId } from "../common/org-context.decorator";
+import { AdminOrManagerGuard } from "../common/admin-or-manager.guard";
 import { OutreachArtifactsService } from "./outreach-artifacts.service";
 
 interface ApproveBody {
+  /**
+   * @deprecated Ignored since audit B8 — attribution is derived from the
+   * authenticated principal (request.clerkUserId set by OrgScopeGuard), never
+   * from the body, so the audit trail cannot be forged. Tolerated so older FE
+   * builds that still send it don't break.
+   */
   reviewedBy?: string;
 }
 
 interface RejectBody {
+  /** @deprecated Ignored since audit B8 — see {@link ApproveBody.reviewedBy}. */
   reviewedBy?: string;
   reviewerNote?: string;
 }
@@ -49,32 +61,49 @@ export class OutreachArtifactsController {
     return this.artifacts.get(orgId, id);
   }
 
+  // Audit B11: approve flips an artifact onto the live send path, so both
+  // review verbs carry the same admin/manager gate as the raw Gmail send
+  // endpoint (integrations/gmail/gmail.controller.ts) — a regular member must
+  // not be able to trigger outbound.
   @Post("outreach-artifacts/:id/approve")
+  @UseGuards(AdminOrManagerGuard)
   approve(
     @OrgId() orgId: string | undefined,
     @Param("id") id: string,
-    @Body() body: ApproveBody,
+    @Body() _body: ApproveBody,
+    @Req() req: Request,
   ) {
     if (!orgId) throw new BadRequestException("orgId required");
-    const reviewedBy = body?.reviewedBy?.trim();
-    if (!reviewedBy) {
-      throw new BadRequestException("reviewedBy is required");
-    }
+    const reviewedBy = this.reviewerFromRequest(req);
     return this.artifacts.approve(orgId, id, reviewedBy);
   }
 
   @Post("outreach-artifacts/:id/reject")
+  @UseGuards(AdminOrManagerGuard)
   reject(
     @OrgId() orgId: string | undefined,
     @Param("id") id: string,
     @Body() body: RejectBody,
+    @Req() req: Request,
   ) {
     if (!orgId) throw new BadRequestException("orgId required");
-    const reviewedBy = body?.reviewedBy?.trim();
-    if (!reviewedBy) {
-      throw new BadRequestException("reviewedBy is required");
-    }
+    const reviewedBy = this.reviewerFromRequest(req);
     return this.artifacts.reject(orgId, id, reviewedBy, body?.reviewerNote);
+  }
+
+  /**
+   * Server-derived reviewer attribution (audit B8). Reads the Clerk user id
+   * that OrgScopeGuard stamped on the request after JWT verification — the
+   * same principal source suppression.controller.ts uses. Body-supplied
+   * `reviewedBy` is deliberately ignored: it was client-controlled and made
+   * the review audit trail forgeable.
+   */
+  private reviewerFromRequest(req: Request): string {
+    const clerkUserId = (req as unknown as Record<string, unknown>).clerkUserId;
+    if (typeof clerkUserId !== "string" || clerkUserId.length === 0) {
+      throw new UnauthorizedException("Missing authenticated user context");
+    }
+    return clerkUserId;
   }
 }
 

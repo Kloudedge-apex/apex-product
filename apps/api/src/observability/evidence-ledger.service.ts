@@ -290,7 +290,18 @@ export class EvidenceLedgerService {
     readonly orgId: string;
     readonly runId?: string | null;
     readonly artifactId: string;
-    readonly status: "DRAFT" | "PENDING_REVIEW" | "APPROVED" | "REJECTED" | "SENT" | "SUPPRESSED";
+    // Keep in sync with ArtifactPersistedPayload.status (the full Prisma
+    // OutreachArtifactStatus) — callers pass `artifact.status` straight off
+    // the row, so a missing member here is a compile error at the call site.
+    readonly status:
+      | "DRAFT"
+      | "PENDING_REVIEW"
+      | "APPROVED"
+      | "REJECTED"
+      | "SENT"
+      | "SUPPRESSED"
+      | "SENDING"
+      | "SIMULATED";
     readonly channel: "EMAIL" | "LINKEDIN" | "HUBSPOT_NOTE";
   }): Promise<void> {
     return this.append({

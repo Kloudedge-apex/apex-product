@@ -1,11 +1,16 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { BadRequestException, NotFoundException } from "@nestjs/common";
+import {
+  BadRequestException,
+  NotFoundException,
+  ServiceUnavailableException,
+} from "@nestjs/common";
 import {
   OutreachArtifactStatus,
   OutreachChannel,
   type OutreachArtifact,
 } from "@prisma/client";
 import { OutreachArtifactsService } from "../outreach-artifacts.service";
+import { OutreachSendQueueService } from "../outreach-send-queue.service";
 import { PrismaService } from "../../prisma/prisma.service";
 import { LangSmithService } from "../../observability/langsmith.service";
 
@@ -16,6 +21,16 @@ type LangSmithMock = Pick<LangSmithService, "addRunToDataset"> & {
 function mockLangsmith(impl?: () => Promise<void>): LangSmithMock {
   return {
     addRunToDataset: vi.fn(impl ?? (() => Promise.resolve())),
+  };
+}
+
+type SendQueueMock = Pick<OutreachSendQueueService, "enqueue"> & {
+  enqueue: ReturnType<typeof vi.fn>;
+};
+
+function mockSendQueue(impl?: () => Promise<void>): SendQueueMock {
+  return {
+    enqueue: vi.fn(impl ?? (() => Promise.resolve())),
   };
 }
 
@@ -210,6 +225,213 @@ describe("OutreachArtifactsService.approve / reject", () => {
       artifactRow({ status: OutreachArtifactStatus.SENT }),
     );
     await expect(service.reject("org_1", "art_1", "user_x")).rejects.toThrow(BadRequestException);
+  });
+});
+
+describe("OutreachArtifactsService.approve — enqueue failure surfacing (audit B11)", () => {
+  let prisma: ReturnType<typeof mockPrisma>;
+
+  beforeEach(() => {
+    prisma = mockPrisma();
+    prisma.outreachArtifact.findUnique.mockResolvedValue(artifactRow());
+    prisma.outreachArtifact.update.mockResolvedValue(
+      artifactRow({ status: OutreachArtifactStatus.APPROVED, reviewedBy: "user_x" }),
+    );
+  });
+
+  it("returns the updated artifact when enqueue succeeds", async () => {
+    const sendQueue = mockSendQueue();
+    const service = new OutreachArtifactsService(
+      prisma,
+      undefined,
+      sendQueue as unknown as OutreachSendQueueService,
+    );
+    const out = await service.approve("org_1", "art_1", "user_x");
+    expect(out.status).toBe(OutreachArtifactStatus.APPROVED);
+    expect(sendQueue.enqueue).toHaveBeenCalledWith({
+      artifactId: "art_1",
+      orgId: "org_1",
+    });
+  });
+
+  it("rethrows as 503 when enqueue fails — no silent swallow", async () => {
+    const sendQueue = mockSendQueue(() => Promise.reject(new Error("Redis down")));
+    const service = new OutreachArtifactsService(
+      prisma,
+      undefined,
+      sendQueue as unknown as OutreachSendQueueService,
+    );
+    await expect(service.approve("org_1", "art_1", "user_x")).rejects.toThrow(
+      ServiceUnavailableException,
+    );
+  });
+
+  it("persists APPROVED before the enqueue failure surfaces (sweep can recover)", async () => {
+    const sendQueue = mockSendQueue(() => Promise.reject(new Error("Redis down")));
+    const service = new OutreachArtifactsService(
+      prisma,
+      undefined,
+      sendQueue as unknown as OutreachSendQueueService,
+    );
+    await expect(service.approve("org_1", "art_1", "user_x")).rejects.toThrow(
+      ServiceUnavailableException,
+    );
+    expect(prisma.outreachArtifact.update).toHaveBeenCalledWith({
+      where: { id: "art_1" },
+      data: expect.objectContaining({
+        status: OutreachArtifactStatus.APPROVED,
+        reviewedBy: "user_x",
+      }),
+    });
+    expect(sendQueue.enqueue).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("OutreachArtifactsService.approve — LangSmith good-drafts dataset", () => {
+  let prisma: ReturnType<typeof mockPrisma>;
+
+  beforeEach(() => {
+    prisma = mockPrisma();
+  });
+
+  it("appends to apex-good-sdr-drafts when the artifact carries a langsmith_run_id", async () => {
+    const runId = "run_good_1";
+    prisma.outreachArtifact.findUnique.mockResolvedValue(
+      artifactRow({
+        payload: {
+          to: "dest@example.com",
+          subject: "Hi",
+          body: "Hello",
+          langsmith_run_id: runId,
+        },
+      }),
+    );
+    prisma.outreachArtifact.update.mockResolvedValue(
+      artifactRow({
+        status: OutreachArtifactStatus.APPROVED,
+        reviewedBy: "user_x",
+        payload: { langsmith_run_id: runId },
+      }),
+    );
+    const langsmith = mockLangsmith();
+    const service = new OutreachArtifactsService(
+      prisma,
+      undefined,
+      undefined,
+      langsmith as unknown as LangSmithService,
+    );
+
+    const out = await service.approve("org_1", "art_1", "user_x");
+    expect(out.status).toBe(OutreachArtifactStatus.APPROVED);
+
+    await flushMicrotasks();
+    expect(langsmith.addRunToDataset).toHaveBeenCalledTimes(1);
+    const [dataset, calledRunId, metadata] = langsmith.addRunToDataset.mock.calls[0];
+    expect(dataset).toBe("apex-good-sdr-drafts");
+    expect(calledRunId).toBe(runId);
+    expect(metadata).toEqual(
+      expect.objectContaining({
+        label: "approved",
+        artifact_id: "art_1",
+        reviewer_note: null,
+        reviewed_by: "user_x",
+        channel: OutreachChannel.EMAIL,
+        recipient_ref: "dest@example.com",
+      }),
+    );
+  });
+
+  it("skips dataset append (and does not throw) for artifacts without a langsmith_run_id", async () => {
+    prisma.outreachArtifact.findUnique.mockResolvedValue(
+      artifactRow({ payload: { to: "dest@example.com", subject: "Hi", body: "Hello" } }),
+    );
+    prisma.outreachArtifact.update.mockResolvedValue(
+      artifactRow({ status: OutreachArtifactStatus.APPROVED, reviewedBy: "user_x" }),
+    );
+    const langsmith = mockLangsmith();
+    const service = new OutreachArtifactsService(
+      prisma,
+      undefined,
+      undefined,
+      langsmith as unknown as LangSmithService,
+    );
+
+    const out = await service.approve("org_1", "art_1", "user_x");
+    expect(out.status).toBe(OutreachArtifactStatus.APPROVED);
+
+    await flushMicrotasks();
+    expect(langsmith.addRunToDataset).not.toHaveBeenCalled();
+  });
+
+  it("flips status and does not throw when addRunToDataset rejects", async () => {
+    const runId = "run_good_fails";
+    prisma.outreachArtifact.findUnique.mockResolvedValue(
+      artifactRow({ payload: { langsmith_run_id: runId } }),
+    );
+    prisma.outreachArtifact.update.mockResolvedValue(
+      artifactRow({
+        status: OutreachArtifactStatus.APPROVED,
+        reviewedBy: "user_x",
+        payload: { langsmith_run_id: runId },
+      }),
+    );
+    const langsmith = mockLangsmith(() => Promise.reject(new Error("LangSmith 500")));
+    const service = new OutreachArtifactsService(
+      prisma,
+      undefined,
+      undefined,
+      langsmith as unknown as LangSmithService,
+    );
+
+    const out = await service.approve("org_1", "art_1", "user_x");
+    expect(out.status).toBe(OutreachArtifactStatus.APPROVED);
+
+    // Let the rejected promise settle; the service must swallow it.
+    await flushMicrotasks();
+    expect(langsmith.addRunToDataset).toHaveBeenCalledTimes(1);
+  });
+
+  it("still records the human judgment when the enqueue hand-off fails", async () => {
+    const runId = "run_good_enqueue_down";
+    prisma.outreachArtifact.findUnique.mockResolvedValue(
+      artifactRow({ payload: { langsmith_run_id: runId } }),
+    );
+    prisma.outreachArtifact.update.mockResolvedValue(
+      artifactRow({
+        status: OutreachArtifactStatus.APPROVED,
+        reviewedBy: "user_x",
+        payload: { langsmith_run_id: runId },
+      }),
+    );
+    const langsmith = mockLangsmith();
+    const sendQueue = mockSendQueue(() => Promise.reject(new Error("Redis down")));
+    const service = new OutreachArtifactsService(
+      prisma,
+      undefined,
+      sendQueue as unknown as OutreachSendQueueService,
+      langsmith as unknown as LangSmithService,
+    );
+
+    await expect(service.approve("org_1", "art_1", "user_x")).rejects.toThrow(
+      ServiceUnavailableException,
+    );
+
+    await flushMicrotasks();
+    expect(langsmith.addRunToDataset).toHaveBeenCalledTimes(1);
+    expect(langsmith.addRunToDataset.mock.calls[0][0]).toBe("apex-good-sdr-drafts");
+  });
+
+  it("no-ops when LangSmithService is not injected (e.g. tracing disabled)", async () => {
+    prisma.outreachArtifact.findUnique.mockResolvedValue(
+      artifactRow({ payload: { langsmith_run_id: "run_x" } }),
+    );
+    prisma.outreachArtifact.update.mockResolvedValue(
+      artifactRow({ status: OutreachArtifactStatus.APPROVED, reviewedBy: "user_x" }),
+    );
+    const service = new OutreachArtifactsService(prisma);
+
+    const out = await service.approve("org_1", "art_1", "user_x");
+    expect(out.status).toBe(OutreachArtifactStatus.APPROVED);
   });
 });
 

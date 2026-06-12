@@ -76,13 +76,21 @@ export class OrgsController {
     return this.orgsService.findOne(orgId);
   }
 
+  /**
+   * Org settings update. Writes sender identity (the CAN-SPAM §7704(a)(5)
+   * fields the send worker fail-closes on) and `plan` — org-level settings a
+   * regular MEMBER must not be able to change, so the same OWNER/ADMIN gate
+   * as the suppression endpoints (commit e61b3cb) applies.
+   */
   @Patch(":id")
-  update(
+  async update(
     @OrgId() orgId: string,
     @Param("id") id: string,
     @Body() body: UpdateOrgDto,
+    @Req() req: Request,
   ) {
     if (id !== orgId) throw new ForbiddenException("Cross-org access denied");
+    await this.assertAdminOrOwner(req, orgId, "update org settings");
     return this.orgsService.update(orgId, body);
   }
 
@@ -227,6 +235,33 @@ export class OrgsController {
       .digest("hex");
 
     return { token, exp, expiresInSeconds };
+  }
+
+  /**
+   * Same role gate as suppression.controller.ts (commit e61b3cb): the caller
+   * must resolve to a User row in the target org with role OWNER or ADMIN.
+   * There is no @Roles decorator in the codebase, so the check is inline.
+   */
+  private async assertAdminOrOwner(
+    req: Request,
+    orgId: string,
+    actionLabel: string,
+  ): Promise<{ userId: string; clerkUserId: string }> {
+    const clerkUserId = readClerkUserId(req);
+    if (!clerkUserId) {
+      throw new UnauthorizedException("Missing authenticated user context");
+    }
+    const user = await this.prisma.user.findUnique({
+      where: { clerkId: clerkUserId },
+      select: { id: true, role: true, orgId: true },
+    });
+    if (!user || user.orgId !== orgId) {
+      throw new ForbiddenException("Cross-org access denied");
+    }
+    if (user.role !== "OWNER" && user.role !== "ADMIN") {
+      throw new ForbiddenException(`Only OWNER or ADMIN may ${actionLabel}`);
+    }
+    return { userId: user.id, clerkUserId };
   }
 }
 

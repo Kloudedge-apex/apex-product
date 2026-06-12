@@ -90,6 +90,12 @@ async function bootstrap() {
     maxAge: 600,
   });
 
+  // ── Graceful shutdown ───────────────────────────────────────────────────
+  // Wire SIGTERM/SIGINT into Nest's lifecycle so OnModuleDestroy hooks run on
+  // deploy. Without this, BullMQ workers (graph-runs, outreach-send) are
+  // hard-killed mid-job and their Worker.close() drains never execute.
+  app.enableShutdownHooks();
+
   const port = process.env.API_PORT || 4000;
   await app.listen(port);
   logger.log(`API listening on :${port} (NODE_ENV=${process.env.NODE_ENV ?? "development"})`);

@@ -134,10 +134,24 @@ export function verifyUnsubscribeToken(
 }
 
 /**
+ * Global route prefix the Nest app mounts every controller under — main.ts
+ * calls `app.setGlobalPrefix("api")`, so the UnsubscribeController's
+ * `u/:token` route actually resolves at `/api/u/:token`. Kept as a single
+ * constant so the advertised URL and the mounted route cannot drift again
+ * (audit B11: the builder used to emit `/u/<token>`, which 404'd in prod).
+ */
+export const API_GLOBAL_PREFIX = "api";
+
+/**
  * Build the public unsubscribe URL stamped on outbound email
  * `List-Unsubscribe` headers. Reads API_PUBLIC_URL (canonical for the api
  * Container App's externally-routable hostname); falls back to the legacy
  * BASE_URL or http://localhost:3000 for dev.
+ *
+ * The result always carries exactly one `/${API_GLOBAL_PREFIX}` segment:
+ * a base that already ends in `/api` is not doubled, a bare hostname gets
+ * it appended. This is the URL mailbox providers POST to (RFC 8058), so it
+ * must resolve — see UnsubscribeController.
  */
 export function buildUnsubscribeUrl(
   orgId: string,
@@ -149,8 +163,13 @@ export function buildUnsubscribeUrl(
     env.BASE_URL?.trim() ||
     "http://localhost:3000";
   const trimmed = base.replace(/\/+$/, "");
+  // Tolerate operators who set API_PUBLIC_URL with the prefix already
+  // included — never emit a `/api/api/` double segment.
+  const origin = trimmed.endsWith(`/${API_GLOBAL_PREFIX}`)
+    ? trimmed.slice(0, -(API_GLOBAL_PREFIX.length + 1))
+    : trimmed;
   const token = signUnsubscribeToken({ orgId, recipientRef, env });
-  return `${trimmed}/u/${encodeURIComponent(token)}`;
+  return `${origin}/${API_GLOBAL_PREFIX}/u/${encodeURIComponent(token)}`;
 }
 
 /**

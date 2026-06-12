@@ -3,6 +3,7 @@ import {
   Logger,
   NotFoundException,
   BadRequestException,
+  ServiceUnavailableException,
   Optional,
 } from "@nestjs/common";
 import {
@@ -18,6 +19,9 @@ import { OutreachSendQueueService } from "./outreach-send-queue.service";
 
 /** Dataset name for the regression set of rejected SDR drafts. */
 const BAD_SDR_DRAFTS_DATASET = "apex-bad-sdr-drafts";
+
+/** Dataset name for the positive set of human-approved SDR drafts. */
+const GOOD_SDR_DRAFTS_DATASET = "apex-good-sdr-drafts";
 
 /**
  * Extract the LangSmith run id stashed on the artifact at create-time.
@@ -181,11 +185,44 @@ export class OutreachArtifactsService {
       },
     });
 
-    // Hand off to the send worker. Best-effort: a queue outage must not
-    // poison the approve API — the in-memory poller in dev and a future
-    // recovery sweep can pick up APPROVED rows that never made it onto the
-    // queue. We swallow the error here and log; SendOutreachWorker's polling
-    // mode would also pick this up on its next tick.
+    // Best-effort: append the generating LangSmith run to the good-drafts
+    // dataset — the positive mirror of the reject-side bad-drafts append —
+    // so evaluators can be calibrated against human-approved outputs too.
+    // Never throws — dataset upload must not block the approve API. Emitted
+    // before the queue hand-off because the human judgment stands regardless
+    // of whether enqueueing succeeds.
+    const runId = extractLangsmithRunId(artifact.payload);
+    if (!runId) {
+      this.logger.debug(
+        `Artifact ${id} has no langsmith_run_id — skipping dataset append (legacy or tracing-disabled)`,
+      );
+    } else if (this.langsmith) {
+      void this.langsmith
+        .addRunToDataset(GOOD_SDR_DRAFTS_DATASET, runId, {
+          label: "approved",
+          artifact_id: updated.id,
+          org_id: updated.orgId,
+          graph_run_id: updated.graphRunId,
+          channel: updated.channel,
+          recipient_ref: updated.recipientRef,
+          reviewer_note: null,
+          reviewed_by: reviewedBy,
+        })
+        .catch((err) => {
+          this.logger.warn(
+            `addRunToDataset threw for artifact=${updated.id} runId=${runId}: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        });
+    }
+
+    // Hand off to the send worker. The APPROVED status is already persisted
+    // above, so a queue outage cannot lose the approval — the reconcile sweep
+    // in SendOutreachWorker (and the dev DB poller) will pick up APPROVED
+    // rows that never made it onto the queue. Audit B11: we must NOT swallow
+    // the failure, though — the caller deserves to know the send is queued
+    // nowhere yet, so rethrow as 503 after logging loudly.
     if (this.sendQueue) {
       try {
         await this.sendQueue.enqueue({
@@ -194,9 +231,14 @@ export class OutreachArtifactsService {
         });
       } catch (err) {
         this.logger.error(
-          `Failed to enqueue artifact ${updated.id} for send: ${
+          `Failed to enqueue artifact ${updated.id} for send (status=APPROVED persisted; recovery sweep will retry): ${
             err instanceof Error ? err.message : String(err)
           }`,
+          err instanceof Error ? err.stack : undefined,
+        );
+        throw new ServiceUnavailableException(
+          `Artifact ${updated.id} was approved but could not be queued for sending. ` +
+            `The approval is saved; the recovery sweep will queue it automatically.`,
         );
       }
     }

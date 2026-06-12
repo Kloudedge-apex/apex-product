@@ -88,7 +88,18 @@ export interface ApprovalDeniedPayload extends Prisma.InputJsonObject {
 
 export interface ArtifactPersistedPayload extends Prisma.InputJsonObject {
   readonly kind: typeof EVIDENCE_EVENT_KIND.artifactPersisted;
-  readonly status: "DRAFT" | "PENDING_REVIEW" | "APPROVED" | "REJECTED" | "SENT" | "SUPPRESSED";
+  // Mirrors Prisma's OutreachArtifactStatus. SENDING (transient send-worker
+  // CAS claim) and SIMULATED (forced-mock send) are appended last to match
+  // the enum's ALTER TYPE … ADD VALUE placement in schema.prisma.
+  readonly status:
+    | "DRAFT"
+    | "PENDING_REVIEW"
+    | "APPROVED"
+    | "REJECTED"
+    | "SENT"
+    | "SUPPRESSED"
+    | "SENDING"
+    | "SIMULATED";
   readonly channel: "EMAIL" | "LINKEDIN" | "HUBSPOT_NOTE";
 }
 

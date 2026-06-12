@@ -10,9 +10,14 @@ import {
 import { ConfigService } from "@nestjs/config";
 import { google, gmail_v1, Auth } from "googleapis";
 import { OAuth2Client } from "google-auth-library";
-import { OutreachArtifactStatus, Prisma } from "@prisma/client";
+import {
+  OutreachArtifactStatus,
+  OutreachSuppressionReason,
+  Prisma,
+} from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { RuntimeService } from "../../runtime/runtime.service";
+import { SuppressionService } from "../../outreach/suppression.service";
 import { encrypt, decrypt } from "../crypto.util";
 import { isLiveSendAllowedForOrg } from "../../outreach/outreach-allowlist.util";
 import {
@@ -67,6 +72,10 @@ interface GmailMessage {
   date: string;
   labelIds: string[];
   body?: string;
+  /** Raw Content-Type header value — used to spot multipart/report DSNs. */
+  contentType: string;
+  /** X-Failed-Recipients header — set by Gmail's mailer-daemon on bounces. */
+  failedRecipients: string;
 }
 
 interface GmailThread {
@@ -88,15 +97,6 @@ interface ReplyDispatchContext {
   bodyPreview: string;
 }
 
-// Phase 1 watermark: the GmailIntegration row in the Prisma schema does NOT yet
-// have a `lastHistoryId` column. Until that field is added + migrated, we keep
-// the watermark in-memory keyed by orgId. This is lossy across process
-// restarts; the dispatcher tolerates that by falling back to "scan from the
-// supplied historyId" when there's no stored value.
-// TODO(schema): add `lastHistoryId String?` to Integration (or a sibling
-// GmailIntegration table) and migrate; then replace this in-memory map.
-const HISTORY_WATERMARK = new Map<string, string>();
-
 const GMAIL_SCOPES = [
   "https://www.googleapis.com/auth/gmail.send",
   "https://www.googleapis.com/auth/gmail.readonly",
@@ -115,11 +115,20 @@ export class GmailService {
   private readonly pushPubsubTopic: string;
   private readonly oidcClient = new OAuth2Client();
 
+  /**
+   * Hot layer over Integration.lastHistoryId: last Gmail historyId processed
+   * per org. Cold reads fall back to the persisted column (see
+   * handlePushNotification); writes go through advanceWatermark, which
+   * persists write-through so the reply window survives deploys. Audit B8.
+   */
+  private readonly historyWatermark = new Map<string, string>();
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
     @Inject(forwardRef(() => RuntimeService))
     private readonly runtime: RuntimeService,
+    private readonly suppression: SuppressionService,
   ) {
     this.clientId = this.config.get<string>("GOOGLE_CLIENT_ID", "");
     this.clientSecret = this.config.get<string>("GOOGLE_CLIENT_SECRET", "");
@@ -195,7 +204,12 @@ export class GmailService {
     const orgId = integration.orgId;
     const gmail = await this.getGmailClient(orgId);
 
-    const startHistoryId = HISTORY_WATERMARK.get(orgId) ?? historyId;
+    // Watermark precedence: in-memory hot layer → persisted
+    // Integration.lastHistoryId (survives restarts) → the pushed historyId.
+    const startHistoryId =
+      this.historyWatermark.get(orgId) ??
+      integration.lastHistoryId ??
+      historyId;
 
     let newMessageIds: string[] = [];
     try {
@@ -217,7 +231,7 @@ export class GmailService {
         startHistoryId,
         error: err instanceof Error ? err.message : String(err),
       });
-      HISTORY_WATERMARK.set(orgId, historyId);
+      await this.advanceWatermark(orgId, historyId);
       return;
     }
 
@@ -237,7 +251,34 @@ export class GmailService {
       }
     }
 
-    HISTORY_WATERMARK.set(orgId, historyId);
+    await this.advanceWatermark(orgId, historyId);
+  }
+
+  /**
+   * Write-through watermark update: the in-memory map is the hot layer, the
+   * Integration.lastHistoryId column is the durable layer restored on the
+   * next cold start. A persistence failure is non-fatal — the hot layer has
+   * already advanced so this process won't rescan; worst case after a crash
+   * we replay from the previous persisted watermark, which the dispatcher
+   * tolerates (duplicate history pages no-op).
+   */
+  private async advanceWatermark(
+    orgId: string,
+    historyId: string,
+  ): Promise<void> {
+    this.historyWatermark.set(orgId, historyId);
+    try {
+      await this.prisma.integration.update({
+        where: { orgId_provider: { orgId, provider: "gmail" } },
+        data: { lastHistoryId: historyId },
+      });
+    } catch (err) {
+      this.logger.warn("gmail.push failed to persist lastHistoryId", {
+        orgId,
+        historyId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   private async maybeDispatchReply(
@@ -255,6 +296,15 @@ export class GmailService {
       integrationEmail &&
       message.from.toLowerCase().includes(integrationEmail.toLowerCase())
     ) {
+      return;
+    }
+
+    // Bounce/DSN guard (audit B8): mailer-daemon / postmaster notifications
+    // are not prospect replies — dispatching the Reply Handler on them would
+    // have an agent "reply" to a robot. Suppress the failed recipient instead
+    // so the send worker never re-mails a bouncing address.
+    if (isDeliveryStatusNotification(message)) {
+      await this.handleDeliveryStatusNotification(orgId, message);
       return;
     }
 
@@ -298,16 +348,57 @@ export class GmailService {
     });
   }
 
+  /**
+   * Auto-suppress the bounced recipient from a delivery-status notification.
+   * Extraction is conservative (X-Failed-Recipients header, then RFC 3464
+   * fields, then Gmail's human-readable phrasing) — when nothing matches we
+   * log and drop rather than risk suppressing the wrong address.
+   */
+  private async handleDeliveryStatusNotification(
+    orgId: string,
+    message: GmailMessage,
+  ): Promise<void> {
+    const failedRecipient = extractFailedRecipient(message);
+    if (!failedRecipient) {
+      this.logger.warn("gmail.push DSN without extractable failed recipient", {
+        orgId,
+        messageId: message.id,
+        from: message.from,
+      });
+      return;
+    }
+
+    const { created } = await this.suppression.suppress({
+      orgId,
+      recipientRef: failedRecipient,
+      reason: OutreachSuppressionReason.BOUNCED,
+      source: "gmail_dsn",
+      metadata: {
+        gmailMessageId: message.id,
+        threadId: message.threadId,
+        from: message.from,
+        subject: message.subject,
+      },
+    });
+
+    this.logger.log("gmail.push DSN detected — recipient auto-suppressed", {
+      orgId,
+      messageId: message.id,
+      recipientRef: failedRecipient,
+      created,
+    });
+  }
+
   private async findIntegrationByEmail(emailAddress: string): Promise<{
     orgId: string;
+    lastHistoryId: string | null;
   } | null> {
     // We stash the authenticated Gmail address inside the (non-secret)
     // `credentials` JSON column during handleCallback. Until a first-class
     // column lands, query via Prisma's Json `path` filter.
     //
     // TODO(schema): promote `accountEmail` to a first-class indexed column on
-    // Integration (or split into a GmailIntegration sibling). Same migration
-    // should add `lastHistoryId` for durable watermarking.
+    // Integration (or split into a GmailIntegration sibling).
     const match = await this.prisma.integration.findFirst({
       where: {
         provider: "gmail",
@@ -317,7 +408,7 @@ export class GmailService {
           equals: emailAddress,
         },
       },
-      select: { orgId: true },
+      select: { orgId: true, lastHistoryId: true },
     });
     return match;
   }
@@ -502,6 +593,8 @@ export class GmailService {
       date: getHeader("Date"),
       labelIds: response.data.labelIds ?? [],
       body,
+      contentType: getHeader("Content-Type"),
+      failedRecipients: getHeader("X-Failed-Recipients"),
     };
   }
 
@@ -539,6 +632,8 @@ export class GmailService {
         date: getHeader("Date"),
         labelIds: msg.labelIds ?? [],
         body,
+        contentType: getHeader("Content-Type"),
+        failedRecipients: getHeader("X-Failed-Recipients"),
       };
     });
 
@@ -753,6 +848,64 @@ export class GmailService {
       },
     });
   }
+}
+
+// ─── DSN / bounce detection (audit B8) ──────────────────────────────────
+
+const EMAIL_PATTERN = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/;
+
+// Left-bounded so an address like "not-postmaster@..." doesn't false-positive.
+const DAEMON_SENDER_PATTERN =
+  /(?:^|[^a-z0-9._%+-])(?:mailer-daemon|postmaster)@/i;
+
+/**
+ * A message is a delivery-status notification when it comes from a mail
+ * daemon (Gmail's bounces are From: mailer-daemon@googlemail.com) or carries
+ * an RFC 6522 multipart/report body with report-type=delivery-status (other
+ * MTAs bouncing back to the connected mailbox).
+ */
+function isDeliveryStatusNotification(message: GmailMessage): boolean {
+  if (DAEMON_SENDER_PATTERN.test(message.from)) return true;
+  const contentType = message.contentType.toLowerCase();
+  return (
+    contentType.includes("multipart/report") &&
+    contentType.includes("delivery-status")
+  );
+}
+
+/**
+ * Pulls the bounced address out of a DSN, most-reliable source first:
+ *   1. X-Failed-Recipients header (Gmail's mailer-daemon sets this).
+ *   2. RFC 3464 Final-Recipient / Original-Recipient fields — getMessage only
+ *      decodes text parts, but several MTAs echo these into the text body.
+ *   3. Gmail's human-readable "wasn't delivered to <addr>" phrasing.
+ * Deliberately NO "first email in body" fallback — a quoted original message
+ * could make us suppress an innocent address. Null means "give up".
+ */
+function extractFailedRecipient(message: GmailMessage): string | null {
+  const headerMatch = message.failedRecipients.match(EMAIL_PATTERN);
+  if (headerMatch) return headerMatch[0].toLowerCase();
+
+  const body = message.body ?? "";
+  for (const field of ["Final-Recipient", "Original-Recipient"]) {
+    const match = body.match(
+      new RegExp(
+        `${field}:\\s*(?:rfc822;)?\\s*<?(${EMAIL_PATTERN.source})>?`,
+        "i",
+      ),
+    );
+    if (match) return match[1].toLowerCase();
+  }
+
+  const phrased = body.match(
+    new RegExp(
+      `(?:wasn't|was not|couldn't be|could not be)\\s+delivered\\s+to\\s+<?(${EMAIL_PATTERN.source})>?`,
+      "i",
+    ),
+  );
+  if (phrased) return phrased[1].toLowerCase();
+
+  return null;
 }
 
 function asNonEmptyString(value: unknown): string | undefined {

@@ -86,6 +86,20 @@ enum OutreachArtifactStatus {
   // Terminal state, same shape as REJECTED for UI purposes but produced by
   // the system (CAN-SPAM compliance), not by a human reviewer.
   SUPPRESSED
+  // Claim state: a send worker CAS'd the row from APPROVED before dispatch so
+  // concurrent workers cannot double-send. Transient — released back to
+  // APPROVED on dispatch failure (or by the reconcile sweep when the claiming
+  // worker died mid-send).
+  // NOTE: SENDING/SIMULATED are appended at the end of the enum to mirror the
+  // default ALTER TYPE … ADD VALUE placement in
+  // docs/migrations/2026-06-12_week1-hardening-expand.sql (keeps prod and
+  // schema.prisma value order in sync for drift checks).
+  SENDING
+  // Terminal state for forced-mock sends (org not in OUTREACH_LIVE_FOR_ORGS).
+  // The mock_ receipt is kept for the audit trail, but dashboards/KPIs must
+  // never count SIMULATED traffic as delivered mail — that is the whole point
+  // of splitting it off SENT.
+  SIMULATED
 }
 
 enum OutreachChannel {
@@ -240,6 +254,11 @@ model Integration {
   lastSyncAt           DateTime?
   lastErrorAt          DateTime?
   lastErrorMessage     String?
+  // Gmail push watermark: last Gmail historyId processed for this org's
+  // mailbox. Persists the in-memory HISTORY_WATERMARK map in
+  // integrations/gmail/gmail.service.ts so history dedup survives process
+  // restarts. Null means "no watermark yet — scan from the pushed historyId".
+  lastHistoryId        String?
   createdAt            DateTime          @default(now())
   updatedAt            DateTime          @updatedAt
 
