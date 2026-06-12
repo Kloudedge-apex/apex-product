@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { ForbiddenException } from "@nestjs/common";
+import type { Request } from "express";
 import { OrgsController } from "../orgs.controller";
 import { OrgsService } from "../orgs.service";
 import { PrismaService } from "../../prisma/prisma.service";
@@ -60,17 +61,29 @@ describe("OrgsController IDOR protection", () => {
   describe("PATCH /orgs/:id (update)", () => {
     const body: UpdateOrgDto = { name: "Renamed" };
 
+    // The update route additionally requires OWNER/ADMIN (see
+    // orgs.controller.update-guard.spec.ts for the full role matrix); here we
+    // satisfy the role gate so the IDOR check stays the behaviour under test.
+    function makeOwnerReq(): Request {
+      prisma.user.findUnique.mockResolvedValue({
+        id: "user_internal",
+        role: "OWNER",
+        orgId: ORG_ID,
+      });
+      return { headers: {}, clerkUserId: "user_clerk_owner" } as unknown as Request;
+    }
+
     it("updates when :id matches the JWT orgId", async () => {
-      const result = await controller.update(ORG_ID, ORG_ID, body);
+      const result = await controller.update(ORG_ID, ORG_ID, body, makeOwnerReq());
       expect(service.update).toHaveBeenCalledTimes(1);
       expect(service.update).toHaveBeenCalledWith(ORG_ID, body);
       expect(result).toEqual({ id: ORG_ID, name: "Acme", plan: "TRIAL" });
     });
 
-    it("throws Forbidden when :id targets a different org", () => {
-      expect(() => controller.update(ORG_ID, OTHER_ORG_ID, body)).toThrow(
-        ForbiddenException,
-      );
+    it("throws Forbidden when :id targets a different org", async () => {
+      await expect(
+        controller.update(ORG_ID, OTHER_ORG_ID, body, makeOwnerReq()),
+      ).rejects.toBeInstanceOf(ForbiddenException);
       expect(service.update).not.toHaveBeenCalled();
     });
   });

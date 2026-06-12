@@ -121,7 +121,17 @@ export class OrgsService {
     return user.org;
   }
 
-  async update(id: string, data: { name?: string; plan?: string; website?: string }) {
+  async update(
+    id: string,
+    data: {
+      name?: string;
+      plan?: string;
+      website?: string;
+      physicalAddress?: string;
+      senderName?: string;
+      country?: string;
+    },
+  ) {
     const website =
       data.website === undefined
         ? undefined
@@ -135,6 +145,17 @@ export class OrgsService {
         ...(data.name && { name: data.name }),
         ...(data.plan && { plan: data.plan as Plan }),
         ...(website !== undefined && { website }),
+        // Sender identity (CAN-SPAM §7704(a)(5)) — the send worker fail-closes
+        // live email outreach until physicalAddress is set. UpdateOrgDto has
+        // already trimmed + length-checked these; trim again defensively
+        // because this service is also called outside the HTTP pipe.
+        ...(data.physicalAddress !== undefined && {
+          physicalAddress: data.physicalAddress.trim(),
+        }),
+        ...(data.senderName !== undefined && {
+          senderName: data.senderName.trim(),
+        }),
+        ...(data.country !== undefined && { country: data.country.trim() }),
       },
     });
   }
