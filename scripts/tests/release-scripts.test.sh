@@ -346,7 +346,10 @@ argument() {
 
 if [[ "${1:-} ${2:-}" == "acr build" ]]; then
   build_context="${!#}"
-  build_context_mode="$(stat -f '%Lp' "${build_context}" 2>/dev/null || stat -c '%a' "${build_context}")"
+  build_context_mode="$(stat -c '%a' "${build_context}" 2>/dev/null || true)"
+  if [[ ! "${build_context_mode}" =~ ^[0-7]{3,4}$ ]]; then
+    build_context_mode="$(stat -f '%Lp' "${build_context}")"
+  fi
   printf 'snapshot-context %s mode %s\n' "${build_context}" "${build_context_mode}" >>"${CALL_LOG}"
   printf '%s\n' "${FAKE_RUN_ID}"
   exit 0
