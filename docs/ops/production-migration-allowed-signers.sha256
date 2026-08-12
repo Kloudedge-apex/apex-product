@@ -1,0 +1,4 @@
+# SHA-256 of the exact independently controlled OpenSSH allowed-signers file.
+# Replace UNCONFIGURED only in a reviewed source change after the approver keys
+# and principal mappings have been provisioned outside this repository.
+UNCONFIGURED

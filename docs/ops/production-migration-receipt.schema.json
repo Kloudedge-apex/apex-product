@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://workforceos.xyz/schemas/production-migration-receipt-v1.json",
+  "title": "Workforce OS production migration receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "environment",
+    "candidateCommit",
+    "status",
+    "verifiedAt",
+    "operator",
+    "approver",
+    "changeTicket",
+    "databaseIdentityHash",
+    "stagingRehearsalEvidenceHash",
+    "productionApplyEvidenceHash",
+    "rollbackRehearsalEvidenceHash",
+    "migrations"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "environment": {
+      "const": "production"
+    },
+    "candidateCommit": {
+      "$ref": "#/$defs/gitSha"
+    },
+    "status": {
+      "const": "applied-and-verified"
+    },
+    "verifiedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "operator": {
+      "type": "string",
+      "minLength": 1
+    },
+    "approver": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}$"
+    },
+    "changeTicket": {
+      "type": "string",
+      "minLength": 1
+    },
+    "databaseIdentityHash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "stagingRehearsalEvidenceHash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "productionApplyEvidenceHash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "rollbackRehearsalEvidenceHash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "migrations": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "sha256",
+          "preflightPassed",
+          "applied",
+          "postconditionsPassed",
+          "writerPause",
+          "duplicateInventoryHash",
+          "postconditionEvidenceHash"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sha256": {
+            "$ref": "#/$defs/sha256"
+          },
+          "preflightPassed": {
+            "const": true
+          },
+          "applied": {
+            "const": true
+          },
+          "postconditionsPassed": {
+            "const": true
+          },
+          "writerPause": {
+            "enum": [
+              "observed",
+              "not-required"
+            ]
+          },
+          "duplicateInventoryHash": {
+            "$ref": "#/$defs/sha256"
+          },
+          "postconditionEvidenceHash": {
+            "$ref": "#/$defs/sha256"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "gitSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}

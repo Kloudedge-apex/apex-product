@@ -201,24 +201,29 @@ API and worker run from one immutable image. Their independent worker gates are
 set by deployment role; `SCHEDULER_ENABLED` stays false for the guarded-SDR
 release:
 
-```bash
-# Build & push to ACR
-az acr build --registry ledgracr \
-  --image apex-api:<full-git-sha> \
-  --build-arg VCS_REF=<full-git-sha> \
-  -f apps/api/Dockerfile .
-
-# Roll API
-az containerapp update -n apex-gtm-api -g Ledgr-prod \
-  --image ledgracr.azurecr.io/apex-api@sha256:<verified-manifest-digest>
-
-# Roll worker to the same digest; set all three worker gates explicitly.
-az containerapp update -n apex-gtm-worker -g Ledgr-prod \
-  --image ledgracr.azurecr.io/apex-api@sha256:<verified-manifest-digest>
-```
+Run `scripts/deploy-prod.sh --migration-receipt <outside-repo-receipt.json>
+--migration-signature <outside-repo-receipt.json.sig> --migration-allowed-signers
+<outside-repo-allowed-signers>`
+from a clean, published `release/go-live-*` branch on an authenticated
+workstation with `gh`, `jq`, `ssh-keygen`, Azure CLI, and Linux/amd64 Docker.
+The script requires exact-commit green GitHub CI, validates the approver-signed
+production migration receipt against an external trust root whose exact bytes
+are SHA-256-pinned in reviewed source, verifies the
+API/worker role, release-critical non-secret configuration, secret-reference
+wiring, and probe matrix, builds from a fresh `git archive`, binds the digest to
+the completed ACR run record, pulls the immutable digest, and runs the image
+contract against that exact registry artifact. The release verifier requires
+`REQUIRE_PRODUCTION_ENV=true` on both apps and rejects both the live-send
+wildcard and its escape flag. Worker and API roll in stages with active-revision
+health checks and automatic rollback to their previously captured digest
+references. Tags, including `latest`, are never deployment identities.
 
 All sensitive env vars are wired via `secretref`:
 `database-url`, `redis-url`, `clerk-secret-key`, `encryption-key` (64 hex chars), `azure-openai-key`, `hubspot-access-token`, `apollo-api-key`, `instantly-api-key`, `serper-api-key`, `admin-api-key`, plus OAuth client secrets.
+Container Apps redact each app's backing secret value, so the verifier compares
+environment-to-`secretRef` names without claiming that two app-local secrets
+with the same name contain the same value. The approved release evidence must
+establish that shared API/worker references use the same source or rotation.
 
 ### Database schema changes
 

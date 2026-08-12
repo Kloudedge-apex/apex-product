@@ -58,6 +58,72 @@ review-only SQL files are rehearsed and then applied with separate operator
 approval. Codex did not apply them. Use the invocation, writer-pause,
 duplicate-inventory, retry, and postcondition instructions inside each file.
 
+After the authorized production apply, create a sanitized receipt conforming to
+`docs/ops/production-migration-receipt.schema.json`. Store it outside the Git
+working tree and include only hashes, operator/approver identifiers, the change
+ticket, booleans, and the exact candidate commit. Do not include connection
+strings, SQL output, row values, customer identifiers, or message content.
+The `approver` must be a principal in a separately controlled OpenSSH
+allowed-signers file, also kept outside the repository. After reviewing the
+final receipt bytes, that approver signs them with the fixed namespace:
+
+```bash
+ssh-keygen -Y sign \
+  -f <approver-private-key> \
+  -n workforce-os-migration-receipt \
+  <outside-repo-receipt.json>
+```
+
+Keep the resulting `.sig` beside the receipt; never copy the private key into
+the repository or release evidence. The exact SHA-256 of the independently
+controlled allowed-signers file must be committed in
+`docs/ops/production-migration-allowed-signers.sha256` through a reviewed source
+change. Its initial `UNCONFIGURED` value deliberately blocks production; do not
+replace it until the principal-to-key mappings have been provisioned and
+reviewed outside the deploy operator's control. Rotation changes both the
+external file and this source-pinned digest.
+
+`scripts/verify-migration-release-receipt.sh` rejects undeclared fields, copies
+the supplied trust file once, matches those exact bytes to the reviewed digest,
+and verifies the detached signature against the claimed approver. The reviewed
+digest and all six migration bytes are read from the exact candidate commit
+with replacement objects disabled, never from mutable working-tree files. The
+verifier enforces their order and writer-pause requirements. The receipt,
+signature, and pinned allowed-signers trust root are mandatory inputs to
+`scripts/deploy-prod.sh`.
+
+The only admitted image rollout path is `scripts/deploy-prod.sh` from a clean,
+published `release/go-live-*` branch. It must resolve the full-SHA ACR tag once,
+pull `ledgracr.azurecr.io/apex-api@sha256:...` as Linux/amd64, and pass
+`scripts/verify-registry-api-image.sh` before either Container App changes.
+Never deploy `latest`, a timestamp tag, or a digest that lacks an exact
+40-character matching OCI revision label. Retain the verified digest and script
+receipt with the release evidence.
+
+The script atomically acquires the GitHub ref lease
+`refs/heads/workforce-os-release-lock/production-gtm-platform` before reading
+production state. Do not make direct Container App changes while that lease
+exists. Cleanup removes it only when it still points to the running release
+commit. If a process dies before cleanup, inspect the referenced commit,
+operator session, and Azure state before separately authorizing stale-lease
+removal; never delete it merely because another rollout is waiting.
+Once the first Container App mutation is attempted, every failed rollout keeps
+the lease, including one whose compensating rollback verifies healthy. This
+prevents a second rollout while a delayed platform operation may still surface.
+Treat that retained ref as an incident marker, not as disposable lock
+contention; investigate and separately authorize its removal.
+
+`scripts/verify-containerapp-release-config.sh` requires
+`REQUIRE_PRODUCTION_ENV=true` on both roles, enforces the intentional worker-gate
+differences, compares the shared authentication, provider, compliance, health,
+and observability values, and rejects `OUTREACH_LIVE_FOR_ORGS="*"` and
+`OUTREACH_ALLOW_WILDCARD=true`. Sensitive variables must use `secretRef`.
+The verifier can compare secret-reference names but cannot compare redacted
+app-local secret values. Before rollout, the approved configuration evidence
+must establish that every shared API/worker reference resolves to the same
+approved source or rotation; never retrieve or print a secret merely to compare
+it.
+
 Required dependency order:
 
 1. `docs/migrations/2026-06-01_outreach-artifact-unique.sql`
@@ -138,12 +204,19 @@ map, so `SendEmailTool`/`LinkedInSendMessageTool` take their mock branch and
 the artifact terminates as `SIMULATED` (mock receipt kept, `sentAt` stays
 NULL, dashboards never count it as delivered).
 
-**1. Capture the current value first** (you need it verbatim to recover):
+**1. Capture and compare both current values first** (you need the exact
+verbatim value to recover):
 
 ```bash
-az containerapp show -n apex-gtm-worker -g Ledgr-prod \
-  --query "properties.template.containers[0].env[?name=='OUTREACH_LIVE_FOR_ORGS'].value | [0]" -o tsv
+CURRENT_API_ALLOWLIST="$(az containerapp show -n apex-gtm-api -g Ledgr-prod \
+  --query "properties.template.containers[0].env[?name=='OUTREACH_LIVE_FOR_ORGS'].value | [0]" -o tsv)"
+CURRENT_WORKER_ALLOWLIST="$(az containerapp show -n apex-gtm-worker -g Ledgr-prod \
+  --query "properties.template.containers[0].env[?name=='OUTREACH_LIVE_FOR_ORGS'].value | [0]" -o tsv)"
+test "$CURRENT_API_ALLOWLIST" = "$CURRENT_WORKER_ALLOWLIST"
+test -n "$CURRENT_API_ALLOWLIST"
 ```
+
+Stop if parity fails. Do not guess which value is authoritative.
 
 **2. Clear on BOTH apps** (the worker evaluates it on the send path; the api
 evaluates it for honesty/display — keep them in sync):
@@ -164,15 +237,25 @@ az containerapp update -n apex-gtm-api    -g Ledgr-prod --remove-env-vars OUTREA
 **Recovery:**
 
 ```bash
-az containerapp update -n apex-gtm-worker -g Ledgr-prod \
-  --set-env-vars "OUTREACH_LIVE_FOR_ORGS=cmpe63k370000ap01vsiehbj2"   # restore the captured value
 az containerapp update -n apex-gtm-api -g Ledgr-prod \
-  --set-env-vars "OUTREACH_LIVE_FOR_ORGS=cmpe63k370000ap01vsiehbj2"
+  --set-env-vars "OUTREACH_LIVE_FOR_ORGS=$CURRENT_API_ALLOWLIST"
+az containerapp update -n apex-gtm-worker -g Ledgr-prod \
+  --set-env-vars "OUTREACH_LIVE_FOR_ORGS=$CURRENT_WORKER_ALLOWLIST"
+
+RESTORED_API_ALLOWLIST="$(az containerapp show -n apex-gtm-api -g Ledgr-prod \
+  --query "properties.template.containers[0].env[?name=='OUTREACH_LIVE_FOR_ORGS'].value | [0]" -o tsv)"
+RESTORED_WORKER_ALLOWLIST="$(az containerapp show -n apex-gtm-worker -g Ledgr-prod \
+  --query "properties.template.containers[0].env[?name=='OUTREACH_LIVE_FOR_ORGS'].value | [0]" -o tsv)"
+test "$RESTORED_API_ALLOWLIST" = "$CURRENT_API_ALLOWLIST"
+test "$RESTORED_WORKER_ALLOWLIST" = "$CURRENT_WORKER_ALLOWLIST"
 ```
 
-Never set `*` in production: GL8c refuses the wildcard unless
-`OUTREACH_ALLOW_WILDCARD=true` is also set, and the env validator fail-fasts
-the same combination at boot.
+Restore API truth first and worker delivery last so the UI cannot report dry
+run while the worker is already live-enabled.
+
+Never set `*` in production. The runtime guard requires the explicit
+`OUTREACH_ALLOW_WILDCARD=true` escape before it will accept a wildcard, but the
+production release verifier rejects both the wildcard and that escape flag.
 
 ### KS-2 — `OUTREACH_WORKER_ENABLED=false` (pause the send loop)
 

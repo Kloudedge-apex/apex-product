@@ -54,6 +54,9 @@ jobs:
       - name: Generate Prisma client
         run: pnpm db:generate
 
+      - name: Test release scripts
+        run: bash scripts/tests/release-scripts.test.sh
+
       - name: Type check
         run: pnpm type-check
 
