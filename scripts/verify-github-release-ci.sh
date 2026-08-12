@@ -6,7 +6,24 @@
 set -euo pipefail
 
 COMMIT="${1:-}"
-REPOSITORY="Kloudedge-apex/apex-product"
+REPOSITORY="github.com/Kloudedge-apex/apex-product"
+
+github_cli() {
+  /usr/bin/env \
+    -u ALL_PROXY \
+    -u CURL_CA_BUNDLE \
+    -u DEBUG \
+    -u GH_DEBUG \
+    -u HTTPS_PROXY \
+    -u HTTP_PROXY \
+    -u SSL_CERT_DIR \
+    -u SSL_CERT_FILE \
+    -u all_proxy \
+    -u http_proxy \
+    -u https_proxy \
+    GH_HOST=github.com \
+    gh "$@"
+}
 
 if [[ ! "${COMMIT}" =~ ^[0-9a-f]{40}$ ]]; then
   echo "Usage: $0 <full-lowercase-git-sha>" >&2
@@ -19,7 +36,7 @@ for REQUIRED_COMMAND in gh jq; do
   fi
 done
 
-RUNS="$(gh run list \
+RUNS="$(github_cli run list \
   --repo "${REPOSITORY}" \
   --workflow ci.yml \
   --commit "${COMMIT}" \
@@ -37,7 +54,7 @@ RUN_ID="$(jq -er --arg commit "${COMMIT}" '
   exit 1
 }
 
-RUN="$(gh run view "${RUN_ID}" \
+RUN="$(github_cli run view "${RUN_ID}" \
   --repo "${REPOSITORY}" \
   --json databaseId,headSha,status,conclusion,event,jobs)"
 

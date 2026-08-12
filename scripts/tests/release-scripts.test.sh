@@ -17,6 +17,9 @@ trap cleanup EXIT
 
 fail() {
   echo "FAIL: $*" >&2
+  if [[ -n "${CALL_LOG:-}" && -f "${CALL_LOG}" ]]; then
+    tail -n 80 "${CALL_LOG}" >&2
+  fi
   exit 1
 }
 
@@ -47,6 +50,19 @@ assert_before() {
   second_line="$(grep -nF -- "${second}" "${log_file}" | head -n 1 | cut -d: -f1)"
   [[ -n "${first_line}" && -n "${second_line}" && ${first_line} -lt ${second_line} ]] ||
     fail "expected '${first}' before '${second}'"
+}
+
+assert_immediately_preceded_by() {
+  local log_file=$1
+  local target=$2
+  local expected_previous=$3
+  local target_line previous_line
+  target_line="$(grep -nF -- "${target}" "${log_file}" | head -n 1 | cut -d: -f1)"
+  [[ -n "${target_line}" && ${target_line} -gt 1 ]] ||
+    fail "missing log entry with predecessor: ${target}"
+  previous_line="$(sed -n "$((target_line - 1))p" "${log_file}")"
+  [[ "${previous_line}" == *"${expected_previous}"* ]] ||
+    fail "expected '${target}' immediately after '${expected_previous}', got '${previous_line}'"
 }
 
 make_registry_harness() {
@@ -143,14 +159,31 @@ test_registry_verifier() {
 
 make_deploy_harness() {
   HARNESS="$(mktemp -d)"
+  HARNESS="$(cd "${HARNESS}" && pwd -P)"
   TEMP_DIRS+=("${HARNESS}")
-  mkdir -p "${HARNESS}/bin" "${HARNESS}/repo/scripts"
+  mkdir -p "${HARNESS}/bin" "${HARNESS}/repo/scripts" \
+    "${HARNESS}/repo/.git/objects"
   cp "${REPO_ROOT}/scripts/deploy-prod.sh" "${HARNESS}/repo/scripts/"
+  cp "${REPO_ROOT}/scripts/run-release-git.sh" "${HARNESS}/repo/scripts/"
 
   cat >"${HARNESS}/repo/scripts/verify-registry-api-image.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'verify-registry %s %s\n' "$1" "$2" >>"${CALL_LOG}"
+if [[ "${FAKE_BOOTSTRAP_SIGNAL_POINT:-}" == "verify-registry" ]]; then
+  printf 'bootstrap-signal-ready verify-registry\n' >>"${CALL_LOG}"
+  printf '%s\n' "${WORKFORCE_RELEASE_SNAPSHOT_PARENT_PID}" >"${BOOTSTRAP_PID_FILE}"
+  printf '%s\n' "$$" >"${BOOTSTRAP_DESCENDANT_PID_FILE}"
+  : >"${BOOTSTRAP_SIGNAL_READY_FILE}"
+  while :; do
+    sleep 0.05
+  done
+fi
 exit "${FAKE_VERIFY_STATUS:-0}"
+EOF
+
+  cat >"${HARNESS}/repo/scripts/verify-api-image.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
 EOF
 
   cat >"${HARNESS}/repo/scripts/verify-github-release-ci.sh" <<'EOF'
@@ -186,17 +219,82 @@ EOF
 
   cat >"${HARNESS}/bin/git" <<'EOF'
 #!/usr/bin/env bash
-if [[ "${1:-}" == "archive" && "${2:-}" == "--format=tar" ]]; then
-  tar -cf - --files-from /dev/null
+printf 'git %s\n' "$*" >>"${CALL_LOG}"
+if env | grep -Eq '^(ALL_PROXY|CURL_CA_BUNDLE|GIT_SSL_CAINFO|GIT_SSL_CAPATH|GIT_SSL_NO_VERIFY|GIT_TRACE|GIT_TRACE2|GIT_TRACE_CURL|GIT_TRACE_PACKET|HTTPS_PROXY|HTTP_PROXY|SSL_CERT_DIR|SSL_CERT_FILE|all_proxy|http_proxy|https_proxy)='; then
+  printf 'unsafe Git transport or trace environment survived isolation\n' >&2
+  exit 98
+fi
+if [[ "${GIT_TRACE_REDACT:-}" != "1" ]]; then
+  printf 'Git trace redaction was not forced\n' >&2
+  exit 98
+fi
+while [[ "${1:-}" == "-c" &&
+  ("${2:-}" == "core.attributesFile=/dev/null" || "${2:-}" == "http.sslVerify=true") ]]; do
+  shift 2
+done
+if [[ "$*" == *" archive --format=tar ${FAKE_COMMIT}"* ]]; then
+  tar -C "${FAKE_REPO_ROOT}" -cf - scripts
+  exit 0
+fi
+if [[ "$*" == *" init --bare --template="* ]]; then
+  mkdir -p -- "${!#}/objects/info"
+  exit 0
+fi
+if [[ "$*" == *" cat-file -e ${FAKE_COMMIT}^{commit}"* ]]; then
+  exit 0
+fi
+if [[ "$*" == *" fetch --no-tags --depth=1 https://github.com/Kloudedge-apex/apex-product.git ${FAKE_COMMIT}"* ]]; then
+  exit 0
+fi
+if [[ "$*" == *" rev-parse FETCH_HEAD"* ]]; then
+  printf '%s\n' "${FAKE_COMMIT}"
+  exit 0
+fi
+if [[ "$*" == *" rev-parse ${FAKE_COMMIT}^{tree}"* ]]; then
+  printf '%s\n' "${FAKE_TREE_COMMIT}"
+  exit 0
+fi
+if [[ "$*" == *" commit-tree ${FAKE_TREE_COMMIT} -p ${FAKE_COMMIT}"* ]]; then
+  printf '%s\n' "${FAKE_LEASE_COMMIT}"
+  exit 0
+fi
+if [[ "$*" == *" push "* ]]; then
+  if [[ "$*" == *"--force-with-lease=refs/heads/workforce-os-release-lock/production-gtm-platform:"* &&
+    "$*" == *"${FAKE_LEASE_COMMIT}:refs/heads/workforce-os-release-lock/production-gtm-platform"* ]]; then
+    if [[ "${FAKE_MUTATE_SOURCE_HELPER_ON_LOCK:-false}" == "true" ]]; then
+      printf '#!/usr/bin/env bash\nexit 97\n' >"${FAKE_REPO_ROOT}/scripts/verify-containerapp-release-config.sh"
+    fi
+    if [[ "${FAKE_SWAP_SNAPSHOT_HELPER_ON_LOCK:-false}" == "true" ]]; then
+      rm -f -- "${WORKFORCE_RELEASE_SNAPSHOT_ROOT}/scripts/verify-containerapp-release-config.sh"
+      ln -s "${FAKE_ESCAPED_HELPER}" \
+        "${WORKFORCE_RELEASE_SNAPSHOT_ROOT}/scripts/verify-containerapp-release-config.sh"
+    fi
+    exit "${FAKE_LOCK_STATUS:-0}"
+  fi
+  if [[ "$*" == *"--force-with-lease=refs/heads/workforce-os-release-lock/production-gtm-platform:${FAKE_LEASE_COMMIT}"* &&
+    "$*" == *":refs/heads/workforce-os-release-lock/production-gtm-platform"* ]]; then
+    exit "${FAKE_LOCK_CLEANUP_STATUS:-0}"
+  fi
+fi
+if [[ "$*" == "-C ${FAKE_REPO_ROOT} rev-parse --git-common-dir" ]]; then
+  printf '%s\n' '.git'
+  exit 0
+fi
+if [[ "$*" == "-C ${FAKE_REPO_ROOT} rev-parse --abbrev-ref HEAD" ]]; then
+  printf '%s\n' "${FAKE_BRANCH}"
+  exit 0
+fi
+if [[ "$*" == "-C ${FAKE_REPO_ROOT} rev-parse HEAD" ]]; then
+  printf '%s\n' "${FAKE_COMMIT}"
+  exit 0
+fi
+if [[ "$*" == "-C ${FAKE_REPO_ROOT} status --porcelain --untracked-files=all" ||
+  "$*" == "-C ${FAKE_REPO_ROOT} status --short --untracked-files=all" ]]; then
   exit 0
 fi
 case "${1:-} ${2:-} ${3:-}" in
   "rev-parse --show-toplevel ") printf '%s\n' "${FAKE_REPO_ROOT}" ;;
-  "rev-parse --abbrev-ref HEAD") printf '%s\n' "${FAKE_BRANCH}" ;;
   "rev-parse HEAD ") printf '%s\n' "${FAKE_COMMIT}" ;;
-  "status --porcelain ") exit 0 ;;
-  "status --short ") exit 0 ;;
-  "ls-remote --exit-code origin") printf '%s\trefs/heads/%s\n' "${FAKE_REMOTE_COMMIT}" "${FAKE_BRANCH}" ;;
   *) printf 'unexpected git invocation: %s\n' "$*" >&2; exit 1 ;;
 esac
 EOF
@@ -207,17 +305,21 @@ printf 'docker %s\n' "$*" >>"${CALL_LOG}"
 [[ "${1:-}" == "info" ]]
 EOF
 
+  cat >"${HARNESS}/escaped-config-helper.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'escaped-config-helper-executed\n' >>"${CALL_LOG}"
+exit 0
+EOF
+
   cat >"${HARNESS}/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 printf 'gh %s\n' "$*" >>"${CALL_LOG}"
-if [[ "$*" == *"--method POST"* ]]; then
-  exit "${FAKE_LOCK_STATUS:-0}"
+if env | grep -Eq '^(ALL_PROXY|CURL_CA_BUNDLE|GH_DEBUG|HTTPS_PROXY|HTTP_PROXY|SSL_CERT_DIR|SSL_CERT_FILE|all_proxy|http_proxy|https_proxy)='; then
+  printf 'unsafe GitHub transport environment survived isolation\n' >&2
+  exit 98
 fi
-if [[ "$*" == *"--jq .object.sha"* ]]; then
-  printf '%s\n' "${FAKE_COMMIT}"
-  exit 0
-fi
-if [[ "$*" == *"--method DELETE"* ]]; then
+if [[ "$*" == "api --hostname github.com repos/Kloudedge-apex/apex-product/git/ref/heads/${FAKE_BRANCH} --jq .object.sha" ]]; then
+  printf '%s\n' "${FAKE_REMOTE_COMMIT}"
   exit 0
 fi
 exit 1
@@ -243,6 +345,9 @@ argument() {
 }
 
 if [[ "${1:-} ${2:-}" == "acr build" ]]; then
+  build_context="${!#}"
+  build_context_mode="$(stat -f '%Lp' "${build_context}" 2>/dev/null || stat -c '%a' "${build_context}")"
+  printf 'snapshot-context %s mode %s\n' "${build_context}" "${build_context_mode}" >>"${CALL_LOG}"
   printf '%s\n' "${FAKE_RUN_ID}"
   exit 0
 fi
@@ -281,24 +386,36 @@ if [[ "${1:-} ${2:-}" == "containerapp show" ]]; then
   if [[ -n "${FAKE_CONCURRENT_APP:-}" && "${app}" == "${FAKE_CONCURRENT_APP}" &&
     ${show_call} -gt ${FAKE_CONCURRENT_AFTER_SHOW:-2} ]]; then
     printf 'concurrent-image %s %s\n' "${app}" "${FAKE_CONCURRENT_IMAGE}" >>"${CALL_LOG}"
-    printf '%s\n' "${FAKE_CONCURRENT_IMAGE}"
-    exit 0
-  fi
-  current="$(awk -F '\t' -v app="${app}" '$1 == app { value=$2 } END { print value }' "${AZ_STATE}")"
-  if [[ -n "${current}" ]]; then
-    printf '%s\n' "${current}"
+    current="${FAKE_CONCURRENT_IMAGE}"
   elif [[ "${app}" == "apex-gtm-api" ]]; then
-    printf '%s\n' "${FAKE_PREVIOUS_API_IMAGE}"
+    current="$(awk -F '\t' -v app="${app}" '$1 == app { value=$2 } END { print value }' "${AZ_STATE}")"
+    current="${current:-${FAKE_PREVIOUS_API_IMAGE}}"
   else
-    printf '%s\n' "${FAKE_PREVIOUS_WORKER_IMAGE}"
+    current="$(awk -F '\t' -v app="${app}" '$1 == app { value=$2 } END { print value }' "${AZ_STATE}")"
+    current="${current:-${FAKE_PREVIOUS_WORKER_IMAGE}}"
   fi
+  jq -n \
+    --arg id "/subscriptions/test-subscription/resourceGroups/Ledgr-prod/providers/Microsoft.App/containerApps/${app}" \
+    --arg app "${app}" \
+    --arg image "${current}" \
+    '{
+      id: $id,
+      properties: {
+        provisioningState: "Succeeded",
+        latestRevisionName: ($app + "--revision"),
+        latestReadyRevisionName: ($app + "--revision"),
+        template: {containers: [{name: $app, image: $image}]}
+      }
+    }'
   exit 0
 fi
 exit 1
 EOF
 
   chmod +x "${HARNESS}/bin/git" "${HARNESS}/bin/docker" "${HARNESS}/bin/gh" "${HARNESS}/bin/az" \
+    "${HARNESS}/escaped-config-helper.sh" \
     "${HARNESS}/repo/scripts/deploy-prod.sh" \
+    "${HARNESS}/repo/scripts/verify-api-image.sh" \
     "${HARNESS}/repo/scripts/verify-registry-api-image.sh" \
     "${HARNESS}/repo/scripts/verify-github-release-ci.sh" \
     "${HARNESS}/repo/scripts/verify-migration-release-receipt.sh" \
@@ -308,6 +425,9 @@ EOF
   CONFIG_CALL_COUNT="${HARNESS}/config-call-count"
   SHOW_CALL_COUNT="${HARNESS}/show-call-count"
   DEPLOY_PID_FILE="${HARNESS}/deploy.pid"
+  BOOTSTRAP_PID_FILE="${HARNESS}/bootstrap.pid"
+  BOOTSTRAP_DESCENDANT_PID_FILE="${HARNESS}/bootstrap-descendant.pid"
+  BOOTSTRAP_SIGNAL_READY_FILE="${HARNESS}/bootstrap-signal-ready"
   SIGNAL_READY_FILE="${HARNESS}/signal-ready"
   SIGNAL_CONTINUE_FILE="${HARNESS}/signal-continue"
   touch "${HARNESS}/receipt.json"
@@ -316,21 +436,43 @@ EOF
   : >"${AZ_STATE}"
   printf '0\n' >"${CONFIG_CALL_COUNT}"
   printf '0\n' >"${SHOW_CALL_COUNT}"
+  FAKE_TREE_COMMIT="$(printf '6%.0s' {1..40})"
+  FAKE_LEASE_COMMIT="$(printf '7%.0s' {1..40})"
+  FAKE_LOCK_CLEANUP_STATUS=0
+  FAKE_MUTATE_SOURCE_HELPER_ON_LOCK=false
+  FAKE_SWAP_SNAPSHOT_HELPER_ON_LOCK=false
+  ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED=true
 }
 
 run_fake_deploy() {
   local deploy_status
+  local -a deploy_args
+  deploy_args=(
+    --migration-receipt "${HARNESS}/receipt.json"
+    --migration-signature "${HARNESS}/receipt.json.sig"
+    --migration-allowed-signers "${HARNESS}/allowed-signers"
+  )
+  if [[ "${FAKE_OMIT_YES:-false}" != "true" ]]; then
+    deploy_args+=(--yes)
+  fi
   env PATH="${HARNESS}/bin:${PATH}" \
+    ALL_PROXY="http://127.0.0.1:1" \
     CALL_LOG="${CALL_LOG}" \
+    CURL_CA_BUNDLE="${HARNESS}/hostile-ca.pem" \
     AZ_STATE="${AZ_STATE}" \
     CONFIG_CALL_COUNT="${CONFIG_CALL_COUNT}" \
     SHOW_CALL_COUNT="${SHOW_CALL_COUNT}" \
     DEPLOY_PID_FILE="${DEPLOY_PID_FILE}" \
+    BOOTSTRAP_PID_FILE="${BOOTSTRAP_PID_FILE}" \
+    BOOTSTRAP_DESCENDANT_PID_FILE="${BOOTSTRAP_DESCENDANT_PID_FILE}" \
+    BOOTSTRAP_SIGNAL_READY_FILE="${BOOTSTRAP_SIGNAL_READY_FILE}" \
     SIGNAL_READY_FILE="${SIGNAL_READY_FILE}" \
     SIGNAL_CONTINUE_FILE="${SIGNAL_CONTINUE_FILE}" \
     FAKE_REPO_ROOT="${HARNESS}/repo" \
     FAKE_BRANCH="${FAKE_BRANCH}" \
     FAKE_COMMIT="${FAKE_COMMIT}" \
+    FAKE_TREE_COMMIT="${FAKE_TREE_COMMIT}" \
+    FAKE_LEASE_COMMIT="${FAKE_LEASE_COMMIT}" \
     FAKE_REMOTE_COMMIT="${FAKE_REMOTE_COMMIT}" \
     FAKE_RUN_ID="${FAKE_RUN_ID}" \
     FAKE_DIGEST="${FAKE_DIGEST}" \
@@ -338,6 +480,10 @@ run_fake_deploy() {
     FAKE_CI_STATUS="${FAKE_CI_STATUS:-0}" \
     FAKE_MIGRATION_STATUS="${FAKE_MIGRATION_STATUS:-0}" \
     FAKE_LOCK_STATUS="${FAKE_LOCK_STATUS:-0}" \
+    FAKE_LOCK_CLEANUP_STATUS="${FAKE_LOCK_CLEANUP_STATUS:-0}" \
+    FAKE_MUTATE_SOURCE_HELPER_ON_LOCK="${FAKE_MUTATE_SOURCE_HELPER_ON_LOCK:-false}" \
+    FAKE_SWAP_SNAPSHOT_HELPER_ON_LOCK="${FAKE_SWAP_SNAPSHOT_HELPER_ON_LOCK:-false}" \
+    FAKE_ESCAPED_HELPER="${HARNESS}/escaped-config-helper.sh" \
     FAKE_CONFIG_STATUS="${FAKE_CONFIG_STATUS:-0}" \
     FAKE_CONFIG_FAIL_CALL="${FAKE_CONFIG_FAIL_CALL:-}" \
     FAKE_CONFIG_FAIL_FROM_CALL="${FAKE_CONFIG_FAIL_FROM_CALL:-}" \
@@ -345,16 +491,20 @@ run_fake_deploy() {
     FAKE_SIGNAL_APP="${FAKE_SIGNAL_APP:-}" \
     FAKE_SIGNAL_IMAGE="${FAKE_SIGNAL_IMAGE:-}" \
     FAKE_SIGNAL_NAME="${FAKE_SIGNAL_NAME:-TERM}" \
+    FAKE_BOOTSTRAP_SIGNAL_POINT="${FAKE_BOOTSTRAP_SIGNAL_POINT:-}" \
     FAKE_CONCURRENT_APP="${FAKE_CONCURRENT_APP:-}" \
     FAKE_CONCURRENT_IMAGE="${FAKE_CONCURRENT_IMAGE:-}" \
     FAKE_CONCURRENT_AFTER_SHOW="${FAKE_CONCURRENT_AFTER_SHOW:-2}" \
+    GIT_SSL_CAINFO="${HARNESS}/hostile-ca.pem" \
+    GIT_SSL_NO_VERIFY=true \
+    GIT_TRACE="${HARNESS}/hostile-git-trace" \
+    GIT_TRACE_PACKET="${HARNESS}/hostile-git-packet-trace" \
+    HTTPS_PROXY="http://127.0.0.1:1" \
+    HTTP_PROXY="http://127.0.0.1:1" \
+    ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED="${ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED-true}" \
     FAKE_PREVIOUS_API_IMAGE="ledgracr.azurecr.io/apex-api@sha256:$(printf 'd%.0s' {1..64})" \
     FAKE_PREVIOUS_WORKER_IMAGE="ledgracr.azurecr.io/apex-api@sha256:$(printf 'e%.0s' {1..64})" \
-    "${HARNESS}/repo/scripts/deploy-prod.sh" \
-      --migration-receipt "${HARNESS}/receipt.json" \
-      --migration-signature "${HARNESS}/receipt.json.sig" \
-      --migration-allowed-signers "${HARNESS}/allowed-signers" \
-      --yes
+    "${HARNESS}/repo/scripts/deploy-prod.sh" "${deploy_args[@]}"
   deploy_status=$?
   return "${deploy_status}"
 }
@@ -364,13 +514,25 @@ reset_deploy_harness() {
   : >"${AZ_STATE}"
   printf '0\n' >"${CONFIG_CALL_COUNT}"
   FAKE_LOCK_STATUS=0
+  FAKE_LOCK_CLEANUP_STATUS=0
+  FAKE_MUTATE_SOURCE_HELPER_ON_LOCK=false
+  FAKE_SWAP_SNAPSHOT_HELPER_ON_LOCK=false
+  FAKE_BOOTSTRAP_SIGNAL_POINT=""
+  FAKE_OMIT_YES=false
+  ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED=true
   FAKE_CONFIG_FAIL_FROM_CALL=""
   printf '0\n' >"${SHOW_CALL_COUNT}"
-  rm -f -- "${DEPLOY_PID_FILE}" "${SIGNAL_READY_FILE}" "${SIGNAL_CONTINUE_FILE}"
+  rm -f -- \
+    "${DEPLOY_PID_FILE}" \
+    "${BOOTSTRAP_PID_FILE}" \
+    "${BOOTSTRAP_DESCENDANT_PID_FILE}" \
+    "${BOOTSTRAP_SIGNAL_READY_FILE}" \
+    "${SIGNAL_READY_FILE}" \
+    "${SIGNAL_CONTINUE_FILE}"
 }
 
 test_deploy_admission() {
-  local requested_image
+  local requested_image snapshot_context direct_token
   make_deploy_harness
   FAKE_BRANCH="release/go-live-test"
   FAKE_COMMIT="$(printf '1%.0s' {1..40})"
@@ -380,19 +542,86 @@ test_deploy_admission() {
   FAKE_VERIFY_STATUS=0
   requested_image="ledgracr.azurecr.io/apex-api@${FAKE_DIGEST}"
 
+  # Only the bootstrap parent may delete its runtime directory. Even a direct
+  # child with an otherwise valid snapshot identity must never recursively
+  # remove an environment-supplied path during EXIT cleanup.
+  mkdir "${HARNESS}/direct-child-runtime"
+  : >"${HARNESS}/direct-child-runtime/sentinel"
+  direct_token="$(printf 'a%.0s' {1..64})"
+  printf '%s\n' "${direct_token}" >"${HARNESS}/direct-child-token"
+  if env PATH="${HARNESS}/bin:${PATH}" \
+    ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED= \
+    WORKFORCE_RELEASE_SNAPSHOT_ACTIVE=true \
+    WORKFORCE_RELEASE_SOURCE_REPOSITORY="${HARNESS}/repo" \
+    WORKFORCE_RELEASE_SOURCE_COMMIT="${FAKE_COMMIT}" \
+    WORKFORCE_RELEASE_SNAPSHOT_ROOT="${HARNESS}/repo" \
+    WORKFORCE_RELEASE_SNAPSHOT_PARENT_PID="$$" \
+    WORKFORCE_RELEASE_SNAPSHOT_TOKEN="${direct_token}" \
+    WORKFORCE_RELEASE_SNAPSHOT_TOKEN_FILE="${HARNESS}/direct-child-token" \
+    WORKFORCE_RELEASE_RUNTIME_STATE_DIR="${HARNESS}/direct-child-runtime" \
+    "${HARNESS}/repo/scripts/deploy-prod.sh" \
+      --migration-receipt "${HARNESS}/receipt.json" \
+      --migration-signature "${HARNESS}/receipt.json.sig" \
+      --migration-allowed-signers "${HARNESS}/allowed-signers" \
+      --yes >"${HARNESS}/direct-child-output.log" 2>&1; then
+    fail "direct snapshot child bypassed the exclusive-authority admission gate"
+  fi
+  assert_log_contains "${HARNESS}/direct-child-output.log" \
+    "production Container Apps writes are fail-closed pending exclusive authority attestation"
+  if [[ ! -d "${HARNESS}/direct-child-runtime" ||
+    ! -f "${HARNESS}/direct-child-runtime/sentinel" ]]; then
+    fail "direct snapshot child deleted an environment-supplied runtime path"
+  fi
+  pass
+
+  # The ordinary harness exports no Bash functions. Running this first deploy
+  # under Bash 3 covers the zero discovered BASH_FUNC_* environment case.
   run_fake_deploy >/dev/null
   assert_log_contains "${CALL_LOG}" "verify-ci ${FAKE_COMMIT}"
   assert_log_contains "${CALL_LOG}" "verify-migrations ${HARNESS}/receipt.json ${HARNESS}/receipt.json.sig ${HARNESS}/allowed-signers ${FAKE_COMMIT}"
   assert_log_contains "${CALL_LOG}" "az acr task show-run --registry ledgracr --run-id ${FAKE_RUN_ID}"
   assert_log_contains "${CALL_LOG}" "verify-registry ${requested_image} ${FAKE_COMMIT}"
-  assert_log_contains "${CALL_LOG}" "gh api --method POST repos/Kloudedge-apex/apex-product/git/refs"
-  assert_log_contains "${CALL_LOG}" "gh api --method DELETE repos/Kloudedge-apex/apex-product/git/refs/heads/workforce-os-release-lock/production-gtm-platform"
-  assert_before "${CALL_LOG}" "gh api --method POST" "az containerapp show"
+  assert_log_contains "${CALL_LOG}" \
+    "commit-tree ${FAKE_TREE_COMMIT} -p ${FAKE_COMMIT}"
+  assert_log_contains "${CALL_LOG}" "-c core.hooksPath=/dev/null"
+  assert_log_contains "${CALL_LOG}" "-c credential.helper=!gh auth git-credential"
+  assert_log_contains "${CALL_LOG}" \
+    "push --force-with-lease=refs/heads/workforce-os-release-lock/production-gtm-platform: https://github.com/Kloudedge-apex/apex-product.git ${FAKE_LEASE_COMMIT}:refs/heads/workforce-os-release-lock/production-gtm-platform"
+  assert_log_contains "${CALL_LOG}" \
+    "push --force-with-lease=refs/heads/workforce-os-release-lock/production-gtm-platform:${FAKE_LEASE_COMMIT} https://github.com/Kloudedge-apex/apex-product.git :refs/heads/workforce-os-release-lock/production-gtm-platform"
+  assert_before "${CALL_LOG}" \
+    "push --force-with-lease=refs/heads/workforce-os-release-lock/production-gtm-platform: https://github.com/Kloudedge-apex/apex-product.git ${FAKE_LEASE_COMMIT}" \
+    "az containerapp show"
   assert_log_contains "${CALL_LOG}" "az containerapp update --name apex-gtm-worker"
   assert_log_contains "${CALL_LOG}" "az containerapp update --name apex-gtm-api"
+  assert_immediately_preceded_by "${CALL_LOG}" \
+    "az containerapp update --name apex-gtm-worker" \
+    "az containerapp show --name apex-gtm-worker --resource-group Ledgr-prod --output json"
+  assert_immediately_preceded_by "${CALL_LOG}" \
+    "az containerapp update --name apex-gtm-api" \
+    "az containerapp show --name apex-gtm-api --resource-group Ledgr-prod --output json"
   assert_before "${CALL_LOG}" "verify-registry" "az containerapp update"
   assert_before "${CALL_LOG}" "az containerapp update --name apex-gtm-worker" \
     "az containerapp update --name apex-gtm-api"
+  if grep -F -- "az acr build" "${CALL_LOG}" | grep -Fq -- "${HARNESS}/repo"; then
+    fail "ACR build used the mutable source repository instead of the private snapshot"
+  fi
+  assert_log_contains "${CALL_LOG}" "mode 700"
+  snapshot_context="$(awk '/^snapshot-context / { print $2; exit }' "${CALL_LOG}")"
+  if [[ -z "${snapshot_context}" || -e "${snapshot_context}" ]]; then
+    fail "bootstrap parent did not remove its exact private snapshot after release"
+  fi
+  pass
+
+  reset_deploy_harness
+  FAKE_LOCK_CLEANUP_STATUS=1
+  if run_fake_deploy >/dev/null 2>&1; then
+    fail "deploy reported success while its conditional release lease cleanup failed"
+  fi
+  assert_log_contains "${CALL_LOG}" "az containerapp update --name apex-gtm-worker"
+  assert_log_contains "${CALL_LOG}" "az containerapp update --name apex-gtm-api"
+  assert_log_contains "${CALL_LOG}" \
+    "push --force-with-lease=refs/heads/workforce-os-release-lock/production-gtm-platform:${FAKE_LEASE_COMMIT} https://github.com/Kloudedge-apex/apex-product.git :refs/heads/workforce-os-release-lock/production-gtm-platform"
   pass
 
   reset_deploy_harness
@@ -402,6 +631,17 @@ test_deploy_admission() {
   fi
   assert_log_excludes "${CALL_LOG}" "az containerapp show"
   assert_log_excludes "${CALL_LOG}" "az acr build"
+  pass
+
+  reset_deploy_harness
+  FAKE_OMIT_YES=true
+  if run_fake_deploy >"${HARNESS}/missing-yes-output.log" 2>&1; then
+    fail "deploy accepted a protected release invocation without --yes"
+  fi
+  assert_log_contains "${HARNESS}/missing-yes-output.log" \
+    "protected release execution is noninteractive and requires --yes"
+  assert_log_excludes "${CALL_LOG}" "gh "
+  assert_log_excludes "${CALL_LOG}" "az "
   pass
 
   reset_deploy_harness
@@ -442,6 +682,41 @@ test_deploy_admission() {
   fi
   assert_log_excludes "${CALL_LOG}" "az "
   pass
+
+  reset_deploy_harness
+  FAKE_BRANCH="release/go-live-test"
+  ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED=""
+  if run_fake_deploy >/dev/null 2>&1; then
+    fail "deploy accepted missing exclusive Container Apps mutation authority attestation"
+  fi
+  assert_log_excludes "${CALL_LOG}" "git push"
+  assert_log_excludes "${CALL_LOG}" "az "
+  pass
+
+  # Mutating the checked-out helper after acquisition must not affect the
+  # controller or helpers already running from the exact-commit snapshot.
+  reset_deploy_harness
+  FAKE_MUTATE_SOURCE_HELPER_ON_LOCK=true
+  cp "${HARNESS}/repo/scripts/verify-containerapp-release-config.sh" \
+    "${HARNESS}/verify-containerapp-release-config.saved"
+  run_fake_deploy >/dev/null
+  cp "${HARNESS}/verify-containerapp-release-config.saved" \
+    "${HARNESS}/repo/scripts/verify-containerapp-release-config.sh"
+  assert_log_contains "${CALL_LOG}" \
+    "verify-containerapps ${requested_image} ${requested_image}"
+  pass
+
+  # Revalidation must fail closed if a helper is replaced after the initial
+  # snapshot admission but before its later call site. The escaped target must
+  # never execute, including from conditional cleanup or rollback contexts.
+  reset_deploy_harness
+  FAKE_SWAP_SNAPSHOT_HELPER_ON_LOCK=true
+  if run_fake_deploy >/dev/null 2>&1; then
+    fail "deploy accepted a post-admission snapshot helper symlink swap"
+  fi
+  assert_log_excludes "${CALL_LOG}" "escaped-config-helper-executed"
+  assert_log_excludes "${CALL_LOG}" "az acr build"
+  pass
 }
 
 test_deploy_rollback() {
@@ -472,10 +747,13 @@ test_deploy_rollback() {
   fi
   assert_log_contains "${CALL_LOG}" "${forward_worker}"
   assert_log_contains "${CALL_LOG}" "${rollback_worker}"
+  assert_immediately_preceded_by "${CALL_LOG}" "${rollback_worker}" \
+    "az containerapp show --name apex-gtm-worker --resource-group Ledgr-prod --output json"
   assert_log_excludes "${CALL_LOG}" "az containerapp update --name apex-gtm-api"
   assert_before "${CALL_LOG}" "${forward_worker}" "${rollback_worker}"
   assert_log_contains "${CALL_LOG}" "verify-containerapps ${previous_api_image} ${previous_worker_image}"
-  assert_log_excludes "${CALL_LOG}" "gh api --method DELETE repos/Kloudedge-apex/apex-product/git/refs/heads/workforce-os-release-lock/production-gtm-platform"
+  assert_log_excludes "${CALL_LOG}" \
+    "push --force-with-lease=refs/heads/workforce-os-release-lock/production-gtm-platform:${FAKE_LEASE_COMMIT} https://github.com/Kloudedge-apex/apex-product.git :refs/heads/workforce-os-release-lock/production-gtm-platform"
   pass
 
   # If rollback read-back also fails, production state is uncertain and the
@@ -488,7 +766,8 @@ test_deploy_rollback() {
   fi
   assert_log_contains "${CALL_LOG}" "${forward_worker}"
   assert_log_contains "${CALL_LOG}" "${rollback_worker}"
-  assert_log_excludes "${CALL_LOG}" "gh api --method DELETE repos/Kloudedge-apex/apex-product/git/refs/heads/workforce-os-release-lock/production-gtm-platform"
+  assert_log_excludes "${CALL_LOG}" \
+    "push --force-with-lease=refs/heads/workforce-os-release-lock/production-gtm-platform:${FAKE_LEASE_COMMIT} https://github.com/Kloudedge-apex/apex-product.git :refs/heads/workforce-os-release-lock/production-gtm-platform"
   pass
 
   # A failed final read-back must restore API first, worker second, and verify
@@ -503,6 +782,10 @@ test_deploy_rollback() {
   assert_log_contains "${CALL_LOG}" "${forward_api}"
   assert_log_contains "${CALL_LOG}" "${rollback_api}"
   assert_log_contains "${CALL_LOG}" "${rollback_worker}"
+  assert_immediately_preceded_by "${CALL_LOG}" "${rollback_api}" \
+    "az containerapp show --name apex-gtm-api --resource-group Ledgr-prod --output json"
+  assert_immediately_preceded_by "${CALL_LOG}" "${rollback_worker}" \
+    "az containerapp show --name apex-gtm-worker --resource-group Ledgr-prod --output json"
   assert_before "${CALL_LOG}" "${forward_api}" "${rollback_api}"
   assert_before "${CALL_LOG}" "${rollback_api}" "${rollback_worker}"
   assert_log_contains "${CALL_LOG}" "verify-containerapps ${previous_api_image} ${previous_worker_image}"
@@ -553,6 +836,398 @@ test_deploy_rollback() {
   pass
 }
 
+test_bootstrap_signal_forwarding() {
+  local deploy_job bootstrap_pid deploy_pid descendant_pid rollout_status snapshot_context
+  local signal_ready="false"
+  make_deploy_harness
+  FAKE_BRANCH="release/go-live-test"
+  FAKE_COMMIT="$(printf '1%.0s' {1..40})"
+  FAKE_REMOTE_COMMIT="${FAKE_COMMIT}"
+  FAKE_RUN_ID="ca123"
+  FAKE_DIGEST="sha256:$(printf '2%.0s' {1..64})"
+  FAKE_VERIFY_STATUS=0
+  FAKE_BOOTSTRAP_SIGNAL_POINT="verify-registry"
+
+  (trap - EXIT; run_fake_deploy >"${HARNESS}/bootstrap-signal-output.log" 2>&1) &
+  deploy_job=$!
+  for _ in {1..300}; do
+    if [[ -s "${BOOTSTRAP_PID_FILE}" && -s "${DEPLOY_PID_FILE}" &&
+      -s "${BOOTSTRAP_DESCENDANT_PID_FILE}" &&
+      -e "${BOOTSTRAP_SIGNAL_READY_FILE}" ]]; then
+      signal_ready="true"
+      break
+    fi
+    if ! kill -0 "${deploy_job}" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.05
+  done
+  if [[ "${signal_ready}" != "true" ]]; then
+    if [[ -s "${BOOTSTRAP_PID_FILE}" ]]; then
+      kill -s TERM "$(cat "${BOOTSTRAP_PID_FILE}")" >/dev/null 2>&1 || true
+    else
+      kill -s TERM "${deploy_job}" >/dev/null 2>&1 || true
+    fi
+    wait "${deploy_job}" >/dev/null 2>&1 || true
+    fail "bootstrap deploy did not reach the parent-signal injection point"
+  fi
+
+  bootstrap_pid="$(cat "${BOOTSTRAP_PID_FILE}")"
+  deploy_pid="$(cat "${DEPLOY_PID_FILE}")"
+  descendant_pid="$(cat "${BOOTSTRAP_DESCENDANT_PID_FILE}")"
+  if [[ "${bootstrap_pid}" == "$$" || "${deploy_pid}" == "$$" ||
+    "${bootstrap_pid}" == "${deploy_pid}" || "${deploy_pid}" == "${descendant_pid}" ]]; then
+    kill -s TERM -- "-${deploy_pid}" >/dev/null 2>&1 || true
+    kill -s TERM "${bootstrap_pid}" >/dev/null 2>&1 || true
+    wait "${deploy_job}" >/dev/null 2>&1 || true
+    fail "bootstrap signal harness did not resolve distinct controller processes"
+  fi
+  if ! kill -0 "${bootstrap_pid}" >/dev/null 2>&1 ||
+    ! kill -0 "${deploy_pid}" >/dev/null 2>&1 ||
+    ! kill -0 "${descendant_pid}" >/dev/null 2>&1; then
+    kill -s TERM -- "-${deploy_pid}" >/dev/null 2>&1 || true
+    wait "${deploy_job}" >/dev/null 2>&1 || true
+    fail "bootstrap signal harness resolved a process that was not live"
+  fi
+  if ! kill -s TERM "${bootstrap_pid}"; then
+    kill -s TERM -- "-${deploy_pid}" >/dev/null 2>&1 || true
+    wait "${deploy_job}" >/dev/null 2>&1 || true
+    fail "bootstrap signal harness could not signal the live bootstrap parent"
+  fi
+  if wait "${deploy_job}"; then
+    fail "bootstrap deploy succeeded after its parent received TERM"
+  else
+    rollout_status=$?
+  fi
+  if [[ ${rollout_status} -ne 143 ]]; then
+    fail "bootstrap-parent TERM exited ${rollout_status}, expected 143"
+  fi
+
+  for _ in {1..100}; do
+    if ! kill -0 "${deploy_pid}" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.02
+  done
+  if kill -0 "${deploy_pid}" >/dev/null 2>&1; then
+    fail "bootstrap parent exited while its snapshot controller was still running"
+  fi
+  if kill -0 "${descendant_pid}" >/dev/null 2>&1; then
+    fail "bootstrap parent left a stalled release helper descendant running"
+  fi
+  sleep 0.1
+  assert_log_excludes "${CALL_LOG}" "az containerapp update"
+  snapshot_context="$(awk '/^snapshot-context / { print $2; exit }' "${CALL_LOG}")"
+  if [[ -z "${snapshot_context}" || -e "${snapshot_context}" ]]; then
+    fail "bootstrap parent did not remove the private snapshot after TERM"
+  fi
+  pass
+
+  # If the snapshot controller itself dies, the bootstrap still owns the
+  # recorded process group and must terminate a surviving release descendant.
+  reset_deploy_harness
+  FAKE_BOOTSTRAP_SIGNAL_POINT="verify-registry"
+  signal_ready="false"
+  (trap - EXIT; run_fake_deploy >"${HARNESS}/leader-death-output.log" 2>&1) &
+  deploy_job=$!
+  for _ in {1..300}; do
+    if [[ -s "${BOOTSTRAP_PID_FILE}" && -s "${DEPLOY_PID_FILE}" &&
+      -s "${BOOTSTRAP_DESCENDANT_PID_FILE}" &&
+      -e "${BOOTSTRAP_SIGNAL_READY_FILE}" ]]; then
+      signal_ready="true"
+      break
+    fi
+    if ! kill -0 "${deploy_job}" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.05
+  done
+  if [[ "${signal_ready}" != "true" ]]; then
+    if [[ -s "${BOOTSTRAP_PID_FILE}" ]]; then
+      kill -s TERM "$(cat "${BOOTSTRAP_PID_FILE}")" >/dev/null 2>&1 || true
+    else
+      kill -s TERM "${deploy_job}" >/dev/null 2>&1 || true
+    fi
+    wait "${deploy_job}" >/dev/null 2>&1 || true
+    fail "bootstrap deploy did not reach the leader-death injection point"
+  fi
+  bootstrap_pid="$(cat "${BOOTSTRAP_PID_FILE}")"
+  deploy_pid="$(cat "${DEPLOY_PID_FILE}")"
+  descendant_pid="$(cat "${BOOTSTRAP_DESCENDANT_PID_FILE}")"
+  snapshot_context="$(awk '/^snapshot-context / { print $2; exit }' "${CALL_LOG}")"
+  kill -s KILL "${deploy_pid}"
+  if wait "${deploy_job}"; then
+    fail "bootstrap deploy succeeded after its snapshot controller was killed"
+  else
+    rollout_status=$?
+  fi
+  if [[ ${rollout_status} -ne 137 ]]; then
+    fail "killed snapshot controller exited ${rollout_status}, expected 137"
+  fi
+  for _ in {1..100}; do
+    if ! kill -0 "${descendant_pid}" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.02
+  done
+  if kill -0 "${bootstrap_pid}" >/dev/null 2>&1 ||
+    kill -0 "${descendant_pid}" >/dev/null 2>&1; then
+    kill -s TERM -- "-${deploy_pid}" >/dev/null 2>&1 || true
+    fail "bootstrap cleanup left a process after its group leader died"
+  fi
+  assert_log_excludes "${CALL_LOG}" "az containerapp update"
+  if [[ -z "${snapshot_context}" || -e "${snapshot_context}" ]]; then
+    fail "bootstrap parent did not remove the private snapshot after leader death"
+  fi
+  pass
+}
+
+test_release_git_environment_isolation() {
+  local harness canonical_url hostile_url canonical_sha hostile_sha control_sha isolated_sha
+  harness="$(mktemp -d)"
+  TEMP_DIRS+=("${harness}")
+  git init -q "${harness}/work"
+  git -C "${harness}/work" config user.name "Release Test"
+  git -C "${harness}/work" config user.email "release-test@example.invalid"
+  printf 'canonical\n' >"${harness}/work/payload.txt"
+  git -C "${harness}/work" add payload.txt
+  git -C "${harness}/work" commit -q -m "canonical"
+  git -C "${harness}/work" branch -M main
+  canonical_sha="$(git -C "${harness}/work" rev-parse HEAD)"
+  git init -q --bare "${harness}/canonical.git"
+  git -C "${harness}/work" push -q "${harness}/canonical.git" HEAD:refs/heads/main
+
+  printf 'hostile\n' >"${harness}/work/payload.txt"
+  git -C "${harness}/work" commit -q -am "hostile"
+  hostile_sha="$(git -C "${harness}/work" rev-parse HEAD)"
+  git init -q --bare "${harness}/hostile.git"
+  git -C "${harness}/work" push -q "${harness}/hostile.git" HEAD:refs/heads/main
+
+  canonical_url="file://${harness}/canonical.git"
+  hostile_url="file://${harness}/hostile.git"
+  printf '[url "%s"]\n\tinsteadOf = %s\n' "${hostile_url}" "${canonical_url}" \
+    >"${harness}/hostile-gitconfig"
+
+  control_sha="$(env \
+    GIT_CONFIG_GLOBAL="${harness}/hostile-gitconfig" \
+    GIT_CONFIG_COUNT=1 \
+    GIT_CONFIG_KEY_0="url.${hostile_url}.insteadOf" \
+    GIT_CONFIG_VALUE_0="${canonical_url}" \
+    git ls-remote "${canonical_url}" refs/heads/main | awk '{ print $1 }')"
+  if [[ "${control_sha}" != "${hostile_sha}" ]]; then
+    fail "hostile Git URL rewrite fixture did not redirect the control request"
+  fi
+
+  isolated_sha="$(env \
+    ALL_PROXY="http://127.0.0.1:1" \
+    GIT_CONFIG_GLOBAL="${harness}/hostile-gitconfig" \
+    GIT_CONFIG_COUNT=1 \
+    GIT_CONFIG_KEY_0="url.${hostile_url}.insteadOf" \
+    GIT_CONFIG_VALUE_0="${canonical_url}" \
+    GIT_SSL_NO_VERIFY=true \
+    GIT_TRACE="${harness}/git-trace" \
+    HTTPS_PROXY="http://127.0.0.1:1" \
+    bash "${REPO_ROOT}/scripts/run-release-git.sh" \
+      ls-remote "${canonical_url}" refs/heads/main | awk '{ print $1 }')"
+  if [[ "${isolated_sha}" != "${canonical_sha}" ||
+    "${isolated_sha}" == "${hostile_sha}" ]]; then
+    fail "release Git helper accepted caller-controlled URL rewrite configuration"
+  fi
+  if [[ -e "${harness}/git-trace" ]]; then
+    fail "release Git helper honored caller-controlled trace output"
+  fi
+  pass
+}
+
+test_release_lease_real_git_protocol() {
+  local harness lock_ref source_commit source_tree lease_a lease_b remaining
+  harness="$(mktemp -d)"
+  TEMP_DIRS+=("${harness}")
+  lock_ref="refs/heads/workforce-os-release-lock/production-gtm-platform"
+
+  git init -q "${harness}/source"
+  git -C "${harness}/source" config user.name "Release Test"
+  git -C "${harness}/source" config user.email "release-test@example.invalid"
+  printf 'source\n' >"${harness}/source/payload.txt"
+  git -C "${harness}/source" add payload.txt
+  git -C "${harness}/source" commit -q -m "source"
+  source_commit="$(git -C "${harness}/source" rev-parse HEAD)"
+  git init -q --bare "${harness}/remote.git"
+  git -C "${harness}/source" push -q \
+    "${harness}/remote.git" HEAD:refs/heads/release/go-live-test
+
+  bash "${REPO_ROOT}/scripts/run-release-git.sh" init -q --bare "${harness}/a.git"
+  bash "${REPO_ROOT}/scripts/run-release-git.sh" init -q --bare "${harness}/b.git"
+  bash "${REPO_ROOT}/scripts/run-release-git.sh" --git-dir="${harness}/a.git" \
+    fetch -q --no-tags "${harness}/remote.git" "${source_commit}"
+  bash "${REPO_ROOT}/scripts/run-release-git.sh" --git-dir="${harness}/b.git" \
+    fetch -q --no-tags "${harness}/remote.git" "${source_commit}"
+  source_tree="$(bash "${REPO_ROOT}/scripts/run-release-git.sh" \
+    --git-dir="${harness}/a.git" rev-parse "${source_commit}^{tree}")"
+  lease_a="$(printf 'release lease attempt a\n' | env \
+    GIT_AUTHOR_NAME='Release Test' \
+    GIT_AUTHOR_EMAIL='release-test@example.invalid' \
+    GIT_COMMITTER_NAME='Release Test' \
+    GIT_COMMITTER_EMAIL='release-test@example.invalid' \
+    bash "${REPO_ROOT}/scripts/run-release-git.sh" \
+      --git-dir="${harness}/a.git" commit-tree "${source_tree}" -p "${source_commit}")"
+  lease_b="$(printf 'release lease attempt b\n' | env \
+    GIT_AUTHOR_NAME='Release Test' \
+    GIT_AUTHOR_EMAIL='release-test@example.invalid' \
+    GIT_COMMITTER_NAME='Release Test' \
+    GIT_COMMITTER_EMAIL='release-test@example.invalid' \
+    bash "${REPO_ROOT}/scripts/run-release-git.sh" \
+      --git-dir="${harness}/b.git" commit-tree "${source_tree}" -p "${source_commit}")"
+  if [[ "${lease_a}" == "${lease_b}" || "${lease_a}" == "${source_commit}" ||
+    "${lease_b}" == "${source_commit}" ]]; then
+    fail "real Git lease fixture did not create unique per-attempt identities"
+  fi
+
+  bash "${REPO_ROOT}/scripts/run-release-git.sh" --git-dir="${harness}/a.git" \
+    push -q "--force-with-lease=${lock_ref}:" \
+    "${harness}/remote.git" "${lease_a}:${lock_ref}"
+  if bash "${REPO_ROOT}/scripts/run-release-git.sh" --git-dir="${harness}/b.git" \
+    push -q "--force-with-lease=${lock_ref}:" \
+    "${harness}/remote.git" "${lease_b}:${lock_ref}" >/dev/null 2>&1; then
+    fail "second real Git lease attempt acquired an already-held lock"
+  fi
+  bash "${REPO_ROOT}/scripts/run-release-git.sh" --git-dir="${harness}/a.git" \
+    push -q "--force-with-lease=${lock_ref}:${lease_a}" \
+    "${harness}/remote.git" ":${lock_ref}"
+  bash "${REPO_ROOT}/scripts/run-release-git.sh" --git-dir="${harness}/b.git" \
+    push -q "--force-with-lease=${lock_ref}:" \
+    "${harness}/remote.git" "${lease_b}:${lock_ref}"
+  if bash "${REPO_ROOT}/scripts/run-release-git.sh" --git-dir="${harness}/a.git" \
+    push -q "--force-with-lease=${lock_ref}:${lease_a}" \
+    "${harness}/remote.git" ":${lock_ref}" >/dev/null 2>&1; then
+    fail "stale real Git cleanup deleted a successor lease"
+  fi
+  remaining="$(bash "${REPO_ROOT}/scripts/run-release-git.sh" \
+    ls-remote "${harness}/remote.git" "${lock_ref}" | awk '{ print $1 }')"
+  if [[ "${remaining}" != "${lease_b}" ]]; then
+    fail "successor real Git lease did not remain after stale cleanup rejection"
+  fi
+  pass
+}
+
+test_bootstrap_archive_attribute_isolation() {
+  local harness candidate_commit hostile_attr_commit output_file
+  harness="$(mktemp -d)"
+  TEMP_DIRS+=("${harness}")
+  mkdir -p "${harness}/repo/scripts"
+  cp "${REPO_ROOT}/scripts/deploy-prod.sh" \
+    "${REPO_ROOT}/scripts/run-release-git.sh" \
+    "${REPO_ROOT}/scripts/verify-github-release-ci.sh" \
+    "${REPO_ROOT}/scripts/verify-migration-release-receipt.sh" \
+    "${REPO_ROOT}/scripts/verify-registry-api-image.sh" \
+    "${REPO_ROOT}/scripts/verify-api-image.sh" \
+    "${REPO_ROOT}/scripts/verify-containerapp-release-config.sh" \
+    "${harness}/repo/scripts/"
+  chmod +x \
+    "${harness}/repo/scripts/deploy-prod.sh" \
+    "${harness}/repo/scripts/verify-github-release-ci.sh" \
+    "${harness}/repo/scripts/verify-migration-release-receipt.sh" \
+    "${harness}/repo/scripts/verify-registry-api-image.sh" \
+    "${harness}/repo/scripts/verify-api-image.sh" \
+    "${harness}/repo/scripts/verify-containerapp-release-config.sh"
+  git -C "${harness}/repo" init -q
+  git -C "${harness}/repo" config user.name "Release Test"
+  git -C "${harness}/repo" config user.email "release-test@example.invalid"
+  git -C "${harness}/repo" checkout -q -b attribute-test
+  git -C "${harness}/repo" add scripts
+  git -C "${harness}/repo" commit -q -m "candidate"
+  candidate_commit="$(git -C "${harness}/repo" rev-parse HEAD)"
+
+  printf 'scripts/deploy-prod.sh export-ignore\nscripts/run-release-git.sh export-ignore\n' \
+    >"${harness}/repo/.gitattributes"
+  git -C "${harness}/repo" add .gitattributes
+  git -C "${harness}/repo" commit -q -m "hostile attribute source"
+  hostile_attr_commit="$(git -C "${harness}/repo" rev-parse HEAD)"
+  git -C "${harness}/repo" reset -q --hard "${candidate_commit}"
+
+  printf 'scripts/deploy-prod.sh export-ignore\n' \
+    >"${harness}/repo/.git/info/attributes"
+  printf 'scripts/run-release-git.sh export-ignore\n' \
+    >"${harness}/hostile-global-attributes"
+  : >"${harness}/receipt.json"
+  : >"${harness}/receipt.json.sig"
+  : >"${harness}/allowed-signers"
+  cat >"${harness}/hostile-bash-env.sh" <<'EOF'
+printf 'bash-env-executed\n' >>"${BASH_ENV_MARKER}"
+EOF
+  : >"${harness}/bash-env-marker"
+  : >"${harness}/exported-function-marker"
+  output_file="${harness}/attribute-output.log"
+
+  if (
+    cd "${harness}/repo"
+    bash() {
+      printf 'exported-bash-function-executed\n' >>"${EXPORTED_FUNCTION_MARKER}"
+      command bash "$@"
+    }
+    command() {
+      printf 'exported-command-function-executed\n' >>"${EXPORTED_FUNCTION_MARKER}"
+      builtin command "$@"
+    }
+    function /usr/bin/env() {
+      printf 'exported-env-function-executed\n' >>"${EXPORTED_FUNCTION_MARKER}"
+      builtin command /usr/bin/env "$@"
+    }
+    export -f bash command /usr/bin/env
+    env \
+      ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED=true \
+      BASH_ENV="${harness}/hostile-bash-env.sh" \
+      ENV="${harness}/hostile-bash-env.sh" \
+      BASH_ENV_MARKER="${harness}/bash-env-marker" \
+      EXPORTED_FUNCTION_MARKER="${harness}/exported-function-marker" \
+      GIT_ATTR_SOURCE="${hostile_attr_commit}" \
+      GIT_CONFIG_COUNT=1 \
+      GIT_CONFIG_KEY_0=core.attributesFile \
+      GIT_CONFIG_VALUE_0="${harness}/hostile-global-attributes" \
+      TAR_OPTIONS='--exclude=scripts/deploy-prod.sh' \
+      scripts/deploy-prod.sh \
+        --migration-receipt "${harness}/receipt.json" \
+        --migration-signature "${harness}/receipt.json.sig" \
+        --migration-allowed-signers "${harness}/allowed-signers" \
+        --yes
+  ) >"${output_file}" 2>&1; then
+    fail "attribute isolation fixture unexpectedly passed branch admission"
+  fi
+  assert_log_contains "${output_file}" "current branch is 'attribute-test', expected release/go-live-*"
+  assert_log_excludes "${output_file}" "snapshot does not contain a regular executable release controller"
+  assert_log_excludes "${output_file}" "release helper must be a regular non-symlink snapshot file"
+  if [[ -s "${harness}/bash-env-marker" ]]; then
+    fail "BASH_ENV executed in the bootstrap, exact-commit controller, or descendants"
+  fi
+  if [[ -s "${harness}/exported-function-marker" ]]; then
+    fail "an exported Bash function reached the exact-commit controller"
+  fi
+  pass
+}
+
+test_snapshot_helper_symlink_rejection() {
+  make_deploy_harness
+  FAKE_BRANCH="release/go-live-test"
+  FAKE_COMMIT="$(printf '1%.0s' {1..40})"
+  FAKE_REMOTE_COMMIT="${FAKE_COMMIT}"
+  FAKE_RUN_ID="ca123"
+  FAKE_DIGEST="sha256:$(printf '2%.0s' {1..64})"
+  printf '#!/usr/bin/env bash\nexit 0\n' >"${HARNESS}/outside-git-helper.sh"
+  chmod +x "${HARNESS}/outside-git-helper.sh"
+  rm -f -- "${HARNESS}/repo/scripts/run-release-git.sh"
+  ln -s "${HARNESS}/outside-git-helper.sh" \
+    "${HARNESS}/repo/scripts/run-release-git.sh"
+
+  if run_fake_deploy >"${HARNESS}/symlink-output.log" 2>&1; then
+    fail "snapshot controller accepted a release helper symlink escaping the snapshot"
+  fi
+  assert_log_contains "${HARNESS}/symlink-output.log" \
+    "release helper must be a regular non-symlink snapshot file: scripts/run-release-git.sh"
+  assert_log_excludes "${CALL_LOG}" "gh "
+  assert_log_excludes "${CALL_LOG}" "az "
+  pass
+}
+
 test_no_mutable_bitbucket_deploy_path() {
   if grep -Fq -- "redeploy-current-master" "${REPO_ROOT}/bitbucket-pipelines.yml"; then
     fail "Bitbucket still exposes the mutable-tag production deploy fallback"
@@ -578,6 +1253,15 @@ test_github_ci_verifier() {
 
   cat >"${harness}/bin/gh" <<'EOF'
 #!/usr/bin/env bash
+if [[ "${GH_HOST:-}" != "github.com" ]]; then
+  exit 91
+fi
+if env | grep -Eq '^(ALL_PROXY|CURL_CA_BUNDLE|GH_DEBUG|HTTPS_PROXY|HTTP_PROXY|SSL_CERT_DIR|SSL_CERT_FILE|all_proxy|http_proxy|https_proxy)='; then
+  exit 92
+fi
+if [[ "$*" != *"--repo github.com/Kloudedge-apex/apex-product"* ]]; then
+  exit 93
+fi
 if [[ "${1:-} ${2:-}" == "run list" ]]; then
   cat "${RUN_LIST_JSON}"
 elif [[ "${1:-} ${2:-}" == "run view" ]]; then
@@ -608,14 +1292,18 @@ EOF
     ]
   }' >"${harness}/run.json"
 
-  env PATH="${harness}/bin:${PATH}" RUN_LIST_JSON="${harness}/runs.json" \
+  env PATH="${harness}/bin:${PATH}" ALL_PROXY="http://127.0.0.1:1" \
+    CURL_CA_BUNDLE="${harness}/hostile-ca.pem" GH_DEBUG=api GH_HOST=evil.invalid \
+    HTTPS_PROXY="http://127.0.0.1:1" RUN_LIST_JSON="${harness}/runs.json" \
     RUN_VIEW_JSON="${harness}/run.json" \
     "${harness}/scripts/verify-github-release-ci.sh" "${commit}" >/dev/null
   pass
 
   jq '(.jobs[] | select(.name == "Production Image Contract").conclusion) = "failure"' \
     "${harness}/run.json" >"${harness}/failed-run.json"
-  if env PATH="${harness}/bin:${PATH}" RUN_LIST_JSON="${harness}/runs.json" \
+  if env PATH="${harness}/bin:${PATH}" ALL_PROXY="http://127.0.0.1:1" \
+    CURL_CA_BUNDLE="${harness}/hostile-ca.pem" GH_DEBUG=api GH_HOST=evil.invalid \
+    HTTPS_PROXY="http://127.0.0.1:1" RUN_LIST_JSON="${harness}/runs.json" \
     RUN_VIEW_JSON="${harness}/failed-run.json" \
     "${harness}/scripts/verify-github-release-ci.sh" "${commit}" >/dev/null 2>&1; then
     fail "GitHub CI verifier accepted a failed required job"
@@ -654,7 +1342,7 @@ test_migration_receipt_verifier() {
   git -C "${harness}/repo" init -q
   git -C "${harness}/repo" config user.name "Release Test"
   git -C "${harness}/repo" config user.email "release-test@example.invalid"
-  git -C "${harness}/repo" add docs
+  git -C "${harness}/repo" add docs scripts
   git -C "${harness}/repo" commit -q -m "fixture: committed release evidence"
   commit="$(git -C "${harness}/repo" rev-parse HEAD)"
   evidence="sha256:$(printf '6%.0s' {1..64})"
@@ -780,6 +1468,55 @@ test_migration_receipt_verifier() {
     "${harness}/allowed-signers" \
     "${commit}" >/dev/null 2>&1; then
     fail "migration receipt verifier accepted undeclared receipt fields"
+  fi
+  pass
+
+  # Snapshot mode reads the already archived reviewed bytes directly and must
+  # neither require Git metadata nor accept a mismatched snapshot identity.
+  mkdir -p "${harness}/snapshot" "${harness}/no-git-bin"
+  git -C "${harness}/repo" archive --format=tar "${commit}" | \
+    tar -xf - -C "${harness}/snapshot"
+  cat >"${harness}/no-git-bin/git" <<'EOF'
+#!/usr/bin/env bash
+exit 93
+EOF
+  chmod +x "${harness}/no-git-bin/git"
+  env PATH="${harness}/no-git-bin:${PATH}" \
+    WORKFORCE_RELEASE_SNAPSHOT_ACTIVE=true \
+    WORKFORCE_RELEASE_SOURCE_COMMIT="${commit}" \
+    WORKFORCE_RELEASE_SNAPSHOT_ROOT="${harness}/snapshot" \
+    "${harness}/snapshot/scripts/verify-migration-release-receipt.sh" \
+      "${harness}/receipt.json" \
+      "${harness}/receipt.json.sig" \
+      "${harness}/allowed-signers" \
+      "${commit}" >/dev/null
+  pass
+
+  if env PATH="${harness}/no-git-bin:${PATH}" \
+    WORKFORCE_RELEASE_SNAPSHOT_ACTIVE=true \
+    WORKFORCE_RELEASE_SOURCE_COMMIT="$(printf '9%.0s' {1..40})" \
+    WORKFORCE_RELEASE_SNAPSHOT_ROOT="${harness}/snapshot" \
+    "${harness}/snapshot/scripts/verify-migration-release-receipt.sh" \
+      "${harness}/receipt.json" \
+      "${harness}/receipt.json.sig" \
+      "${harness}/allowed-signers" \
+      "${commit}" >/dev/null 2>&1; then
+    fail "migration verifier accepted a mismatched exact-snapshot commit identity"
+  fi
+  pass
+
+  rm -f -- "${harness}/snapshot/${paths[0]}"
+  ln -s "${harness}/repo/${paths[0]}" "${harness}/snapshot/${paths[0]}"
+  if env PATH="${harness}/no-git-bin:${PATH}" \
+    WORKFORCE_RELEASE_SNAPSHOT_ACTIVE=true \
+    WORKFORCE_RELEASE_SOURCE_COMMIT="${commit}" \
+    WORKFORCE_RELEASE_SNAPSHOT_ROOT="${harness}/snapshot" \
+    "${harness}/snapshot/scripts/verify-migration-release-receipt.sh" \
+      "${harness}/receipt.json" \
+      "${harness}/receipt.json.sig" \
+      "${harness}/allowed-signers" \
+      "${commit}" >/dev/null 2>&1; then
+    fail "migration verifier accepted a symlinked reviewed snapshot source"
   fi
   pass
 }
@@ -1049,6 +1786,11 @@ EOF
 test_registry_verifier
 test_deploy_admission
 test_deploy_rollback
+test_bootstrap_signal_forwarding
+test_release_git_environment_isolation
+test_release_lease_real_git_protocol
+test_bootstrap_archive_attribute_isolation
+test_snapshot_helper_symlink_rejection
 test_no_mutable_bitbucket_deploy_path
 test_github_ci_verifier
 test_migration_receipt_verifier

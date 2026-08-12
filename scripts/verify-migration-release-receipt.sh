@@ -22,7 +22,11 @@ for REQUIRED_FILE in "${RECEIPT}" "${SIGNATURE}" "${ALLOWED_SIGNERS}"; do
     exit 1
   fi
 done
-for REQUIRED_COMMAND in git jq openssl ssh-keygen; do
+REQUIRED_COMMANDS=(jq openssl ssh-keygen)
+if [[ "${WORKFORCE_RELEASE_SNAPSHOT_ACTIVE:-}" != "true" ]]; then
+  REQUIRED_COMMANDS+=(git)
+fi
+for REQUIRED_COMMAND in "${REQUIRED_COMMANDS[@]}"; do
   if ! command -v "${REQUIRED_COMMAND}" >/dev/null 2>&1; then
     echo "ERROR: required command is unavailable: ${REQUIRED_COMMAND}" >&2
     exit 1
@@ -31,9 +35,48 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+SNAPSHOT_SOURCE_MODE="false"
+if [[ "${WORKFORCE_RELEASE_SNAPSHOT_ACTIVE:-}" == "true" ]]; then
+  if [[ "${EXPECTED_COMMIT}" != "${WORKFORCE_RELEASE_SOURCE_COMMIT:-}" ]]; then
+    echo "ERROR: migration receipt commit does not match the exact-commit release snapshot" >&2
+    exit 1
+  fi
+  if [[ -z "${WORKFORCE_RELEASE_SNAPSHOT_ROOT:-}" ||
+    "$(cd "${WORKFORCE_RELEASE_SNAPSHOT_ROOT}" && pwd -P)" != "$(cd "${REPO_ROOT}" && pwd -P)" ]]; then
+    echo "ERROR: migration verifier is not running from the admitted release snapshot" >&2
+    exit 1
+  fi
+  SNAPSHOT_SOURCE_MODE="true"
+fi
+
+read_reviewed_source() {
+  local path=$1
+  local candidate current component
+  local -a path_components
+  if [[ "${SNAPSHOT_SOURCE_MODE}" != "true" ]]; then
+    GIT_NO_REPLACE_OBJECTS=1 git -C "${REPO_ROOT}" show "${EXPECTED_COMMIT}:${path}"
+    return
+  fi
+
+  candidate="${REPO_ROOT}/${path}"
+  current="${REPO_ROOT}"
+  IFS='/' read -r -a path_components <<<"${path}"
+  for component in "${path_components[@]}"; do
+    current="${current}/${component}"
+    if [[ -L "${current}" ]]; then
+      echo "ERROR: reviewed snapshot source must not traverse a symlink: ${path}" >&2
+      return 1
+    fi
+  done
+  if [[ ! -f "${candidate}" ]]; then
+    echo "ERROR: reviewed snapshot source is not a regular file: ${path}" >&2
+    return 1
+  fi
+  command cat -- "${candidate}"
+}
+
 TRUST_ROOT_PIN_PATH="docs/ops/production-migration-allowed-signers.sha256"
-if ! TRUST_ROOT_PIN_SOURCE="$(GIT_NO_REPLACE_OBJECTS=1 git -C "${REPO_ROOT}" show \
-  "${EXPECTED_COMMIT}:${TRUST_ROOT_PIN_PATH}")"; then
+if ! TRUST_ROOT_PIN_SOURCE="$(read_reviewed_source "${TRUST_ROOT_PIN_PATH}")"; then
   echo "ERROR: reviewed migration approver trust-root pin is missing from ${EXPECTED_COMMIT}" >&2
   exit 1
 fi
@@ -125,8 +168,8 @@ fi
 for index in "${!MIGRATIONS[@]}"; do
   path="${MIGRATIONS[$index]}"
   pause="${WRITER_PAUSE[$index]}"
-  if ! source_digest="$(GIT_NO_REPLACE_OBJECTS=1 git -C "${REPO_ROOT}" show \
-    "${EXPECTED_COMMIT}:${path}" | openssl dgst -sha256 -r | awk '{ print $1 }')"; then
+  if ! source_digest="$(read_reviewed_source "${path}" | \
+    openssl dgst -sha256 -r | awk '{ print $1 }')"; then
     echo "ERROR: required migration is missing from ${EXPECTED_COMMIT}: ${path}" >&2
     exit 1
   fi

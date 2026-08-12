@@ -203,14 +203,24 @@ release:
 
 Run `scripts/deploy-prod.sh --migration-receipt <outside-repo-receipt.json>
 --migration-signature <outside-repo-receipt.json.sig> --migration-allowed-signers
-<outside-repo-allowed-signers>`
-from a clean, published `release/go-live-*` branch on an authenticated
-workstation with `gh`, `jq`, `ssh-keygen`, Azure CLI, and Linux/amd64 Docker.
+<outside-repo-allowed-signers> --yes`
+from a published `release/go-live-*` branch only after a protected CI
+OIDC release workflow and environment exist, using `gh`, `jq`, `ssh-keygen`,
+Azure CLI, and Linux/amd64 Docker. No such protected deploy
+workflow/environment exists yet, and private-repository branch-protection API
+configuration is plan-blocked; production rollout is currently NO-GO. A future
+admitted release environment must invoke the controller noninteractively with
+the required `--yes` acknowledgement and set
+`ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED=true` only after the runbook's RBAC
+audit proves that identity is the exclusive production Container Apps writer;
+the default/unset state is NO-GO because the Container Apps update API does not
+publish an ETag/`If-Match` CAS contract.
 The script requires exact-commit green GitHub CI, validates the approver-signed
 production migration receipt against an external trust root whose exact bytes
 are SHA-256-pinned in reviewed source, verifies the
 API/worker role, release-critical non-secret configuration, secret-reference
-wiring, and probe matrix, builds from a fresh `git archive`, binds the digest to
+wiring, and probe matrix, re-enters itself and all helpers from a private
+exact-commit `git archive`, binds the digest to
 the completed ACR run record, pulls the immutable digest, and runs the image
 contract against that exact registry artifact. The release verifier requires
 `REQUIRE_PRODUCTION_ENV=true` on both apps and rejects both the live-send

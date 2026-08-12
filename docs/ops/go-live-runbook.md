@@ -90,28 +90,84 @@ digest and all six migration bytes are read from the exact candidate commit
 with replacement objects disabled, never from mutable working-tree files. The
 verifier enforces their order and writer-pause requirements. The receipt,
 signature, and pinned allowed-signers trust root are mandatory inputs to
-`scripts/deploy-prod.sh`.
+`scripts/deploy-prod.sh`. The protected controller is deliberately
+noninteractive and requires the explicit `--yes` acknowledgement; it never
+reads a confirmation from stdin. The future admitted release environment must
+execute `scripts/deploy-prod.sh` directly (not through `bash`) so its privileged
+bootstrap shebang applies, using:
 
-The only admitted image rollout path is `scripts/deploy-prod.sh` from a clean,
-published `release/go-live-*` branch. It must resolve the full-SHA ACR tag once,
+```bash
+scripts/deploy-prod.sh \
+  --migration-receipt <outside-repo-receipt.json> \
+  --migration-signature <outside-repo-receipt.json.sig> \
+  --migration-allowed-signers <outside-repo-allowed-signers> \
+  --yes
+```
+
+The only admitted image rollout path is `scripts/deploy-prod.sh` from a
+published `release/go-live-*` branch. Mutable worktree files are neither
+executed nor uploaded, and admission deliberately avoids `git status` because
+repository-local fsmonitor configuration can execute code. It must resolve the
+full-SHA ACR tag once,
 pull `ledgracr.azurecr.io/apex-api@sha256:...` as Linux/amd64, and pass
 `scripts/verify-registry-api-image.sh` before either Container App changes.
+The checked-out script is only a bootstrap: it creates a mode-0700 `git
+archive` of the exact candidate commit, then runs the controller, every release
+helper, and the ACR build context from that private snapshot. The bootstrap
+starts in privileged Bash mode so shell startup files and exported functions
+cannot run before its scrub boundary. Its parent owns the child process group,
+snapshot, and separate runtime-state directory, waits for the group leader,
+terminates any surviving descendant, and removes those exact `mktemp` paths.
+Mutable or ignored files in the original checkout are never executed or
+uploaded.
 Never deploy `latest`, a timestamp tag, or a digest that lacks an exact
 40-character matching OCI revision label. Retain the verified digest and script
 receipt with the release evidence.
 
 The script atomically acquires the GitHub ref lease
 `refs/heads/workforce-os-release-lock/production-gtm-platform` before reading
-production state. Do not make direct Container App changes while that lease
-exists. Cleanup removes it only when it still points to the running release
-commit. If a process dies before cleanup, inspect the referenced commit,
-operator session, and Azure state before separately authorizing stale-lease
-removal; never delete it merely because another rollout is waiting.
+production state. Each attempt creates a unique commit with the candidate tree
+and source commit as its parent. Acquisition uses Git `--force-with-lease` with
+an empty expected ref; cleanup uses `--force-with-lease` with that unique commit
+as the expected value. Both operations are server-side compare-and-swap, so a
+cleanup cannot delete a successor attempt's lease. Lease fetches and pushes run
+from a private bare repository with an empty hook template, ignored
+system/global Git configuration, prompts disabled, the explicit canonical
+GitHub URL, and the `gh` credential helper. Mutable checkout remotes and hooks
+are outside the lease boundary. Caller-supplied Git configuration, attribute
+sources (including `GIT_ATTR_SOURCE`), object stores, namespaces, and transport
+overrides are scrubbed; HTTPS uses direct system trust with certificate
+verification forced on, and Git tracing is disabled with redaction forced for
+defense in depth around the credential helper. Snapshot bootstrap attributes
+come only from the exact candidate tree. Do not make direct Container App
+changes while the lease exists. If a process dies before cleanup, inspect
+the unique lease commit, operator session, and Azure state before separately
+authorizing stale-lease removal; never delete it merely because another rollout
+is waiting. A rollout whose final conditional lease deletion fails exits
+nonzero even if both applications are healthy, because the release is not
+operationally complete while its lease remains.
 Once the first Container App mutation is attempted, every failed rollout keeps
 the lease, including one whose compensating rollback verifies healthy. This
 prevents a second rollout while a delayed platform operation may still surface.
 Treat that retained ref as an incident marker, not as disposable lock
 contention; investigate and separately authorize its removal.
+
+Azure Container Apps stable REST specifications from `2022-03-01` through
+`2026-01-01` do not expose a resource ETag or an `If-Match` parameter for the
+update operation. The image update is therefore not described as optimistic
+CAS. It is fail-closed unless
+`ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED=true`; set that variable only after
+an RBAC audit proves the protected CI OIDC principal is the exclusive identity
+with `Microsoft.App/containerApps/write` on both production apps and confirms
+interactive users cannot write them. The Git lease serializes attempts by that
+principal, and the controller re-reads both apps immediately before the first
+write, immediately before each later or compensating write, and after every
+write. No protected deploy workflow/environment currently exists, and the
+private-repository branch-protection API needed to establish that admission
+boundary is plan-blocked. Therefore the attestation must remain unset and the
+current release remains NO-GO until those controls exist and the exclusive-RBAC
+audit is recorded. Re-audit after any role-assignment, group-membership,
+federation, or break-glass change.
 
 `scripts/verify-containerapp-release-config.sh` requires
 `REQUIRE_PRODUCTION_ENV=true` on both roles, enforces the intentional worker-gate
