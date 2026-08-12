@@ -1,8 +1,10 @@
 # Go-Live Runbook — Live Sending Week
 
 Operator runbook for the first week of real outbound email (GO-LIVE GL9/GL10).
-Everything here is grounded in the code on `fix/go-live-blockers` — file
-references are given so you can verify behavior before acting.
+Everything here is grounded in the guarded-SDR candidate on
+`release/go-live-2026-06-01`; the exact local candidate commit is recorded in
+the workspace verification file. File references are given so behavior can be
+verified before acting.
 
 **Infra constants (do not improvise):**
 
@@ -24,6 +26,62 @@ API_FQDN=$(az containerapp show -n apex-gtm-api -g Ledgr-prod \
   --query properties.configuration.ingress.fqdn -o tsv)
 ```
 
+### Authentication claim contract
+
+Before an API or console-BFF revision receives traffic, verify its non-secret
+Clerk claim configuration is present and consistent:
+
+- `CLERK_ISSUER` is the exact trusted Clerk issuer origin. If omitted, the
+  verifier derives it from `CLERK_DOMAIN`, the publishable-key domain, or the
+  origin of `CLERK_JWKS_URL`.
+- `CLERK_AUTHORIZED_PARTIES` is required in production on both the API and BFF.
+  It is a comma-separated list of exact browser origins accepted in the JWT
+  `azp` claim. Do not use wildcards, paths, or preview-domain patterns.
+- `CLERK_AUDIENCE` is optional. Configure it only after confirming that the
+  current Clerk session token carries that audience; setting an invented value
+  intentionally rejects every session.
+- `DEV_TRUST_X_ORG_ID` must remain false on the BFF. The code also ignores it
+  whenever `NODE_ENV=production`. `ALLOW_DEV_ORG_HEADER` remains non-production
+  only on the API.
+
+The verifiers require RS256, an exact JWKS `kid`, nonempty `sub`, `exp`, `iat`,
+the trusted issuer, an active `nbf` when present, and an authorized `azp` in
+production. A revision that cannot validate those claims rejects the request;
+it must not fall back to client-supplied tenant headers.
+
+---
+
+## (0) RELEASE ADMISSION AND SCHEMA ORDER
+
+The current guarded-SDR candidate is a production **NO-GO** until all six
+review-only SQL files are rehearsed and then applied with separate operator
+approval. Codex did not apply them. Use the invocation, writer-pause,
+duplicate-inventory, retry, and postcondition instructions inside each file.
+
+Required dependency order:
+
+1. `docs/migrations/2026-06-01_outreach-artifact-unique.sql`
+2. `docs/migrations/2026-08-12_conversation-store-expand.sql`
+3. `docs/migrations/2026-08-12_outreach-delivery-unknown-expand.sql`
+4. `docs/migrations/2026-08-12_conversation-reply-single-flight-expand.sql`
+5. `docs/migrations/2026-08-12_graph-run-activity-expand.sql`
+6. `docs/migrations/2026-08-12_graph-run-lifecycle-expand.sql`
+
+Do not deploy code that writes a new column, table, or enum value before its
+schema prerequisite. The artifact, reply-single-flight, and graph-lifecycle
+index operations require the documented writer pauses. The concurrent index
+files must not run inside a transaction-wrapping migration runner.
+
+Stop on any duplicate preflight. Never auto-delete or rewrite a `SENT` or
+`DELIVERY_UNKNOWN` row. Reconcile reply duplicates against Gmail provider
+truth and active GraphRun duplicates against checkpoints/evidence. A legacy
+active run with neither a checkpoint nor persisted start seed requires manual
+resolution; an empty backfilled seed is not evidence that it can be replayed.
+
+After schema apply, verify the exact candidate image against the production
+gates in the workspace `docs/PRODUCT_COMPLETION_CONTRACT.md` before adding any
+organization to `OUTREACH_LIVE_FOR_ORGS`.
+
 ---
 
 ## (a) KILL SWITCHES
@@ -38,8 +96,9 @@ Three switches, in escalation order. Pick by intent:
 
 Every `az containerapp update`/`stop` rolls a new revision/restarts replicas;
 in-flight jobs are interrupted, BullMQ marks them stalled and redelivers, and
-artifacts caught mid-send in `SENDING` are released by the reconcile sweep
-(see triage #5).
+artifacts caught mid-send in `SENDING` are quarantined as
+`DELIVERY_UNKNOWN` by the reconcile sweep (see triage #5). They are never
+automatically dispatched again.
 
 ### KS-1 — Clear `OUTREACH_LIVE_FOR_ORGS` (fail-closed → everything SIMULATED)
 
@@ -136,7 +195,7 @@ az containerapp stop -n apex-gtm-worker -g Ledgr-prod
   runs, Gmail watch renewal sweep, reconcile sweeps.
 - Jobs active at the moment of the kill are redelivered by BullMQ on restart;
   artifacts caught in `SENDING` sit there until the post-restart reconcile
-  sweep releases claims older than 15 min.
+  sweep quarantines claims older than 15 min as `DELIVERY_UNKNOWN`.
 - Still working (these live on `apex-gtm-api`): the API itself, inbound Gmail
   push (`/api/integrations/gmail/push`), unsubscribe endpoints (`/api/u/:token`),
   approvals. Approvals made during the stop queue up and send on restart.
@@ -151,9 +210,9 @@ az containerapp logs show -n apex-gtm-worker -g Ledgr-prod --tail 50   # watch b
 curl -fsS "https://${API_FQDN}/api/health/worker" | jq .               # expect 200 + workerCount ≥ 1 per queue
 ```
 
-Boot order on restart: reconcile sweep runs once immediately (recovers
-stale `SENDING` + stranded `APPROVED`), then the Gmail watch renewal sweep
-runs once (re-arms any watch that expired during the outage).
+Boot order on restart: reconcile sweep runs once immediately (quarantines
+stale `SENDING`; re-enqueues only stranded `APPROVED`), then the Gmail watch
+renewal sweep runs once (re-arms any watch that expired during the outage).
 
 ---
 
@@ -169,6 +228,9 @@ Code: `send-outreach.worker.ts` `markTerminalFailure()` — fires when BullMQ
 exhausts retries (3 attempts, exponential backoff from 5s). There is no FAILED
 enum value yet, so worker-side failures reuse `REJECTED` with the
 `auto-failed: <reason>` marker to distinguish them from human rejections.
+This applies only when the artifact is safely back in `APPROVED` after a
+proved no-attempt or provider-rejected response. An unresolved `SENDING` claim
+becomes `DELIVERY_UNKNOWN` instead.
 
 ```sql
 SELECT id, "orgId", "recipientRef", "reviewerNote", "reviewedAt"
@@ -273,19 +335,22 @@ WHERE status = 'ERROR';
 `expires_at` (GL1 `withAbsoluteExpiry`), and the row flips back to `CONNECTED`.
 There is no server-side fix for `invalid_grant` — it requires the user.
 
-### 5. `SENDING` claims stuck > 15 min
+### 5. `DELIVERY_UNKNOWN` and `SENDING` claims stuck > 15 min
 
 Code: the reconcile sweep (`reconcileStuckArtifacts()`, every 5 min, also once
-at worker boot) releases `SENDING` rows with `updatedAt` older than 15 min
-back to `APPROVED` and re-enqueues them. So a `SENDING` row older than ~20 min
-should not exist — if it does, **the sweep itself is not running**, which
-means the outreach worker is disabled, wedged, or down.
+at worker boot) changes `SENDING` rows older than 15 min to terminal
+`DELIVERY_UNKNOWN`. It does not re-enqueue them. A stale claim cannot prove
+whether process loss happened before or after the provider accepted the POST.
+Automatically dispatching it again would risk duplicate mail.
 
 ```sql
-SELECT id, "orgId", "updatedAt", now() - "updatedAt" AS stuck_for
+SELECT id, "orgId", status, "recipientRef", subject, "updatedAt",
+       "sendReceiptId", "reviewerNote"
 FROM "OutreachArtifact"
-WHERE status = 'SENDING'
-  AND "updatedAt" < now() - interval '15 minutes';
+WHERE status = 'DELIVERY_UNKNOWN'
+   OR (status = 'SENDING'
+       AND "updatedAt" < now() - interval '15 minutes')
+ORDER BY "updatedAt" DESC;
 ```
 
 **Action:**
@@ -293,18 +358,19 @@ WHERE status = 'SENDING'
    consumers on `outreach-send`, fix the worker (env gate? crash-loop? KS-2/KS-3
    left engaged?).
 2. Restart the worker (`az containerapp revision restart` or KS-3
-   stop/start). The boot-time sweep recovers the rows; look for
-   `Reconcile sweep: released N stale SENDING claim(s), re-enqueued M stranded artifact(s)`
+   stop/start). Look for
+   `Reconcile sweep: quarantined N stale SENDING claim(s) as DELIVERY_UNKNOWN`
    in worker logs.
-3. Manual DB release is a last resort (DB-safety workflow): guarded
-   `UPDATE ... SET status='APPROVED' WHERE id='<id>' AND status='SENDING'` —
-   the same CAS shape the code uses, so you can never clobber a row that
-   raced to a terminal state.
+3. For each `DELIVERY_UNKNOWN`, inspect the connected provider's Sent mailbox
+   or message API using recipient, subject, and the narrow send-time window.
+   Record the provider evidence in the incident/change record.
+4. Never reset the same artifact to `APPROVED`. If provider evidence proves no
+   message was accepted and a replacement is still appropriate, create a new
+   artifact and put it through normal human review and approval.
 
-Note: a SENDING row that resolves on its own within 15–20 min is the system
-working as designed (worker died mid-send, sweep recovered it). Duplicate
-delivery is possible in exactly that window — the dispatch is not idempotent
-at the provider, which is a known, accepted live-week risk.
+This provides at-most-once automatic dispatch for ambiguous outcomes. It is
+not exactly-once delivery: a provider may have accepted a request whose
+response was lost, so manual/provider reconciliation remains mandatory.
 
 ---
 
@@ -489,6 +555,8 @@ FROM "OutreachArtifact" WHERE id = '<artifact-id>';
 Required: `status='SENT'`, `sentAt` set, `sendReceiptId` = Gmail message id.
 - `SIMULATED` instead → the org was NOT allowlisted in the worker's env. Fix the allowlist, regenerate, retry.
 - `REJECTED auto-failed: live send required ... mock mode` → credential problem; back to Step 1.
+- `DELIVERY_UNKNOWN` → do not approve or retry this artifact. Follow failure
+  triage #5 and reconcile the provider's Sent mailbox/API first.
 
 **Step 5 — verify Gmail delivery + receipt**
 

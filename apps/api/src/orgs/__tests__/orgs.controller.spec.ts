@@ -23,6 +23,7 @@ describe("OrgsController IDOR protection", () => {
     findOne: ReturnType<typeof vi.fn>;
     update: ReturnType<typeof vi.fn>;
     getStats: ReturnType<typeof vi.fn>;
+    getOnboardingStatus: ReturnType<typeof vi.fn>;
   };
   let prisma: { user: { findUnique: ReturnType<typeof vi.fn> } };
   let controller: OrgsController;
@@ -34,12 +35,30 @@ describe("OrgsController IDOR protection", () => {
         .fn()
         .mockResolvedValue({ id: ORG_ID, name: "Acme", plan: "TRIAL" }),
       getStats: vi.fn().mockResolvedValue({ users: 3, runs: 10 }),
+      getOnboardingStatus: vi.fn().mockResolvedValue({
+        currentStep: "organization",
+        complete: false,
+        readyForLiveSend: false,
+      }),
     };
     prisma = { user: { findUnique: vi.fn() } };
     controller = new OrgsController(
       service as unknown as OrgsService,
       prisma as unknown as PrismaService,
     );
+  });
+
+  describe("GET /orgs/onboarding/status", () => {
+    it("derives status for the guard-provided org without a client org id", async () => {
+      const result = await controller.getOnboardingStatus(ORG_ID);
+
+      expect(service.getOnboardingStatus).toHaveBeenCalledWith(ORG_ID);
+      expect(result).toEqual({
+        currentStep: "organization",
+        complete: false,
+        readyForLiveSend: false,
+      });
+    });
   });
 
   describe("GET /orgs/:id (findOne)", () => {

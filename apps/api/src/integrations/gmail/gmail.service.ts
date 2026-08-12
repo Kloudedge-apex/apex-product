@@ -6,23 +6,16 @@ import {
   UnauthorizedException,
   BadRequestException,
   ForbiddenException,
-  Inject,
-  forwardRef,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { google, gmail_v1, Auth } from "googleapis";
 import { OAuth2Client } from "google-auth-library";
-import {
-  OutreachArtifactStatus,
-  OutreachSuppressionReason,
-  Prisma,
-} from "@prisma/client";
+import { OutreachSuppressionReason } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
-import { RuntimeService } from "../../runtime/runtime.service";
 import { isWorkerEnabled } from "../../runtime/worker.service";
 import { SuppressionService } from "../../outreach/suppression.service";
+import { ConversationStoreService } from "../../conversation-store/conversation-store.service";
 import { encrypt, decrypt } from "../crypto.util";
-import { isLiveSendAllowedForOrg } from "../../outreach/outreach-allowlist.util";
 import {
   buildUnsubscribeMailto,
   buildUnsubscribeUrl,
@@ -71,10 +64,14 @@ interface GmailMessage {
   snippet: string;
   from: string;
   to: string;
+  cc: string;
   subject: string;
   date: string;
+  sentAt: Date;
+  internetMessageId: string;
   labelIds: string[];
   body?: string;
+  bodyHtml?: string;
   /** Raw Content-Type header value — used to spot multipart/report DSNs. */
   contentType: string;
   /** X-Failed-Recipients header — set by Gmail's mailer-daemon on bounces. */
@@ -90,14 +87,6 @@ interface GmailThread {
 interface GmailPushPayload {
   emailAddress: string;
   historyId: string;
-}
-
-interface ReplyDispatchContext {
-  gmailMessageId: string;
-  threadId: string;
-  from: string;
-  subject: string;
-  bodyPreview: string;
 }
 
 const GMAIL_SCOPES = [
@@ -138,9 +127,8 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
-    @Inject(forwardRef(() => RuntimeService))
-    private readonly runtime: RuntimeService,
     private readonly suppression: SuppressionService,
+    private readonly conversationStore: ConversationStoreService,
   ) {
     this.clientId = this.config.get<string>("GOOGLE_CLIENT_ID", "");
     this.clientSecret = this.config.get<string>("GOOGLE_CLIENT_SECRET", "");
@@ -285,8 +273,8 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Entry point for Gmail Pub/Sub push notifications. Decodes the watermark,
-   * fetches history since the last seen `historyId`, and dispatches each new
-   * inbound reply to the org's Reply Handler agent.
+   * fetches history since the last seen `historyId`, and durably materializes
+   * each correlated inbound reply before acknowledging the notification.
    *
    * Idempotency: the History API is monotonic and we update the watermark
    * after processing. Duplicate deliveries from Pub/Sub will produce an empty
@@ -319,36 +307,63 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
 
     let newMessageIds: string[] = [];
     try {
-      const history = await gmail.users.history.list({
-        userId: "me",
-        startHistoryId,
-        historyTypes: ["messageAdded"],
-      });
-      for (const record of history.data.history ?? []) {
-        for (const added of record.messagesAdded ?? []) {
-          if (added.message?.id) newMessageIds.push(added.message.id);
+      let pageToken: string | undefined;
+      do {
+        const history = await gmail.users.history.list({
+          userId: "me",
+          startHistoryId,
+          historyTypes: ["messageAdded"],
+          pageToken,
+        });
+        for (const record of history.data.history ?? []) {
+          for (const added of record.messagesAdded ?? []) {
+            if (added.message?.id) newMessageIds.push(added.message.id);
+          }
         }
-      }
+        pageToken = history.data.nextPageToken ?? undefined;
+      } while (pageToken);
     } catch (err) {
-      // Common case: startHistoryId is too old → Gmail returns 404. Skip and
-      // reset the watermark to the latest so we don't refetch forever.
-      this.logger.warn("gmail.history.list failed; resetting watermark", {
+      if (!isExpiredHistoryCursorError(err)) {
+        // Auth, quota, network, and Gmail 5xx failures are retryable. Moving
+        // the cursor here would acknowledge work that was never inspected.
+        this.logger.warn("gmail.history.list failed; preserving watermark", {
+          orgId,
+          startHistoryId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
+      }
+
+      // Gmail documents 404 for an out-of-retention startHistoryId. Those
+      // changes are no longer retrievable, so establish the notification's
+      // cursor as the new durable baseline instead of retrying forever.
+      this.logger.warn("gmail.history cursor expired; resetting watermark", {
         orgId,
         startHistoryId,
         error: err instanceof Error ? err.message : String(err),
       });
-      await this.advanceWatermark(orgId, historyId);
+      await this.advanceWatermark(
+        orgId,
+        latestHistoryId(startHistoryId, historyId),
+      );
       return;
     }
 
     // De-duplicate (history can repeat ids across pages).
     newMessageIds = Array.from(new Set(newMessageIds));
 
+    const failedMessageIds: string[] = [];
     for (const messageId of newMessageIds) {
       try {
         const message = await this.getMessage(orgId, messageId, gmail);
-        await this.maybeDispatchReply(orgId, emailAddress, message);
+        await this.maybeMaterializeInboundMessage(
+          orgId,
+          integration.id,
+          emailAddress,
+          message,
+        );
       } catch (err) {
+        failedMessageIds.push(messageId);
         this.logger.warn("gmail.push message processing failed", {
           orgId,
           messageId,
@@ -357,38 +372,86 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    await this.advanceWatermark(orgId, historyId);
+    if (failedMessageIds.length > 0) {
+      // Do not advance the watermark beyond messages that failed durable
+      // materialization. Pub/Sub receives a 5xx and retries; store-level
+      // unique keys make already-processed messages no-op on replay.
+      throw new Error(
+        `Failed to persist ${failedMessageIds.length} Gmail message(s): ${failedMessageIds.join(",")}`,
+      );
+    }
+
+    // Pub/Sub deliveries are not ordered. Never move a hot or persisted
+    // cursor backwards when a delayed notification arrives.
+    await this.advanceWatermark(
+      orgId,
+      latestHistoryId(startHistoryId, historyId),
+    );
   }
 
   /**
    * Write-through watermark update: the in-memory map is the hot layer, the
    * Integration.lastHistoryId column is the durable layer restored on the
-   * next cold start. A persistence failure is non-fatal — the hot layer has
-   * already advanced so this process won't rescan; worst case after a crash
-   * we replay from the previous persisted watermark, which the dispatcher
-   * tolerates (duplicate history pages no-op).
+   * next cold start. The durable write must succeed before the hot cursor
+   * advances and before the controller returns 2xx. On failure Pub/Sub retries
+   * and store-level provider-message idempotency makes replay safe.
    */
   private async advanceWatermark(
     orgId: string,
     historyId: string,
   ): Promise<void> {
-    this.historyWatermark.set(orgId, historyId);
-    try {
-      await this.prisma.integration.update({
+    // Compare-and-set prevents concurrent Pub/Sub requests handled by
+    // different API processes from committing an older cursor after a newer
+    // one. A bounded retry absorbs ordinary cursor contention.
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const currentRow = await this.prisma.integration.findUnique({
         where: { orgId_provider: { orgId, provider: "gmail" } },
-        data: { lastHistoryId: historyId },
+        select: { lastHistoryId: true },
       });
-    } catch (err) {
-      this.logger.warn("gmail.push failed to persist lastHistoryId", {
-        orgId,
-        historyId,
-        error: err instanceof Error ? err.message : String(err),
-      });
+      if (!currentRow) {
+        throw new UnauthorizedException(
+          "Gmail integration disappeared while advancing history cursor",
+        );
+      }
+
+      const currentHistoryId = currentRow.lastHistoryId ?? null;
+      const nextHistoryId = currentHistoryId
+        ? latestHistoryId(currentHistoryId, historyId)
+        : historyId;
+      if (currentHistoryId === nextHistoryId) {
+        this.historyWatermark.set(orgId, nextHistoryId);
+        return;
+      }
+
+      try {
+        const updated = await this.prisma.integration.updateMany({
+          where: {
+            orgId,
+            provider: "gmail",
+            lastHistoryId: currentHistoryId,
+          },
+          data: { lastHistoryId: nextHistoryId },
+        });
+        if (updated.count === 1) {
+          this.historyWatermark.set(orgId, nextHistoryId);
+          return;
+        }
+      } catch (err) {
+        this.logger.error("gmail.push failed to persist lastHistoryId", {
+          orgId,
+          historyId: nextHistoryId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
+      }
     }
+
+    throw new Error("Gmail history cursor changed too often to advance safely");
   }
 
-  private async maybeDispatchReply(
+  private async maybeMaterializeInboundMessage(
     orgId: string,
+    integrationId: string,
     integrationEmail: string,
     message: GmailMessage,
   ): Promise<void> {
@@ -398,120 +461,68 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
 
     // Defense in depth: if the From header matches the integration owner,
     // it's our own outbound — don't loop.
+    const integrationOwner = mailboxEmail(integrationEmail);
     if (
-      integrationEmail &&
-      message.from.toLowerCase().includes(integrationEmail.toLowerCase())
+      integrationOwner &&
+      mailboxEmail(message.from) === integrationOwner
     ) {
       return;
     }
 
     // Bounce/DSN guard (audit B8): mailer-daemon / postmaster notifications
-    // are not prospect replies — dispatching the Reply Handler on them would
-    // have an agent "reply" to a robot. Suppress the failed recipient instead
-    // so the send worker never re-mails a bouncing address.
+    // are not prospect replies. Suppress the failed recipient instead of
+    // materializing a customer conversation so the send worker never re-mails
+    // a bouncing address.
     if (isDeliveryStatusNotification(message)) {
       await this.handleDeliveryStatusNotification(orgId, message);
       return;
     }
 
-    // GL6a reply→stop-outreach: past the SENT/self/DSN guards this is a
-    // genuine prospect reply — the conversation is now human-owned, so the
-    // send worker must never fire another sequenced touch at this sender.
-    // Runs BEFORE the Reply Handler lookup so orgs without a configured
-    // handler still stop outreach, and best-effort so a suppression-write
-    // failure cannot block handler dispatch.
-    await this.suppressReplyingSender(orgId, message);
-
-    // Look up the Reply Handler agent for this org. Template slug is
-    // "reply-handler"; the seeded AgentTemplate row has name "Reply Handler".
-    const agent = await this.prisma.agent.findFirst({
-      where: {
-        orgId,
-        template: { name: "Reply Handler" },
-      },
-      select: { id: true, orgId: true },
-    });
-
-    if (!agent) {
-      this.logger.log("gmail.push no Reply Handler configured — skipping", {
-        orgId,
-        messageId: message.id,
-      });
-      return;
-    }
-
-    const context: ReplyDispatchContext = {
-      gmailMessageId: message.id,
-      threadId: message.threadId,
-      from: message.from,
-      subject: message.subject,
-      bodyPreview: (message.body ?? message.snippet).slice(0, 280),
-    };
-
-    const run = await this.runtime.triggerRun(agent.id, agent.orgId);
-
-    // RuntimeService.triggerRun does not accept a payload today; log the
-    // inbound context against the new run so the executor can pick it up.
-    await this.prisma.agentLog.create({
-      data: {
-        runId: run.id,
-        level: "INFO",
-        message: "Reply Handler triggered by Gmail push notification",
-        metadata: context as unknown as Prisma.InputJsonValue,
-      },
-    });
-  }
-
-  /**
-   * GL6a: suppress a prospect who replied so outreach stops immediately.
-   * OutreachSuppressionReason has no REPLIED value (USER_UNSUBSCRIBED /
-   * BOUNCED / COMPLAINED / MANUAL only — adding enum values needs a prod
-   * migration), so we use the closest existing one, MANUAL, and disambiguate
-   * via source="gmail_reply". SuppressionService.suppress is idempotent on
-   * (orgId, recipientRef), so duplicate pushes of the same reply no-op.
-   *
-   * Best-effort by design: a failed suppression write logs at error level but
-   * never throws — handler dispatch must still happen, and the send worker's
-   * isSuppressed already fails closed on DB errors as the backstop.
-   */
-  private async suppressReplyingSender(
-    orgId: string,
-    message: GmailMessage,
-  ): Promise<void> {
-    const senderMatch = message.from.match(EMAIL_PATTERN);
-    if (!senderMatch) {
-      this.logger.warn(
-        "gmail.push reply without extractable sender — skipping reply suppression",
-        { orgId, messageId: message.id, from: message.from },
+    const sender = mailboxEmail(message.from);
+    if (!sender) {
+      throw new BadRequestException(
+        `Gmail message ${message.id} has no valid sender address`,
       );
+    }
+    const recipients = mailboxEmails(message.to);
+    const ownerEmail = mailboxEmail(integrationEmail);
+    const materialized = await this.conversationStore.recordInboundGmailMessage({
+      orgId,
+      integrationId,
+      providerThreadId: message.threadId,
+      providerMessageId: message.id,
+      internetMessageId: message.internetMessageId || null,
+      senderEmail: sender,
+      senderName: mailboxName(message.from),
+      toEmails:
+        recipients.length > 0
+          ? recipients
+          : ownerEmail
+            ? [ownerEmail]
+            : [],
+      ccEmails: mailboxEmails(message.cc),
+      subject: message.subject,
+      bodyText: message.body ?? null,
+      bodyHtml: message.bodyHtml ?? null,
+      snippet: message.snippet,
+      sentAt: message.sentAt,
+      isUnread: message.labelIds.includes("UNREAD"),
+    });
+
+    if (!materialized.correlated) {
+      this.logger.debug("gmail.push ignored non-GTM inbox thread", {
+        orgId,
+        messageId: message.id,
+        threadId: message.threadId,
+      });
       return;
     }
-    const sender = senderMatch[0].toLowerCase();
-    try {
-      const { created } = await this.suppression.suppress({
-        orgId,
-        recipientRef: sender,
-        reason: OutreachSuppressionReason.MANUAL,
-        source: "gmail_reply",
-        metadata: {
-          gmailMessageId: message.id,
-          threadId: message.threadId,
-        },
-      });
-      this.logger.log("gmail.push reply detected — sender suppressed", {
-        orgId,
-        messageId: message.id,
-        recipientRef: sender,
-        created,
-      });
-    } catch (err) {
-      this.logger.error("gmail.push failed to suppress replying sender", {
-        orgId,
-        messageId: message.id,
-        recipientRef: sender,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
+    this.logger.log("gmail.push materialized prospect reply", {
+      orgId,
+      messageId: message.id,
+      conversationId: materialized.conversation.id,
+      created: materialized.created,
+    });
   }
 
   /**
@@ -556,27 +567,39 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async findIntegrationByEmail(emailAddress: string): Promise<{
+    id: string;
     orgId: string;
     lastHistoryId: string | null;
   } | null> {
+    const normalizedEmail = emailAddress.trim().toLowerCase();
     // We stash the authenticated Gmail address inside the (non-secret)
     // `credentials` JSON column during handleCallback. Until a first-class
     // column lands, query via Prisma's Json `path` filter.
     //
     // TODO(schema): promote `accountEmail` to a first-class indexed column on
     // Integration (or split into a GmailIntegration sibling).
-    const match = await this.prisma.integration.findFirst({
+    const matches = await this.prisma.integration.findMany({
       where: {
         provider: "gmail",
         status: "CONNECTED",
         credentials: {
           path: ["accountEmail"],
-          equals: emailAddress,
+          equals: normalizedEmail,
         },
       },
-      select: { orgId: true, lastHistoryId: true },
+      select: { id: true, orgId: true, lastHistoryId: true },
+      take: 2,
     });
-    return match;
+    if (matches.length > 1) {
+      // Gmail's notification identifies only the mailbox. Choosing an
+      // arbitrary org here would cross a tenant boundary; fail closed until
+      // the duplicate mailbox mapping is resolved.
+      this.logger.error("gmail.push mailbox maps to multiple organizations", {
+        matchCount: matches.length,
+      });
+      throw new Error("Gmail push mailbox mapping is ambiguous");
+    }
+    return matches[0] ?? null;
   }
 
   getAuthUrl(orgId: string): string {
@@ -620,7 +643,7 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
       });
       const gmail = google.gmail({ version: "v1", auth: oauthForProfile });
       const profile = await gmail.users.getProfile({ userId: "me" });
-      accountEmail = profile.data.emailAddress ?? "";
+      accountEmail = (profile.data.emailAddress ?? "").trim().toLowerCase();
     } catch {
       // Non-fatal — push routing will degrade but OAuth still succeeds.
     }
@@ -685,6 +708,20 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
       historyId: response.data.historyId,
       expiration: response.data.expiration,
     });
+    if (response.data.historyId) {
+      // Establish the initial cursor exactly once. Renewal must not overwrite
+      // a cursor that may still have unprocessed pages between it and the new
+      // watch response.
+      await this.prisma.integration.updateMany({
+        where: {
+          orgId,
+          provider: "gmail",
+          status: "CONNECTED",
+          lastHistoryId: null,
+        },
+        data: { lastHistoryId: response.data.historyId },
+      });
+    }
     return {
       historyId: response.data.historyId ?? undefined,
       expiration: response.data.expiration ?? undefined,
@@ -736,18 +773,8 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
     const getHeader = (name: string): string =>
       headers.find((h) => h.name?.toLowerCase() === name.toLowerCase())?.value ?? "";
 
-    let body = "";
     const payload = response.data.payload;
-    if (payload?.body?.data) {
-      body = Buffer.from(payload.body.data, "base64url").toString("utf-8");
-    } else if (payload?.parts) {
-      const textPart = payload.parts.find((p) => p.mimeType === "text/plain");
-      const htmlPart = payload.parts.find((p) => p.mimeType === "text/html");
-      const part = textPart ?? htmlPart;
-      if (part?.body?.data) {
-        body = Buffer.from(part.body.data, "base64url").toString("utf-8");
-      }
-    }
+    const bodies = decodeMessageBodies(payload);
 
     return {
       id: response.data.id!,
@@ -755,10 +782,14 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
       snippet: response.data.snippet ?? "",
       from: getHeader("From"),
       to: getHeader("To"),
+      cc: getHeader("Cc"),
       subject: getHeader("Subject"),
       date: getHeader("Date"),
+      sentAt: parseMessageDate(getHeader("Date"), response.data.internalDate),
+      internetMessageId: getHeader("Message-ID"),
       labelIds: response.data.labelIds ?? [],
-      body,
+      body: bodies.text ?? bodies.html ?? "",
+      bodyHtml: bodies.html,
       contentType: getHeader("Content-Type"),
       failedRecipients: getHeader("X-Failed-Recipients"),
     };
@@ -778,15 +809,7 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
       const getHeader = (name: string): string =>
         headers.find((h) => h.name?.toLowerCase() === name.toLowerCase())?.value ?? "";
 
-      let body = "";
-      if (msg.payload?.body?.data) {
-        body = Buffer.from(msg.payload.body.data, "base64url").toString("utf-8");
-      } else if (msg.payload?.parts) {
-        const textPart = msg.payload.parts.find((p) => p.mimeType === "text/plain");
-        if (textPart?.body?.data) {
-          body = Buffer.from(textPart.body.data, "base64url").toString("utf-8");
-        }
-      }
+      const bodies = decodeMessageBodies(msg.payload);
 
       return {
         id: msg.id!,
@@ -794,10 +817,14 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
         snippet: msg.snippet ?? "",
         from: getHeader("From"),
         to: getHeader("To"),
+        cc: getHeader("Cc"),
         subject: getHeader("Subject"),
         date: getHeader("Date"),
+        sentAt: parseMessageDate(getHeader("Date"), msg.internalDate),
+        internetMessageId: getHeader("Message-ID"),
         labelIds: msg.labelIds ?? [],
-        body,
+        body: bodies.text ?? bodies.html ?? "",
+        bodyHtml: bodies.html,
         contentType: getHeader("Content-Type"),
         failedRecipients: getHeader("X-Failed-Recipients"),
       };
@@ -874,56 +901,17 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
   }
 
   async sendApprovedOutreachEmail(
-    orgId: string,
-    options: SendApprovedOutreachEmailOptions,
-  ): Promise<{ id: string; threadId: string }> {
-    if (!isLiveSendAllowedForOrg(orgId)) {
-      throw new ForbiddenException("Live send not enabled for this org");
-    }
-
-    const artifactId = options.outreachArtifactId;
-    if (typeof artifactId !== "string" || artifactId.trim().length === 0) {
-      throw new ForbiddenException("Missing approved outreach artifact");
-    }
-
-    const artifact = await this.prisma.outreachArtifact.findUnique({
-      where: { id: artifactId },
-      select: {
-        id: true,
-        orgId: true,
-        status: true,
-        toolName: true,
-        payload: true,
-      },
-    });
-
-    if (!artifact || artifact.orgId !== orgId) {
-      throw new ForbiddenException("Missing approved outreach artifact");
-    }
-    if (artifact.status !== OutreachArtifactStatus.APPROVED) {
-      throw new ForbiddenException("Missing approved outreach artifact");
-    }
-    if (artifact.toolName !== "send_email") {
-      throw new ForbiddenException("Outreach artifact does not authorize this send");
-    }
-
-    const approvedPayload = extractApprovedEmailPayload(artifact.payload);
-    if (!approvedPayload || !payloadMatchesApproved(approvedPayload, options)) {
-      throw new ForbiddenException("Outreach artifact payload mismatch");
-    }
-
-    const result = await this.sendEmail(orgId, options);
-
-    await this.prisma.outreachArtifact.update({
-      where: { id: artifact.id },
-      data: {
-        status: OutreachArtifactStatus.SENT,
-        sentAt: new Date(),
-        sendReceiptId: result.id,
-      },
-    });
-
-    return result;
+    _orgId: string,
+    _options: SendApprovedOutreachEmailOptions,
+  ): Promise<never> {
+    // Direct provider dispatch used to duplicate a subset of the worker's
+    // approval checks while bypassing suppression, cooldown, daily caps,
+    // compliance composition, CAS claiming, and ambiguous-delivery handling.
+    // Keep the method as a fail-closed compatibility boundary; the only live
+    // path is artifact approval -> outreach queue -> SendOutreachWorker.
+    throw new ForbiddenException(
+      "Direct Gmail dispatch is disabled; approve the artifact through the outreach queue",
+    );
   }
 
   async searchMessages(
@@ -1020,6 +1008,105 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
 
 const EMAIL_PATTERN = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/;
 
+function latestHistoryId(first: string, second: string): string {
+  if (/^\d+$/.test(first) && /^\d+$/.test(second)) {
+    return BigInt(first) >= BigInt(second) ? first : second;
+  }
+  // Gmail history ids are decimal strings. If an invalid value reaches this
+  // internal helper, prefer the notification value and let Gmail validate it
+  // on the next history request instead of manufacturing an ordering.
+  return second;
+}
+
+function isExpiredHistoryCursorError(error: unknown): boolean {
+  if (!isRecord(error)) return false;
+
+  if (httpStatus(error.code) === 404 || httpStatus(error.status) === 404) {
+    return true;
+  }
+
+  const response = error.response;
+  if (!isRecord(response)) return false;
+  if (httpStatus(response.status) === 404) return true;
+
+  const data = response.data;
+  if (!isRecord(data)) return false;
+  const nestedError = data.error;
+  return isRecord(nestedError) && httpStatus(nestedError.code) === 404;
+}
+
+function httpStatus(value: unknown): number | null {
+  if (typeof value === "number" && Number.isInteger(value)) return value;
+  if (typeof value === "string" && /^\d{3}$/.test(value)) {
+    return Number(value);
+  }
+  return null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function mailboxEmail(value: string): string | null {
+  const match = value.match(EMAIL_PATTERN);
+  return match ? match[0].toLowerCase() : null;
+}
+
+function mailboxEmails(value: string): string[] {
+  const pattern = new RegExp(EMAIL_PATTERN.source, "g");
+  return Array.from(
+    new Set((value.match(pattern) ?? []).map((email) => email.toLowerCase())),
+  );
+}
+
+function mailboxName(value: string): string | null {
+  const email = mailboxEmail(value);
+  if (!email) return null;
+  const raw = value.replace(new RegExp(`<[^>]*${escapeRegExp(email)}[^>]*>`, "i"), "");
+  const name = raw.replace(/^\s*["']|["']\s*$/g, "").trim();
+  return name && name.toLowerCase() !== email ? name.slice(0, 320) : null;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function parseMessageDate(header: string, internalDate: string | null | undefined): Date {
+  const fromHeader = new Date(header);
+  if (!Number.isNaN(fromHeader.getTime())) return fromHeader;
+  if (internalDate && /^\d+$/.test(internalDate)) {
+    const fromInternal = new Date(Number(internalDate));
+    if (!Number.isNaN(fromInternal.getTime())) return fromInternal;
+  }
+  throw new BadRequestException("Gmail message has no valid delivery timestamp");
+}
+
+function decodeMessageBodies(
+  payload: gmail_v1.Schema$MessagePart | null | undefined,
+): { text?: string; html?: string } {
+  let text: string | undefined;
+  let html: string | undefined;
+
+  const visit = (part: gmail_v1.Schema$MessagePart | null | undefined): void => {
+    if (!part) return;
+    const data = part.body?.data;
+    if (data) {
+      const decoded = Buffer.from(data, "base64url").toString("utf-8");
+      if (part.mimeType === "text/html" && html === undefined) html = decoded;
+      if (
+        (part.mimeType === "text/plain" || !part.mimeType) &&
+        text === undefined
+      ) {
+        text = decoded;
+      }
+    }
+    for (const child of part.parts ?? []) visit(child);
+  };
+
+  visit(payload);
+  return { ...(text !== undefined ? { text } : {}), ...(html !== undefined ? { html } : {}) };
+}
+
 // Left-bounded so an address like "not-postmaster@..." doesn't false-positive.
 const DAEMON_SENDER_PATTERN =
   /(?:^|[^a-z0-9._%+-])(?:mailer-daemon|postmaster)@/i;
@@ -1072,77 +1159,4 @@ function extractFailedRecipient(message: GmailMessage): string | null {
   if (phrased) return phrased[1].toLowerCase();
 
   return null;
-}
-
-function asNonEmptyString(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
-}
-
-function extractApprovedEmailPayload(
-  payload: unknown,
-): {
-  readonly to: string;
-  readonly subject: string;
-  readonly body: string;
-  readonly html?: string;
-  readonly cc?: string;
-  readonly bcc?: string;
-  readonly replyTo?: string;
-  readonly inReplyTo?: string;
-  readonly threadId?: string;
-} | null {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
-  const obj = payload as Record<string, unknown>;
-
-  const to =
-    asNonEmptyString(obj.to) ??
-    asNonEmptyString(obj.recipient) ??
-    asNonEmptyString(obj.email);
-  const subject = asNonEmptyString(obj.subject);
-  const body =
-    asNonEmptyString(obj.body) ??
-    asNonEmptyString(obj.bodyText) ??
-    asNonEmptyString(obj.text);
-
-  if (!to || !subject || !body) return null;
-
-  const html = asNonEmptyString(obj.html) ?? asNonEmptyString(obj.bodyHtml);
-  const cc = asNonEmptyString(obj.cc);
-  const bcc = asNonEmptyString(obj.bcc);
-  const replyTo = asNonEmptyString(obj.replyTo);
-  const inReplyTo = asNonEmptyString(obj.inReplyTo);
-  const threadId = asNonEmptyString(obj.threadId);
-
-  return {
-    to,
-    subject,
-    body,
-    ...(html ? { html } : {}),
-    ...(cc ? { cc } : {}),
-    ...(bcc ? { bcc } : {}),
-    ...(replyTo ? { replyTo } : {}),
-    ...(inReplyTo ? { inReplyTo } : {}),
-    ...(threadId ? { threadId } : {}),
-  };
-}
-
-function payloadMatchesApproved(
-  approved: Exclude<ReturnType<typeof extractApprovedEmailPayload>, null>,
-  requested: SendApprovedOutreachEmailOptions,
-): boolean {
-  if (approved.to !== requested.to) return false;
-  if (approved.subject !== requested.subject) return false;
-  if (approved.body !== requested.body) return false;
-
-  const normalizeOptional = (value: unknown): string | undefined =>
-    typeof value === "string" && value.length > 0 ? value : undefined;
-
-  if (normalizeOptional(approved.html) !== normalizeOptional(requested.html)) return false;
-  if (normalizeOptional(approved.cc) !== normalizeOptional(requested.cc)) return false;
-  if (normalizeOptional(approved.bcc) !== normalizeOptional(requested.bcc)) return false;
-  if (normalizeOptional(approved.replyTo) !== normalizeOptional(requested.replyTo)) return false;
-  if (normalizeOptional(approved.inReplyTo) !== normalizeOptional(requested.inReplyTo)) return false;
-  if (normalizeOptional(approved.threadId) !== normalizeOptional(requested.threadId)) return false;
-
-  return true;
 }

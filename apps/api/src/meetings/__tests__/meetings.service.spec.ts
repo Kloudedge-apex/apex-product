@@ -13,6 +13,8 @@ function meetingRow(overrides: Partial<MeetingLedger> = {}): MeetingLedger {
     id: "mtg_1",
     orgId: "org_1",
     outreachArtifactId: null,
+    conversationId: null,
+    sourceMessageId: null,
     personId: null,
     title: "Intro chat",
     description: null,
@@ -46,6 +48,12 @@ function mockPrisma() {
     },
     person: {
       findUnique: vi.fn(),
+    },
+    conversation: {
+      findFirst: vi.fn(),
+    },
+    conversationMessage: {
+      findFirst: vi.fn(),
     },
   } as unknown as PrismaService;
 }
@@ -119,6 +127,74 @@ describe("MeetingsService", () => {
       await expect(
         service.create({ ...baseInput, personId: "p_other" }),
       ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it("rejects a conversationId that is not visible in the meeting org", async () => {
+      (
+        prisma.conversation.findFirst as ReturnType<typeof vi.fn>
+      ).mockResolvedValue(null);
+
+      await expect(
+        service.create({ ...baseInput, conversationId: "conv_other" }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(prisma.conversation.findFirst).toHaveBeenCalledWith({
+        where: { id: "conv_other", orgId: "org_1" },
+        select: { id: true },
+      });
+    });
+
+    it("rejects a source message outside the selected same-org conversation", async () => {
+      (
+        prisma.conversation.findFirst as ReturnType<typeof vi.fn>
+      ).mockResolvedValue({ id: "conv_1" });
+      (
+        prisma.conversationMessage.findFirst as ReturnType<typeof vi.fn>
+      ).mockResolvedValue(null);
+
+      await expect(
+        service.create({
+          ...baseInput,
+          conversationId: "conv_1",
+          sourceMessageId: "msg_other",
+        }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(prisma.conversationMessage.findFirst).toHaveBeenCalledWith({
+        where: {
+          id: "msg_other",
+          orgId: "org_1",
+          conversationId: "conv_1",
+        },
+        select: { id: true },
+      });
+      expect(prisma.meetingLedger.create).not.toHaveBeenCalled();
+    });
+
+    it("persists tenant-checked conversation and source-message provenance", async () => {
+      (
+        prisma.conversation.findFirst as ReturnType<typeof vi.fn>
+      ).mockResolvedValue({ id: "conv_1" });
+      (
+        prisma.conversationMessage.findFirst as ReturnType<typeof vi.fn>
+      ).mockResolvedValue({ id: "msg_1" });
+      (
+        prisma.meetingLedger.create as ReturnType<typeof vi.fn>
+      ).mockResolvedValue(
+        meetingRow({ conversationId: "conv_1", sourceMessageId: "msg_1" }),
+      );
+
+      await service.create({
+        ...baseInput,
+        conversationId: "conv_1",
+        sourceMessageId: "msg_1",
+      });
+
+      expect(prisma.meetingLedger.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          orgId: "org_1",
+          conversationId: "conv_1",
+          sourceMessageId: "msg_1",
+        }),
+      });
     });
 
     it("accepts valid same-org FKs", async () => {

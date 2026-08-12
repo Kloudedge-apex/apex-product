@@ -23,6 +23,10 @@ const BAD_SDR_DRAFTS_DATASET = "apex-bad-sdr-drafts";
 /** Dataset name for the positive set of human-approved SDR drafts. */
 const GOOD_SDR_DRAFTS_DATASET = "apex-good-sdr-drafts";
 
+type ReviewDecision =
+  | typeof OutreachArtifactStatus.APPROVED
+  | typeof OutreachArtifactStatus.REJECTED;
+
 /**
  * Extract the LangSmith run id stashed on the artifact at create-time.
  * Today this lives in `payload.langsmith_run_id` because OutreachArtifact has
@@ -150,6 +154,26 @@ export class OutreachArtifactsService {
     });
   }
 
+  async listPageForOrg(
+    orgId: string,
+    opts: { status?: OutreachArtifactStatus; page: number; limit: number },
+  ) {
+    const where = {
+      orgId,
+      ...(opts.status ? { status: opts.status } : {}),
+    };
+    const [items, total] = await Promise.all([
+      this.prisma.outreachArtifact.findMany({
+        where,
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        skip: (opts.page - 1) * opts.limit,
+        take: opts.limit,
+      }),
+      this.prisma.outreachArtifact.count({ where }),
+    ]);
+    return { items, total, page: opts.page, limit: opts.limit };
+  }
+
   async listForGraphRun(orgId: string, graphRunId: string) {
     return this.prisma.outreachArtifact.findMany({
       where: { orgId, graphRunId },
@@ -170,20 +194,12 @@ export class OutreachArtifactsService {
     id: string,
     reviewedBy: string,
   ): Promise<OutreachArtifact> {
-    const artifact = await this.get(orgId, id);
-    if (artifact.status !== OutreachArtifactStatus.PENDING_REVIEW) {
-      throw new BadRequestException(
-        `Artifact ${id} is ${artifact.status}; only PENDING_REVIEW can be approved`,
-      );
-    }
-    const updated = await this.prisma.outreachArtifact.update({
-      where: { id },
-      data: {
-        status: OutreachArtifactStatus.APPROVED,
-        reviewedBy,
-        reviewedAt: new Date(),
-      },
-    });
+    const updated = await this.transitionReview(
+      orgId,
+      id,
+      reviewedBy,
+      OutreachArtifactStatus.APPROVED,
+    );
 
     // Best-effort: append the generating LangSmith run to the good-drafts
     // dataset — the positive mirror of the reject-side bad-drafts append —
@@ -191,7 +207,7 @@ export class OutreachArtifactsService {
     // Never throws — dataset upload must not block the approve API. Emitted
     // before the queue hand-off because the human judgment stands regardless
     // of whether enqueueing succeeds.
-    const runId = extractLangsmithRunId(artifact.payload);
+    const runId = extractLangsmithRunId(updated.payload);
     if (!runId) {
       this.logger.debug(
         `Artifact ${id} has no langsmith_run_id — skipping dataset append (legacy or tracing-disabled)`,
@@ -252,26 +268,18 @@ export class OutreachArtifactsService {
     reviewedBy: string,
     reviewerNote?: string,
   ): Promise<OutreachArtifact> {
-    const artifact = await this.get(orgId, id);
-    if (artifact.status !== OutreachArtifactStatus.PENDING_REVIEW) {
-      throw new BadRequestException(
-        `Artifact ${id} is ${artifact.status}; only PENDING_REVIEW can be rejected`,
-      );
-    }
-    const updated = await this.prisma.outreachArtifact.update({
-      where: { id },
-      data: {
-        status: OutreachArtifactStatus.REJECTED,
-        reviewedBy,
-        reviewedAt: new Date(),
-        reviewerNote: reviewerNote ?? null,
-      },
-    });
+    const updated = await this.transitionReview(
+      orgId,
+      id,
+      reviewedBy,
+      OutreachArtifactStatus.REJECTED,
+      reviewerNote,
+    );
 
     // Best-effort: append the generating LangSmith run to the bad-drafts
     // regression dataset so evaluators can be tested against real human
     // judgments. Never throws — dataset upload must not block the reject API.
-    const runId = extractLangsmithRunId(artifact.payload);
+    const runId = extractLangsmithRunId(updated.payload);
     if (!runId) {
       this.logger.debug(
         `Artifact ${id} has no langsmith_run_id — skipping dataset append (legacy or tracing-disabled)`,
@@ -297,6 +305,79 @@ export class OutreachArtifactsService {
     }
 
     return updated;
+  }
+
+  /**
+   * Atomically claim the one allowed human review transition. Both the
+   * tenant and the expected PENDING_REVIEW state are part of the update
+   * predicate, so concurrent approve/reject requests cannot both win after
+   * reading the same pending row. All external effects run only after this
+   * transaction commits and only for the caller whose CAS changed one row.
+   */
+  private async transitionReview(
+    orgId: string,
+    id: string,
+    reviewedBy: string,
+    decision: ReviewDecision,
+    reviewerNote?: string,
+  ): Promise<OutreachArtifact> {
+    const action =
+      decision === OutreachArtifactStatus.APPROVED ? "approved" : "rejected";
+
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        const artifact = await tx.outreachArtifact.findUnique({
+          where: { id_orgId: { id, orgId } },
+        });
+        if (!artifact || artifact.orgId !== orgId) {
+          throw new NotFoundException(`OutreachArtifact ${id} not found`);
+        }
+        if (artifact.status !== OutreachArtifactStatus.PENDING_REVIEW) {
+          throw new BadRequestException(
+            `Artifact ${id} is ${artifact.status}; only PENDING_REVIEW can be ${action}`,
+          );
+        }
+        if (
+          decision === OutreachArtifactStatus.APPROVED &&
+          artifact.channel === OutreachChannel.HUBSPOT_NOTE
+        ) {
+          throw new BadRequestException(
+            "HubSpot note approval is unavailable because dispatch is not implemented",
+          );
+        }
+
+        return tx.outreachArtifact.update({
+          where: {
+            id_orgId: { id, orgId },
+            status: OutreachArtifactStatus.PENDING_REVIEW,
+          },
+          data: {
+            status: decision,
+            reviewedBy,
+            reviewedAt: new Date(),
+            ...(decision === OutreachArtifactStatus.REJECTED
+              ? { reviewerNote: reviewerNote ?? null }
+              : {}),
+          },
+        });
+      });
+    } catch (err) {
+      // Prisma reports a failed conditional update as P2025. Re-read through
+      // the compound tenant key so the loser gets the committed decision and
+      // never proceeds to dataset or queue side effects.
+      if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== "P2025") {
+        throw err;
+      }
+      const current = await this.prisma.outreachArtifact.findUnique({
+        where: { id_orgId: { id, orgId } },
+      });
+      if (!current) {
+        throw new NotFoundException(`OutreachArtifact ${id} not found`);
+      }
+      throw new BadRequestException(
+        `Artifact ${id} is ${current.status}; only PENDING_REVIEW can be ${action}`,
+      );
+    }
   }
 }
 

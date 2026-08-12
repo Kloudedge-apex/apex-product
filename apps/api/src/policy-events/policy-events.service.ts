@@ -2,7 +2,7 @@ import { Injectable } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import { OutreachArtifactStatus } from "@prisma/client";
 
-export type PolicyDecision = "allowed" | "blocked" | "dry_run";
+export type PolicyDecision = "allowed" | "blocked" | "dry_run" | "delivery_unknown";
 export type SideEffectLevel = "read_only" | "internal_write" | "external_write" | "destructive";
 
 export interface PolicyEvent {
@@ -52,14 +52,21 @@ export class PolicyEventsService {
 
     const events: PolicyEvent[] = artifacts.map((a) => {
       const decision: PolicyDecision =
-        a.status === OutreachArtifactStatus.REJECTED
+        a.status === OutreachArtifactStatus.DELIVERY_UNKNOWN
+          ? "delivery_unknown"
+          : a.status === OutreachArtifactStatus.REJECTED ||
+              a.status === OutreachArtifactStatus.SUPPRESSED
           ? "blocked"
-          : a.status === OutreachArtifactStatus.SENT || a.status === OutreachArtifactStatus.APPROVED
+          : a.status === OutreachArtifactStatus.SENT ||
+              a.status === OutreachArtifactStatus.SENDING ||
+              a.status === OutreachArtifactStatus.APPROVED
             ? "allowed"
             : "dry_run";
       const at =
         a.status === OutreachArtifactStatus.SENT && a.sentAt
           ? a.sentAt
+          : a.status === OutreachArtifactStatus.DELIVERY_UNKNOWN
+            ? a.updatedAt
           : a.reviewedAt ?? a.createdAt;
       return {
         id: a.id,

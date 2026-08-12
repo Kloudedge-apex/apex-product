@@ -7,6 +7,7 @@ import { LeadsModule } from "../leads/leads.module";
 import { RuntimeModule } from "../runtime/runtime.module";
 import { OutreachModule } from "../outreach/outreach.module";
 import { ObservabilityModule } from "../observability/observability.module";
+import { AdminOrManagerGuard } from "../common/admin-or-manager.guard";
 
 @Module({
   imports: [
@@ -16,7 +17,7 @@ import { ObservabilityModule } from "../observability/observability.module";
     ObservabilityModule,
   ],
   controllers: [GraphController],
-  providers: [GraphService, GraphRunQueueService, GraphRunWorker],
+  providers: [GraphService, GraphRunQueueService, GraphRunWorker, AdminOrManagerGuard],
   exports: [GraphService, GraphRunQueueService],
 })
 export class GraphModule {}

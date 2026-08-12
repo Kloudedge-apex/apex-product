@@ -2,8 +2,8 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { UnauthorizedException, BadRequestException } from "@nestjs/common";
 import { GmailService } from "../gmail.service";
 import { PrismaService } from "../../../prisma/prisma.service";
-import { RuntimeService } from "../../../runtime/runtime.service";
 import { SuppressionService } from "../../../outreach/suppression.service";
+import { ConversationStoreService } from "../../../conversation-store/conversation-store.service";
 import { ConfigService } from "@nestjs/config";
 import { encrypt } from "../../crypto.util";
 
@@ -132,25 +132,26 @@ function createMockPrisma() {
   return {
     integration: {
       findUnique: vi.fn(),
-      findFirst: vi.fn(),
       findMany: vi.fn().mockResolvedValue([]),
       upsert: vi.fn().mockResolvedValue({ id: "int_1" }),
       update: vi.fn().mockResolvedValue({ id: "int_1" }),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       create: vi.fn().mockResolvedValue({ id: "int_1" }),
-    },
-    agent: {
-      findFirst: vi.fn(),
-    },
-    agentLog: {
-      create: vi.fn().mockResolvedValue({ id: "log_1" }),
     },
   } as unknown as PrismaService;
 }
 
-function createMockRuntime() {
+function createMockConversationStore() {
   return {
-    triggerRun: vi.fn().mockResolvedValue({ id: "run_1" }),
-  } as unknown as RuntimeService;
+    recordInboundGmailMessage: vi.fn().mockResolvedValue({
+      correlated: true,
+      created: true,
+      conversation: { id: "conv_1" },
+      message: { id: "cmsg_1" },
+    }),
+  } as unknown as ConversationStoreService & {
+    recordInboundGmailMessage: ReturnType<typeof vi.fn>;
+  };
 }
 
 function createMockSuppression() {
@@ -198,18 +199,18 @@ describe("GmailService", () => {
   let service: GmailService;
   let mockPrisma: ReturnType<typeof createMockPrisma>;
   let mockConfig: ReturnType<typeof createMockConfig>;
-  let mockRuntime: ReturnType<typeof createMockRuntime>;
+  let mockConversationStore: ReturnType<typeof createMockConversationStore>;
 
   beforeEach(() => {
     vi.clearAllMocks();
     mockPrisma = createMockPrisma();
     mockConfig = createMockConfig();
-    mockRuntime = createMockRuntime();
+    mockConversationStore = createMockConversationStore();
     service = new GmailService(
       mockPrisma,
       mockConfig,
-      mockRuntime,
       createMockSuppression(),
+      mockConversationStore,
     );
   });
 
@@ -381,8 +382,8 @@ describe("GmailService", () => {
       const blankService = new GmailService(
         createMockPrisma(),
         blankConfig,
-        createMockRuntime(),
         createMockSuppression(),
+        createMockConversationStore(),
       );
       expect(await blankService.verifyPushAuth("Bearer anything")).toBe(false);
     });
@@ -392,21 +393,21 @@ describe("GmailService", () => {
     function setupConnectedIntegration() {
       const integration = createConnectedIntegration();
       // findIntegrationByEmail
-      (mockPrisma.integration.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({
-        orgId: "org_1",
-      });
+      (mockPrisma.integration.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([
+        {
+          id: "int_1",
+          orgId: "org_1",
+          lastHistoryId: null,
+        },
+      ]);
       // getTokens
       (mockPrisma.integration.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(
         integration,
       );
     }
 
-    it("dispatches a Reply Handler run for a new inbound message", async () => {
+    it("materializes a correlated new inbound message", async () => {
       setupConnectedIntegration();
-      (mockPrisma.agent.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({
-        id: "agent_reply",
-        orgId: "org_1",
-      });
 
       // Override message metadata: inbound, not sent by us.
       const { google } = await import("googleapis");
@@ -441,26 +442,20 @@ describe("GmailService", () => {
         historyId: "12345",
       });
 
-      expect(mockRuntime.triggerRun).toHaveBeenCalledWith("agent_reply", "org_1");
-      expect(mockPrisma.agentLog.create).toHaveBeenCalledWith(
+      expect(mockConversationStore.recordInboundGmailMessage).toHaveBeenCalledWith(
         expect.objectContaining({
-          data: expect.objectContaining({
-            runId: "run_1",
-            level: "INFO",
-            metadata: expect.objectContaining({
-              gmailMessageId: "msg_new_1",
-              threadId: "thread_new",
-              from: "prospect@acme.com",
-              subject: "Re: quick question",
-            }),
-          }),
+          orgId: "org_1",
+          integrationId: "int_1",
+          providerMessageId: "msg_new_1",
+          providerThreadId: "thread_new",
+          senderEmail: "prospect@acme.com",
+          subject: "Re: quick question",
         }),
       );
     });
 
-    it("returns silently when no Reply Handler is configured for the org", async () => {
+    it("materializes without any agent lookup or runtime trigger", async () => {
       setupConnectedIntegration();
-      (mockPrisma.agent.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue(null);
 
       const { google } = await import("googleapis");
       type GmailMockShape = {
@@ -493,15 +488,11 @@ describe("GmailService", () => {
         }),
       ).resolves.not.toThrow();
 
-      expect(mockRuntime.triggerRun).not.toHaveBeenCalled();
+      expect(mockConversationStore.recordInboundGmailMessage).toHaveBeenCalledOnce();
     });
 
     it("skips messages sent by us (SENT label)", async () => {
       setupConnectedIntegration();
-      (mockPrisma.agent.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({
-        id: "agent_reply",
-        orgId: "org_1",
-      });
 
       const { google } = await import("googleapis");
       type GmailMockShape = {
@@ -530,12 +521,12 @@ describe("GmailService", () => {
         historyId: "55555",
       });
 
-      expect(mockRuntime.triggerRun).not.toHaveBeenCalled();
+      expect(mockConversationStore.recordInboundGmailMessage).not.toHaveBeenCalled();
     });
 
     it("returns silently when no integration matches the emailAddress", async () => {
-      (mockPrisma.integration.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue(
-        null,
+      (mockPrisma.integration.findMany as ReturnType<typeof vi.fn>).mockResolvedValue(
+        [],
       );
 
       await expect(
@@ -545,7 +536,7 @@ describe("GmailService", () => {
         }),
       ).resolves.not.toThrow();
 
-      expect(mockRuntime.triggerRun).not.toHaveBeenCalled();
+      expect(mockConversationStore.recordInboundGmailMessage).not.toHaveBeenCalled();
     });
   });
 

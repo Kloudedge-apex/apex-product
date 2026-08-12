@@ -21,6 +21,8 @@ export interface CreateMeetingInput {
   readonly durationMinutes?: number;
   readonly outreachArtifactId?: string | null;
   readonly personId?: string | null;
+  readonly conversationId?: string | null;
+  readonly sourceMessageId?: string | null;
   readonly source?: MeetingSource;
   readonly createdBy?: string | null;
 }
@@ -87,6 +89,34 @@ export class MeetingsService {
         throw new NotFoundException(`Person ${input.personId} not found`);
       }
     }
+    if (input.conversationId) {
+      const conversation = await this.prisma.conversation.findFirst({
+        where: { id: input.conversationId, orgId: input.orgId },
+        select: { id: true },
+      });
+      if (!conversation) {
+        throw new NotFoundException(
+          `Conversation ${input.conversationId} not found`,
+        );
+      }
+    }
+    if (input.sourceMessageId) {
+      const message = await this.prisma.conversationMessage.findFirst({
+        where: {
+          id: input.sourceMessageId,
+          orgId: input.orgId,
+          ...(input.conversationId
+            ? { conversationId: input.conversationId }
+            : {}),
+        },
+        select: { id: true },
+      });
+      if (!message) {
+        throw new NotFoundException(
+          `ConversationMessage ${input.sourceMessageId} not found`,
+        );
+      }
+    }
 
     return this.prisma.meetingLedger.create({
       data: {
@@ -99,6 +129,8 @@ export class MeetingsService {
         attendeeEmails: attendees,
         outreachArtifactId: input.outreachArtifactId ?? null,
         personId: input.personId ?? null,
+        conversationId: input.conversationId ?? null,
+        sourceMessageId: input.sourceMessageId ?? null,
         source: input.source ?? MeetingSource.AGENT_PROPOSED,
         createdBy: input.createdBy ?? null,
       },

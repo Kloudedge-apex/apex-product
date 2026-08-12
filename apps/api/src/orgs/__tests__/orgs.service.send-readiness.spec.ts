@@ -12,7 +12,8 @@ import { OrgsService, SendReadiness } from "../orgs.service";
  *   senderNameSet      ← Org.senderName non-empty after trim
  *   mailboxConnected   ← CONNECTED gmail/outlook Integration row exists
  *   dailyCapRemaining  ← GL8a cap (OUTREACH_DAILY_CAP_PER_ORG, default 40)
- *                        minus SENT-today (UTC), clamped at 0
+ *                        minus confirmed/in-flight/unknown capacity, clamped
+ *                        at 0
  */
 
 const ORG_ID = "org_readiness_test";
@@ -154,8 +155,8 @@ describe("OrgsService.computeSendReadiness", () => {
     });
   });
 
-  describe("dailyCapRemaining (GL8a cap minus SENT-today, UTC)", () => {
-    it("subtracts today's SENT count from the default cap (40)", async () => {
+  describe("dailyCapRemaining (GL8a cap minus reserved capacity, UTC)", () => {
+    it("subtracts today's capacity usage from the default cap (40)", async () => {
       const { service } = buildService({ sentToday: 7 });
       const readiness = await service.computeSendReadiness(orgRow());
       expect(readiness.dailyCapRemaining).toBe(33);
@@ -174,7 +175,7 @@ describe("OrgsService.computeSendReadiness", () => {
       expect(readiness.dailyCapRemaining).toBe(6);
     });
 
-    it("counts only this org's real sends since midnight UTC", async () => {
+    it("counts this org's confirmed, fresh in-flight, and unknown delivery risk", async () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date("2026-06-13T15:30:00.000Z"));
 
@@ -185,8 +186,20 @@ describe("OrgsService.computeSendReadiness", () => {
       expect(prisma.outreachArtifact.count).toHaveBeenCalledWith({
         where: {
           orgId: ORG_ID,
-          status: "SENT",
-          sentAt: { gte: new Date("2026-06-13T00:00:00.000Z") },
+          OR: [
+            {
+              status: "SENT",
+              sentAt: { gte: new Date("2026-06-13T00:00:00.000Z") },
+            },
+            {
+              status: "SENDING",
+              updatedAt: { gte: new Date("2026-06-13T15:15:00.000Z") },
+            },
+            {
+              status: "DELIVERY_UNKNOWN",
+              updatedAt: { gte: new Date("2026-06-13T00:00:00.000Z") },
+            },
+          ],
         },
       });
     });

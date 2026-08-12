@@ -301,7 +301,8 @@ export class EvidenceLedgerService {
       | "SENT"
       | "SUPPRESSED"
       | "SENDING"
-      | "SIMULATED";
+      | "SIMULATED"
+      | "DELIVERY_UNKNOWN";
     readonly channel: "EMAIL" | "LINKEDIN" | "HUBSPOT_NOTE";
   }): Promise<void> {
     return this.append({

@@ -1,11 +1,11 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { ForbiddenException, type ExecutionContext } from "@nestjs/common";
 import { GmailService } from "../gmail.service";
 import { AdminOrManagerGuard } from "../../../common/admin-or-manager.guard";
 import type { PrismaService } from "../../../prisma/prisma.service";
 import type { ConfigService } from "@nestjs/config";
-import type { RuntimeService } from "../../../runtime/runtime.service";
 import type { SuppressionService } from "../../../outreach/suppression.service";
+import type { ConversationStoreService } from "../../../conversation-store/conversation-store.service";
 
 function createMockPrisma() {
   return {
@@ -27,12 +27,12 @@ function createMockConfig() {
   } as unknown as ConfigService;
 }
 
-function createMockRuntime() {
-  return {} as unknown as RuntimeService;
-}
-
 function createMockSuppression() {
   return {} as unknown as SuppressionService;
+}
+
+function createMockConversationStore() {
+  return {} as unknown as ConversationStoreService;
 }
 
 function createExecutionContext(request: Record<string, unknown>): ExecutionContext {
@@ -44,94 +44,28 @@ function createExecutionContext(request: Record<string, unknown>): ExecutionCont
 }
 
 describe("Gmail send outreach gating", () => {
-  const originalEnv = process.env.OUTREACH_LIVE_FOR_ORGS;
-
-  beforeEach(() => {
-    vi.restoreAllMocks();
-    process.env.OUTREACH_LIVE_FOR_ORGS = originalEnv;
-  });
-
-  afterEach(() => {
-    process.env.OUTREACH_LIVE_FOR_ORGS = originalEnv;
-  });
-
-  it("returns 403 when org is not allowlisted", async () => {
-    process.env.OUTREACH_LIVE_FOR_ORGS = "org_allowed";
-
+  it("always rejects direct provider dispatch without reading or mutating an artifact", async () => {
     const prisma = createMockPrisma();
     const service = new GmailService(
       prisma,
       createMockConfig(),
-      createMockRuntime(),
       createMockSuppression(),
+      createMockConversationStore(),
     );
 
     await expect(
-      service.sendApprovedOutreachEmail("org_denied", {
+      service.sendApprovedOutreachEmail("org_1", {
         outreachArtifactId: "art_1",
         to: "to@example.com",
         subject: "Hello",
         body: "Body",
       }),
-    ).rejects.toBeInstanceOf(ForbiddenException);
+    ).rejects.toThrow(
+      "Direct Gmail dispatch is disabled; approve the artifact through the outreach queue",
+    );
 
     expect(prisma.outreachArtifact.findUnique).not.toHaveBeenCalled();
-  });
-
-  it("returns 403 when approved artifact is missing", async () => {
-    process.env.OUTREACH_LIVE_FOR_ORGS = "org_1";
-
-    const prisma = createMockPrisma();
-    prisma.outreachArtifact.findUnique.mockResolvedValue(null);
-
-    const service = new GmailService(
-      prisma,
-      createMockConfig(),
-      createMockRuntime(),
-      createMockSuppression(),
-    );
-
-    await expect(
-      service.sendApprovedOutreachEmail("org_1", {
-        outreachArtifactId: "missing",
-        to: "to@example.com",
-        subject: "Hello",
-        body: "Body",
-      }),
-    ).rejects.toBeInstanceOf(ForbiddenException);
-  });
-
-  it("returns 403 when payload does not match approved artifact", async () => {
-    process.env.OUTREACH_LIVE_FOR_ORGS = "org_1";
-
-    const prisma = createMockPrisma();
-    prisma.outreachArtifact.findUnique.mockResolvedValue({
-      id: "art_1",
-      orgId: "org_1",
-      status: "APPROVED",
-      toolName: "send_email",
-      payload: {
-        to: "someone-else@example.com",
-        subject: "Hello",
-        body: "Body",
-      },
-    });
-
-    const service = new GmailService(
-      prisma,
-      createMockConfig(),
-      createMockRuntime(),
-      createMockSuppression(),
-    );
-
-    await expect(
-      service.sendApprovedOutreachEmail("org_1", {
-        outreachArtifactId: "art_1",
-        to: "to@example.com",
-        subject: "Hello",
-        body: "Body",
-      }),
-    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(prisma.outreachArtifact.update).not.toHaveBeenCalled();
   });
 
   it("returns 403 when caller role is denied (member)", async () => {
@@ -142,46 +76,4 @@ describe("Gmail send outreach gating", () => {
     await expect(guard.canActivate(ctx)).rejects.toBeInstanceOf(ForbiddenException);
   });
 
-  it("returns 200 and sends when allowlisted + admin/manager + approved payload match", async () => {
-    process.env.OUTREACH_LIVE_FOR_ORGS = "org_1";
-
-    const prisma = createMockPrisma();
-    prisma.outreachArtifact.findUnique.mockResolvedValue({
-      id: "art_1",
-      orgId: "org_1",
-      status: "APPROVED",
-      toolName: "send_email",
-      payload: {
-        to: "to@example.com",
-        subject: "Hello",
-        body: "Body",
-      },
-    });
-    prisma.outreachArtifact.update.mockResolvedValue({
-      id: "art_1",
-      status: "SENT",
-    });
-
-    const service = new GmailService(
-      prisma,
-      createMockConfig(),
-      createMockRuntime(),
-      createMockSuppression(),
-    );
-    const sendSpy = vi
-      .spyOn(service, "sendEmail")
-      .mockResolvedValue({ id: "msg_1", threadId: "thr_1" });
-
-    const result = await service.sendApprovedOutreachEmail("org_1", {
-      outreachArtifactId: "art_1",
-      to: "to@example.com",
-      subject: "Hello",
-      body: "Body",
-    });
-
-    expect(result).toEqual({ id: "msg_1", threadId: "thr_1" });
-    expect(sendSpy).toHaveBeenCalledTimes(1);
-    expect(prisma.outreachArtifact.update).toHaveBeenCalledTimes(1);
-  });
 });
-

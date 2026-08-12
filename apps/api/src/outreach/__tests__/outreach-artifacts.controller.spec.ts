@@ -1,6 +1,7 @@
 import "reflect-metadata";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { BadRequestException, UnauthorizedException } from "@nestjs/common";
+import { OutreachArtifactStatus } from "@prisma/client";
 import type { Request } from "express";
 import { OutreachArtifactsController } from "../outreach-artifacts.controller";
 import { AdminOrManagerGuard } from "../../common/admin-or-manager.guard";
@@ -9,15 +10,19 @@ import { OutreachArtifactsService } from "../outreach-artifacts.service";
 /** Nest stores @UseGuards() refs under this key (GUARDS_METADATA). */
 const GUARDS_METADATA = "__guards__";
 
-type ServiceMock = Pick<OutreachArtifactsService, "approve" | "reject"> & {
+type ServiceMock = Pick<OutreachArtifactsService, "approve" | "reject" | "listForOrg" | "listPageForOrg"> & {
   approve: ReturnType<typeof vi.fn>;
   reject: ReturnType<typeof vi.fn>;
+  listForOrg: ReturnType<typeof vi.fn>;
+  listPageForOrg: ReturnType<typeof vi.fn>;
 };
 
 function mockService(): ServiceMock {
   return {
     approve: vi.fn().mockResolvedValue({ id: "art_1" }),
     reject: vi.fn().mockResolvedValue({ id: "art_1" }),
+    listForOrg: vi.fn().mockResolvedValue([]),
+    listPageForOrg: vi.fn().mockResolvedValue({ items: [], total: 0, page: 1, limit: 20 }),
   };
 }
 
@@ -111,5 +116,23 @@ describe("OutreachArtifactsController — server-derived attribution (audit B8)"
       controller.reject("org_1", "art_1", {}, reqWithClerkUser("")),
     ).toThrow(UnauthorizedException);
     expect(service.reject).not.toHaveBeenCalled();
+  });
+
+  it("accepts DELIVERY_UNKNOWN as an artifact status filter", async () => {
+    await controller.list("org_1", "delivery_unknown");
+
+    expect(service.listForOrg).toHaveBeenCalledWith("org_1", {
+      status: OutreachArtifactStatus.DELIVERY_UNKNOWN,
+    });
+  });
+
+  it("uses the paginated service when page controls are supplied", async () => {
+    await controller.list("org_1", "pending_review", "2", "25");
+
+    expect(service.listPageForOrg).toHaveBeenCalledWith("org_1", {
+      status: OutreachArtifactStatus.PENDING_REVIEW,
+      page: 2,
+      limit: 25,
+    });
   });
 });

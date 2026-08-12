@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { GmailService } from "../gmail.service";
 import { PrismaService } from "../../../prisma/prisma.service";
-import { RuntimeService } from "../../../runtime/runtime.service";
 import { SuppressionService } from "../../../outreach/suppression.service";
+import { ConversationStoreService } from "../../../conversation-store/conversation-store.service";
 import { ConfigService } from "@nestjs/config";
 import { encrypt } from "../../crypto.util";
 
@@ -47,9 +47,9 @@ function createMockPrisma() {
   return {
     integration: {
       findUnique: vi.fn(),
-      findFirst: vi.fn(),
       findMany: vi.fn().mockResolvedValue([]),
       update: vi.fn().mockResolvedValue({ id: "int_1" }),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
   } as unknown as PrismaService;
 }
@@ -96,8 +96,8 @@ function buildService(
   return new GmailService(
     mockPrisma,
     config,
-    { triggerRun: vi.fn() } as unknown as RuntimeService,
     { suppress: vi.fn() } as unknown as SuppressionService,
+    {} as unknown as ConversationStoreService,
   );
 }
 
@@ -256,6 +256,24 @@ describe("GmailService watch auto-renewal (GL7)", () => {
 
       resolveFindMany([]);
       await expect(first).resolves.toEqual({ renewed: 0, failed: 0 });
+    });
+  });
+
+  describe("registerWatch cursor initialization", () => {
+    it("initializes only a connected integration with no existing cursor", async () => {
+      setConnectedIntegrations(["org_1"]);
+
+      await service.registerWatch("org_1");
+
+      expect(mockPrisma.integration.updateMany).toHaveBeenCalledWith({
+        where: {
+          orgId: "org_1",
+          provider: "gmail",
+          status: "CONNECTED",
+          lastHistoryId: null,
+        },
+        data: { lastHistoryId: "1000" },
+      });
     });
   });
 });

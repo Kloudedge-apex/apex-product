@@ -49,9 +49,19 @@ export class OutreachArtifactsController {
   list(
     @OrgId() orgId: string | undefined,
     @Query("status") status?: string,
+    @Query("page") pageRaw?: string,
+    @Query("limit") limitRaw?: string,
   ) {
     if (!orgId) throw new BadRequestException("orgId required");
     const parsed = status ? parseStatus(status) : undefined;
+    // Backwards compatible: legacy callers receive the historical bare array.
+    // Pagination-aware callers receive an envelope with a real tenant-scoped
+    // count, so review rows beyond the old 100-row window remain reachable.
+    if (pageRaw !== undefined || limitRaw !== undefined) {
+      const page = parsePositiveInt(pageRaw, 1, 10_000);
+      const limit = parsePositiveInt(limitRaw, 20, 100);
+      return this.artifacts.listPageForOrg(orgId, { status: parsed, page, limit });
+    }
     return this.artifacts.listForOrg(orgId, { status: parsed });
   }
 
@@ -116,4 +126,13 @@ function parseStatus(value: string): OutreachArtifactStatus {
     );
   }
   return normalized as OutreachArtifactStatus;
+}
+
+function parsePositiveInt(value: string | undefined, fallback: number, max: number): number {
+  if (value === undefined) return fallback;
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > max) {
+    throw new BadRequestException(`Expected an integer from 1 to ${max}`);
+  }
+  return parsed;
 }

@@ -76,6 +76,15 @@ export class OrgsController {
     return this.orgsService.findByClerkUser(clerkUserId);
   }
 
+  /**
+   * Derived guided-setup status for the authenticated tenant. There is no
+   * client-provided org identifier and no mutable completion flag.
+   */
+  @Get("onboarding/status")
+  getOnboardingStatus(@OrgId() orgId: string) {
+    return this.orgsService.getOnboardingStatus(orgId);
+  }
+
   @Get(":id")
   findOne(@OrgId() orgId: string, @Param("id") id: string) {
     if (id !== orgId) throw new ForbiddenException("Cross-org access denied");

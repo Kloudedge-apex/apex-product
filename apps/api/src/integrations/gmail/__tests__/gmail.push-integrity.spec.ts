@@ -1,13 +1,12 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { OutreachSuppressionReason } from "@prisma/client";
 import { GmailService } from "../gmail.service";
 import { PrismaService } from "../../../prisma/prisma.service";
-import { RuntimeService } from "../../../runtime/runtime.service";
 import { SuppressionService } from "../../../outreach/suppression.service";
+import { ConversationStoreService } from "../../../conversation-store/conversation-store.service";
 import { ConfigService } from "@nestjs/config";
 import { encrypt } from "../../crypto.util";
 
-// Mock google-auth-library (OAuth2Client used for OIDC verification)
 vi.mock("google-auth-library", () => {
   class MockOAuth2Client {
     verifyIdToken = vi.fn();
@@ -15,21 +14,18 @@ vi.mock("google-auth-library", () => {
   return { OAuth2Client: MockOAuth2Client };
 });
 
-// Hoisted handles so individual tests can steer history.list / messages.get.
 const { historyList, messagesGet } = vi.hoisted(() => ({
   historyList: vi.fn(),
   messagesGet: vi.fn(),
 }));
 
-// Mock googleapis
 vi.mock("googleapis", () => {
   class MockOAuth2 {
-    generateAuthUrl = vi.fn().mockReturnValue("https://accounts.google.com/o/oauth2/auth?mock=1");
+    generateAuthUrl = vi.fn();
     getToken = vi.fn();
     setCredentials = vi.fn();
     on = vi.fn();
   }
-
   return {
     google: {
       auth: { OAuth2: MockOAuth2 },
@@ -48,541 +44,465 @@ function createMockPrisma() {
   return {
     integration: {
       findUnique: vi.fn(),
-      findFirst: vi.fn(),
+      findMany: vi.fn(),
       update: vi.fn().mockResolvedValue({ id: "int_1" }),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
-    agent: {
-      findFirst: vi.fn().mockResolvedValue({ id: "agent_reply", orgId: "org_1" }),
-    },
-    agentLog: {
-      create: vi.fn().mockResolvedValue({ id: "log_1" }),
-    },
-  } as unknown as PrismaService;
-}
-
-function createMockRuntime() {
-  return {
-    triggerRun: vi.fn().mockResolvedValue({ id: "run_1" }),
-  } as unknown as RuntimeService;
+  } as unknown as PrismaService & {
+    integration: {
+      findUnique: ReturnType<typeof vi.fn>;
+      findMany: ReturnType<typeof vi.fn>;
+      update: ReturnType<typeof vi.fn>;
+      updateMany: ReturnType<typeof vi.fn>;
+    };
+  };
 }
 
 function createMockSuppression() {
   return {
     suppress: vi.fn().mockResolvedValue({ created: true }),
-  } as unknown as SuppressionService;
+  } as unknown as SuppressionService & {
+    suppress: ReturnType<typeof vi.fn>;
+  };
+}
+
+function createMockConversationStore() {
+  return {
+    recordInboundGmailMessage: vi.fn().mockResolvedValue({
+      correlated: true,
+      created: true,
+      conversation: { id: "conv_1" },
+      message: { id: "cmsg_1" },
+    }),
+  } as unknown as ConversationStoreService & {
+    recordInboundGmailMessage: ReturnType<typeof vi.fn>;
+  };
 }
 
 function createMockConfig() {
-  const configMap: Record<string, string> = {
+  const values: Record<string, string> = {
     GOOGLE_CLIENT_ID: "mock_client_id",
     GOOGLE_CLIENT_SECRET: "mock_client_secret",
     GOOGLE_REDIRECT_URI: "http://localhost:4000/api/integrations/gmail/callback",
     GMAIL_PUSH_AUDIENCE: "https://api.example.com/api/integrations/gmail/push",
-    GMAIL_PUSH_PUBLISHER_SA: "gmail-push-publisher@example.iam.gserviceaccount.com",
+    GMAIL_PUSH_PUBLISHER_SA:
+      "gmail-push-publisher@example.iam.gserviceaccount.com",
     GMAIL_PUBSUB_TOPIC: "projects/example/topics/gmail-inbound",
   };
   return {
-    get: vi.fn().mockImplementation((key: string, defaultValue?: string) => {
-      return configMap[key] ?? defaultValue ?? "";
-    }),
+    get: vi.fn((key: string, fallback?: string) => values[key] ?? fallback ?? ""),
   } as unknown as ConfigService;
 }
 
-function createConnectedIntegration() {
-  const tokens = {
-    access_token: "mock_access_token",
-    refresh_token: "mock_refresh_token",
-    expiry_date: Date.now() + 3600_000,
-    token_type: "Bearer",
-    scope: "https://www.googleapis.com/auth/gmail.send",
-  };
+function connectedIntegration() {
   return {
     id: "int_1",
     orgId: "org_1",
     provider: "gmail",
     status: "CONNECTED",
-    encryptedCredentials: encrypt(JSON.stringify(tokens)),
-    credentials: {},
+    encryptedCredentials: encrypt(
+      JSON.stringify({
+        access_token: "mock_access_token",
+        refresh_token: "mock_refresh_token",
+        expiry_date: Date.now() + 3_600_000,
+        token_type: "Bearer",
+        scope: "https://www.googleapis.com/auth/gmail.send",
+      }),
+    ),
+    credentials: { accountEmail: "owner@example.com" },
   };
 }
 
-/** Builds a gmail.users.messages.get response for an inbound message. */
-function gmailMessageResponse(opts: {
+function messageResponse(options: {
   id?: string;
   from: string;
   subject?: string;
   labelIds?: string[];
+  body?: string;
   extraHeaders?: Array<{ name: string; value: string }>;
-  bodyText?: string;
 }) {
   return {
     data: {
-      id: opts.id ?? "msg_new_1",
-      threadId: "thread_new",
-      snippet: "snippet",
-      labelIds: opts.labelIds ?? ["INBOX", "UNREAD"],
+      id: options.id ?? "msg_1",
+      threadId: "thread_1",
+      internalDate: "1767225600000",
+      snippet: "reply snippet",
+      labelIds: options.labelIds ?? ["INBOX", "UNREAD"],
       payload: {
+        mimeType: "text/plain",
         headers: [
-          { name: "From", value: opts.from },
-          { name: "To", value: "owner@example.com" },
-          { name: "Subject", value: opts.subject ?? "Re: quick question" },
-          { name: "Date", value: "Mon, 1 Jan 2026 00:00:00 +0000" },
-          ...(opts.extraHeaders ?? []),
+          { name: "From", value: options.from },
+          { name: "To", value: "Owner <owner@example.com>" },
+          { name: "Cc", value: "Sales <sales@example.com>" },
+          { name: "Subject", value: options.subject ?? "Re: quick question" },
+          { name: "Date", value: "Thu, 1 Jan 2026 00:00:00 +0000" },
+          { name: "Message-ID", value: "<reply-1@example.com>" },
+          ...(options.extraHeaders ?? []),
         ],
         body: {
-          data: Buffer.from(opts.bodyText ?? "Sure, let's chat.").toString("base64url"),
+          data: Buffer.from(options.body ?? "Sure, let's talk.").toString(
+            "base64url",
+          ),
         },
       },
     },
   };
 }
 
-describe("GmailService push integrity (audit B8)", () => {
+describe("GmailService durable push handling", () => {
+  let prisma: ReturnType<typeof createMockPrisma>;
+  let suppression: ReturnType<typeof createMockSuppression>;
+  let store: ReturnType<typeof createMockConversationStore>;
   let service: GmailService;
-  let mockPrisma: ReturnType<typeof createMockPrisma>;
-  let mockRuntime: ReturnType<typeof createMockRuntime>;
-  let mockSuppression: ReturnType<typeof createMockSuppression>;
 
-  function setupConnectedIntegration(lastHistoryId: string | null = null) {
-    (mockPrisma.integration.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({
-      orgId: "org_1",
-      lastHistoryId,
+  function connect(lastHistoryId: string | null = "100") {
+    let durableHistoryId = lastHistoryId;
+    prisma.integration.findMany.mockImplementation(async () => [
+      {
+        id: "int_1",
+        orgId: "org_1",
+        lastHistoryId: durableHistoryId,
+      },
+    ]);
+    prisma.integration.findUnique.mockImplementation(async () => ({
+      ...connectedIntegration(),
+      lastHistoryId: durableHistoryId,
+    }));
+    prisma.integration.updateMany.mockImplementation(async (args) => {
+      const input = args as {
+        where: { lastHistoryId?: string | null };
+        data: { lastHistoryId?: string | null };
+      };
+      if (input.where.lastHistoryId !== durableHistoryId) return { count: 0 };
+      durableHistoryId = input.data.lastHistoryId ?? null;
+      return { count: 1 };
     });
-    (mockPrisma.integration.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(
-      createConnectedIntegration(),
-    );
+  }
+
+  function pushOne(response: ReturnType<typeof messageResponse>) {
+    historyList.mockResolvedValue({
+      data: {
+        history: [{ messagesAdded: [{ message: { id: response.data.id } }] }],
+      },
+    });
+    messagesGet.mockResolvedValue(response);
   }
 
   beforeEach(() => {
     vi.clearAllMocks();
     historyList.mockReset();
     messagesGet.mockReset();
-    // Default: no new messages — individual tests override.
     historyList.mockResolvedValue({ data: { history: [] } });
-    mockPrisma = createMockPrisma();
-    mockRuntime = createMockRuntime();
-    mockSuppression = createMockSuppression();
+    prisma = createMockPrisma();
+    suppression = createMockSuppression();
+    store = createMockConversationStore();
     service = new GmailService(
-      mockPrisma,
+      prisma,
       createMockConfig(),
-      mockRuntime,
-      mockSuppression,
+      suppression,
+      store,
     );
   });
 
-  describe("durable history watermark", () => {
-    it("restores the watermark from Integration.lastHistoryId on a cold cache", async () => {
-      setupConnectedIntegration("100");
-
-      await service.handlePushNotification({
-        emailAddress: "owner@example.com",
-        historyId: "200",
-      });
-
-      expect(historyList).toHaveBeenCalledWith(
-        expect.objectContaining({ startHistoryId: "100" }),
-      );
+  it("restores and advances the durable history watermark", async () => {
+    connect("100");
+    await service.handlePushNotification({
+      emailAddress: "owner@example.com",
+      historyId: "200",
     });
-
-    it("falls back to the pushed historyId when nothing is persisted", async () => {
-      setupConnectedIntegration(null);
-
-      await service.handlePushNotification({
-        emailAddress: "owner@example.com",
-        historyId: "200",
-      });
-
-      expect(historyList).toHaveBeenCalledWith(
-        expect.objectContaining({ startHistoryId: "200" }),
-      );
-    });
-
-    it("persists the new watermark write-through after a processed push", async () => {
-      setupConnectedIntegration("100");
-
-      await service.handlePushNotification({
-        emailAddress: "owner@example.com",
-        historyId: "200",
-      });
-
-      expect(mockPrisma.integration.update).toHaveBeenCalledWith({
-        where: { orgId_provider: { orgId: "org_1", provider: "gmail" } },
-        data: { lastHistoryId: "200" },
-      });
-    });
-
-    it("prefers the in-memory hot layer over a stale persisted value", async () => {
-      setupConnectedIntegration("100");
-
-      await service.handlePushNotification({
-        emailAddress: "owner@example.com",
-        historyId: "200",
-      });
-      // DB read still reports the stale "100" — the hot layer has "200".
-      await service.handlePushNotification({
-        emailAddress: "owner@example.com",
-        historyId: "300",
-      });
-
-      expect(historyList).toHaveBeenCalledTimes(2);
-      expect(historyList.mock.calls[1][0]).toMatchObject({ startHistoryId: "200" });
-    });
-
-    it("persists the reset watermark when history.list rejects (too-old watermark)", async () => {
-      setupConnectedIntegration("1");
-      historyList.mockRejectedValueOnce(new Error("Requested entity was not found."));
-
-      await expect(
-        service.handlePushNotification({
-          emailAddress: "owner@example.com",
-          historyId: "500",
-        }),
-      ).resolves.not.toThrow();
-
-      expect(mockPrisma.integration.update).toHaveBeenCalledWith({
-        where: { orgId_provider: { orgId: "org_1", provider: "gmail" } },
-        data: { lastHistoryId: "500" },
-      });
-      expect(mockRuntime.triggerRun).not.toHaveBeenCalled();
-    });
-
-    it("does not throw when watermark persistence fails (hot layer still advances)", async () => {
-      setupConnectedIntegration("100");
-      (mockPrisma.integration.update as ReturnType<typeof vi.fn>).mockRejectedValue(
-        new Error("db down"),
-      );
-
-      await expect(
-        service.handlePushNotification({
-          emailAddress: "owner@example.com",
-          historyId: "200",
-        }),
-      ).resolves.not.toThrow();
-
-      // Hot layer advanced despite the persistence failure.
-      await service.handlePushNotification({
-        emailAddress: "owner@example.com",
-        historyId: "300",
-      });
-      expect(historyList.mock.calls[1][0]).toMatchObject({ startHistoryId: "200" });
-    });
-  });
-
-  describe("DSN / bounce handling", () => {
-    function pushOneMessage(response: ReturnType<typeof gmailMessageResponse>) {
-      historyList.mockResolvedValue({
-        data: {
-          history: [
-            { messagesAdded: [{ message: { id: response.data.id } }] },
-          ],
-        },
-      });
-      messagesGet.mockResolvedValue(response);
-    }
-
-    it("suppresses the X-Failed-Recipients address and skips reply dispatch for mailer-daemon DSNs", async () => {
-      setupConnectedIntegration();
-      pushOneMessage(
-        gmailMessageResponse({
-          from: "Mail Delivery Subsystem <mailer-daemon@googlemail.com>",
-          subject: "Delivery Status Notification (Failure)",
-          extraHeaders: [
-            { name: "X-Failed-Recipients", value: "Prospect@Acme.com" },
-          ],
-          bodyText: "Your message wasn't delivered because the address couldn't be found.",
-        }),
-      );
-
-      await service.handlePushNotification({
-        emailAddress: "owner@example.com",
-        historyId: "200",
-      });
-
-      expect(mockSuppression.suppress).toHaveBeenCalledWith(
-        expect.objectContaining({
-          orgId: "org_1",
-          recipientRef: "prospect@acme.com",
-          reason: OutreachSuppressionReason.BOUNCED,
-          source: "gmail_dsn",
-        }),
-      );
-      expect(mockRuntime.triggerRun).not.toHaveBeenCalled();
-      expect(mockPrisma.agentLog.create).not.toHaveBeenCalled();
-    });
-
-    it("treats postmaster senders as DSNs", async () => {
-      setupConnectedIntegration();
-      pushOneMessage(
-        gmailMessageResponse({
-          from: "postmaster@partner-mta.example",
-          subject: "Undeliverable: hello",
-          bodyText: "Delivery has failed.\nFinal-Recipient: rfc822; bounce@target.io\nAction: failed",
-        }),
-      );
-
-      await service.handlePushNotification({
-        emailAddress: "owner@example.com",
-        historyId: "200",
-      });
-
-      expect(mockSuppression.suppress).toHaveBeenCalledWith(
-        expect.objectContaining({ recipientRef: "bounce@target.io" }),
-      );
-      expect(mockRuntime.triggerRun).not.toHaveBeenCalled();
-    });
-
-    it("detects multipart/report delivery-status content and extracts Final-Recipient from the body", async () => {
-      setupConnectedIntegration();
-      pushOneMessage(
-        gmailMessageResponse({
-          from: "Bounce Notifier <bounces@mta.example>",
-          subject: "Undelivered Mail Returned to Sender",
-          extraHeaders: [
-            {
-              name: "Content-Type",
-              value: 'multipart/report; report-type=delivery-status; boundary="b1"',
-            },
-          ],
-          bodyText:
-            "Reporting-MTA: dns; mta.example\nFinal-Recipient: rfc822; Prospect@Acme.com\nAction: failed\nStatus: 5.1.1",
-        }),
-      );
-
-      await service.handlePushNotification({
-        emailAddress: "owner@example.com",
-        historyId: "200",
-      });
-
-      expect(mockSuppression.suppress).toHaveBeenCalledWith(
-        expect.objectContaining({
-          recipientRef: "prospect@acme.com",
-          reason: OutreachSuppressionReason.BOUNCED,
-        }),
-      );
-      expect(mockRuntime.triggerRun).not.toHaveBeenCalled();
-    });
-
-    it("extracts the recipient from Gmail's human-readable phrasing when no machine fields exist", async () => {
-      setupConnectedIntegration();
-      pushOneMessage(
-        gmailMessageResponse({
-          from: "Mail Delivery Subsystem <mailer-daemon@googlemail.com>",
-          subject: "Delivery Status Notification (Failure)",
-          bodyText:
-            "Your message wasn't delivered to bob@gone-startup.io because the address couldn't be found, or is unable to receive mail.",
-        }),
-      );
-
-      await service.handlePushNotification({
-        emailAddress: "owner@example.com",
-        historyId: "200",
-      });
-
-      expect(mockSuppression.suppress).toHaveBeenCalledWith(
-        expect.objectContaining({ recipientRef: "bob@gone-startup.io" }),
-      );
-    });
-
-    it("drops a DSN with no extractable recipient without dispatch or suppression", async () => {
-      setupConnectedIntegration();
-      pushOneMessage(
-        gmailMessageResponse({
-          from: "mailer-daemon@googlemail.com",
-          subject: "Delivery Status Notification (Failure)",
-          bodyText: "Delivery incomplete. There was a temporary problem.",
-        }),
-      );
-
-      await expect(
-        service.handlePushNotification({
-          emailAddress: "owner@example.com",
-          historyId: "200",
-        }),
-      ).resolves.not.toThrow();
-
-      expect(mockSuppression.suppress).not.toHaveBeenCalled();
-      expect(mockRuntime.triggerRun).not.toHaveBeenCalled();
-    });
-
-    it("still dispatches the Reply Handler for a regular prospect reply (and never suppresses it as a bounce)", async () => {
-      setupConnectedIntegration();
-      pushOneMessage(
-        gmailMessageResponse({
-          from: "Pat Prospect <prospect@acme.com>",
-          subject: "Re: quick question",
-          bodyText: "Sure, let's chat next week.",
-        }),
-      );
-
-      await service.handlePushNotification({
-        emailAddress: "owner@example.com",
-        historyId: "200",
-      });
-
-      expect(mockRuntime.triggerRun).toHaveBeenCalledWith("agent_reply", "org_1");
-      // GL6a: the reply DOES suppress the sender — but as a reply
-      // (MANUAL/gmail_reply), never as a BOUNCED/gmail_dsn row.
-      expect(mockSuppression.suppress).not.toHaveBeenCalledWith(
-        expect.objectContaining({ reason: OutreachSuppressionReason.BOUNCED }),
-      );
-      expect(mockSuppression.suppress).not.toHaveBeenCalledWith(
-        expect.objectContaining({ source: "gmail_dsn" }),
-      );
-    });
-  });
-
-  describe("reply → stop outreach (GL6a)", () => {
-    function pushOneMessage(response: ReturnType<typeof gmailMessageResponse>) {
-      historyList.mockResolvedValue({
-        data: {
-          history: [
-            { messagesAdded: [{ message: { id: response.data.id } }] },
-          ],
-        },
-      });
-      messagesGet.mockResolvedValue(response);
-    }
-
-    it("suppresses the replying sender (MANUAL/gmail_reply) AND still dispatches the Reply Handler", async () => {
-      setupConnectedIntegration();
-      pushOneMessage(
-        gmailMessageResponse({
-          id: "msg_reply_1",
-          from: "Pat Prospect <Prospect@Acme.com>",
-          subject: "Re: quick question",
-          bodyText: "Sure, let's chat next week.",
-        }),
-      );
-
-      await service.handlePushNotification({
-        emailAddress: "owner@example.com",
-        historyId: "200",
-      });
-
-      expect(mockSuppression.suppress).toHaveBeenCalledTimes(1);
-      expect(mockSuppression.suppress).toHaveBeenCalledWith({
+    expect(historyList).toHaveBeenCalledWith(
+      expect.objectContaining({ startHistoryId: "100" }),
+    );
+    expect(prisma.integration.updateMany).toHaveBeenCalledWith({
+      where: {
         orgId: "org_1",
-        recipientRef: "prospect@acme.com",
-        reason: OutreachSuppressionReason.MANUAL,
-        source: "gmail_reply",
-        metadata: {
-          gmailMessageId: "msg_reply_1",
-          threadId: "thread_new",
+        provider: "gmail",
+        lastHistoryId: "100",
+      },
+      data: { lastHistoryId: "200" },
+    });
+
+    await service.handlePushNotification({
+      emailAddress: "owner@example.com",
+      historyId: "300",
+    });
+    expect(historyList.mock.calls[1][0]).toMatchObject({ startHistoryId: "200" });
+  });
+
+  it("does not regress the watermark for a delayed Pub/Sub notification", async () => {
+    connect("100");
+    await service.handlePushNotification({
+      emailAddress: "owner@example.com",
+      historyId: "300",
+    });
+    await service.handlePushNotification({
+      emailAddress: "owner@example.com",
+      historyId: "200",
+    });
+
+    expect(historyList.mock.calls[1][0]).toMatchObject({ startHistoryId: "300" });
+    expect(prisma.integration.updateMany).toHaveBeenLastCalledWith({
+      where: {
+        orgId: "org_1",
+        provider: "gmail",
+        lastHistoryId: "100",
+      },
+      data: { lastHistoryId: "300" },
+    });
+  });
+
+  it("does not overwrite a newer cursor committed by another API process", async () => {
+    connect("100");
+    prisma.integration.findUnique
+      .mockResolvedValueOnce({ ...connectedIntegration(), lastHistoryId: "100" })
+      .mockResolvedValueOnce({ ...connectedIntegration(), lastHistoryId: "100" })
+      .mockResolvedValueOnce({ ...connectedIntegration(), lastHistoryId: "250" });
+    prisma.integration.updateMany.mockResolvedValueOnce({ count: 0 });
+
+    await service.handlePushNotification({
+      emailAddress: "owner@example.com",
+      historyId: "200",
+    });
+
+    expect(prisma.integration.updateMany).toHaveBeenCalledTimes(1);
+    expect(prisma.integration.updateMany).toHaveBeenCalledWith({
+      where: {
+        orgId: "org_1",
+        provider: "gmail",
+        lastHistoryId: "100",
+      },
+      data: { lastHistoryId: "200" },
+    });
+    const state = service as unknown as {
+      historyWatermark: Map<string, string>;
+    };
+    expect(state.historyWatermark.get("org_1")).toBe("250");
+  });
+
+  it("paginates Gmail history and de-duplicates provider message ids", async () => {
+    connect();
+    const response = messageResponse({ from: "Pat <prospect@acme.com>" });
+    historyList
+      .mockResolvedValueOnce({
+        data: {
+          history: [{ messagesAdded: [{ message: { id: "msg_1" } }] }],
+          nextPageToken: "page_2",
+        },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          history: [{ messagesAdded: [{ message: { id: "msg_1" } }] }],
         },
       });
-      expect(mockRuntime.triggerRun).toHaveBeenCalledWith("agent_reply", "org_1");
+    messagesGet.mockResolvedValue(response);
+
+    await service.handlePushNotification({
+      emailAddress: "owner@example.com",
+      historyId: "200",
     });
 
-    it("suppresses the sender even when no Reply Handler agent is configured", async () => {
-      setupConnectedIntegration();
-      (mockPrisma.agent.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue(null);
-      pushOneMessage(
-        gmailMessageResponse({
-          from: "prospect@acme.com",
-          subject: "Re: quick question",
-        }),
-      );
+    expect(historyList).toHaveBeenCalledTimes(2);
+    expect(historyList.mock.calls[1][0]).toMatchObject({ pageToken: "page_2" });
+    expect(messagesGet).toHaveBeenCalledTimes(1);
+  });
 
-      await service.handlePushNotification({
+  it("fails closed when one mailbox maps to multiple organizations", async () => {
+    prisma.integration.findMany.mockResolvedValue([
+      { id: "int_1", orgId: "org_1", lastHistoryId: "100" },
+      { id: "int_2", orgId: "org_2", lastHistoryId: "100" },
+    ]);
+
+    await expect(
+      service.handlePushNotification({
+        emailAddress: "shared@example.com",
+        historyId: "200",
+      }),
+    ).rejects.toThrow("mailbox mapping is ambiguous");
+    expect(historyList).not.toHaveBeenCalled();
+    expect(store.recordInboundGmailMessage).not.toHaveBeenCalled();
+    expect(suppression.suppress).not.toHaveBeenCalled();
+  });
+
+  it("materializes a correlated reply and never legal-suppresses engagement", async () => {
+    connect();
+    pushOne(
+      messageResponse({
+        id: "msg_reply_1",
+        from: '"Pat Prospect" <Prospect@Acme.com>',
+      }),
+    );
+
+    await service.handlePushNotification({
+      emailAddress: "owner@example.com",
+      historyId: "200",
+    });
+
+    expect(store.recordInboundGmailMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        orgId: "org_1",
+        integrationId: "int_1",
+        providerMessageId: "msg_reply_1",
+        providerThreadId: "thread_1",
+        internetMessageId: "<reply-1@example.com>",
+        senderEmail: "prospect@acme.com",
+        senderName: "Pat Prospect",
+        toEmails: ["owner@example.com"],
+        ccEmails: ["sales@example.com"],
+        isUnread: true,
+      }),
+    );
+    expect(suppression.suppress).not.toHaveBeenCalled();
+  });
+
+  it("ignores self/SENT messages before conversation materialization", async () => {
+    connect();
+    pushOne(
+      messageResponse({
+        from: "Owner <owner@example.com>",
+        labelIds: ["SENT"],
+      }),
+    );
+    await service.handlePushNotification({
+      emailAddress: "owner@example.com",
+      historyId: "200",
+    });
+    expect(store.recordInboundGmailMessage).not.toHaveBeenCalled();
+    expect(suppression.suppress).not.toHaveBeenCalled();
+  });
+
+  it("ignores an exact owner sender even when Gmail omits the SENT label", async () => {
+    connect();
+    pushOne(
+      messageResponse({
+        from: "Owner <OWNER@example.com>",
+        labelIds: ["INBOX"],
+      }),
+    );
+
+    await service.handlePushNotification({
+      emailAddress: "owner@example.com",
+      historyId: "200",
+    });
+
+    expect(store.recordInboundGmailMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not treat an address containing the owner address as self", async () => {
+    connect();
+    pushOne(
+      messageResponse({
+        from: "Attacker <owner@example.com.attacker.test>",
+      }),
+    );
+
+    await service.handlePushNotification({
+      emailAddress: "owner@example.com",
+      historyId: "200",
+    });
+
+    expect(store.recordInboundGmailMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        senderEmail: "owner@example.com.attacker.test",
+      }),
+    );
+  });
+
+  it("keeps DSNs on the legal bounce-suppression path", async () => {
+    connect();
+    pushOne(
+      messageResponse({
+        from: "Mail Delivery <mailer-daemon@googlemail.com>",
+        subject: "Delivery Status Notification (Failure)",
+        extraHeaders: [
+          { name: "X-Failed-Recipients", value: "Prospect@Acme.com" },
+        ],
+      }),
+    );
+    await service.handlePushNotification({
+      emailAddress: "owner@example.com",
+      historyId: "200",
+    });
+    expect(suppression.suppress).toHaveBeenCalledWith(
+      expect.objectContaining({
+        recipientRef: "prospect@acme.com",
+        reason: OutreachSuppressionReason.BOUNCED,
+        source: "gmail_dsn",
+      }),
+    );
+    expect(store.recordInboundGmailMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not advance the watermark when durable materialization fails", async () => {
+    connect();
+    pushOne(messageResponse({ from: "prospect@acme.com" }));
+    store.recordInboundGmailMessage.mockRejectedValue(new Error("db down"));
+
+    await expect(
+      service.handlePushNotification({
         emailAddress: "owner@example.com",
         historyId: "200",
-      });
+      }),
+    ).rejects.toThrow(/Failed to persist 1 Gmail message/);
+    expect(prisma.integration.updateMany).not.toHaveBeenCalled();
+  });
 
-      expect(mockSuppression.suppress).toHaveBeenCalledWith(
-        expect.objectContaining({
-          recipientRef: "prospect@acme.com",
-          reason: OutreachSuppressionReason.MANUAL,
-          source: "gmail_reply",
-        }),
-      );
-      expect(mockRuntime.triggerRun).not.toHaveBeenCalled();
-    });
+  it("returns a retryable failure and leaves the hot cursor when watermark persistence fails", async () => {
+    connect("100");
+    prisma.integration.updateMany
+      .mockRejectedValueOnce(new Error("watermark db down"))
+      .mockResolvedValueOnce({ count: 1 });
 
-    it("still dispatches the Reply Handler when the suppression write fails (best-effort)", async () => {
-      setupConnectedIntegration();
-      (mockSuppression.suppress as ReturnType<typeof vi.fn>).mockRejectedValue(
-        new Error("db down"),
-      );
-      pushOneMessage(
-        gmailMessageResponse({
-          from: "prospect@acme.com",
-          subject: "Re: quick question",
-        }),
-      );
-
-      await expect(
-        service.handlePushNotification({
-          emailAddress: "owner@example.com",
-          historyId: "200",
-        }),
-      ).resolves.not.toThrow();
-
-      expect(mockRuntime.triggerRun).toHaveBeenCalledWith("agent_reply", "org_1");
-    });
-
-    it("does NOT reply-suppress our own outbound (self / SENT-labelled messages)", async () => {
-      setupConnectedIntegration();
-      pushOneMessage(
-        gmailMessageResponse({
-          from: "Me <owner@example.com>",
-          subject: "Re: quick question",
-        }),
-      );
-
-      await service.handlePushNotification({
+    await expect(
+      service.handlePushNotification({
         emailAddress: "owner@example.com",
         historyId: "200",
-      });
+      }),
+    ).rejects.toThrow("watermark db down");
 
-      expect(mockSuppression.suppress).not.toHaveBeenCalled();
-      expect(mockRuntime.triggerRun).not.toHaveBeenCalled();
+    await service.handlePushNotification({
+      emailAddress: "owner@example.com",
+      historyId: "200",
     });
+    expect(historyList.mock.calls[1][0]).toMatchObject({ startHistoryId: "100" });
+  });
 
-    it("does NOT reply-suppress a DSN — bounce handling owns that path (reason stays BOUNCED)", async () => {
-      setupConnectedIntegration();
-      pushOneMessage(
-        gmailMessageResponse({
-          from: "Mail Delivery Subsystem <mailer-daemon@googlemail.com>",
-          subject: "Delivery Status Notification (Failure)",
-          extraHeaders: [
-            { name: "X-Failed-Recipients", value: "prospect@acme.com" },
-          ],
-        }),
-      );
+  it("preserves the cursor and rethrows transient Gmail history failures", async () => {
+    connect("100");
+    const transient = Object.assign(new Error("backend unavailable"), {
+      response: { status: 503 },
+    });
+    historyList.mockRejectedValue(transient);
 
-      await service.handlePushNotification({
+    await expect(
+      service.handlePushNotification({
         emailAddress: "owner@example.com",
         historyId: "200",
-      });
+      }),
+    ).rejects.toBe(transient);
+    expect(prisma.integration.updateMany).not.toHaveBeenCalled();
+  });
 
-      expect(mockSuppression.suppress).toHaveBeenCalledTimes(1);
-      expect(mockSuppression.suppress).toHaveBeenCalledWith(
-        expect.objectContaining({
-          reason: OutreachSuppressionReason.BOUNCED,
-          source: "gmail_dsn",
-        }),
-      );
-      expect(mockSuppression.suppress).not.toHaveBeenCalledWith(
-        expect.objectContaining({ source: "gmail_reply" }),
-      );
-    });
-
-    it("skips reply suppression (but still dispatches) when From has no extractable email", async () => {
-      setupConnectedIntegration();
-      pushOneMessage(
-        gmailMessageResponse({
-          from: "Undisclosed Sender",
-          subject: "Re: quick question",
-        }),
-      );
-
-      await service.handlePushNotification({
+  it("resets an expired history cursor without fabricating message work", async () => {
+    connect("1");
+    historyList.mockRejectedValue(
+      Object.assign(new Error("Requested entity was not found"), {
+        response: { status: 404 },
+      }),
+    );
+    await expect(
+      service.handlePushNotification({
         emailAddress: "owner@example.com",
-        historyId: "200",
-      });
-
-      expect(mockSuppression.suppress).not.toHaveBeenCalled();
-      expect(mockRuntime.triggerRun).toHaveBeenCalledWith("agent_reply", "org_1");
+        historyId: "500",
+      }),
+    ).resolves.toBeUndefined();
+    expect(prisma.integration.updateMany).toHaveBeenCalledWith({
+      where: {
+        orgId: "org_1",
+        provider: "gmail",
+        lastHistoryId: "1",
+      },
+      data: { lastHistoryId: "500" },
     });
+    expect(store.recordInboundGmailMessage).not.toHaveBeenCalled();
   });
 });

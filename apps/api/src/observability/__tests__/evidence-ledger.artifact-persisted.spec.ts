@@ -44,7 +44,7 @@ describe("artifactPersisted", () => {
     });
   });
 
-  it("accepts every OutreachArtifactStatus, incl. the SENDING claim and SIMULATED", async () => {
+  it("accepts every OutreachArtifactStatus, including DELIVERY_UNKNOWN", async () => {
     // Compile-time lock: `status` is typed as the full Prisma enum here, so
     // when a new enum value lands (as SENDING/SIMULATED did in the week-1
     // send-path work) without widening the ledger's status union, tsc fails
@@ -65,5 +65,6 @@ describe("artifactPersisted", () => {
     expect(prisma.created.map((r: any) => r.payload.status)).toEqual(statuses);
     expect(statuses).toContain("SENDING");
     expect(statuses).toContain("SIMULATED");
+    expect(statuses).toContain("DELIVERY_UNKNOWN");
   });
 });

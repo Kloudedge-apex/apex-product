@@ -127,7 +127,7 @@ describe("HubSpotTool — retry wiring", () => {
 });
 
 describe("SendEmailTool — retry wiring", () => {
-  it("retries on 429 from Gmail", async () => {
+  it("does not automatically retry a non-idempotent Gmail POST after 429", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(mockResponse(429, {}))
@@ -138,15 +138,19 @@ describe("SendEmailTool — retry wiring", () => {
       ["gmail", { provider: "gmail", accessToken: "real_token" }],
     ]);
 
-    const { SendEmailTool } = await import("../send-email.tool");
+    const { EMAIL_DISPATCH_OUTCOME, SendEmailTool, getEmailDispatchOutcome } =
+      await import("../send-email.tool");
     const tool = new SendEmailTool();
     const result = await tool.execute(
       { to: "a@b.com", subject: "Hi", body: "body" },
       buildContext(integrations),
     );
 
-    expect(result.success).toBe(true);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.success).toBe(false);
+    expect(getEmailDispatchOutcome(result)).toBe(
+      EMAIL_DISPATCH_OUTCOME.CONFIRMED_NOT_SENT,
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain("gmail.googleapis.com");
   });
 });

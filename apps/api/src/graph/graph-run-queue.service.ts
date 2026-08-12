@@ -6,7 +6,6 @@ import {
   Optional,
 } from "@nestjs/common";
 import { Queue, JobsOptions, ConnectionOptions } from "bullmq";
-import { Command } from "@langchain/langgraph";
 import { buildRedisConnectionOptions } from "../runtime/queue.service";
 import {
   MetricsService,
@@ -19,32 +18,21 @@ import {
  * checkpoint. Kept separate from the agent-runs / outreach-send queues so the
  * graph supervisor has its own retry / backoff envelope and worker lifecycle.
  *
- * The job payload carries only the GraphRun id plus a small discriminator
- * describing whether this is a fresh start or a resume after HITL — actual
- * graph state lives in GraphCheckpoint / GraphCheckpointWrite (written by
- * PrismaCheckpointSaver) and is re-hydrated by the worker.
+ * The job payload is only a fenced pointer to GraphRun. Canonical first-start
+ * input and pending HITL decisions live on GraphRun; checkpoint state lives in
+ * GraphCheckpoint / GraphCheckpointWrite. Redis is transport, never truth.
  */
 
-export type EnqueueGraphRunInput =
-  | {
-      readonly kind: "start";
-      readonly graphRunId: string;
-      readonly orgId: string;
-      readonly icpProfileIds: readonly string[];
-    }
-  | {
-      readonly kind: "resume";
-      readonly graphRunId: string;
-      readonly orgId: string;
-      readonly resume: { approved: boolean; approvedBy?: string };
-    };
-
-export interface GraphRunJobData {
-  readonly kind: "start" | "resume";
+export interface EnqueueGraphRunInput {
   readonly graphRunId: string;
   readonly orgId: string;
-  readonly icpProfileIds?: readonly string[];
-  readonly resume?: { approved: boolean; approvedBy?: string };
+  readonly dispatchGeneration: number;
+}
+
+export interface GraphRunJobData {
+  readonly graphRunId: string;
+  readonly orgId: string;
+  readonly dispatchGeneration: number;
 }
 
 export const GRAPH_RUN_QUEUE_NAME = "graph-runs";
@@ -58,6 +46,25 @@ const DEFAULT_JOB_OPTIONS: JobsOptions = {
   removeOnComplete: { age: 24 * 3600, count: 1000 },
   removeOnFail: { age: 7 * 24 * 3600, count: 5000 },
 };
+
+/**
+ * BullMQ retains completed jobs for 24 hours. A monotonic durable generation
+ * makes every later resume/recovery id fresh while remaining deterministic
+ * across duplicate publication attempts for the same lifecycle phase.
+ */
+export function graphRunDispatchJobId(
+  graphRunId: string,
+  dispatchGeneration: number,
+): string {
+  if (
+    !Number.isSafeInteger(dispatchGeneration) ||
+    dispatchGeneration < 0
+  ) {
+    throw new Error("GraphRun dispatchGeneration must be a non-negative integer");
+  }
+  // BullMQ rejects ':' in custom ids; hyphens are safe.
+  return `${graphRunId}-dispatch-${dispatchGeneration}`;
+}
 
 @Injectable()
 export class GraphRunQueueService implements OnModuleInit, OnModuleDestroy {
@@ -175,13 +182,9 @@ export class GraphRunQueueService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Enqueue a GraphRun for execution. Uses the GraphRun id as the BullMQ
-   * jobId so duplicate enqueues (e.g. crash-recovery sweep racing the boot
-   * controller path) collapse to a single job rather than spawning multiple
-   * concurrent invocations against the same checkpoint thread.
-   *
-   * `resume` jobs intentionally use a distinct jobId suffix so a resume can
-   * coexist with any leftover start job for the same run.
+   * Enqueue a fenced GraphRun pointer. Duplicate publications of one durable
+   * generation collapse; a later resume/recovery uses a different generation
+   * and therefore cannot collide with a completed job retained by BullMQ.
    */
   async enqueueGraphRun(input: EnqueueGraphRunInput): Promise<void> {
     if (!this.bullQueue) {
@@ -190,28 +193,15 @@ export class GraphRunQueueService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    const data: GraphRunJobData =
-      input.kind === "start"
-        ? {
-            kind: "start",
-            graphRunId: input.graphRunId,
-            orgId: input.orgId,
-            icpProfileIds: input.icpProfileIds,
-          }
-        : {
-            kind: "resume",
-            graphRunId: input.graphRunId,
-            orgId: input.orgId,
-            resume: input.resume,
-          };
-
-    // BullMQ rejects custom job ids that contain ':' (it uses colon as an
-    // internal key separator). Use '-' instead so resume jobs can still be
-    // distinguished from start jobs for the same run.
-    const jobId =
-      input.kind === "resume"
-        ? `${input.graphRunId}-resume`
-        : input.graphRunId;
+    const data: GraphRunJobData = {
+      graphRunId: input.graphRunId,
+      orgId: input.orgId,
+      dispatchGeneration: input.dispatchGeneration,
+    };
+    const jobId = graphRunDispatchJobId(
+      input.graphRunId,
+      input.dispatchGeneration,
+    );
 
     await this.bullQueue.add("process-graph-run", data, {
       jobId,
@@ -226,14 +216,4 @@ export class GraphRunQueueService implements OnModuleInit, OnModuleDestroy {
     }
     await this.bullQueue?.close();
   }
-}
-
-/**
- * Helper: convert a queued job's resume payload back into a LangGraph
- * `Command`. Kept out of the worker to keep `Command` import discipline tight.
- */
-export function resumeCommandFromJob(
-  resume: { approved: boolean; approvedBy?: string },
-): Command {
-  return new Command({ resume });
 }

@@ -6,7 +6,12 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { circuitBreakerRegistry } from "../../../common/http-retry.util";
-import { SendEmailTool, isMockModeResult } from "../send-email.tool";
+import {
+  EMAIL_DISPATCH_OUTCOME,
+  SendEmailTool,
+  getEmailDispatchOutcome,
+  isMockModeResult,
+} from "../send-email.tool";
 import type { IntegrationCredentials, ToolContext, ToolResult } from "../tool.interface";
 
 const ORIGINAL_FETCH = globalThis.fetch;
@@ -62,6 +67,9 @@ describe("SendEmailTool — provider/mode stamping (GL2)", () => {
     expect(data.provider).toBe("mock");
     expect(data.mock).toBe(true);
     expect(data.sent).toBe(false);
+    expect(getEmailDispatchOutcome(result)).toBe(
+      EMAIL_DISPATCH_OUTCOME.NOT_ATTEMPTED,
+    );
     expect(isMockModeResult(result)).toBe(true);
   });
 
@@ -93,7 +101,69 @@ describe("SendEmailTool — provider/mode stamping (GL2)", () => {
     expect(data.provider).toBe("gmail");
     expect(data.sent).toBe(true);
     expect(data.messageId).toBe("gmail_msg_1");
+    expect(getEmailDispatchOutcome(result)).toBe(
+      EMAIL_DISPATCH_OUTCOME.CONFIRMED_SENT,
+    );
     expect(isMockModeResult(result)).toBe(false);
+  });
+
+  it("keeps a Gmail reply in its provider thread and emits RFC reply headers", async () => {
+    let requestBody: Record<string, unknown> | null = null;
+    globalThis.fetch = (async (_url, init) => {
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return mockResponse(200, { id: "gmail_reply_1", threadId: "thread_1" });
+    }) as typeof fetch;
+    const tool = new SendEmailTool();
+    const integrations = new Map<string, IntegrationCredentials>([
+      ["outlook", creds("outlook", "real-outlook-token")],
+      ["gmail", creds("gmail", "real-gmail-token")],
+    ]);
+
+    const result = await tool.execute(
+      {
+        ...PARAMS,
+        provider: "gmail",
+        threadId: "thread_1",
+        inReplyTo: "<message-1@example.com>",
+      },
+      buildContext(integrations),
+    );
+
+    expect(result.success).toBe(true);
+    expect(dataOf(result)).toMatchObject({
+      provider: "gmail",
+      messageId: "gmail_reply_1",
+      threadId: "thread_1",
+    });
+    expect(requestBody).toMatchObject({ threadId: "thread_1" });
+    const raw = String(requestBody?.raw ?? "");
+    const decoded = Buffer.from(raw, "base64url").toString("utf8");
+    expect(decoded).toContain("In-Reply-To: <message-1@example.com>");
+    expect(decoded).toContain("References: <message-1@example.com>");
+  });
+
+  it("rejects CRLF header injection before making a provider request", async () => {
+    let called = false;
+    globalThis.fetch = (async () => {
+      called = true;
+      return mockResponse(200, { id: "should_not_send" });
+    }) as typeof fetch;
+    const tool = new SendEmailTool();
+    const integrations = new Map<string, IntegrationCredentials>([
+      ["gmail", creds("gmail", "real-token")],
+    ]);
+
+    const result = await tool.execute(
+      { ...PARAMS, subject: "Hello\r\nBcc: attacker@example.com" },
+      buildContext(integrations),
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("invalid line breaks");
+    expect(getEmailDispatchOutcome(result)).toBe(
+      EMAIL_DISPATCH_OUTCOME.NOT_ATTEMPTED,
+    );
+    expect(called).toBe(false);
   });
 
   it("stamps provider='gmail' on a FAILED Gmail send so the failure is attributable", async () => {
@@ -111,6 +181,9 @@ describe("SendEmailTool — provider/mode stamping (GL2)", () => {
     const data = dataOf(result);
     expect(data.sent).toBe(false);
     expect(data.provider).toBe("gmail");
+    expect(getEmailDispatchOutcome(result)).toBe(
+      EMAIL_DISPATCH_OUTCOME.CONFIRMED_NOT_SENT,
+    );
     // A real-provider failure is NOT mock mode — the worker must throw on
     // success:false, not misclassify it.
     expect(isMockModeResult(result)).toBe(false);
@@ -126,12 +199,18 @@ describe("SendEmailTool — provider/mode stamping (GL2)", () => {
     const ok = await tool.execute(PARAMS, buildContext(integrations));
     expect(ok.success).toBe(true);
     expect(dataOf(ok).provider).toBe("outlook");
+    expect(getEmailDispatchOutcome(ok)).toBe(
+      EMAIL_DISPATCH_OUTCOME.CONFIRMED_SENT,
+    );
     expect(isMockModeResult(ok)).toBe(false);
 
     globalThis.fetch = (async () => mockResponse(500, {})) as typeof fetch;
     const failed = await tool.execute(PARAMS, buildContext(integrations));
     expect(failed.success).toBe(false);
     expect(dataOf(failed).provider).toBe("outlook");
+    expect(getEmailDispatchOutcome(failed)).toBe(
+      EMAIL_DISPATCH_OUTCOME.CONFIRMED_NOT_SENT,
+    );
     expect(isMockModeResult(failed)).toBe(false);
   });
 
@@ -139,8 +218,94 @@ describe("SendEmailTool — provider/mode stamping (GL2)", () => {
     const tool = new SendEmailTool();
     const result = await tool.execute({ to: "x@example.com" }, buildContext());
     expect(result.success).toBe(false);
-    expect(result.data).toBeNull();
+    expect(dataOf(result)).not.toHaveProperty("provider");
+    expect(getEmailDispatchOutcome(result)).toBe(
+      EMAIL_DISPATCH_OUTCOME.NOT_ATTEMPTED,
+    );
     expect(isMockModeResult(result)).toBe(false);
+  });
+
+  it("makes one provider POST and reports DELIVERY_UNKNOWN when the response is lost", async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      throw new TypeError("socket closed before response");
+    }) as typeof fetch;
+    const tool = new SendEmailTool();
+    const integrations = new Map<string, IntegrationCredentials>([
+      ["gmail", creds("gmail", "real-token")],
+    ]);
+
+    const result = await tool.execute(PARAMS, buildContext(integrations));
+
+    expect(result.success).toBe(false);
+    expect(calls).toBe(1);
+    expect(getEmailDispatchOutcome(result)).toBe(
+      EMAIL_DISPATCH_OUTCOME.DELIVERY_UNKNOWN,
+    );
+  });
+
+  it("makes one provider POST and reports confirmed rejection for 503", async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      return mockResponse(503, {});
+    }) as typeof fetch;
+    const tool = new SendEmailTool();
+    const integrations = new Map<string, IntegrationCredentials>([
+      ["gmail", creds("gmail", "real-token")],
+    ]);
+
+    const result = await tool.execute(PARAMS, buildContext(integrations));
+
+    expect(result.success).toBe(false);
+    expect(calls).toBe(1);
+    expect(getEmailDispatchOutcome(result)).toBe(
+      EMAIL_DISPATCH_OUTCOME.CONFIRMED_NOT_SENT,
+    );
+  });
+
+  it("reports DELIVERY_UNKNOWN when Gmail returns success without its required message id", async () => {
+    globalThis.fetch = (async () => mockResponse(200, {})) as typeof fetch;
+    const tool = new SendEmailTool();
+    const integrations = new Map<string, IntegrationCredentials>([
+      ["gmail", creds("gmail", "real-token")],
+    ]);
+
+    const result = await tool.execute(PARAMS, buildContext(integrations));
+
+    expect(result.success).toBe(false);
+    expect(getEmailDispatchOutcome(result)).toBe(
+      EMAIL_DISPATCH_OUTCOME.DELIVERY_UNKNOWN,
+    );
+  });
+
+  it("reports NOT_ATTEMPTED while the provider circuit is open", async () => {
+    const breaker = circuitBreakerRegistry.get("gmail");
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await expect(
+        breaker.execute(async () => {
+          throw new Error("trip breaker");
+        }),
+      ).rejects.toThrow("trip breaker");
+    }
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      return mockResponse(200, { id: "should_not_send" });
+    }) as typeof fetch;
+    const tool = new SendEmailTool();
+    const integrations = new Map<string, IntegrationCredentials>([
+      ["gmail", creds("gmail", "real-token")],
+    ]);
+
+    const result = await tool.execute(PARAMS, buildContext(integrations));
+
+    expect(result.success).toBe(false);
+    expect(calls).toBe(0);
+    expect(getEmailDispatchOutcome(result)).toBe(
+      EMAIL_DISPATCH_OUTCOME.NOT_ATTEMPTED,
+    );
   });
 });
 

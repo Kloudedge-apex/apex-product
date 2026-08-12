@@ -10,8 +10,13 @@ import { Plan } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { EvidenceLedgerService } from "../observability/evidence-ledger.service";
 import { isLiveSendAllowedForOrg } from "../outreach/outreach-allowlist.util";
-import { getDailySendCapPerOrg } from "../outreach/send-outreach.worker";
+import {
+  dailySendCapacityWhere,
+  getDailySendCapPerOrg,
+} from "../outreach/send-outreach.worker";
 import { isIP } from "node:net";
+import { isISO31661Alpha2 } from "class-validator";
+import { buildTrialOrgSlug } from "../common/trial-org.util";
 
 /**
  * Computed live-send truth for an org (GL5). The FE renders Dry Run / Live
@@ -34,6 +39,39 @@ export interface SendReadiness {
   senderNameSet: boolean;
   mailboxConnected: boolean;
   dailyCapRemaining: number | null;
+}
+
+export type OnboardingCurrentStep =
+  | "organization"
+  | "sender_identity"
+  | "icp"
+  | "mailbox"
+  | "complete";
+
+export interface OnboardingStatus {
+  organization: {
+    nameSet: boolean;
+    websiteSet: boolean;
+    complete: boolean;
+  };
+  senderIdentity: {
+    senderNameSet: boolean;
+    countrySet: boolean;
+    physicalAddressSet: boolean;
+    complete: boolean;
+  };
+  icp: {
+    usable: boolean;
+    complete: boolean;
+  };
+  mailbox: {
+    connected: boolean;
+    complete: boolean;
+  };
+  sendReadiness: SendReadiness;
+  currentStep: OnboardingCurrentStep;
+  complete: boolean;
+  readyForLiveSend: boolean;
 }
 
 /** Integration.provider values that count as a sending mailbox for email. */
@@ -88,10 +126,7 @@ export class OrgsService {
     userName?: string;
   }) {
     const slug =
-      data.slug ||
-      data.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") +
-        "-" +
-        Date.now().toString(36);
+      data.slug || buildTrialOrgSlug(data.name, data.clerkUserId);
 
     const existingUser = await this.prisma.user.findUnique({
       where: { clerkId: data.clerkUserId },
@@ -112,23 +147,40 @@ export class OrgsService {
         ? data.email
         : `${data.clerkUserId}@no-email.workforceos.local`;
 
-    return this.prisma.org.create({
-      data: {
-        name: data.name,
-        slug,
-        plan: "TRIAL",
-        trialEndsAt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000),
-        users: {
-          create: {
-            email,
-            name: data.userName || data.name,
-            role: "OWNER",
-            clerkId: data.clerkUserId,
+    try {
+      return await this.prisma.org.create({
+        data: {
+          name: data.name,
+          slug,
+          plan: "TRIAL",
+          trialEndsAt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000),
+          users: {
+            create: {
+              email,
+              name: data.userName || data.name,
+              role: "OWNER",
+              clerkId: data.clerkUserId,
+            },
           },
         },
-      },
-      include: { users: true },
-    });
+        include: { users: true },
+      });
+    } catch (err) {
+      // A protected request and POST /orgs can bootstrap concurrently. The
+      // unique User.clerkId constraint elects one winner; return that winner's
+      // workspace instead of surfacing a transient uniqueness error.
+      const racedUser = await this.prisma.user.findUnique({
+        where: { clerkId: data.clerkUserId },
+      });
+      if (racedUser) {
+        const racedOrg = await this.prisma.org.findUnique({
+          where: { id: racedUser.orgId },
+          include: { users: true },
+        });
+        if (racedOrg) return racedOrg;
+      }
+      throw err;
+    }
   }
 
   async findOne(id: string) {
@@ -165,7 +217,7 @@ export class OrgsService {
     physicalAddress: string | null;
     senderName: string | null;
   }): Promise<SendReadiness> {
-    const [mailboxCount, sentToday] = await Promise.all([
+    const [mailboxCount, capacityUsedToday] = await Promise.all([
       this.prisma.integration.count({
         where: {
           orgId: org.id,
@@ -173,14 +225,12 @@ export class OrgsService {
           provider: { in: MAILBOX_PROVIDERS },
         },
       }),
-      // Same window the GL8a cap gate in send-outreach.worker.ts counts:
-      // real sends only (status SENT — SIMULATED rows never set sentAt),
-      // since midnight UTC of the current day.
+      // Exactly the same conservative capacity-risk rows as the worker:
+      // confirmed SENT, fresh SENDING, and today's DELIVERY_UNKNOWN.
       this.prisma.outreachArtifact.count({
         where: {
           orgId: org.id,
-          status: "SENT",
-          sentAt: { gte: startOfUtcDay(new Date()) },
+          ...dailySendCapacityWhere(new Date()),
         },
       }),
     ]);
@@ -190,7 +240,103 @@ export class OrgsService {
       physicalAddressSet: (org.physicalAddress ?? "").trim().length > 0,
       senderNameSet: (org.senderName ?? "").trim().length > 0,
       mailboxConnected: mailboxCount > 0,
-      dailyCapRemaining: Math.max(0, getDailySendCapPerOrg() - sentToday),
+      dailyCapRemaining: Math.max(
+        0,
+        getDailySendCapPerOrg() - capacityUsedToday,
+      ),
+    };
+  }
+
+  /**
+   * Read-only guided-setup truth. Every value is derived from org-owned rows
+   * or the same backend send gates used by the worker; there is no mutable
+   * "onboarding complete" flag for a client to spoof or drift.
+   */
+  async getOnboardingStatus(orgId: string): Promise<OnboardingStatus> {
+    const [org, currentIcpProfile] = await Promise.all([
+      this.prisma.org.findUnique({
+        where: { id: orgId },
+        select: {
+          id: true,
+          name: true,
+          website: true,
+          senderName: true,
+          country: true,
+          physicalAddress: true,
+        },
+      }),
+      this.prisma.icpProfile.findFirst({
+        where: { orgId },
+        orderBy: { updatedAt: "desc" },
+        select: {
+          name: true,
+          targetTitles: true,
+          targetIndustries: true,
+          targetGeos: true,
+          techStackSignals: true,
+          intentKeywords: true,
+          seedDomains: true,
+        },
+      }),
+    ]);
+
+    if (!org) throw new NotFoundException("Org not found");
+
+    const sendReadiness = await this.computeSendReadiness(org);
+    const nameSet = hasText(org.name);
+    const websiteSet = hasText(org.website);
+    const senderNameSet = hasText(org.senderName);
+    const physicalAddressSet = hasText(org.physicalAddress);
+    const countrySet = isUppercaseIsoCountry(org.country);
+    const usableIcp = currentIcpProfile
+      ? isUsableIcpProfile(currentIcpProfile)
+      : false;
+
+    const organizationComplete = nameSet && websiteSet;
+    const senderIdentityComplete =
+      senderNameSet && countrySet && physicalAddressSet;
+    const mailboxConnected = sendReadiness.mailboxConnected;
+    const complete =
+      organizationComplete &&
+      senderIdentityComplete &&
+      usableIcp &&
+      mailboxConnected;
+
+    const currentStep: OnboardingCurrentStep = !organizationComplete
+      ? "organization"
+      : !senderIdentityComplete
+        ? "sender_identity"
+        : !usableIcp
+          ? "icp"
+          : !mailboxConnected
+            ? "mailbox"
+            : "complete";
+
+    return {
+      organization: {
+        nameSet,
+        websiteSet,
+        complete: organizationComplete,
+      },
+      senderIdentity: {
+        senderNameSet,
+        countrySet,
+        physicalAddressSet,
+        complete: senderIdentityComplete,
+      },
+      icp: { usable: usableIcp, complete: usableIcp },
+      mailbox: {
+        connected: mailboxConnected,
+        complete: mailboxConnected,
+      },
+      sendReadiness,
+      currentStep,
+      complete,
+      readyForLiveSend:
+        complete &&
+        sendReadiness.liveSendAllowed &&
+        sendReadiness.dailyCapRemaining !== null &&
+        sendReadiness.dailyCapRemaining > 0,
     };
   }
 
@@ -547,16 +693,33 @@ export class OrgsService {
   }
 }
 
-/**
- * Midnight UTC of the day containing `now` — the daily-cap window floor.
- * Mirrors the private startOfUtcDay in outreach/send-outreach.worker.ts
- * (GL8a), which is not exported; keep the two in lockstep if the cap window
- * ever changes.
- */
-function startOfUtcDay(now: Date): Date {
-  return new Date(
-    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
-  );
+function hasText(value: string | null): boolean {
+  return (value ?? "").trim().length > 0;
+}
+
+function isUppercaseIsoCountry(value: string | null): boolean {
+  const country = (value ?? "").trim();
+  return /^[A-Z]{2}$/.test(country) && isISO31661Alpha2(country);
+}
+
+function isUsableIcpProfile(profile: {
+  name: string;
+  targetTitles: string[];
+  targetIndustries: string[];
+  targetGeos: string[];
+  techStackSignals: string[];
+  intentKeywords: string[];
+  seedDomains: string[];
+}): boolean {
+  if (!hasText(profile.name)) return false;
+  return [
+    profile.targetTitles,
+    profile.targetIndustries,
+    profile.targetGeos,
+    profile.techStackSignals,
+    profile.intentKeywords,
+    profile.seedDomains,
+  ].some((values) => values.some((value) => value.trim().length > 0));
 }
 
 function validateOrgWebsiteOrThrow(input: string): string {

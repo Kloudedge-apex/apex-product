@@ -52,3 +52,34 @@ describe("OrgsService website validation", () => {
   });
 });
 
+describe("OrgsService concurrent bootstrap", () => {
+  it("returns the workspace created by the winning request", async () => {
+    const org = { id: "org_trial", users: [{ clerkId: "clerk_new" }] };
+    const prisma = {
+      user: {
+        findUnique: vi
+          .fn()
+          .mockResolvedValueOnce(null)
+          .mockResolvedValueOnce({ orgId: org.id }),
+      },
+      org: {
+        create: vi.fn().mockRejectedValue(new Error("unique constraint")),
+        findUnique: vi.fn().mockResolvedValue(org),
+      },
+    };
+    const service = new OrgsService(prisma as never);
+
+    await expect(
+      service.create({
+        name: "Acme",
+        clerkUserId: "clerk_new",
+        email: "owner@acme.example",
+      }),
+    ).resolves.toEqual(org);
+
+    expect(prisma.org.findUnique).toHaveBeenCalledWith({
+      where: { id: org.id },
+      include: { users: true },
+    });
+  });
+});

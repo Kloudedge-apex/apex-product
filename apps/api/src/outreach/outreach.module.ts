@@ -8,6 +8,7 @@ import { SuppressionController } from "./suppression.controller";
 import { UnsubscribeController } from "./unsubscribe.controller";
 import { IntegrationsModule } from "../integrations/integrations.module";
 import { ObservabilityModule } from "../observability/observability.module";
+import { ConversationStoreModule } from "../conversation-store/conversation-store.module";
 
 @Module({
   // ObservabilityModule is @Global so LangSmithService is already injectable,
@@ -15,7 +16,12 @@ import { ObservabilityModule } from "../observability/observability.module";
   // future de-globalization. SuppressionService lives in SuppressionModule
   // (re-exported below) so GmailModule can consume it without importing this
   // module — see suppression.module.ts for the boot-cycle rationale.
-  imports: [IntegrationsModule, ObservabilityModule, SuppressionModule],
+  imports: [
+    IntegrationsModule,
+    ObservabilityModule,
+    SuppressionModule,
+    ConversationStoreModule,
+  ],
   controllers: [OutreachArtifactsController, UnsubscribeController, SuppressionController],
   providers: [
     OutreachArtifactsService,

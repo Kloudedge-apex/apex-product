@@ -7,6 +7,7 @@ import {
   Body,
   Query,
   BadRequestException,
+  UnauthorizedException,
 } from "@nestjs/common";
 import { MeetingSource, MeetingStatus } from "@prisma/client";
 import { OrgId, ClerkUserId } from "../common/org-context.decorator";
@@ -21,7 +22,6 @@ interface CreateBody {
   notes?: string;
   outreachArtifactId?: string;
   personId?: string;
-  source?: MeetingSource;
 }
 
 interface UpdateBody {
@@ -84,7 +84,8 @@ export class MeetingsController {
       notes: body.notes,
       outreachArtifactId: body.outreachArtifactId,
       personId: body.personId,
-      source: body.source ?? MeetingSource.HUMAN_LOGGED,
+      // Public callers cannot spoof an agent-created proposal.
+      source: MeetingSource.HUMAN_LOGGED,
       createdBy: clerkUserId ?? null,
     });
   }
@@ -110,13 +111,12 @@ export class MeetingsController {
     @OrgId() orgId: string,
     @ClerkUserId() clerkUserId: string | undefined,
     @Param("id") id: string,
-    @Body() body: { confirmedBy?: string } | undefined,
+    @Body() _body: { confirmedBy?: string } | undefined,
   ) {
-    const confirmedBy = body?.confirmedBy ?? clerkUserId;
-    if (!confirmedBy) {
-      throw new BadRequestException("confirmedBy is required");
+    if (!clerkUserId) {
+      throw new UnauthorizedException("Authenticated user is required");
     }
-    return this.meetings.confirm(orgId, id, confirmedBy);
+    return this.meetings.confirm(orgId, id, clerkUserId);
   }
 
   @Post(":id/cancel")

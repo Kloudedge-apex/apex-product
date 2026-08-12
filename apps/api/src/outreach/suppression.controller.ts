@@ -19,6 +19,10 @@ import { OutreachSuppressionReason } from "@prisma/client";
 import { Request } from "express";
 import { OrgId } from "../common/org-context.decorator";
 import { PrismaService } from "../prisma/prisma.service";
+import type {
+  ArtifactManualSuppressionResult,
+  BulkManualSuppressionResult,
+} from "./suppression.service";
 import { SuppressionService } from "./suppression.service";
 
 /**
@@ -66,9 +70,10 @@ export class SuppressionController {
   /**
    * GL6b: manual suppression. Idempotent — SuppressionService.suppress
    * returns { created: false } when the recipient is already on the list
-   * (first suppression wins, metadata is never overwritten). Actor
-   * attribution is server-derived from the authenticated principal (same
-   * clerkUserId source as assertAdminOrOwner) — never trusted from the body.
+   * (the first real suppression wins; only a legacy gmail_reply sequence-stop
+   * marker may be upgraded). Actor attribution is server-derived from the
+   * authenticated principal (same clerkUserId source as assertAdminOrOwner) —
+   * never trusted from the body.
    */
   @Post()
   async create(
@@ -106,6 +111,49 @@ export class SuppressionController {
       }),
     );
     return { created, recipientRef: normalizedRef, reason };
+  }
+
+  /**
+   * Suppress the recipient persisted on a reviewed outreach artifact. The
+   * request deliberately has no body: recipient, org, and actor all come
+   * from server-owned state.
+   */
+  @Post("artifacts/:artifactId")
+  async suppressArtifactRecipient(
+    @OrgId() orgId: string,
+    @Req() req: Request,
+    @Param("artifactId") artifactId: string,
+  ): Promise<ArtifactManualSuppressionResult> {
+    const actor = await this.assertAdminOrOwner(
+      req,
+      orgId,
+      "suppress an artifact recipient",
+    );
+    return this.suppression.suppressArtifactRecipient({
+      orgId,
+      artifactId,
+      actor,
+    });
+  }
+
+  /**
+   * Bulk suppression accepts Person ids only. Company ownership and the
+   * usable EmailCandidate are resolved server-side, so callers cannot inject
+   * another org or an arbitrary recipient address.
+   */
+  @Post("people/bulk")
+  async suppressPeople(
+    @OrgId() orgId: string,
+    @Req() req: Request,
+    @Body() body: unknown,
+  ): Promise<BulkManualSuppressionResult> {
+    const actor = await this.assertAdminOrOwner(
+      req,
+      orgId,
+      "bulk suppress people",
+    );
+    const personIds = parseBulkPersonSuppressionBody(body);
+    return this.suppression.suppressPeople({ orgId, personIds, actor });
   }
 
   @Delete(":id")
@@ -200,4 +248,41 @@ function parseCreateSuppressionBody(body: unknown): {
   }
 
   return { recipientRef, reason };
+}
+
+const MAX_BULK_PERSON_IDS = 200;
+const MAX_PERSON_ID_LENGTH = 256;
+
+function parseBulkPersonSuppressionBody(body: unknown): string[] {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new BadRequestException("Request body must be a JSON object");
+  }
+  const obj = body as Record<string, unknown>;
+  const unexpectedKeys = Object.keys(obj).filter((key) => key !== "personIds");
+  if (unexpectedKeys.length > 0) {
+    throw new BadRequestException(
+      `Only personIds is accepted; unexpected field(s): ${unexpectedKeys.join(", ")}`,
+    );
+  }
+  if (!Array.isArray(obj.personIds) || obj.personIds.length === 0) {
+    throw new BadRequestException("personIds must be a non-empty array");
+  }
+  if (obj.personIds.length > MAX_BULK_PERSON_IDS) {
+    throw new BadRequestException(
+      `personIds must contain at most ${MAX_BULK_PERSON_IDS} entries`,
+    );
+  }
+
+  return obj.personIds.map((value, index) => {
+    if (typeof value !== "string") {
+      throw new BadRequestException(`personIds[${index}] must be a string`);
+    }
+    const personId = value.trim();
+    if (!personId || personId.length > MAX_PERSON_ID_LENGTH) {
+      throw new BadRequestException(
+        `personIds[${index}] must be between 1 and ${MAX_PERSON_ID_LENGTH} characters`,
+      );
+    }
+    return personId;
+  });
 }

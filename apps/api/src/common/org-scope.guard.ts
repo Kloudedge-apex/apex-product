@@ -11,6 +11,7 @@ import { Reflector } from "@nestjs/core";
 import { Request } from "express";
 import { PrismaService } from "../prisma/prisma.service";
 import { verifyClerkToken } from "./jwt.util";
+import { buildTrialOrgSlug } from "./trial-org.util";
 
 export const SKIP_ORG_GUARD = "skipOrgGuard";
 
@@ -41,7 +42,9 @@ export class OrgScopeGuard implements CanActivate {
   ) {
     this.clerkConfigured = !!(
       process.env.CLERK_DOMAIN ||
-      process.env.CLERK_JWKS_URL
+      process.env.CLERK_JWKS_URL ||
+      process.env.CLERK_ISSUER ||
+      process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
     );
     this.allowDevHeader =
       process.env.NODE_ENV !== "production" &&
@@ -49,7 +52,7 @@ export class OrgScopeGuard implements CanActivate {
 
     if (process.env.NODE_ENV === "production" && !this.clerkConfigured) {
       throw new Error(
-        "OrgScopeGuard: CLERK_DOMAIN or CLERK_JWKS_URL must be set in production. " +
+        "OrgScopeGuard: Clerk issuer/JWKS configuration must be set in production. " +
         "Refusing to start — header-based org spoofing would be possible otherwise.",
       );
     }
@@ -84,6 +87,12 @@ export class OrgScopeGuard implements CanActivate {
         throw new UnauthorizedException(msg);
       }
 
+      // Defense in depth: tenant resolution must never proceed without a
+      // concrete Clerk principal, even if the verifier is later replaced or
+      // regresses. A signed org_id alone is not an internal membership proof.
+      if (typeof payload.sub !== "string" || payload.sub.trim().length === 0) {
+        throw new UnauthorizedException("JWT subject is required");
+      }
       clerkUserId = payload.sub;
       clerkOrgRole = payload.org_role;
 
@@ -132,8 +141,22 @@ export class OrgScopeGuard implements CanActivate {
       throw new ForbiddenException("Organization not found");
     }
 
+    // A verified Clerk org_id proves membership in a Clerk organization, but
+    // it does not by itself prove membership in the internal tenant row that
+    // happened to match by id/slug. Bind every protected request back to the
+    // one internal User row for the verified `sub` before exposing orgId.
+    if (this.clerkConfigured) {
+      const membership = await this.prisma.user.findUnique({
+        where: { clerkId: clerkUserId! },
+        select: { orgId: true },
+      });
+      if (!membership || membership.orgId !== org.id) {
+        throw new ForbiddenException("User is not a member of this organization");
+      }
+    }
+
     reqAny.orgId = org.id;
-    if (clerkUserId) reqAny.clerkUserId = clerkUserId;
+    if (this.clerkConfigured) reqAny.clerkUserId = clerkUserId!;
     if (clerkOrgRole) reqAny.clerkOrgRole = clerkOrgRole;
     return true;
   }
@@ -175,10 +198,7 @@ export class OrgScopeGuard implements CanActivate {
         ? payload.email.split("@")[1].split(".")[0]
         : "Workspace";
     const name = baseName.charAt(0).toUpperCase() + baseName.slice(1);
-    const slug =
-      name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") +
-      "-" +
-      Date.now().toString(36);
+    const slug = buildTrialOrgSlug(name, clerkUserId);
 
     try {
       const org = await this.prisma.org.create({

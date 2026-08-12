@@ -7,6 +7,8 @@ import {
   forwardRef,
 } from "@nestjs/common";
 import { Command, isInterrupted } from "@langchain/langgraph";
+import { randomUUID } from "node:crypto";
+import { GraphRunStatus, Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { LeadsService } from "../leads/leads.service";
 import { RuntimeService } from "../runtime/runtime.service";
@@ -56,39 +58,88 @@ export class GraphService {
     orgId: string,
     icpProfileIds: string[],
   ): Promise<{ runId: string; threadId: string }> {
-    if (icpProfileIds.length === 0) {
+    const canonicalIcpProfileIds = [
+      ...new Set(icpProfileIds.map((id) => id.trim()).filter(Boolean)),
+    ];
+    if (canonicalIcpProfileIds.length === 0) {
       throw new ConflictException("No ICP profiles provided to graph run");
     }
 
-    // Reject if a graph is already in-flight for this org (mirrors the
-    // ScrapeJob single-flight check in LeadsService.triggerDiscovery).
-    const inflight = await this.prisma.graphRun.findFirst({
-      where: {
-        orgId,
-        status: { in: ["RUNNING", "AWAITING_APPROVAL"] },
-      },
-    });
-    if (inflight) {
-      throw new ConflictException(
-        `A pipeline graph is already ${inflight.status.toLowerCase()} for this org (runId=${inflight.id})`,
-      );
+    let run: { id: string; dispatchGeneration: number };
+    try {
+      run = await this.prisma.$transaction(async (tx) => {
+        // The advisory lock closes the find-then-create race across API pods.
+        // The review-only migration also adds a partial unique index as a
+        // durable backstop for mixed-version deploys and future callers.
+        await tx.$queryRaw`
+          SELECT pg_advisory_xact_lock(
+            hashtextextended(${`graph-run-single-flight:${orgId}`}, 0::bigint)
+          )
+        `;
+
+        const inflight = await tx.graphRun.findFirst({
+          where: {
+            orgId,
+            status: {
+              in: [
+                GraphRunStatus.RUNNING,
+                GraphRunStatus.AWAITING_APPROVAL,
+              ],
+            },
+          },
+          select: { id: true, status: true },
+        });
+        if (inflight) {
+          throw new ConflictException(
+            `A pipeline graph is already ${inflight.status.toLowerCase()} for this org (runId=${inflight.id})`,
+          );
+        }
+
+        // Generate the id before insert so id and LangGraph threadId are
+        // written together. There is never an observable threadId="" row.
+        const runId = randomUUID();
+        return tx.graphRun.create({
+          data: {
+            id: runId,
+            orgId,
+            threadId: runId,
+            graphName: GRAPH_NAME,
+            status: GraphRunStatus.RUNNING,
+            currentNode: NODE.SUPERVISOR,
+            startIcpProfileIds: canonicalIcpProfileIds,
+            dispatchGeneration: 0,
+          },
+          select: { id: true, dispatchGeneration: true },
+        });
+      });
+    } catch (err) {
+      // A partial-unique violation is possible during a mixed-version deploy
+      // even though this version takes the advisory lock. Keep it a truthful
+      // 409 instead of leaking a database error.
+      if (
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        err.code === "P2002"
+      ) {
+        const inflight = await this.prisma.graphRun.findFirst({
+          where: {
+            orgId,
+            status: {
+              in: [
+                GraphRunStatus.RUNNING,
+                GraphRunStatus.AWAITING_APPROVAL,
+              ],
+            },
+          },
+          select: { id: true, status: true },
+        });
+        throw new ConflictException(
+          inflight
+            ? `A pipeline graph is already ${inflight.status.toLowerCase()} for this org (runId=${inflight.id})`
+            : "A pipeline graph is already active for this org",
+        );
+      }
+      throw err;
     }
-
-    const run = await this.prisma.graphRun.create({
-      data: {
-        orgId,
-        threadId: "", // filled below — Prisma needs a default; we update with the row id
-        graphName: GRAPH_NAME,
-        status: "RUNNING",
-        currentNode: NODE.SUPERVISOR,
-      },
-    });
-
-    // Use the run id as the thread id — 1:1 mapping, easy to look up
-    await this.prisma.graphRun.update({
-      where: { id: run.id },
-      data: { threadId: run.id },
-    });
 
     // Persisted execution: hand off to the graph-runs queue so the worker
     // pod owns the run. Pod restart mid-flight no longer abandons the run —
@@ -96,11 +147,10 @@ export class GraphService {
     // PrismaCheckpointSaver between them guarantee resumption from the last
     // checkpoint. HTTP response semantics are unchanged: this returns the
     // runId immediately and execution happens out-of-band.
-    await this.graphRunQueue.enqueueGraphRun({
-      kind: "start",
+    await this.enqueueDispatchOrLeaveForRecovery({
       graphRunId: run.id,
       orgId,
-      icpProfileIds,
+      dispatchGeneration: run.dispatchGeneration,
     });
 
     return { runId: run.id, threadId: run.id };
@@ -115,13 +165,57 @@ export class GraphService {
     orgId: string,
     decision: { approved: boolean; approvedBy?: string },
   ): Promise<{ status: string }> {
-    const run = await this.prisma.graphRun.findFirst({
-      where: { id: runId, orgId },
+    // Transition to RUNNING for BOTH approve and reject paths so the worker
+    // (which short-circuits when status !== RUNNING) actually dequeues and
+    // drives the graph to END. Audit P0 #6: previously the reject branch
+    // skipped the status update, leaving runs stuck in AWAITING_APPROVAL
+    // forever and silently dropping the user's reject decision.
+    //
+    // Refresh the mutable activity clock so the boot-time orphan sweep does
+    // not race a freshly resumed run. startedAt deliberately remains the
+    // original run start time; overwriting it corrupted dates and duration.
+    //
+    // The status predicate is also the decision claim: only one concurrent
+    // reviewer can transition this tenant-owned run out of AWAITING_APPROVAL.
+    // Evidence and queue side effects happen only after that compare-and-swap
+    // succeeds, so an approve/reject race cannot record or enqueue both choices.
+    const resumedAt = new Date();
+    const claim = await this.prisma.$transaction(async (tx) => {
+      const claimed = await tx.graphRun.updateMany({
+        where: {
+          id: runId,
+          orgId,
+          status: GraphRunStatus.AWAITING_APPROVAL,
+        },
+        data: {
+          status: GraphRunStatus.RUNNING,
+          lastActivityAt: resumedAt,
+          approvedAt: decision.approved ? resumedAt : null,
+          approvedBy: decision.approved
+            ? (decision.approvedBy ?? null)
+            : null,
+          needsApproval: false,
+          pendingResumeApproved: decision.approved,
+          pendingResumeApprovedBy: decision.approvedBy ?? null,
+          dispatchGeneration: { increment: 1 },
+        },
+      });
+
+      // Read inside the same transaction so the generation paired with the
+      // winning CAS is the one used for the dispatch job id.
+      const current = await tx.graphRun.findFirst({
+        where: { id: runId, orgId },
+        select: { status: true, dispatchGeneration: true },
+      });
+      return { won: claimed.count === 1, current };
     });
-    if (!run) throw new NotFoundException(`Graph run not found: ${runId}`);
-    if (run.status !== "AWAITING_APPROVAL") {
+
+    if (!claim.current) {
+      throw new NotFoundException(`Graph run not found: ${runId}`);
+    }
+    if (!claim.won) {
       throw new ConflictException(
-        `Graph run is ${run.status}, not AWAITING_APPROVAL`,
+        `Graph run is ${claim.current.status}, not AWAITING_APPROVAL`,
       );
     }
 
@@ -139,41 +233,35 @@ export class GraphService {
       });
     }
 
-    // Transition to RUNNING for BOTH approve and reject paths so the worker
-    // (which short-circuits when status !== RUNNING) actually dequeues and
-    // drives the graph to END. Audit P0 #6: previously the reject branch
-    // skipped the status update, leaving runs stuck in AWAITING_APPROVAL
-    // forever and silently dropping the user's reject decision.
-    //
-    // Also refresh startedAt so the boot-time orphan sweep (which filters on
-    // startedAt < now - BOOT_ORPHAN_AGE_MS) does NOT pick up a freshly-resumed
-    // run and re-enqueue a duplicate start job mid-resume. Audit P0 #8.
-    const resumeStartedAt = new Date();
-    await this.prisma.graphRun.update({
-      where: { id: runId },
-      data: decision.approved
-        ? {
-            status: "RUNNING",
-            startedAt: resumeStartedAt,
-            approvedAt: resumeStartedAt,
-            approvedBy: decision.approvedBy ?? null,
-            needsApproval: false,
-          }
-        : {
-            status: "RUNNING",
-            startedAt: resumeStartedAt,
-            needsApproval: false,
-          },
-    });
-
-    await this.graphRunQueue.enqueueGraphRun({
-      kind: "resume",
+    await this.enqueueDispatchOrLeaveForRecovery({
       graphRunId: runId,
       orgId,
-      resume: decision,
+      dispatchGeneration: claim.current.dispatchGeneration,
     });
 
     return { status: "resuming" };
+  }
+
+  /**
+   * Queue publication is not the source of truth. If Redis rejects the add or
+   * its acknowledgement is lost after accepting it, leave the durable RUNNING
+   * row untouched. The recurrent orphan sweep will publish a newer fenced job
+   * once the activity lease expires; an accepted job keeps that lease fresh.
+   */
+  private async enqueueDispatchOrLeaveForRecovery(input: {
+    graphRunId: string;
+    orgId: string;
+    dispatchGeneration: number;
+  }): Promise<void> {
+    try {
+      await this.graphRunQueue.enqueueGraphRun(input);
+    } catch (err) {
+      this.logger.error(
+        `GraphRun ${input.graphRunId} dispatch ${input.dispatchGeneration} enqueue failed; durable recovery remains pending: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 
   async getGraphRun(orgId: string, runId: string) {
@@ -184,12 +272,43 @@ export class GraphService {
     return run;
   }
 
-  async listGraphRuns(orgId: string, limit = 20) {
-    return this.prisma.graphRun.findMany({
-      where: { orgId },
-      orderBy: { startedAt: "desc" },
-      take: limit,
-    });
+  async listGraphRuns(
+    orgId: string,
+    pagination?: { page: number; limit: number; status?: GraphRunStatus },
+  ) {
+    const where = {
+      orgId,
+      ...(pagination?.status ? { status: pagination.status } : {}),
+    };
+
+    // Preserve the historical bare-array response for callers that have not
+    // opted into pagination. The id tie-breaker makes equal timestamps stable.
+    if (!pagination) {
+      return this.prisma.graphRun.findMany({
+        where,
+        orderBy: [{ startedAt: "desc" }, { id: "desc" }],
+        take: 20,
+      });
+    }
+
+    const { page, limit } = pagination;
+    const [items, total] = await this.prisma.$transaction([
+      this.prisma.graphRun.findMany({
+        where,
+        orderBy: [{ startedAt: "desc" }, { id: "desc" }],
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      this.prisma.graphRun.count({ where }),
+    ]);
+
+    return {
+      items,
+      total,
+      page,
+      limit,
+      totalPages: total === 0 ? 0 : Math.ceil(total / limit),
+    };
   }
 
   // ── Worker-facing API ────────────────────────────────────────────────────
@@ -218,12 +337,17 @@ export class GraphService {
   async processGraphRun(
     runId: string,
     input: Partial<PipelineState> | Command,
+    dispatchGeneration: number,
   ): Promise<void> {
     const config = { configurable: { thread_id: runId } };
 
     // Resolve the LangSmith root run id for this GraphRun. Resume reuses the
     // persisted id; start mints a fresh one and persists it.
-    const parentRunId = await this.resolveParentRunId(runId, input);
+    const parentRunId = await this.resolveParentRunId(
+      runId,
+      input,
+      dispatchGeneration,
+    );
 
     const compiled = buildPipelineGraph({
       leads: this.leads,
@@ -250,48 +374,77 @@ export class GraphService {
         const candidateCount = (result.scoredLeads ?? [])
           .filter((s) => s.tier === "A" || s.tier === "B")
           .slice(0, 10).length;
-        void this.evidenceLedger.approvalRequested({
-          orgId: result.orgId,
-          runId,
-          candidateCount,
-        });
-
-        await this.prisma.graphRun.update({
-          where: { id: runId },
+        const transition = await this.prisma.graphRun.updateMany({
+          where: {
+            id: runId,
+            status: GraphRunStatus.RUNNING,
+            dispatchGeneration,
+          },
           data: {
-            status: "AWAITING_APPROVAL",
+            status: GraphRunStatus.AWAITING_APPROVAL,
             currentNode: NODE.APPROVAL,
             needsApproval: true,
             state: this.snapshotPublicState(result),
           },
+        });
+        if (transition.count !== 1) {
+          this.logger.warn(
+            `Graph ${runId} dispatch ${dispatchGeneration} was superseded before approval transition`,
+          );
+          return;
+        }
+        void this.evidenceLedger.approvalRequested({
+          orgId: result.orgId,
+          runId,
+          candidateCount,
         });
         this.logger.log(`Graph ${runId} paused at human_approval`);
         return;
       }
 
       // Graph ran to completion
-      await this.prisma.graphRun.update({
-        where: { id: runId },
+      const transition = await this.prisma.graphRun.updateMany({
+        where: {
+          id: runId,
+          status: GraphRunStatus.RUNNING,
+          dispatchGeneration,
+        },
         data: {
-          status: "COMPLETED",
+          status: GraphRunStatus.COMPLETED,
           currentNode: null,
           completedAt: new Date(),
           state: this.snapshotPublicState(result),
         },
       });
+      if (transition.count !== 1) {
+        this.logger.warn(
+          `Graph ${runId} dispatch ${dispatchGeneration} was superseded before completion transition`,
+        );
+        return;
+      }
       this.logger.log(`Graph ${runId} completed`);
       this.fireRunLevelEvaluator(runId);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      await this.prisma.graphRun.update({
-        where: { id: runId },
+      const transition = await this.prisma.graphRun.updateMany({
+        where: {
+          id: runId,
+          status: GraphRunStatus.RUNNING,
+          dispatchGeneration,
+        },
         data: {
-          status: "FAILED",
+          status: GraphRunStatus.FAILED,
           completedAt: new Date(),
           error: msg.slice(0, 1000),
         },
       });
-      this.fireRunLevelEvaluator(runId);
+      if (transition.count === 1) {
+        this.fireRunLevelEvaluator(runId);
+      } else {
+        this.logger.warn(
+          `Graph ${runId} dispatch ${dispatchGeneration} failure was superseded; lifecycle row left unchanged`,
+        );
+      }
       throw err;
     }
   }
@@ -313,6 +466,7 @@ export class GraphService {
   private async resolveParentRunId(
     runId: string,
     input: Partial<PipelineState> | Command,
+    dispatchGeneration: number,
   ): Promise<string | null> {
     let row: { id: string; orgId: string; langsmithRootRunId: string | null } | null = null;
     try {
@@ -355,8 +509,8 @@ export class GraphService {
 
     if (created) {
       try {
-        await this.prisma.graphRun.update({
-          where: { id: runId },
+        await this.prisma.graphRun.updateMany({
+          where: { id: runId, dispatchGeneration },
           data: { langsmithRootRunId: created },
         });
       } catch (err) {

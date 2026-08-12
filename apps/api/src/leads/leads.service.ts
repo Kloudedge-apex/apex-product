@@ -23,7 +23,8 @@ import {
   isLikelyHumanName,
   isLikelyJobTitle,
 } from "./quality/lead-quality.validators";
-import type { Seniority, Department, ScrapeStage } from "@prisma/client";
+import type { Seniority, Department, ScrapeStage, Prisma } from "@prisma/client";
+import { OutreachArtifactStatus } from "@prisma/client";
 
 interface CompanyFilters {
   page: number;
@@ -69,8 +70,8 @@ export class LeadsService {
       targetTitles?: string[];
       targetIndustries?: string[];
       targetGeos?: string[];
-      minEmployees?: number;
-      maxEmployees?: number;
+      minEmployees?: number | null;
+      maxEmployees?: number | null;
       techStackSignals?: string[];
       intentKeywords?: string[];
       seedDomains?: string[];
@@ -89,6 +90,61 @@ export class LeadsService {
         intentKeywords: data.intentKeywords ?? [],
         seedDomains: data.seedDomains ?? [],
       },
+    });
+  }
+
+  async upsertCurrentIcpProfile(
+    orgId: string,
+    data: {
+      name: string;
+      targetTitles?: string[];
+      targetIndustries?: string[];
+      targetGeos?: string[];
+      minEmployees?: number | null;
+      maxEmployees?: number | null;
+      techStackSignals?: string[];
+      intentKeywords?: string[];
+      seedDomains?: string[];
+    },
+  ) {
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`
+        SELECT pg_advisory_xact_lock(
+          hashtextextended(${`workforce-current-icp:${orgId}`}, 0::bigint)
+        )
+      `;
+      const current = await tx.icpProfile.findFirst({
+        where: { orgId },
+        orderBy: { updatedAt: "desc" },
+        select: { id: true },
+      });
+      const createProfile = {
+        name: data.name,
+        targetTitles: data.targetTitles ?? [],
+        targetIndustries: data.targetIndustries ?? [],
+        targetGeos: data.targetGeos ?? [],
+        minEmployees: data.minEmployees ?? null,
+        maxEmployees: data.maxEmployees ?? null,
+        techStackSignals: data.techStackSignals ?? [],
+        intentKeywords: data.intentKeywords ?? [],
+        seedDomains: data.seedDomains ?? [],
+      };
+      if (current) {
+        const update: Prisma.IcpProfileUpdateInput = { name: data.name };
+        if (data.targetTitles !== undefined) update.targetTitles = data.targetTitles;
+        if (data.targetIndustries !== undefined) update.targetIndustries = data.targetIndustries;
+        if (data.targetGeos !== undefined) update.targetGeos = data.targetGeos;
+        if (data.minEmployees !== undefined) update.minEmployees = data.minEmployees;
+        if (data.maxEmployees !== undefined) update.maxEmployees = data.maxEmployees;
+        if (data.techStackSignals !== undefined) update.techStackSignals = data.techStackSignals;
+        if (data.intentKeywords !== undefined) update.intentKeywords = data.intentKeywords;
+        if (data.seedDomains !== undefined) update.seedDomains = data.seedDomains;
+        return tx.icpProfile.update({
+          where: { id: current.id },
+          data: update,
+        });
+      }
+      return tx.icpProfile.create({ data: { orgId, ...createProfile } });
     });
   }
 
@@ -1089,7 +1145,7 @@ export class LeadsService {
       industry: string;
       companySize: string;
       techStack: string[];
-      score: number;
+      score: number | null;
       scoreBreakdown: Array<{ label: string; value: number }>;
       stage: "sourced" | "enriched" | "qualified" | "in_crm" | "contacted" | "replied" | "meeting";
       source: string;
@@ -1135,11 +1191,27 @@ export class LeadsService {
     ]);
 
     const personIds = raw.map((p) => p.id);
+    const recipientToPersonId = new Map<string, string>();
+    const recipientRefs = new Set<string>();
+    for (const person of raw) {
+      recipientToPersonId.set(person.id, person.id);
+      recipientRefs.add(person.id);
+      const email = person.emails[0]?.email?.trim();
+      if (email) {
+        recipientRefs.add(email);
+        recipientToPersonId.set(email, person.id);
+        recipientToPersonId.set(email.toLowerCase(), person.id);
+      }
+    }
 
     const [artifactsByRecipient, meetingsByPerson] = await Promise.all([
-      personIds.length
+      recipientRefs.size
         ? this.prisma.outreachArtifact.findMany({
-            where: { orgId, recipientRef: { in: personIds } },
+            where: {
+              orgId,
+              status: OutreachArtifactStatus.SENT,
+              recipientRef: { in: [...recipientRefs] },
+            },
             select: { recipientRef: true, status: true, sentAt: true },
           })
         : Promise.resolve([]),
@@ -1153,7 +1225,11 @@ export class LeadsService {
 
     const contactedSet = new Set<string>();
     for (const a of artifactsByRecipient) {
-      if (a.recipientRef && a.sentAt) contactedSet.add(a.recipientRef);
+      const recipientRef = a.recipientRef?.trim();
+      const personId = recipientRef
+        ? recipientToPersonId.get(recipientRef) ?? recipientToPersonId.get(recipientRef.toLowerCase())
+        : undefined;
+      if (personId && a.sentAt) contactedSet.add(personId);
     }
     const meetingSet = new Set<string>();
     for (const m of meetingsByPerson) {
@@ -1200,7 +1276,7 @@ export class LeadsService {
 
     const leads = raw.map((p) => {
       const email = p.emails[0]?.email ?? "";
-      const score = p.scores[0]?.score ?? 0;
+      const score = p.scores[0]?.score ?? null;
       const stage = deriveStage(p.id, !!email, p.scores[0]?.qualifiedAt);
       return {
         id: p.id,

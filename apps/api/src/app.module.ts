@@ -21,6 +21,7 @@ import { PolicyEventsModule } from "./policy-events/policy-events.module";
 import { ObservabilityModule } from "./observability/observability.module";
 import { KpisModule } from "./kpis/kpis.module";
 import { BetaStubsModule } from "./beta-stubs/beta-stubs.module";
+import { ConversationsModule } from "./conversations/conversations.module";
 import { OrgScopeGuard } from "./common/org-scope.guard";
 import { RateLimitGuard } from "./common/rate-limit.guard";
 
@@ -50,6 +51,7 @@ import { RateLimitGuard } from "./common/rate-limit.guard";
     KpisModule,
     WorkflowsModule,
     MeetingsModule,
+    ConversationsModule,
     DashboardModule,
     PolicyEventsModule,
     BetaStubsModule,

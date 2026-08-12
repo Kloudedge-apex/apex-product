@@ -1,157 +1,321 @@
 /**
  * Clerk JWT verification utility.
- * Fetches the Clerk JWKS public keys and verifies incoming JWTs.
- * Keys are cached in memory and refreshed every 24 hours.
+ *
+ * Signature verification is necessary but not sufficient: a token must also
+ * be a current Workforce OS session token issued for the configured Clerk
+ * instance and, in production, for an explicitly authorized browser origin.
  */
 
 interface JWK {
-    kty: string;
-    use: string;
-    kid: string;
-    n: string;
-    e: string;
+  kty: string;
+  use?: string;
+  alg?: string;
+  kid: string;
+  n: string;
+  e: string;
 }
 
 interface JWKSResponse {
-    keys: JWK[];
+  keys: JWK[];
 }
 
-interface ClerkTokenPayload {
-    sub: string;
-    org_id?: string;
-    org_role?: string;
-    email?: string;
-    iss: string;
-    exp: number;
-    iat: number;
+export interface ClerkTokenPayload {
+  sub: string;
+  org_id?: string;
+  org_role?: string;
+  email?: string;
+  iss: string;
+  aud?: string | string[];
+  azp?: string;
+  exp: number;
+  iat: number;
+  nbf?: number;
 }
 
 interface CachedKeys {
-    keys: JWK[];
-    fetchedAt: number;
+  keys: JWK[];
+  fetchedAt: number;
+  jwksUrl: string;
 }
 
-const JWKS_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+interface ClerkVerificationConfig {
+  jwksUrl: string;
+  issuer: string;
+  audiences: string[];
+  authorizedParties: string[];
+}
+
+interface JWTHeader {
+  kid?: unknown;
+  alg?: unknown;
+}
+
+const JWKS_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 let cachedKeys: CachedKeys | null = null;
 
-async function getJWKS(): Promise<JWK[]> {
-    const now = Date.now();
-    if (cachedKeys && now - cachedKeys.fetchedAt < JWKS_CACHE_TTL_MS) {
-        return cachedKeys.keys;
-    }
-
-    const clerkDomain = process.env.CLERK_DOMAIN || process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
-    if (!clerkDomain) {
-        throw new Error("CLERK_DOMAIN or NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY env var is required for JWT verification");
-    }
-
-    // Extract domain from publishable key (pk_test_xxx -> extract the base64 domain)
-    let jwksUrl: string;
-    if (process.env.CLERK_JWKS_URL) {
-        jwksUrl = process.env.CLERK_JWKS_URL;
-    } else if (clerkDomain.startsWith("pk_")) {
-        // Clerk publishable key format: pk_test_<base64-encoded-domain>
-        const parts = clerkDomain.split("_");
-        if (parts.length >= 3) {
-            const encoded = parts.slice(2).join("_");
-            const domain = Buffer.from(encoded, "base64").toString("utf-8").replace(/\$/g, "");
-            jwksUrl = `https://${domain}/.well-known/jwks.json`;
-        } else {
-            throw new Error("Invalid CLERK_PUBLISHABLE_KEY format");
-        }
-    } else {
-        jwksUrl = `https://${clerkDomain}/.well-known/jwks.json`;
-    }
-
-    const response = await fetch(jwksUrl);
-    if (!response.ok) {
-        throw new Error(`Failed to fetch JWKS from Clerk: ${response.status}`);
-    }
-
-    const data = (await response.json()) as JWKSResponse;
-    cachedKeys = { keys: data.keys, fetchedAt: now };
-    return data.keys;
+function isLoopbackHostname(hostname: string): boolean {
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
 }
 
-/**
- * Decode a JWT without verification (for extracting the kid header).
- */
-function decodeJWT(token: string): { header: { kid?: string; alg?: string }; payload: ClerkTokenPayload } {
-    const parts = token.split(".");
-    if (parts.length !== 3) {
-        throw new Error("Invalid JWT format");
-    }
-
-    const header = JSON.parse(Buffer.from(parts[0], "base64url").toString()) as { kid?: string; alg?: string };
-    const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString()) as ClerkTokenPayload;
-
-    return { header, payload };
+function assertSafeProtocol(url: URL, label: string): void {
+  if (url.protocol === "https:") return;
+  if (process.env.NODE_ENV !== "production" && url.protocol === "http:" && isLoopbackHostname(url.hostname)) {
+    return;
+  }
+  throw new Error(`${label} must use https (http is allowed only for loopback in non-production)`);
 }
 
-/**
- * Convert a JWK to a CryptoKey for verification.
- */
+function parseOrigin(raw: string, label: string): string {
+  let url: URL;
+  try {
+    url = new URL(raw.includes("://") ? raw : `https://${raw}`);
+  } catch {
+    throw new Error(`${label} must be a valid origin`);
+  }
+  assertSafeProtocol(url, label);
+  if (url.username || url.password || url.search || url.hash || (url.pathname && url.pathname !== "/")) {
+    throw new Error(`${label} must be an origin without credentials, path, query, or fragment`);
+  }
+  return url.origin;
+}
+
+function parseUrl(raw: string, label: string): URL {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(`${label} must be a valid URL`);
+  }
+  assertSafeProtocol(url, label);
+  if (url.username || url.password || url.hash) {
+    throw new Error(`${label} must not contain credentials or a fragment`);
+  }
+  return url;
+}
+
+function issuerFromPublishableKey(key: string): string {
+  const match = /^pk_(?:test|live)_(.+)$/.exec(key);
+  if (!match) throw new Error("NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY has an invalid format");
+
+  let decoded: string;
+  try {
+    decoded = Buffer.from(match[1], "base64").toString("utf8").replace(/\$$/, "");
+  } catch {
+    throw new Error("NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY could not be decoded");
+  }
+  if (!decoded) throw new Error("NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY decoded to an empty domain");
+  return parseOrigin(decoded, "decoded Clerk publishable-key domain");
+}
+
+function parseCommaSeparated(raw: string | undefined, label: string): string[] {
+  if (raw === undefined || raw.trim().length === 0) return [];
+  const values = raw.split(",").map((value) => value.trim()).filter(Boolean);
+  if (values.length === 0) throw new Error(`${label} is configured but empty`);
+  return values;
+}
+
+function resolveClerkVerificationConfig(): ClerkVerificationConfig {
+  const explicitJwksUrl = process.env.CLERK_JWKS_URL?.trim();
+  const explicitIssuer = process.env.CLERK_ISSUER?.trim();
+  const clerkDomain = process.env.CLERK_DOMAIN?.trim();
+  const publishableKey = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY?.trim();
+
+  let issuer: string;
+  if (explicitIssuer) {
+    issuer = parseOrigin(explicitIssuer, "CLERK_ISSUER");
+  } else if (clerkDomain) {
+    issuer = parseOrigin(clerkDomain, "CLERK_DOMAIN");
+  } else if (publishableKey) {
+    issuer = issuerFromPublishableKey(publishableKey);
+  } else if (explicitJwksUrl) {
+    issuer = parseUrl(explicitJwksUrl, "CLERK_JWKS_URL").origin;
+  } else {
+    throw new Error(
+      "CLERK_ISSUER, CLERK_DOMAIN, NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY, or CLERK_JWKS_URL is required",
+    );
+  }
+
+  const jwksUrl = explicitJwksUrl
+    ? parseUrl(explicitJwksUrl, "CLERK_JWKS_URL").toString()
+    : `${issuer}/.well-known/jwks.json`;
+
+  const authorizedPartyValues = parseCommaSeparated(
+    process.env.CLERK_AUTHORIZED_PARTIES,
+    "CLERK_AUTHORIZED_PARTIES",
+  );
+  if (process.env.NODE_ENV === "production" && authorizedPartyValues.length === 0) {
+    throw new Error(
+      "CLERK_AUTHORIZED_PARTIES is required in production so the JWT azp claim can be validated",
+    );
+  }
+
+  return {
+    jwksUrl,
+    issuer,
+    audiences: parseCommaSeparated(process.env.CLERK_AUDIENCE, "CLERK_AUDIENCE"),
+    authorizedParties: authorizedPartyValues.map((value, index) =>
+      parseOrigin(value, `CLERK_AUTHORIZED_PARTIES[${index}]`),
+    ),
+  };
+}
+
+async function getJWKS(jwksUrl: string): Promise<JWK[]> {
+  const now = Date.now();
+  if (
+    cachedKeys &&
+    cachedKeys.jwksUrl === jwksUrl &&
+    now - cachedKeys.fetchedAt < JWKS_CACHE_TTL_MS
+  ) {
+    return cachedKeys.keys;
+  }
+
+  const response = await fetch(jwksUrl);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch JWKS from Clerk: ${response.status}`);
+  }
+
+  const data = (await response.json()) as Partial<JWKSResponse>;
+  if (!Array.isArray(data.keys) || data.keys.length === 0) {
+    throw new Error("Clerk JWKS response did not contain any keys");
+  }
+  cachedKeys = { keys: data.keys, fetchedAt: now, jwksUrl };
+  return data.keys;
+}
+
+function decodeJWT(token: string): { header: JWTHeader; payload: Record<string, unknown> } {
+  const parts = token.split(".");
+  if (parts.length !== 3) throw new Error("Invalid JWT format");
+
+  const header = JSON.parse(Buffer.from(parts[0], "base64url").toString("utf8")) as JWTHeader;
+  const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")) as Record<
+    string,
+    unknown
+  >;
+  return { header, payload };
+}
+
 async function jwkToCryptoKey(jwk: JWK): Promise<CryptoKey> {
-    return crypto.subtle.importKey(
-        "jwk",
-        { kty: jwk.kty, use: jwk.use, n: jwk.n, e: jwk.e },
-        { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
-        false,
-        ["verify"],
-    );
+  if (jwk.kty !== "RSA" || (jwk.use && jwk.use !== "sig") || (jwk.alg && jwk.alg !== "RS256")) {
+    throw new Error("Matching JWK is not an RS256 signing key");
+  }
+  return crypto.subtle.importKey(
+    "jwk",
+    { kty: jwk.kty, use: jwk.use, alg: jwk.alg, n: jwk.n, e: jwk.e },
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+    false,
+    ["verify"],
+  );
 }
 
-/**
- * Verify a Clerk JWT token and return the decoded payload.
- * Throws if the token is invalid, expired, or signature fails.
- */
+function requireNumericDate(payload: Record<string, unknown>, claim: "exp" | "iat" | "nbf"): number {
+  const value = payload[claim];
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`JWT ${claim} claim must be a finite NumericDate`);
+  }
+  return value;
+}
+
+function validateAudience(payload: Record<string, unknown>, expected: string[]): void {
+  if (expected.length === 0) return;
+  const raw = payload.aud;
+  const tokenAudiences = typeof raw === "string"
+    ? [raw]
+    : Array.isArray(raw) && raw.every((value) => typeof value === "string")
+      ? raw
+      : [];
+  if (!expected.some((audience) => tokenAudiences.includes(audience))) {
+    throw new Error("JWT audience is not authorized");
+  }
+}
+
+function validatePayload(
+  rawPayload: Record<string, unknown>,
+  config: ClerkVerificationConfig,
+): ClerkTokenPayload {
+  if (typeof rawPayload.sub !== "string" || rawPayload.sub.trim().length === 0) {
+    throw new Error("JWT sub claim must be a nonempty string");
+  }
+  if (rawPayload.iss !== config.issuer) {
+    throw new Error("JWT issuer is not authorized");
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const exp = requireNumericDate(rawPayload, "exp");
+  const iat = requireNumericDate(rawPayload, "iat");
+  if (exp <= now) throw new Error("JWT token has expired");
+  if (iat > now) throw new Error("JWT iat claim is in the future");
+  if (exp <= iat) throw new Error("JWT exp claim must be later than iat");
+  if (rawPayload.nbf !== undefined && requireNumericDate(rawPayload, "nbf") > now) {
+    throw new Error("JWT token is not active yet");
+  }
+
+  validateAudience(rawPayload, config.audiences);
+
+  if (config.authorizedParties.length > 0) {
+    if (typeof rawPayload.azp !== "string" || rawPayload.azp.length === 0) {
+      throw new Error("JWT azp claim is required");
+    }
+    let tokenParty: string;
+    try {
+      tokenParty = parseOrigin(rawPayload.azp, "JWT azp claim");
+    } catch {
+      throw new Error("JWT azp claim is not a valid authorized-party origin");
+    }
+    if (!config.authorizedParties.includes(tokenParty)) {
+      throw new Error("JWT authorized party is not allowed");
+    }
+  }
+
+  if (
+    rawPayload.org_id !== undefined &&
+    (typeof rawPayload.org_id !== "string" || rawPayload.org_id.trim().length === 0)
+  ) {
+    throw new Error("JWT org_id claim must be a nonempty string when present");
+  }
+
+  return rawPayload as unknown as ClerkTokenPayload;
+}
+
+function findExactJwk(keys: JWK[], kid: string): JWK | undefined {
+  const matches = keys.filter((candidate) => candidate.kid === kid);
+  if (matches.length > 1) throw new Error("Clerk JWKS contains duplicate keys for token kid");
+  return matches[0];
+}
+
+/** Verify a Clerk RS256 session JWT and return its validated claims. */
 export async function verifyClerkToken(token: string): Promise<ClerkTokenPayload> {
-    const { header, payload } = decodeJWT(token);
+  const { header, payload } = decodeJWT(token);
+  if (header.alg !== "RS256") throw new Error("JWT alg must be RS256");
+  if (typeof header.kid !== "string" || header.kid.trim().length === 0) {
+    throw new Error("JWT kid header is required");
+  }
 
-    // Check expiry first (fast fail before network call)
-    const now = Math.floor(Date.now() / 1000);
-    if (payload.exp && payload.exp < now) {
-        throw new Error("JWT token has expired");
-    }
+  const config = resolveClerkVerificationConfig();
+  let keys = await getJWKS(config.jwksUrl);
+  let jwk = findExactJwk(keys, header.kid);
+  if (!jwk) {
+    cachedKeys = null;
+    keys = await getJWKS(config.jwksUrl);
+    jwk = findExactJwk(keys, header.kid);
+  }
+  if (!jwk) throw new Error("No matching JWK found for token kid");
 
-    const keys = await getJWKS();
+  const cryptoKey = await jwkToCryptoKey(jwk);
+  const parts = token.split(".");
+  const signingInput = `${parts[0]}.${parts[1]}`;
+  const signature = Buffer.from(parts[2], "base64url");
+  const isValid = await crypto.subtle.verify(
+    "RSASSA-PKCS1-v1_5",
+    cryptoKey,
+    signature,
+    new TextEncoder().encode(signingInput),
+  );
+  if (!isValid) throw new Error("JWT signature verification failed");
 
-    // Find the matching key by kid
-    const jwk = header.kid ? keys.find((k) => k.kid === header.kid) : keys[0];
-    if (!jwk) {
-        // Key not found — try invalidating cache and re-fetching once
-        cachedKeys = null;
-        const freshKeys = await getJWKS();
-        const freshJwk = header.kid ? freshKeys.find((k) => k.kid === header.kid) : freshKeys[0];
-        if (!freshJwk) {
-            throw new Error("No matching JWK found for token kid");
-        }
-    }
-
-    const keyToUse = jwk || (await getJWKS())[0];
-    const cryptoKey = await jwkToCryptoKey(keyToUse);
-
-    const parts = token.split(".");
-    const signingInput = `${parts[0]}.${parts[1]}`;
-    const signature = Buffer.from(parts[2], "base64url");
-
-    const isValid = await crypto.subtle.verify(
-        "RSASSA-PKCS1-v1_5",
-        cryptoKey,
-        signature,
-        new TextEncoder().encode(signingInput),
-    );
-
-    if (!isValid) {
-        throw new Error("JWT signature verification failed");
-    }
-
-    return payload;
+  return validatePayload(payload, config);
 }
 
-/**
- * Invalidate the JWKS cache (useful for testing).
- */
+/** Invalidate the JWKS cache (used after key rotation and by focused tests). */
 export function invalidateJWKSCache(): void {
-    cachedKeys = null;
+  cachedKeys = null;
 }

@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { GraphRunQueueService } from "../graph-run-queue.service";
+import {
+  graphRunDispatchJobId,
+  GraphRunQueueService,
+} from "../graph-run-queue.service";
 
 const addMock = vi.fn().mockResolvedValue(undefined);
 
@@ -23,29 +26,47 @@ describe("GraphRunQueueService.enqueueGraphRun", () => {
     svc = new GraphRunQueueService();
   });
 
-  it("uses the raw graphRunId as the jobId for a start enqueue", async () => {
+  it("uses a deterministic generation-fenced id and pointer-only payload", async () => {
     await svc.enqueueGraphRun({
-      kind: "start",
       graphRunId: "run-abc-123",
       orgId: "org-1",
-      icpProfileIds: ["icp-1"],
+      dispatchGeneration: 0,
     });
     expect(addMock).toHaveBeenCalledTimes(1);
-    const [, , opts] = addMock.mock.calls[0];
-    expect(opts.jobId).toBe("run-abc-123");
+    const [, data, opts] = addMock.mock.calls[0];
+    expect(opts.jobId).toBe("run-abc-123-dispatch-0");
+    expect(data).toEqual({
+      graphRunId: "run-abc-123",
+      orgId: "org-1",
+      dispatchGeneration: 0,
+    });
+    expect(data).not.toHaveProperty("icpProfileIds");
+    expect(data).not.toHaveProperty("resume");
   });
 
-  it("does NOT use ':' in the resume jobId — BullMQ rejects colons", async () => {
+  it("gives recovery a fresh id that cannot collide with a retained completed job", async () => {
     await svc.enqueueGraphRun({
-      kind: "resume",
       graphRunId: "run-abc-123",
       orgId: "org-1",
-      resume: { approved: true, approvedBy: "tester" },
+      dispatchGeneration: 0,
     });
-    expect(addMock).toHaveBeenCalledTimes(1);
-    const [, , opts] = addMock.mock.calls[0];
-    expect(opts.jobId).not.toContain(":");
-    // Suffix must still distinguish resume from start jobs.
-    expect(opts.jobId).toBe("run-abc-123-resume");
+    await svc.enqueueGraphRun({
+      graphRunId: "run-abc-123",
+      orgId: "org-1",
+      dispatchGeneration: 1,
+    });
+    expect(addMock).toHaveBeenCalledTimes(2);
+    const firstId = addMock.mock.calls[0][2].jobId;
+    const recoveryId = addMock.mock.calls[1][2].jobId;
+    expect(firstId).toBe("run-abc-123-dispatch-0");
+    expect(recoveryId).toBe("run-abc-123-dispatch-1");
+    expect(recoveryId).not.toBe(firstId);
+    expect(recoveryId).not.toContain(":");
+  });
+
+  it("rejects invalid generations before constructing a BullMQ id", () => {
+    expect(() => graphRunDispatchJobId("run-1", -1)).toThrow(
+      /non-negative integer/,
+    );
   });
 });

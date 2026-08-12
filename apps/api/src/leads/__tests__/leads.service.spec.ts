@@ -15,21 +15,33 @@ import { IdentityResolver } from "../enrichment/identity-resolver.service";
 import { LeadScorer } from "../scoring/lead-scorer.service";
 
 function mockPrisma() {
-  return {
+  const prisma = {
+    $transaction: vi.fn(),
+    $queryRaw: vi.fn().mockResolvedValue([]),
     scrapeJob: {
       findFirst: vi.fn(),
     },
     icpProfile: {
+      findFirst: vi.fn(),
       findFirstOrThrow: vi.fn(),
+      create: vi.fn(),
       update: vi.fn(),
     },
   } as unknown as PrismaService & {
+    $transaction: ReturnType<typeof vi.fn>;
+    $queryRaw: ReturnType<typeof vi.fn>;
     scrapeJob: { findFirst: ReturnType<typeof vi.fn> };
     icpProfile: {
+      findFirst: ReturnType<typeof vi.fn>;
       findFirstOrThrow: ReturnType<typeof vi.fn>;
+      create: ReturnType<typeof vi.fn>;
       update: ReturnType<typeof vi.fn>;
     };
   };
+  prisma.$transaction.mockImplementation(
+    async (callback: (tx: typeof prisma) => Promise<unknown>) => callback(prisma),
+  );
+  return prisma;
 }
 
 function mockGraphService(): GraphService & {
@@ -128,5 +140,67 @@ describe("LeadsService.triggerDiscovery (legacy flag gate)", () => {
       where: { orgId: "org_1", status: { in: ["QUEUED", "RUNNING"] } },
     });
     expect(graph.runPipelineGraph).not.toHaveBeenCalled();
+  });
+});
+
+describe("LeadsService.upsertCurrentIcpProfile", () => {
+  it("updates the newest org profile instead of creating targeting history", async () => {
+    const prisma = mockPrisma();
+    const service = buildService(prisma);
+    prisma.icpProfile.findFirst.mockResolvedValue({ id: "icp_current" });
+    prisma.icpProfile.update.mockResolvedValue({ id: "icp_current" });
+
+    await service.upsertCurrentIcpProfile("org_1", {
+      name: "Default ICP",
+      targetTitles: ["VP Sales"],
+    });
+
+    expect(prisma.$queryRaw).toHaveBeenCalledOnce();
+    expect(prisma.icpProfile.findFirst).toHaveBeenCalledWith({
+      where: { orgId: "org_1" },
+      orderBy: { updatedAt: "desc" },
+      select: { id: true },
+    });
+    expect(prisma.icpProfile.update).toHaveBeenCalledWith({
+      where: { id: "icp_current" },
+      data: expect.objectContaining({ targetTitles: ["VP Sales"] }),
+    });
+    expect(prisma.icpProfile.update).toHaveBeenCalledWith({
+      where: { id: "icp_current" },
+      data: expect.not.objectContaining({ techStackSignals: [] }),
+    });
+    expect(prisma.icpProfile.create).not.toHaveBeenCalled();
+  });
+
+  it("preserves omitted targeting fields and clears bounds only when null is explicit", async () => {
+    const prisma = mockPrisma();
+    const service = buildService(prisma);
+    prisma.icpProfile.findFirst.mockResolvedValue({ id: "icp_current" });
+    prisma.icpProfile.update.mockResolvedValue({ id: "icp_current" });
+
+    await service.upsertCurrentIcpProfile("org_1", {
+      name: "Default ICP",
+      minEmployees: null,
+      maxEmployees: null,
+    });
+
+    expect(prisma.icpProfile.update).toHaveBeenCalledWith({
+      where: { id: "icp_current" },
+      data: { name: "Default ICP", minEmployees: null, maxEmployees: null },
+    });
+  });
+
+  it("creates exactly one current profile for a clean tenant", async () => {
+    const prisma = mockPrisma();
+    const service = buildService(prisma);
+    prisma.icpProfile.findFirst.mockResolvedValue(null);
+    prisma.icpProfile.create.mockResolvedValue({ id: "icp_new" });
+
+    await service.upsertCurrentIcpProfile("org_1", { name: "Default ICP" });
+
+    expect(prisma.icpProfile.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ orgId: "org_1", name: "Default ICP" }),
+    });
+    expect(prisma.icpProfile.update).not.toHaveBeenCalled();
   });
 });

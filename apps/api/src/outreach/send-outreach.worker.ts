@@ -8,7 +8,10 @@ import {
 } from "@nestjs/common";
 import { Job, Worker } from "bullmq";
 import {
+  ConversationDirection,
+  Prisma,
   OutreachArtifact,
+  OutreachArtifactPurpose,
   OutreachArtifactStatus,
   OutreachChannel,
 } from "@prisma/client";
@@ -17,7 +20,12 @@ import {
   OutreachSendQueueService,
   OUTREACH_SEND_QUEUE_NAME,
 } from "./outreach-send-queue.service";
-import { SendEmailTool, isMockModeResult } from "../runtime/tools/send-email.tool";
+import {
+  EMAIL_DISPATCH_OUTCOME,
+  SendEmailTool,
+  getEmailDispatchOutcome,
+  isMockModeResult,
+} from "../runtime/tools/send-email.tool";
 import { LinkedInSendMessageTool } from "../runtime/tools/linkedin-send-message.tool";
 import {
   IntegrationCredentials,
@@ -29,6 +37,13 @@ import { LinkedInService } from "../integrations/linkedin/linkedin.service";
 import { EvidenceLedgerService } from "../observability/evidence-ledger.service";
 import { isLiveSendAllowedForOrg } from "./outreach-allowlist.util";
 import { SuppressionService } from "./suppression.service";
+import { ConversationStoreService } from "../conversation-store/conversation-store.service";
+import { acquireOrgSendReservationLock } from "./outreach-send-reservation-lock";
+import {
+  acquireReplySingleFlightLock,
+  conversationReplyThreadScope,
+  providerReplyThreadScope,
+} from "./reply-single-flight";
 
 export { isLiveSendAllowedForOrg } from "./outreach-allowlist.util";
 
@@ -70,26 +85,36 @@ const IN_MEMORY_POLL_INTERVAL_MS = 5_000;
 const IN_MEMORY_BATCH_SIZE = 10;
 
 // Reconcile sweep cadence + thresholds. APPROVED rows older than the requeue
-// age have lost their BullMQ job (Redis flush, enqueue failure post-approve);
-// SENDING claims older than the stale age belong to a worker that died
-// mid-send (the window enableShutdownHooks cannot cover, e.g. OOM-kill).
+// age have lost their BullMQ job (Redis flush, enqueue failure post-approve).
+// A stale SENDING claim cannot reveal whether its worker died before or after
+// the provider accepted the POST, so it must become terminal
+// DELIVERY_UNKNOWN rather than being released and automatically re-sent.
 const RECONCILE_INTERVAL_MS = 5 * 60_000;
 const APPROVED_REQUEUE_AGE_MS = 10 * 60_000;
 const SENDING_STALE_AGE_MS = 15 * 60_000;
 const RECONCILE_BATCH_LIMIT = 100;
 
-// GL8a: per-org daily live-send cap. Counts SENT artifacts with sentAt in the
-// current UTC day; over-cap artifacts are deferred (left APPROVED, job
-// completes) — never terminal-failed — and the reconcile sweep retries them
-// until the UTC-midnight reset clears headroom.
+// GL8a: per-org daily live-send cap. Confirmed sends, fresh in-flight claims,
+// and unresolved delivery outcomes all reserve capacity; over-cap artifacts
+// are deferred (left APPROVED, job completes) — never terminal-failed — and
+// the reconcile sweep retries them until the UTC-midnight reset clears
+// headroom.
 const DEFAULT_DAILY_SEND_CAP_PER_ORG = 40;
 
-// GL8b: per-recipient cooldown. A recipient SENT to within this window (same
-// org) is not mailed again — the artifact terminates as SUPPRESSED with a
-// "policy-skip:" reviewerNote marker (no new enum value; SUPPRESSED already
-// reads correctly as "we chose not to contact this person").
+// GL8b: per-recipient cooldown. Confirmed SENT and DELIVERY_UNKNOWN outcomes
+// within this window suppress another contact; a fresh SENDING reservation
+// defers it until the first outcome resolves. Comparisons are trimmed and
+// case-folded inside the org boundary.
 const RECIPIENT_COOLDOWN_DAYS = 14;
 const RECIPIENT_COOLDOWN_MS = RECIPIENT_COOLDOWN_DAYS * 24 * 60 * 60 * 1000;
+
+/**
+ * Raised only after a live-provider tool invocation began and then rejected
+ * without a structured outcome. The caller must not release/retry the claim.
+ */
+class ProviderDispatchUnknownError extends Error {
+  readonly name = "ProviderDispatchUnknownError";
+}
 
 /**
  * Resolves the per-org daily send cap. OUTREACH_DAILY_CAP_PER_ORG overrides
@@ -115,6 +140,57 @@ function startOfUtcDay(now: Date): Date {
   );
 }
 
+/**
+ * Capacity-risk rows for the current UTC day. A fresh SENDING claim may have
+ * crossed midnight, so its short safety window is intentionally independent
+ * of the day boundary. DELIVERY_UNKNOWN is terminal and consumes capacity on
+ * the day it was recorded because the provider may have delivered it.
+ */
+export function dailySendCapacityWhere(
+  now: Date = new Date(),
+): Prisma.OutreachArtifactWhereInput {
+  return {
+    OR: [
+      {
+        status: OutreachArtifactStatus.SENT,
+        sentAt: { gte: startOfUtcDay(now) },
+      },
+      {
+        status: OutreachArtifactStatus.SENDING,
+        updatedAt: {
+          gte: new Date(now.getTime() - SENDING_STALE_AGE_MS),
+        },
+      },
+      {
+        status: OutreachArtifactStatus.DELIVERY_UNKNOWN,
+        updatedAt: { gte: startOfUtcDay(now) },
+      },
+    ],
+  };
+}
+
+interface RecipientDeliveryRisk {
+  id: string;
+  status: OutreachArtifactStatus;
+  sentAt: Date | null;
+  updatedAt: Date;
+}
+
+type SendReservationDecision =
+  | { kind: "CLAIMED" }
+  | { kind: "SKIPPED" }
+  | { kind: "PERSISTED_SUPPRESSION" }
+  | { kind: "SEQUENCE_STOPPED"; conversationId: string }
+  | { kind: "RECIPIENT_IN_FLIGHT"; risk: RecipientDeliveryRisk }
+  | { kind: "RECIPIENT_SUPPRESSED"; risk: RecipientDeliveryRisk }
+  | {
+      kind: "REPLY_CONFLICT";
+      reason: string;
+      blockerId: string | null;
+      blockerStatus: OutreachArtifactStatus | null;
+    }
+  | { kind: "DAILY_CAP"; capacityUsed: number; cap: number };
+
 @Injectable()
 export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(SendOutreachWorker.name);
@@ -135,6 +211,7 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
     private readonly suppression: SuppressionService,
     @Optional() private readonly evidenceLedger?: EvidenceLedgerService,
     @Optional() private readonly linkedinService?: LinkedInService,
+    @Optional() private readonly conversationStore?: ConversationStoreService,
   ) {
     // Build the LinkedIn tool with the optional service + ledger so worker-
     // dispatched sends use the same code path as in-loop agent calls. When
@@ -201,9 +278,9 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
 
     // Periodic reconcile sweep (mirrors GraphRunWorker's crash-recovery
     // sweep, but on an interval because send work is continuous): re-enqueue
-    // stranded APPROVED rows and release stale SENDING claims. Runs once at
-    // boot so a restart doesn't wait a full interval to recover rows the
-    // previous pod left behind.
+    // stranded APPROVED rows and quarantine stale SENDING claims as terminal
+    // DELIVERY_UNKNOWN. Runs once at boot so a restart doesn't wait a full
+    // interval to make ambiguous claims safe.
     this.reconcileHandle = setInterval(
       () => void this.runReconcileSweep(),
       RECONCILE_INTERVAL_MS,
@@ -283,8 +360,13 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
    *   recipient in cooldown → SUPPRESSED with "policy-skip:" reviewerNote
    *   daily cap reached     → deferred: row left APPROVED (no claim), the
    *                           reconcile sweep retries after midnight UTC
-   *   dispatch failed       → claim released back to APPROVED, then rethrow
-   *                           so BullMQ's retry envelope re-picks it up.
+   *   provider rejected/no-attempt → claim released back to APPROVED, then
+   *                           rethrow so BullMQ may safely retry
+   *   response lost/ambiguous → DELIVERY_UNKNOWN; never auto-retried
+   *
+   * This is at-most-once automatic dispatch, not exactly-once delivery. An
+   * unknown outcome requires provider/manual reconciliation because the
+   * provider may have accepted a request whose response never arrived.
    */
   async processArtifact(artifactId: string, orgId: string): Promise<void> {
     const artifact = await this.prisma.outreachArtifact.findUnique({
@@ -309,121 +391,77 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    // Suppression check (CAN-SPAM / GDPR e-Privacy). Audit P0 #3. If the
-    // recipient has unsubscribed (or bounced / been manually suppressed)
-    // since the artifact was approved, terminate the send with a SUPPRESSED
-    // status instead of dispatching to the provider. Fail-closed: the
-    // suppression service treats a Postgres outage as "suppressed" so a
-    // DB blip cannot let a previously-unsubscribed recipient get re-mailed.
-    if (artifact.recipientRef) {
-      const suppressed = await this.suppression.isSuppressed(
-        artifact.orgId,
-        artifact.recipientRef,
-      );
-      if (suppressed) {
-        await this.prisma.outreachArtifact.update({
-          where: { id: artifactId },
-          data: { status: OutreachArtifactStatus.SUPPRESSED },
-        });
-        this.logger.log(
-          `Artifact ${artifactId} skipped — recipient ${artifact.recipientRef} is on the suppression list`,
-        );
-        return;
-      }
-    }
-
-    // GL8b recipient cooldown: if this org already real-SENT to the same
-    // recipient within the cooldown window, do not mail them again. This is
-    // a policy skip, not a failure — reuse SUPPRESSED with a "policy-skip:"
-    // reviewerNote marker so the UI can distinguish it from list-based
-    // suppression and from auto-failed rejections. Only real sends count:
-    // the query filters on status=SENT + sentAt, which SIMULATED rows never
-    // set, so dry-run orgs are unaffected.
-    if (artifact.recipientRef) {
-      const cooldownFloor = new Date(Date.now() - RECIPIENT_COOLDOWN_MS);
-      const recentSend = await this.prisma.outreachArtifact.findFirst({
-        where: {
-          orgId: artifact.orgId,
-          recipientRef: artifact.recipientRef,
-          status: OutreachArtifactStatus.SENT,
-          sentAt: { gte: cooldownFloor },
-        },
-        select: { id: true, sentAt: true },
-      });
-      if (recentSend) {
-        await this.prisma.outreachArtifact.update({
-          where: { id: artifactId },
-          data: {
-            status: OutreachArtifactStatus.SUPPRESSED,
-            reviewerNote:
-              `policy-skip: recipient contacted within ${RECIPIENT_COOLDOWN_DAYS}-day cooldown ` +
-              `(last SENT ${recentSend.sentAt?.toISOString() ?? "<unknown>"} via artifact ${recentSend.id})`.slice(
-                0,
-                1000,
-              ),
-          },
-        });
-        this.logger.log(
-          `Artifact ${artifactId} policy-skipped — recipient ${artifact.recipientRef} was SENT to within the last ${RECIPIENT_COOLDOWN_DAYS} days (org ${artifact.orgId})`,
-        );
-        return;
-      }
-    }
-
     // Evaluate the live-send gate once so the dispatch branch and the
     // terminal status cannot disagree about whether this was a real send.
     const liveAllowed = isLiveSendAllowedForOrg(artifact.orgId);
 
-    // GL8a per-org daily cap — live sends only (SIMULATED traffic never sets
-    // sentAt, so capping it would only stall demos). Over-cap is a DEFERRAL:
-    // return without claiming so the row stays APPROVED with its old
-    // updatedAt, and the reconcile sweep re-enqueues it (clearing the
-    // completed jobId first — see requeueArtifact) until the UTC day rolls
-    // over and headroom returns. Never terminal-fail an over-cap artifact.
-    if (liveAllowed) {
-      const cap = getDailySendCapPerOrg();
-      const sentToday = await this.prisma.outreachArtifact.count({
-        where: {
-          orgId: artifact.orgId,
-          status: OutreachArtifactStatus.SENT,
-          sentAt: { gte: startOfUtcDay(new Date()) },
-        },
-      });
-      if (sentToday >= cap) {
-        this.logger.warn(
-          `Daily send cap reached for org ${artifact.orgId} (${sentToday}/${cap} SENT today, UTC) — deferring artifact ${artifactId}; row stays APPROVED for the reconcile sweep to retry after midnight UTC`,
+    // Serialize every org's reservation phase in PostgreSQL. The transaction
+    // re-checks tenant ownership/status, persisted suppression, sequence-stop,
+    // normalized recipient risk, and daily capacity, then CAS-claims
+    // APPROVED → SENDING. It commits before dispatch so no database lock is
+    // held across provider I/O.
+    const reservation = await this.reserveForDispatch(artifact, liveAllowed);
+    switch (reservation.kind) {
+      case "SKIPPED":
+        this.logger.log(
+          `Artifact ${artifactId} is no longer claimable — skipping`,
         );
         return;
-      }
-    }
-
-    // CAS claim: APPROVED → SENDING. updateMany returns a count instead of
-    // throwing, so a concurrent worker that lost the race sees count === 0
-    // and skips cleanly. This is what makes dispatch single-owner — the
-    // findUnique status guard above is only advisory under concurrency.
-    const claim = await this.prisma.outreachArtifact.updateMany({
-      where: { id: artifactId, status: OutreachArtifactStatus.APPROVED },
-      data: { status: OutreachArtifactStatus.SENDING },
-    });
-    if (claim.count === 0) {
-      this.logger.log(
-        `Artifact ${artifactId} already claimed by another worker — skipping`,
-      );
-      return;
+      case "PERSISTED_SUPPRESSION":
+        this.logger.log(
+          `Artifact ${artifactId} skipped at reservation — recipient ${artifact.recipientRef} is on the persisted suppression list`,
+        );
+        return;
+      case "SEQUENCE_STOPPED":
+        this.logger.log(
+          `Artifact ${artifactId} policy-skipped at reservation — recipient replied in conversation ${reservation.conversationId}`,
+        );
+        return;
+      case "RECIPIENT_IN_FLIGHT":
+        this.logger.log(
+          `Artifact ${artifactId} deferred — recipient ${artifact.recipientRef} has fresh SENDING artifact ${reservation.risk.id}`,
+        );
+        return;
+      case "RECIPIENT_SUPPRESSED":
+        this.logger.log(
+          `Artifact ${artifactId} policy-skipped — recipient ${artifact.recipientRef} has recent ${reservation.risk.status} delivery risk (artifact ${reservation.risk.id}, org ${artifact.orgId})`,
+        );
+        return;
+      case "REPLY_CONFLICT":
+        this.logger.warn(`Reply artifact ${artifactId} policy-skipped — ${reservation.reason}`);
+        return;
+      case "DAILY_CAP":
+        this.logger.warn(
+          `Daily send cap reached for org ${artifact.orgId} (${reservation.capacityUsed}/${reservation.cap} confirmed or unresolved sends, UTC) — deferring artifact ${artifactId}; row stays APPROVED for the reconcile sweep`,
+        );
+        return;
+      case "CLAIMED":
+        break;
     }
 
     let result: ToolResult;
     try {
       result = await this.dispatch(artifact, liveAllowed);
     } catch (err) {
-      // Release the claim before rethrowing so the BullMQ retry envelope
-      // still finds the row in APPROVED on the next attempt.
+      if (liveAllowed && err instanceof ProviderDispatchUnknownError) {
+        await this.markDeliveryUnknown(artifactId, err.message);
+        return;
+      }
+      // Errors before a provider invocation are safe to retry. Release the
+      // claim before rethrowing so BullMQ can find APPROVED next attempt.
       await this.releaseClaim(artifactId);
       throw err;
     }
     if (!result.success) {
-      // Same contract as a thrown dispatch: release, then throw so BullMQ
-      // records the failure and applies retry/backoff.
+      if (liveAllowed && isAmbiguousLiveFailure(artifact.channel, result)) {
+        await this.markDeliveryUnknown(
+          artifactId,
+          result.error ?? "live provider outcome was not classified",
+        );
+        return;
+      }
+      // A provider response confirmed rejection, or the tool proved no call
+      // was made. Release and throw so BullMQ can safely apply retry/backoff.
       await this.releaseClaim(artifactId);
       throw new Error(result.error ?? "send failed (no error message)");
     }
@@ -446,6 +484,23 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
       );
     }
 
+    if (liveAllowed && artifact.channel === OutreachChannel.EMAIL) {
+      const outcome = getEmailDispatchOutcome(result);
+      if (outcome !== EMAIL_DISPATCH_OUTCOME.CONFIRMED_SENT) {
+        if (outcome === EMAIL_DISPATCH_OUTCOME.NOT_ATTEMPTED) {
+          await this.releaseClaim(artifactId);
+          throw new Error(
+            `live email dispatch for artifact ${artifactId} made no provider attempt`,
+          );
+        }
+        await this.markDeliveryUnknown(
+          artifactId,
+          `live email returned success without a confirmed-send outcome (${outcome ?? "unclassified"})`,
+        );
+        return;
+      }
+    }
+
     const receiptId = extractReceiptId(result);
     const provider = extractProvider(result);
 
@@ -455,12 +510,13 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
     // but sentAt stays null: per the schema, sentAt + sendReceiptId together
     // prove a REAL send, and DashboardService.stats counts emailsSent via
     // sentAt != null.
+    const deliveredAt = liveAllowed ? new Date() : null;
     await this.prisma.outreachArtifact.update({
       where: { id: artifactId },
       data: liveAllowed
         ? {
             status: OutreachArtifactStatus.SENT,
-            sentAt: new Date(),
+            sentAt: deliveredAt,
             sendReceiptId: receiptId,
           }
         : {
@@ -468,6 +524,33 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
             sendReceiptId: receiptId,
           },
     });
+
+    // Materialize real Gmail delivery into the durable conversation store
+    // only after SENT is committed. A projection failure must never retry the
+    // already-successful provider call (which could duplicate delivery); the
+    // artifact receipt remains the recovery source for a later backfill.
+    if (
+      liveAllowed &&
+      provider === "gmail" &&
+      deliveredAt &&
+      receiptId &&
+      this.conversationStore
+    ) {
+      try {
+        await this.recordGmailConversationDelivery(
+          artifact,
+          result,
+          receiptId,
+          deliveredAt,
+        );
+      } catch (err) {
+        this.logger.error(
+          `Gmail delivery ${receiptId} was SENT but conversation projection failed for artifact ${artifact.id}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
 
     void this.evidenceLedger?.messageSent({
       orgId: artifact.orgId,
@@ -478,6 +561,435 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
       subject: artifact.subject ?? null,
       sendReceiptId: receiptId,
       provider,
+    });
+  }
+
+  /**
+   * Atomically reserves one org's next dispatch. The advisory transaction
+   * lock closes the gap between "capacity/cooldown is clear" and the SENDING
+   * claim for different artifacts in the same org. Provider I/O is
+   * deliberately not part of this transaction.
+   */
+  private async reserveForDispatch(
+    artifact: OutreachArtifact,
+    liveAllowed: boolean,
+  ): Promise<SendReservationDecision> {
+    const now = new Date();
+    const cooldownFloor = new Date(now.getTime() - RECIPIENT_COOLDOWN_MS);
+    const freshSendingFloor = new Date(
+      now.getTime() - SENDING_STALE_AGE_MS,
+    );
+
+    return this.prisma.$transaction(async (tx) => {
+      await acquireOrgSendReservationLock(tx, artifact.orgId);
+
+      // Re-read after acquiring the org lock. Every mutation below includes
+      // orgId and APPROVED so a stale/cross-tenant job always fails closed.
+      const current = await tx.outreachArtifact.findUnique({
+        where: { id: artifact.id },
+        select: {
+          orgId: true,
+          status: true,
+          purpose: true,
+          channel: true,
+          recipientRef: true,
+          conversationId: true,
+          providerThreadId: true,
+          replyToMessageId: true,
+        },
+      });
+      if (
+        !current ||
+        current.orgId !== artifact.orgId ||
+        current.status !== OutreachArtifactStatus.APPROVED
+      ) {
+        return { kind: "SKIPPED" };
+      }
+
+      // This persisted read under the same org lock as legal/manual
+      // suppression writes is the authoritative dispatch boundary. Only an
+      // APPROVED REPLY may bypass the exact historical MANUAL/gmail_reply
+      // marker.
+      if (current.recipientRef) {
+        const suppressed = await this.suppression.isSuppressedInTransaction(
+          tx,
+          current.orgId,
+          current.recipientRef,
+          {
+            allowLegacyReplyStop:
+              current.purpose === OutreachArtifactPurpose.REPLY,
+          },
+        );
+        if (suppressed) {
+          const update = await tx.outreachArtifact.updateMany({
+            where: {
+              id: artifact.id,
+              orgId: artifact.orgId,
+              status: OutreachArtifactStatus.APPROVED,
+            },
+            data: { status: OutreachArtifactStatus.SUPPRESSED },
+          });
+          return update.count === 1
+            ? { kind: "PERSISTED_SUPPRESSION" }
+            : { kind: "SKIPPED" };
+        }
+      }
+
+      if (current.purpose === OutreachArtifactPurpose.REPLY) {
+        const threadScopes = [
+          ...(current.conversationId
+            ? [conversationReplyThreadScope(current.conversationId)]
+            : []),
+          ...(current.providerThreadId
+            ? [providerReplyThreadScope(current.providerThreadId)]
+            : []),
+        ];
+
+        if (threadScopes.length === 0) {
+          const update = await tx.outreachArtifact.updateMany({
+            where: {
+              id: artifact.id,
+              orgId: artifact.orgId,
+              status: OutreachArtifactStatus.APPROVED,
+            },
+            data: {
+              status: OutreachArtifactStatus.SUPPRESSED,
+              reviewerNote:
+                "policy-skip: reply has no durable conversation or provider-thread identity; dispatch refused",
+            },
+          });
+          return update.count === 1
+            ? {
+                kind: "REPLY_CONFLICT",
+                reason:
+                  "it has no durable conversation or provider-thread identity",
+                blockerId: null,
+                blockerStatus: null,
+              }
+            : { kind: "SKIPPED" };
+        }
+
+        // Creation and dispatch share these tenant/thread/source locks. The
+        // thread lock is always acquired, even for source-aware rows, so a
+        // legacy null replyToMessageId can never race a modern reply through
+        // the provider boundary.
+        await acquireReplySingleFlightLock(
+          tx,
+          current.orgId,
+          threadScopes,
+          current.replyToMessageId,
+        );
+
+        const threadIdentityWhere: Prisma.OutreachArtifactWhereInput = {
+          OR: [
+            ...(current.conversationId
+              ? [{ conversationId: current.conversationId }]
+              : []),
+            ...(current.providerThreadId
+              ? [{ providerThreadId: current.providerThreadId }]
+              : []),
+          ],
+        };
+        const sourceIdentityWhere: Prisma.OutreachArtifactWhereInput =
+          current.replyToMessageId
+            ? {
+                OR: [
+                  { replyToMessageId: current.replyToMessageId },
+                  { replyToMessageId: null },
+                ],
+              }
+            : {};
+        const replyThreadWhere: Prisma.OutreachArtifactWhereInput = {
+          orgId: current.orgId,
+          purpose: OutreachArtifactPurpose.REPLY,
+          AND: [threadIdentityWhere],
+        };
+        const replySourceWhere: Prisma.OutreachArtifactWhereInput = {
+          ...replyThreadWhere,
+          AND: [threadIdentityWhere, sourceIdentityWhere],
+        };
+
+        if (current.conversationId && current.replyToMessageId) {
+          const latestInbound = await tx.conversationMessage.findFirst({
+            where: {
+              orgId: current.orgId,
+              conversationId: current.conversationId,
+              direction: ConversationDirection.INBOUND,
+            },
+            orderBy: [{ sentAt: "desc" }, { id: "desc" }],
+            select: { id: true },
+          });
+          if (!latestInbound || latestInbound.id !== current.replyToMessageId) {
+            const update = await tx.outreachArtifact.updateMany({
+              where: {
+                id: artifact.id,
+                orgId: artifact.orgId,
+                status: OutreachArtifactStatus.APPROVED,
+              },
+              data: {
+                status: OutreachArtifactStatus.SUPPRESSED,
+                reviewerNote:
+                  "policy-skip: reply draft is stale because a newer inbound message exists",
+              },
+            });
+            return update.count === 1
+              ? {
+                  kind: "REPLY_CONFLICT",
+                  reason:
+                    "its source is no longer the latest inbound message in the conversation",
+                  blockerId: null,
+                  blockerStatus: null,
+                }
+              : { kind: "SKIPPED" };
+          }
+        }
+
+        // An in-flight or ambiguous reply anywhere in the same thread blocks
+        // every newer source until provider truth is known.
+        const threadDeliveryBlocker = await tx.outreachArtifact.findFirst({
+          where: {
+            ...replyThreadWhere,
+            id: { not: artifact.id },
+            status: {
+              in: [
+                OutreachArtifactStatus.SENDING,
+                OutreachArtifactStatus.DELIVERY_UNKNOWN,
+              ],
+            },
+          },
+          orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+          select: { id: true, status: true },
+        });
+
+        // A confirmed send blocks only the same inbound source. A newer
+        // inbound message is a distinct reply turn once no earlier send is
+        // in-flight or ambiguous.
+        const sourceDeliveryBlocker = threadDeliveryBlocker
+          ? null
+          : await tx.outreachArtifact.findFirst({
+              where: {
+                ...replySourceWhere,
+                id: { not: artifact.id },
+                status: OutreachArtifactStatus.SENT,
+              },
+              orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+              select: { id: true, status: true },
+            });
+
+        // For pre-index legacy duplicates that are merely reviewable, the
+        // oldest (createdAt, id) row is the deterministic owner. A later row
+        // can never jump the queue merely because it was approved first.
+        const canonicalReviewable =
+          threadDeliveryBlocker || sourceDeliveryBlocker
+          ? null
+          : await tx.outreachArtifact.findFirst({
+              where: {
+                ...replySourceWhere,
+                status: {
+                  in: [
+                    OutreachArtifactStatus.DRAFT,
+                    OutreachArtifactStatus.PENDING_REVIEW,
+                    OutreachArtifactStatus.APPROVED,
+                  ],
+                },
+              },
+              orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+              select: { id: true, status: true },
+            });
+        if (
+          !threadDeliveryBlocker &&
+          !sourceDeliveryBlocker &&
+          !canonicalReviewable
+        ) {
+          const update = await tx.outreachArtifact.updateMany({
+            where: {
+              id: artifact.id,
+              orgId: artifact.orgId,
+              status: OutreachArtifactStatus.APPROVED,
+            },
+            data: {
+              status: OutreachArtifactStatus.SUPPRESSED,
+              reviewerNote:
+                "policy-skip: reply slot ownership could not be established at dispatch",
+            },
+          });
+          return update.count === 1
+            ? {
+                kind: "REPLY_CONFLICT",
+                reason:
+                  "reply slot ownership could not be established at dispatch",
+                blockerId: null,
+                blockerStatus: null,
+              }
+            : { kind: "SKIPPED" };
+        }
+        const replyBlocker =
+          threadDeliveryBlocker ??
+          sourceDeliveryBlocker ??
+          (canonicalReviewable?.id !== artifact.id
+            ? canonicalReviewable
+            : null);
+
+        if (replyBlocker) {
+          const update = await tx.outreachArtifact.updateMany({
+            where: {
+              id: artifact.id,
+              orgId: artifact.orgId,
+              status: OutreachArtifactStatus.APPROVED,
+            },
+            data: {
+              status: OutreachArtifactStatus.SUPPRESSED,
+              reviewerNote: (
+                `policy-skip: duplicate reply for the same conversation/source; ` +
+                `${replyBlocker.status} artifact ${replyBlocker.id} owns the reply slot`
+              ).slice(0, 1_000),
+            },
+          });
+          return update.count === 1
+            ? {
+                kind: "REPLY_CONFLICT",
+                reason: `${replyBlocker.status} artifact ${replyBlocker.id} already owns the applicable reply slot`,
+                blockerId: replyBlocker.id,
+                blockerStatus: replyBlocker.status,
+              }
+            : { kind: "SKIPPED" };
+        }
+      }
+
+      // A reply ingestion transaction uses this same advisory lock when it
+      // commits sequenceStoppedAt. Whichever transaction acquires the lock
+      // first becomes the truthful boundary: stop-before-claim suppresses;
+      // stop-after-claim affects future outreach only.
+      const sequenceLookup = [
+        ...(current.conversationId ? [{ id: current.conversationId }] : []),
+        ...(current.recipientRef
+          ? [{ contactEmail: current.recipientRef.trim().toLowerCase() }]
+          : []),
+      ];
+      if (
+        current.purpose !== OutreachArtifactPurpose.REPLY &&
+        sequenceLookup.length > 0
+      ) {
+        const stoppedConversation = await tx.conversation.findFirst({
+          where: {
+            orgId: current.orgId,
+            sequenceStoppedAt: { not: null },
+            OR: sequenceLookup,
+          },
+          select: { id: true, sequenceStoppedAt: true },
+        });
+        if (stoppedConversation) {
+          const update = await tx.outreachArtifact.updateMany({
+            where: {
+              id: artifact.id,
+              orgId: artifact.orgId,
+              status: OutreachArtifactStatus.APPROVED,
+            },
+            data: {
+              status: OutreachArtifactStatus.SUPPRESSED,
+              reviewerNote:
+                `policy-skip: outreach sequence stopped after recipient reply ` +
+                `(conversation ${stoppedConversation.id}, ${
+                  stoppedConversation.sequenceStoppedAt?.toISOString() ??
+                  "time unknown"
+                })`,
+            },
+          });
+          return update.count === 1
+            ? {
+                kind: "SEQUENCE_STOPPED",
+                conversationId: stoppedConversation.id,
+              }
+            : { kind: "SKIPPED" };
+        }
+      }
+
+      if (
+        current.recipientRef &&
+        current.purpose !== OutreachArtifactPurpose.REPLY
+      ) {
+        const normalizedRecipient = current.recipientRef.trim().toLowerCase();
+        if (normalizedRecipient.length > 0) {
+          const risks = await tx.$queryRaw<RecipientDeliveryRisk[]>`
+            SELECT "id", "status", "sentAt", "updatedAt"
+            FROM "OutreachArtifact"
+            WHERE "orgId" = ${artifact.orgId}
+              AND "id" <> ${artifact.id}
+              AND "channel" = ${current.channel}::"OutreachChannel"
+              AND "recipientRef" IS NOT NULL
+              AND lower(btrim("recipientRef")) = ${normalizedRecipient}
+              AND (
+                (
+                  "status" = 'SENT'::"OutreachArtifactStatus"
+                  AND "sentAt" >= ${cooldownFloor}
+                )
+                OR (
+                  "status" = 'SENDING'::"OutreachArtifactStatus"
+                  AND "updatedAt" >= ${freshSendingFloor}
+                )
+                OR (
+                  "status" = 'DELIVERY_UNKNOWN'::"OutreachArtifactStatus"
+                  AND "updatedAt" >= ${cooldownFloor}
+                )
+              )
+            ORDER BY COALESCE("sentAt", "updatedAt") DESC
+            LIMIT 1
+          `;
+          const risk = risks[0];
+          if (risk?.status === OutreachArtifactStatus.SENDING) {
+            // This is transient contention, not a terminal policy skip. Leave
+            // the artifact APPROVED for reconciliation after the first claim
+            // resolves or becomes DELIVERY_UNKNOWN.
+            return { kind: "RECIPIENT_IN_FLIGHT", risk };
+          }
+          if (risk) {
+            const riskAt =
+              risk.status === OutreachArtifactStatus.SENT
+                ? risk.sentAt
+                : risk.updatedAt;
+            const update = await tx.outreachArtifact.updateMany({
+              where: {
+                id: artifact.id,
+                orgId: artifact.orgId,
+                status: OutreachArtifactStatus.APPROVED,
+              },
+              data: {
+                status: OutreachArtifactStatus.SUPPRESSED,
+                reviewerNote: (
+                  `policy-skip: recipient has ${risk.status} delivery risk within ${RECIPIENT_COOLDOWN_DAYS}-day cooldown ` +
+                  `(${riskAt?.toISOString() ?? "<unknown>"} via artifact ${risk.id})`
+                ).slice(0, 1000),
+              },
+            });
+            return update.count === 1
+              ? { kind: "RECIPIENT_SUPPRESSED", risk }
+              : { kind: "SKIPPED" };
+          }
+        }
+      }
+
+      if (liveAllowed) {
+        const cap = getDailySendCapPerOrg();
+        const capacityUsed = await tx.outreachArtifact.count({
+          where: {
+            orgId: artifact.orgId,
+            ...dailySendCapacityWhere(now),
+          },
+        });
+        if (capacityUsed >= cap) {
+          return { kind: "DAILY_CAP", capacityUsed, cap };
+        }
+      }
+
+      const claim = await tx.outreachArtifact.updateMany({
+        where: {
+          id: artifact.id,
+          orgId: artifact.orgId,
+          status: OutreachArtifactStatus.APPROVED,
+        },
+        data: { status: OutreachArtifactStatus.SENDING },
+      });
+      return claim.count === 1 ? { kind: "CLAIMED" } : { kind: "SKIPPED" };
     });
   }
 
@@ -536,7 +1048,16 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
           },
         };
         const payload = artifact.payload as Record<string, unknown>;
-        return this.sendEmailTool.execute(payload, context);
+        try {
+          return await this.sendEmailTool.execute(payload, context);
+        } catch (err) {
+          if (!liveAllowed) throw err;
+          throw new ProviderDispatchUnknownError(
+            `email provider invocation rejected without a delivery outcome: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
       }
       case OutreachChannel.LINKEDIN: {
         const integrations = await loadIntegrationsIfAllowed();
@@ -565,7 +1086,16 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
         if (typeof payload.integration_id === "string") {
           args.integration_id = payload.integration_id;
         }
-        return this.linkedinSendTool.execute(args, context);
+        try {
+          return await this.linkedinSendTool.execute(args, context);
+        } catch (err) {
+          if (!liveAllowed) throw err;
+          throw new ProviderDispatchUnknownError(
+            `LinkedIn provider invocation rejected without a delivery outcome: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
       }
       case OutreachChannel.HUBSPOT_NOTE: {
         // HubSpot notes aren't a "send" in the outbound-message sense. Leaving
@@ -627,12 +1157,65 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
     return integrations;
   }
 
+  private async recordGmailConversationDelivery(
+    artifact: OutreachArtifact,
+    result: ToolResult,
+    providerMessageId: string,
+    sentAt: Date,
+  ): Promise<void> {
+    if (!this.conversationStore) return;
+    const providerThreadId = extractThreadId(result);
+    if (!providerThreadId) {
+      this.logger.warn(
+        `Gmail send ${providerMessageId} returned no threadId; conversation projection deferred`,
+      );
+      return;
+    }
+    const integration = await this.prisma.integration.findFirst({
+      where: { orgId: artifact.orgId, provider: "gmail", status: "CONNECTED" },
+      select: { id: true, credentials: true },
+    });
+    if (!integration) {
+      this.logger.warn(
+        `Gmail integration missing after send ${providerMessageId}; conversation projection deferred`,
+      );
+      return;
+    }
+    const payload = artifact.payload as Record<string, unknown>;
+    const senderEmail = accountEmailFromCredentials(integration.credentials);
+    const recipient =
+      typeof payload.to === "string" ? payload.to : artifact.recipientRef;
+    if (!senderEmail || !recipient) {
+      this.logger.warn(
+        `Gmail send ${providerMessageId} lacks sender/recipient identity; conversation projection deferred`,
+      );
+      return;
+    }
+    await this.conversationStore.recordDeliveredGmailArtifact({
+      orgId: artifact.orgId,
+      integrationId: integration.id,
+      artifactId: artifact.id,
+      providerThreadId,
+      providerMessageId,
+      senderEmail,
+      toEmails: [recipient],
+      subject:
+        typeof payload.subject === "string"
+          ? payload.subject
+          : artifact.subject,
+      bodyText: artifact.bodyText,
+      bodyHtml: artifact.bodyHtml,
+      snippet: artifact.bodyText?.slice(0, 500) ?? null,
+      sentAt,
+    });
+  }
+
   /**
-   * Releases a SENDING claim back to APPROVED after a failed dispatch. The
-   * guarded updateMany (status: SENDING) means a row that somehow raced to a
-   * terminal state is left untouched. Best-effort: if the release itself
-   * fails (DB blip) the row stays SENDING and the reconcile sweep returns it
-   * to APPROVED after SENDING_STALE_AGE_MS.
+   * Releases a SENDING claim back to APPROVED only after a provable no-send:
+   * either no provider request was attempted or a provider response rejected
+   * it. The guarded updateMany leaves a row that raced terminal untouched.
+   * If this best-effort release fails, SENDING is intentionally not retried;
+   * the stale sweep later quarantines it as DELIVERY_UNKNOWN.
    */
   private async releaseClaim(artifactId: string): Promise<void> {
     try {
@@ -644,7 +1227,34 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
       this.logger.error(
         `Failed to release SENDING claim for ${artifactId}: ${
           err instanceof Error ? err.message : String(err)
-        } — reconcile sweep will recover it`,
+        } — reconcile sweep will quarantine it as DELIVERY_UNKNOWN`,
+      );
+    }
+  }
+
+  /**
+   * Permanently quarantine an ambiguous live-provider outcome. This guarded
+   * SENDING -> DELIVERY_UNKNOWN transition is terminal: BullMQ redelivery and
+   * the reconcile sweep both skip it. Operators must inspect the provider's
+   * Sent mailbox/API before considering a separately reviewed replacement.
+   */
+  private async markDeliveryUnknown(
+    artifactId: string,
+    reason: string,
+  ): Promise<void> {
+    const note =
+      `delivery-unknown: ${reason}; automatic retry disabled - ` +
+      `reconcile provider state before any replacement send`;
+    const result = await this.prisma.outreachArtifact.updateMany({
+      where: { id: artifactId, status: OutreachArtifactStatus.SENDING },
+      data: {
+        status: OutreachArtifactStatus.DELIVERY_UNKNOWN,
+        reviewerNote: note.slice(0, 1000),
+      },
+    });
+    if (result.count > 0) {
+      this.logger.error(
+        `Artifact ${artifactId} moved to DELIVERY_UNKNOWN - automatic dispatch is disabled pending provider reconciliation`,
       );
     }
   }
@@ -658,10 +1268,10 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
     if (this.reconcileInFlight) return;
     this.reconcileInFlight = true;
     try {
-      const { released, requeued } = await this.reconcileStuckArtifacts();
-      if (released > 0 || requeued > 0) {
+      const { deliveryUnknown, requeued } = await this.reconcileStuckArtifacts();
+      if (deliveryUnknown > 0 || requeued > 0) {
         this.logger.log(
-          `Reconcile sweep: released ${released} stale SENDING claim(s), re-enqueued ${requeued} stranded artifact(s)`,
+          `Reconcile sweep: quarantined ${deliveryUnknown} stale SENDING claim(s) as DELIVERY_UNKNOWN, re-enqueued ${requeued} stranded APPROVED artifact(s)`,
         );
       }
     } catch (err) {
@@ -678,23 +1288,24 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
    * GraphRunWorker.recoverOrphanedRuns):
    *
    *  1. SENDING claims whose updatedAt is older than SENDING_STALE_AGE_MS are
-   *     released back to APPROVED and re-enqueued. A claim that old means the
-   *     worker that won the CAS died before flipping the row terminal; the
-   *     guarded updateMany never clobbers a row that raced to
-   *     SENT/SIMULATED/SUPPRESSED in the meantime.
+   *     quarantined as terminal DELIVERY_UNKNOWN. Process death does not tell
+   *     us whether the provider accepted the POST, so automatic release and
+   *     re-dispatch would create a duplicate-delivery window. The guarded
+   *     updateMany never clobbers a row that raced terminal in the meantime.
    *  2. APPROVED rows whose updatedAt is older than APPROVED_REQUEUE_AGE_MS
    *     are re-enqueued — their BullMQ job was lost (Redis flush, enqueue
    *     failure after approve). jobId == artifactId, so a still-live job
    *     dedupes the add and the sweep stays idempotent.
    *
    * Both queries cap at RECONCILE_BATCH_LIMIT to avoid a thundering herd
-   * after a long outage — the next interval picks up the remainder.
+   * after a long outage — the next interval picks up the remainder. This is
+   * at-most-once automatic dispatch, not guaranteed exactly-once delivery.
    */
   async reconcileStuckArtifacts(): Promise<{
-    released: number;
+    deliveryUnknown: number;
     requeued: number;
   }> {
-    let released = 0;
+    let deliveryUnknown = 0;
     let requeued = 0;
 
     const staleClaims = await this.prisma.outreachArtifact.findMany({
@@ -707,19 +1318,21 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
     });
     for (const artifact of staleClaims) {
       try {
-        const releasedNow = await this.prisma.outreachArtifact.updateMany({
+        const quarantinedNow = await this.prisma.outreachArtifact.updateMany({
           where: { id: artifact.id, status: OutreachArtifactStatus.SENDING },
-          data: { status: OutreachArtifactStatus.APPROVED },
+          data: {
+            status: OutreachArtifactStatus.DELIVERY_UNKNOWN,
+            reviewerNote:
+              "delivery-unknown: stale SENDING claim after worker/process loss; automatic retry disabled - reconcile provider state before any replacement send",
+          },
         });
-        // count 0 → the claim resolved (terminal or re-released) between the
-        // findMany and the CAS — leave it alone.
-        if (releasedNow.count === 0) continue;
-        released++;
-        await this.requeueArtifact(artifact.id, artifact.orgId);
-        requeued++;
+        // count 0 → the claim resolved between findMany and the guarded
+        // transition. Leave the winning state alone.
+        if (quarantinedNow.count === 0) continue;
+        deliveryUnknown++;
       } catch (err) {
         this.logger.warn(
-          `Failed to release stale SENDING claim ${artifact.id}: ${
+          `Failed to quarantine stale SENDING claim ${artifact.id}: ${
             err instanceof Error ? err.message : String(err)
           }`,
         );
@@ -747,7 +1360,7 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    return { released, requeued };
+    return { deliveryUnknown, requeued };
   }
 
   /**
@@ -785,14 +1398,12 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Called when BullMQ has exhausted retries. There is no FAILED status on
-   * OutreachArtifactStatus today (would require a prisma migrate), so we
-   * reuse REJECTED with a `reviewerNote="auto-failed: <reason>"` marker as a
-   * pragmatic workaround. The "auto-failed:" prefix lets the UI distinguish
-   * human rejections from worker-side failures.
-   *
-   * TODO: once schema gains a FAILED status, switch this to that status and
-   * drop the prefix convention.
+   * Called when BullMQ has exhausted retries. An APPROVED row is a confirmed
+   * pre-dispatch/provider-rejected failure and reuses REJECTED with the
+   * `auto-failed:` marker. A row still SENDING is not safe to classify: the
+   * claim-release or unknown-outcome persistence may have failed, so it is
+   * quarantined as DELIVERY_UNKNOWN rather than being auto-retried or called
+   * rejected.
    */
   private async markTerminalFailure(
     artifactId: string,
@@ -803,21 +1414,25 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
       const artifact = await this.prisma.outreachArtifact.findUnique({
         where: { id: artifactId },
       });
-      // Only flip if we still own the row and it belongs to the expected
-      // org. "Own" means APPROVED, or a SENDING claim whose release failed —
-      // jobId == artifactId keeps the job single-owner, so a SENDING row at
-      // retry exhaustion can only be ours. If it raced to SENT/SIMULATED,
-      // leave it alone.
+      // Only flip if it belongs to the expected org. Every write below is
+      // status-guarded so a concurrent terminal success is never clobbered.
       if (!artifact || artifact.orgId !== orgId) return;
-      if (
-        artifact.status !== OutreachArtifactStatus.APPROVED &&
-        artifact.status !== OutreachArtifactStatus.SENDING
-      ) {
+      if (artifact.status === OutreachArtifactStatus.SENDING) {
+        await this.markDeliveryUnknown(
+          artifactId,
+          `SENDING claim remained unresolved when BullMQ exhausted retries: ${reason}`,
+        );
+        return;
+      }
+      if (artifact.status !== OutreachArtifactStatus.APPROVED) {
         return;
       }
 
-      await this.prisma.outreachArtifact.update({
-        where: { id: artifactId },
+      await this.prisma.outreachArtifact.updateMany({
+        where: {
+          id: artifactId,
+          status: OutreachArtifactStatus.APPROVED,
+        },
         data: {
           status: OutreachArtifactStatus.REJECTED,
           reviewerNote: `auto-failed: ${reason}`.slice(0, 1000),
@@ -834,6 +1449,41 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
   }
 }
 
+/**
+ * Decide whether a live failure may have been accepted by its provider.
+ * Email has an explicit tool contract. LinkedIn response status proves a
+ * rejection; known local credential errors prove no attempt; a status-less
+ * transport failure remains ambiguous. HUBSPOT_NOTE never invokes a provider.
+ */
+function isAmbiguousLiveFailure(
+  channel: OutreachChannel,
+  result: ToolResult,
+): boolean {
+  if (channel === OutreachChannel.EMAIL) {
+    return (
+      getEmailDispatchOutcome(result) ===
+        EMAIL_DISPATCH_OUTCOME.DELIVERY_UNKNOWN ||
+      getEmailDispatchOutcome(result) === null
+    );
+  }
+  if (channel === OutreachChannel.LINKEDIN) {
+    if (!result.data || typeof result.data !== "object" || Array.isArray(result.data)) {
+      return true;
+    }
+    const data = result.data as Record<string, unknown>;
+    if (typeof data.status === "number") return false;
+    return ![
+      "linkedin_not_connected",
+      "linkedin_mock_credentials",
+      "linkedin_circuit_open",
+      "linkedin_api_not_available",
+      "linkedin_recipient_not_found",
+      "linkedin_invalid_request",
+    ].includes(typeof data.error === "string" ? data.error : "");
+  }
+  return false;
+}
+
 function extractReceiptId(result: ToolResult): string | null {
   if (!result.data || typeof result.data !== "object") return null;
   const data = result.data as Record<string, unknown>;
@@ -846,4 +1496,23 @@ function extractProvider(result: ToolResult): string | null {
   const data = result.data as Record<string, unknown>;
   const provider = data.provider;
   return typeof provider === "string" ? provider : null;
+}
+
+function extractThreadId(result: ToolResult): string | null {
+  if (!result.data || typeof result.data !== "object") return null;
+  const data = result.data as Record<string, unknown>;
+  const threadId = data.threadId;
+  return typeof threadId === "string" && threadId.length > 0
+    ? threadId
+    : null;
+}
+
+function accountEmailFromCredentials(credentials: unknown): string | null {
+  if (!credentials || typeof credentials !== "object" || Array.isArray(credentials)) {
+    return null;
+  }
+  const value = (credentials as Record<string, unknown>).accountEmail;
+  return typeof value === "string" && value.trim().length > 0
+    ? value.trim().toLowerCase()
+    : null;
 }

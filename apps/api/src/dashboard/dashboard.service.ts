@@ -20,6 +20,8 @@ export interface ActivityEvent {
     | "draft_created"
     | "draft_approved"
     | "draft_rejected"
+    | "draft_sent"
+    | "delivery_unknown"
     | "meeting_proposed"
     | "meeting_confirmed";
   text: string;
@@ -152,7 +154,18 @@ export class DashboardService {
         at: a.createdAt.toISOString(),
         leadId: "",
       });
-      if (a.status === OutreachArtifactStatus.APPROVED && a.reviewedAt) {
+      if (
+        a.reviewedAt &&
+        (
+          [
+            OutreachArtifactStatus.APPROVED,
+            OutreachArtifactStatus.SENDING,
+            OutreachArtifactStatus.SENT,
+            OutreachArtifactStatus.SIMULATED,
+            OutreachArtifactStatus.DELIVERY_UNKNOWN,
+          ] as readonly OutreachArtifactStatus[]
+        ).includes(a.status)
+      ) {
         events.push({
           id: `artifact:${a.id}:approved`,
           kind: "draft_approved",
@@ -167,6 +180,24 @@ export class DashboardService {
           kind: "draft_rejected",
           text: `Rejected outreach draft`,
           at: a.reviewedAt.toISOString(),
+          leadId: "",
+        });
+      }
+      if (a.status === OutreachArtifactStatus.SENT) {
+        events.push({
+          id: `artifact:${a.id}:sent`,
+          kind: "draft_sent",
+          text: "Sent approved outreach",
+          at: a.updatedAt.toISOString(),
+          leadId: "",
+        });
+      }
+      if (a.status === OutreachArtifactStatus.DELIVERY_UNKNOWN) {
+        events.push({
+          id: `artifact:${a.id}:delivery_unknown`,
+          kind: "delivery_unknown",
+          text: "Outreach delivery requires reconciliation",
+          at: a.updatedAt.toISOString(),
           leadId: "",
         });
       }

@@ -1,6 +1,11 @@
 import { EvidenceLedgerService } from "../../observability/evidence-ledger.service";
 import { Tool, ToolContext, ToolResult } from "./tool.interface";
-import { fetchWithRetry, withCircuitBreaker } from "../../common/http-retry.util";
+import {
+  CircuitOpenError,
+  RateLimitedError,
+  fetchWithRetry,
+  withCircuitBreaker,
+} from "../../common/http-retry.util";
 import {
   buildUnsubscribeMailto,
   buildUnsubscribeUrl,
@@ -63,14 +68,63 @@ function escapeHtml(input: string): string {
     .replace(/"/g, "&quot;");
 }
 
+/**
+ * Truthful outcome of one email-tool invocation at the provider boundary.
+ *
+ * Gmail `messages.send` and Microsoft Graph `sendMail` do not expose a
+ * caller-supplied idempotency key. Once a POST may have left this process, a
+ * missing response is therefore not safely retryable: the provider may have
+ * accepted the message. Callers must persist DELIVERY_UNKNOWN and reconcile
+ * the provider manually instead of dispatching the artifact again.
+ */
+export const EMAIL_DISPATCH_OUTCOME = {
+  NOT_ATTEMPTED: "NOT_ATTEMPTED",
+  CONFIRMED_NOT_SENT: "CONFIRMED_NOT_SENT",
+  CONFIRMED_SENT: "CONFIRMED_SENT",
+  DELIVERY_UNKNOWN: "DELIVERY_UNKNOWN",
+} as const;
+
+export type EmailDispatchOutcome =
+  (typeof EMAIL_DISPATCH_OUTCOME)[keyof typeof EMAIL_DISPATCH_OUTCOME];
+
+export function getEmailDispatchOutcome(
+  result: ToolResult,
+): EmailDispatchOutcome | null {
+  if (!result.data || typeof result.data !== "object" || Array.isArray(result.data)) {
+    return null;
+  }
+  const outcome = (result.data as Record<string, unknown>).dispatchOutcome;
+  return Object.values(EMAIL_DISPATCH_OUTCOME).includes(
+    outcome as EmailDispatchOutcome,
+  )
+    ? (outcome as EmailDispatchOutcome)
+    : null;
+}
+
 export class SendEmailTool implements Tool {
   name = "send_email";
-  description = "Send an email. Uses Microsoft Graph API when Outlook credentials are available, otherwise operates in mock mode.";
+  description =
+    "Send an email through a connected Outlook or Gmail mailbox; otherwise operate in mock mode.";
   parameters = {
     to: { type: "string", description: "Recipient email address", required: true },
     subject: { type: "string", description: "Email subject line", required: true },
     body: { type: "string", description: "Email body (plain text or HTML)", required: true },
     from: { type: "string", description: "Sender email address (optional, uses default)", required: false },
+    provider: {
+      type: "string",
+      description: "Preferred provider for a provider-bound reply (gmail or outlook)",
+      required: false,
+    },
+    threadId: {
+      type: "string",
+      description: "Provider thread id for an in-thread reply",
+      required: false,
+    },
+    inReplyTo: {
+      type: "string",
+      description: "RFC Message-ID being replied to",
+      required: false,
+    },
   };
 
   constructor(private readonly evidenceLedger?: EvidenceLedgerService) {}
@@ -79,9 +133,42 @@ export class SendEmailTool implements Tool {
     const to = params.to as string;
     const subject = params.subject as string;
     const body = params.body as string;
+    const preferredProvider =
+      params.provider === "gmail" || params.provider === "outlook"
+        ? params.provider
+        : undefined;
+    const threadId =
+      typeof params.threadId === "string" && params.threadId.trim().length > 0
+        ? params.threadId.trim()
+        : undefined;
+    const inReplyTo =
+      typeof params.inReplyTo === "string" && params.inReplyTo.trim().length > 0
+        ? params.inReplyTo.trim()
+        : undefined;
 
     if (!to || !subject || !body) {
-      return { success: false, data: null, error: "to, subject, and body are required" };
+      return {
+        success: false,
+        data: {
+          sent: false,
+          dispatchOutcome: EMAIL_DISPATCH_OUTCOME.NOT_ATTEMPTED,
+        },
+        error: "to, subject, and body are required",
+      };
+    }
+    if (
+      hasHeaderBreak(to) ||
+      hasHeaderBreak(subject) ||
+      (inReplyTo !== undefined && hasHeaderBreak(inReplyTo))
+    ) {
+      return {
+        success: false,
+        data: {
+          sent: false,
+          dispatchOutcome: EMAIL_DISPATCH_OUTCOME.NOT_ATTEMPTED,
+        },
+        error: "email headers contain invalid line breaks",
+      };
     }
 
     // Check for Outlook/Gmail integration credentials
@@ -95,7 +182,12 @@ export class SendEmailTool implements Tool {
     // alone — they never produce live sends.
     const composedBody = appendComplianceFooter(body, context.orgId, to, context.senderOrg);
 
-    if (outlookCreds?.accessToken && !outlookCreds.accessToken.startsWith("mock_")) {
+    if (
+      preferredProvider !== "gmail" &&
+      !threadId &&
+      outlookCreds?.accessToken &&
+      !outlookCreds.accessToken.startsWith("mock_")
+    ) {
       const result = await this.sendViaGraph(to, subject, composedBody, outlookCreds.accessToken, unsubscribeHeaders);
       if (result.success) {
         this.emitMessageSent(context, {
@@ -109,7 +201,14 @@ export class SendEmailTool implements Tool {
     }
 
     if (gmailCreds?.accessToken && !gmailCreds.accessToken.startsWith("mock_")) {
-      const result = await this.sendViaGmail(to, subject, composedBody, gmailCreds.accessToken, unsubscribeHeaders);
+      const result = await this.sendViaGmail(
+        to,
+        subject,
+        composedBody,
+        gmailCreds.accessToken,
+        unsubscribeHeaders,
+        { threadId, inReplyTo },
+      );
       if (result.success) {
         this.emitMessageSent(context, {
           to,
@@ -122,7 +221,7 @@ export class SendEmailTool implements Tool {
     }
 
     // Mock mode — no real send occurred, no evidence emitted.
-    return this.mockSend(to, subject, body, context);
+    return this.mockSend(to, subject, body);
   }
 
   /**
@@ -188,23 +287,43 @@ export class SendEmailTool implements Tool {
               saveToSentItems: true,
             }),
           },
-          { provider: "graph" },
+          // Graph sendMail has no caller idempotency key. Never retry the
+          // POST inside the tool after a transport failure.
+          { provider: "graph", maxAttempts: 1 },
         ),
       );
 
       if (!response.ok) {
-        const errorData = await response.text();
-        throw new Error(`Graph API error ${response.status}: ${errorData}`);
+        const errorData = await response.text().catch(() => "<response body unavailable>");
+        return {
+          success: false,
+          data: {
+            sent: false,
+            provider: "outlook",
+            dispatchOutcome: EMAIL_DISPATCH_OUTCOME.CONFIRMED_NOT_SENT,
+          },
+          error: `Graph API error ${response.status}: ${errorData}`,
+        };
       }
 
       return {
         success: true,
-        data: { sent: true, provider: "outlook", to, subject },
+        data: {
+          sent: true,
+          provider: "outlook",
+          dispatchOutcome: EMAIL_DISPATCH_OUTCOME.CONFIRMED_SENT,
+          to,
+          subject,
+        },
       };
     } catch (error) {
       return {
         success: false,
-        data: { sent: false, provider: "outlook" },
+        data: {
+          sent: false,
+          provider: "outlook",
+          dispatchOutcome: classifyProviderError(error),
+        },
         error: error instanceof Error ? error.message : "Failed to send email via Graph API",
       };
     }
@@ -216,6 +335,7 @@ export class SendEmailTool implements Tool {
     body: string,
     accessToken: string,
     unsubscribe: { listUnsubscribe: string; listUnsubscribePost: string } | null,
+    reply: { threadId?: string; inReplyTo?: string },
   ): Promise<ToolResult> {
     try {
       const headers: string[] = [
@@ -226,6 +346,10 @@ export class SendEmailTool implements Tool {
       if (unsubscribe) {
         headers.push(`List-Unsubscribe: ${unsubscribe.listUnsubscribe}`);
         headers.push(`List-Unsubscribe-Post: ${unsubscribe.listUnsubscribePost}`);
+      }
+      if (reply.inReplyTo) {
+        headers.push(`In-Reply-To: ${reply.inReplyTo}`);
+        headers.push(`References: ${reply.inReplyTo}`);
       }
       const raw = Buffer.from(`${headers.join("\r\n")}\r\n\r\n${body}`)
         .toString("base64")
@@ -242,37 +366,79 @@ export class SendEmailTool implements Tool {
               Authorization: `Bearer ${accessToken}`,
               "Content-Type": "application/json",
             },
-            body: JSON.stringify({ raw }),
+            body: JSON.stringify({
+              raw,
+              ...(reply.threadId ? { threadId: reply.threadId } : {}),
+            }),
           },
-          { provider: "gmail" },
+          // These provider POSTs have no idempotency key. A network retry
+          // after response loss could send twice, so the send tool makes one
+          // wire attempt and lets the worker distinguish a provider response
+          // from an ambiguous transport failure.
+          { provider: "gmail", maxAttempts: 1 },
         ),
       );
 
       if (!response.ok) {
-        throw new Error(`Gmail API error ${response.status}`);
+        return {
+          success: false,
+          data: {
+            sent: false,
+            provider: "gmail",
+            dispatchOutcome: EMAIL_DISPATCH_OUTCOME.CONFIRMED_NOT_SENT,
+          },
+          error: `Gmail API error ${response.status}`,
+        };
       }
 
-      const data = (await response.json()) as { id: string };
+      const data = (await response.json()) as { id?: unknown; threadId?: unknown };
+      if (typeof data.id !== "string" || data.id.length === 0) {
+        return {
+          success: false,
+          data: {
+            sent: false,
+            provider: "gmail",
+            dispatchOutcome: EMAIL_DISPATCH_OUTCOME.DELIVERY_UNKNOWN,
+          },
+          error: "Gmail accepted the request but returned no message id",
+        };
+      }
       return {
         success: true,
-        data: { sent: true, provider: "gmail", messageId: data.id, to, subject },
+        data: {
+          sent: true,
+          provider: "gmail",
+          messageId: data.id,
+          threadId:
+            typeof data.threadId === "string"
+              ? data.threadId
+              : reply.threadId ?? null,
+          dispatchOutcome: EMAIL_DISPATCH_OUTCOME.CONFIRMED_SENT,
+          to,
+          subject,
+        },
       };
     } catch (error) {
       return {
         success: false,
-        data: { sent: false, provider: "gmail" },
+        data: {
+          sent: false,
+          provider: "gmail",
+          dispatchOutcome: classifyProviderError(error),
+        },
         error: error instanceof Error ? error.message : "Failed to send email via Gmail API",
       };
     }
   }
 
-  private mockSend(to: string, subject: string, body: string, context: ToolContext): ToolResult {
+  private mockSend(to: string, subject: string, body: string): ToolResult {
     return {
       success: true,
       data: {
         sent: false,
         mock: true,
         provider: "mock",
+        dispatchOutcome: EMAIL_DISPATCH_OUTCOME.NOT_ATTEMPTED,
         messageId: `mock_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         to,
         subject,
@@ -281,6 +447,26 @@ export class SendEmailTool implements Tool {
       },
     };
   }
+}
+
+/**
+ * Circuit-open means the provider callback was never invoked. A received
+ * 429/503 response (represented by RateLimitedError.lastStatus) also proves
+ * this attempt was rejected. Every other thrown transport outcome is
+ * ambiguous once fetch was invoked and must not be retried automatically.
+ */
+function classifyProviderError(error: unknown): EmailDispatchOutcome {
+  if (error instanceof CircuitOpenError) {
+    return EMAIL_DISPATCH_OUTCOME.NOT_ATTEMPTED;
+  }
+  if (error instanceof RateLimitedError && error.lastStatus !== null) {
+    return EMAIL_DISPATCH_OUTCOME.CONFIRMED_NOT_SENT;
+  }
+  return EMAIL_DISPATCH_OUTCOME.DELIVERY_UNKNOWN;
+}
+
+function hasHeaderBreak(value: string): boolean {
+  return value.includes("\r") || value.includes("\n");
 }
 
 /**
