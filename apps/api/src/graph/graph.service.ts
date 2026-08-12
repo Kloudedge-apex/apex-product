@@ -77,6 +77,30 @@ export class GraphService {
           )
         `;
 
+        // Treat every ICP id as a tenant-owned resource reference, not merely
+        // an opaque graph input. Reject the whole start when even one id is
+        // absent or belongs to another org; accepting the owned subset would
+        // let a mixed request create downstream ScrapeJob rows whose org and
+        // icpProfile relation disagree.
+        const ownedIcpProfiles = await tx.icpProfile.findMany({
+          where: {
+            orgId,
+            id: { in: canonicalIcpProfileIds },
+          },
+          select: { id: true },
+        });
+        const ownedIcpProfileIds = new Set(
+          ownedIcpProfiles.map((profile) => profile.id),
+        );
+        if (
+          canonicalIcpProfileIds.some(
+            (profileId) => !ownedIcpProfileIds.has(profileId),
+          )
+        ) {
+          // Keep missing and foreign ids indistinguishable to callers.
+          throw new NotFoundException("One or more ICP profiles were not found");
+        }
+
         const inflight = await tx.graphRun.findFirst({
           where: {
             orgId,

@@ -30,6 +30,8 @@ const MAX_SUBJECT_LEN = 120;
 const MAX_BODY_LEN = 2000;
 const MIN_BODY_LEN = 30;
 const MAX_RECENT_EVIDENCE_EVENTS = 5;
+const EVIDENCE_EVENT_PAGE_SIZE = 25;
+const MAX_EVIDENCE_EVENTS_SCANNED = 100;
 
 /** Substrings that, if present, mean the LLM left a placeholder unfilled. */
 const PLACEHOLDER_LEAKS = ["{{", "}}", "[FIRST_NAME]", "[COMPANY]", "TODO", "<insert"];
@@ -804,39 +806,63 @@ export async function assembleResearchBrief(
   // Behavioral signals (S-series) from EvidenceEvent — most recent first, fresh + non-mock only.
   let signalCount = 0;
   if (company?.id) {
-    const events = await prisma.evidenceEvent.findMany({
-      where: {
-        orgId: lead.orgId,
-        OR: [
-          { refType: "company", refId: company.id },
-          { refType: "person", refId: lead.personId },
-        ],
-        kind: { in: Array.from(SIGNAL_KINDS) },
-      },
-      orderBy: { createdAt: "desc" },
-      // NOTE: the take-limit is applied by the DB BEFORE the fresh/mock filter
-      // below. Ordering is by createdAt but freshness is judged on payload.date,
-      // so in the rare case a company has >5 signals written close together a
-      // genuinely fresh one could be crowded out by newer-but-stale rows. Safe
-      // today (signals are written near their event date); raise the limit or
-      // paginate-until-N-fresh in a follow-up if that assumption breaks.
-      take: MAX_RECENT_EVIDENCE_EVENTS,
-      select: { kind: true, payload: true, createdAt: true },
-    });
-    for (const ev of events) {
-      const payload = (ev.payload ?? {}) as Record<string, unknown>;
-      if (isMocked(payload)) continue; // mock never becomes a cited fact
-      const effectiveDate =
-        typeof payload.date === "string" ? payload.date : ev.createdAt.toISOString().slice(0, 10);
-      if (!isFresh(ev.kind, effectiveDate)) continue; // stale signals don't ground
-      signalCount += 1;
-      facts.push({
-        id: `S${signalCount}`,
-        category: "signal",
-        source: typeof payload.source === "string" ? payload.source : `evidence_event.${ev.kind}`,
-        text: summarizeEvidencePayload(ev.kind, ev.payload),
-        date: effectiveDate,
+    let cursor: string | undefined;
+    let scanned = 0;
+
+    // Freshness is based on payload.date rather than createdAt, and mocked rows
+    // are rejected after retrieval. Scan a bounded window until we collect the
+    // desired number of usable signals so newer stale/mock rows cannot crowd a
+    // genuinely fresh fact out of the brief.
+    while (
+      signalCount < MAX_RECENT_EVIDENCE_EVENTS &&
+      scanned < MAX_EVIDENCE_EVENTS_SCANNED
+    ) {
+      const take = Math.min(
+        EVIDENCE_EVENT_PAGE_SIZE,
+        MAX_EVIDENCE_EVENTS_SCANNED - scanned,
+      );
+      const events = await prisma.evidenceEvent.findMany({
+        where: {
+          orgId: lead.orgId,
+          OR: [
+            { refType: "company", refId: company.id },
+            { refType: "person", refId: lead.personId },
+          ],
+          kind: { in: Array.from(SIGNAL_KINDS) },
+        },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+        take,
+        select: { id: true, kind: true, payload: true, createdAt: true },
       });
+      if (events.length === 0) break;
+
+      scanned += events.length;
+      cursor = events[events.length - 1]?.id;
+
+      for (const ev of events) {
+        const payload = (ev.payload ?? {}) as Record<string, unknown>;
+        if (isMocked(payload)) continue; // mock never becomes a cited fact
+        const effectiveDate =
+          typeof payload.date === "string"
+            ? payload.date
+            : ev.createdAt.toISOString().slice(0, 10);
+        if (!isFresh(ev.kind, effectiveDate)) continue; // stale signals don't ground
+        signalCount += 1;
+        facts.push({
+          id: `S${signalCount}`,
+          category: "signal",
+          source:
+            typeof payload.source === "string"
+              ? payload.source
+              : `evidence_event.${ev.kind}`,
+          text: summarizeEvidencePayload(ev.kind, ev.payload),
+          date: effectiveDate,
+        });
+        if (signalCount >= MAX_RECENT_EVIDENCE_EVENTS) break;
+      }
+
+      if (events.length < take || !cursor) break;
     }
   }
 

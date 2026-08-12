@@ -25,6 +25,7 @@ import { resolveApiPublicOrigin } from "../outreach/unsubscribe-token.util";
  *   When NODE_ENV="production" (i.e. running as a deployed image):
  *     - At least one LLM provider key (OPENAI_API_KEY | AZURE_OPENAI_KEY | ANTHROPIC_API_KEY)
  *     - GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET (Gmail OAuth, needed by api + worker)
+ *     - METRICS_AUTH_TOKEN (protects the public Prometheus endpoint)
  *
  * Missing prod secrets are collected and reported in a single throw so the
  * operator can fix everything in one redeploy instead of bouncing the pod
@@ -83,8 +84,13 @@ export function validateEnv(
   }
 
   if (isProd) {
+    if (!env.METRICS_AUTH_TOKEN?.trim()) {
+      issues.push("METRICS_AUTH_TOKEN is required when NODE_ENV=production");
+    }
+
+    let apiPublicOrigin: string | null = null;
     try {
-      resolveApiPublicOrigin(env);
+      apiPublicOrigin = resolveApiPublicOrigin(env);
     } catch (err) {
       issues.push(
         err instanceof Error
@@ -93,10 +99,11 @@ export function validateEnv(
       );
     }
 
-    // Hard-fail only on credentials whose absence would crash the very
-    // first request and which BOTH the api and the worker need at boot.
-    // Anything else is warned-not-thrown so a partial config doesn't take
-    // the whole pod down.
+    validateProductionGmailConfiguration(env, apiPublicOrigin, issues);
+
+    // The remaining required credentials are needed by both the api and the
+    // worker. Anything role-specific remains warned-not-thrown so a partial
+    // integration config does not take the whole pod down.
     //
     // LLM provider: at least one of OPENAI_API_KEY / AZURE_OPENAI_KEY /
     // ANTHROPIC_API_KEY must be set. Prod uses Azure OpenAI today, but the
@@ -140,6 +147,64 @@ export function validateEnv(
   }
 
   return { issues, encryptionKeyFingerprint };
+}
+
+function validateProductionGmailConfiguration(
+  env: NodeJS.ProcessEnv,
+  apiPublicOrigin: string | null,
+  issues: string[],
+): void {
+  const expectedRedirectUri = apiPublicOrigin
+    ? `${apiPublicOrigin}/api/integrations/gmail/callback`
+    : null;
+  const redirectUri = env.GOOGLE_REDIRECT_URI?.trim();
+  if (!redirectUri) {
+    issues.push("GOOGLE_REDIRECT_URI is required when NODE_ENV=production");
+  } else if (expectedRedirectUri && redirectUri !== expectedRedirectUri) {
+    issues.push(
+      `GOOGLE_REDIRECT_URI must equal ${expectedRedirectUri} in production`,
+    );
+  }
+
+  const topic = env.GMAIL_PUBSUB_TOPIC?.trim();
+  if (!topic) {
+    issues.push("GMAIL_PUBSUB_TOPIC is required when NODE_ENV=production");
+  } else if (
+    !/^projects\/[a-z][a-z0-9-]{4,28}[a-z0-9]\/topics\/[A-Za-z][A-Za-z0-9._~+%-]{2,254}$/.test(
+      topic,
+    )
+  ) {
+    issues.push(
+      "GMAIL_PUBSUB_TOPIC must be a canonical projects/<project-id>/topics/<topic-id> resource name",
+    );
+  }
+
+  const expectedPushAudience = apiPublicOrigin
+    ? `${apiPublicOrigin}/api/integrations/gmail/push`
+    : null;
+  const pushAudience = env.GMAIL_PUSH_AUDIENCE?.trim();
+  if (!pushAudience) {
+    issues.push("GMAIL_PUSH_AUDIENCE is required when NODE_ENV=production");
+  } else if (expectedPushAudience && pushAudience !== expectedPushAudience) {
+    issues.push(
+      `GMAIL_PUSH_AUDIENCE must equal ${expectedPushAudience} in production`,
+    );
+  }
+
+  const publisherServiceAccount = env.GMAIL_PUSH_PUBLISHER_SA?.trim();
+  if (!publisherServiceAccount) {
+    issues.push(
+      "GMAIL_PUSH_PUBLISHER_SA is required when NODE_ENV=production",
+    );
+  } else if (
+    !/^[a-z][a-z0-9-]{0,62}@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$/.test(
+      publisherServiceAccount,
+    )
+  ) {
+    issues.push(
+      "GMAIL_PUSH_PUBLISHER_SA must be a canonical Google service-account email",
+    );
+  }
 }
 
 function checkEncryptionKey(

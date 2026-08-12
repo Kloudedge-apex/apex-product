@@ -1,9 +1,15 @@
-import { Injectable, Logger, NotFoundException } from "@nestjs/common";
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  ServiceUnavailableException,
+} from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { encryptCredentials, decryptCredentials } from "./crypto.util";
 import { signOAuthState } from "../common/webhook-signature.util";
 import { fetchWithRetry, withCircuitBreaker } from "../common/http-retry.util";
+import { gmailWatchFreshnessFloor } from "./gmail/gmail-watch-freshness";
 
 interface OAuthConfig {
   clientId?: string;
@@ -35,39 +41,27 @@ const OAUTH_CONFIGS: Record<string, OAuthConfig> = {
       "https://www.googleapis.com/auth/gmail.send",
       "https://www.googleapis.com/auth/gmail.readonly",
       "https://www.googleapis.com/auth/gmail.compose",
+      "https://www.googleapis.com/auth/gmail.modify",
     ],
   },
-  outlook: {
-    clientId: process.env.MICROSOFT_CLIENT_ID,
-    clientSecret: process.env.MICROSOFT_CLIENT_SECRET,
-    redirectUri:
-      process.env.MICROSOFT_REDIRECT_URI ||
-      "http://localhost:4000/api/integrations/outlook/callback",
-    authUrl: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
-    tokenUrl: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
-    scopes: ["Mail.ReadWrite", "Mail.Send", "offline_access"],
-  },
-  hubspot: {
-    clientId: process.env.HUBSPOT_CLIENT_ID,
-    clientSecret: process.env.HUBSPOT_CLIENT_SECRET,
-    redirectUri:
-      process.env.HUBSPOT_REDIRECT_URI ||
-      "http://localhost:4000/api/integrations/hubspot/callback",
-    authUrl: "https://app.hubspot.com/oauth/authorize",
-    tokenUrl: "https://api.hubapi.com/oauth/v1/token",
-    scopes: ["contacts", "crm.objects.deals.read", "crm.objects.companies.read"],
-  },
-  linkedin: {
-    clientId: process.env.LINKEDIN_CLIENT_ID,
-    clientSecret: process.env.LINKEDIN_CLIENT_SECRET,
-    redirectUri:
-      process.env.LINKEDIN_REDIRECT_URI ||
-      "http://localhost:4000/api/integrations/linkedin/callback",
-    authUrl: "https://www.linkedin.com/oauth/v2/authorization",
-    tokenUrl: "https://www.linkedin.com/oauth/v2/accessToken",
-    scopes: ["r_liteprofile", "r_emailaddress", "w_member_social"],
-  },
 };
+
+/**
+ * Public Integration responses must never serialize either credential store.
+ * Keep this allowlist next to the service boundary so new secret-bearing
+ * columns fail closed until they are reviewed explicitly.
+ */
+const PUBLIC_INTEGRATION_SELECT = {
+  id: true,
+  provider: true,
+  status: true,
+  scopes: true,
+  lastSyncAt: true,
+  lastErrorAt: true,
+  lastErrorMessage: true,
+  createdAt: true,
+  updatedAt: true,
+} satisfies Prisma.IntegrationSelect;
 
 @Injectable()
 export class IntegrationsService {
@@ -85,30 +79,32 @@ export class IntegrationsService {
   }> {
     return [
       { provider: "gmail", category: "email", name: "Google Workspace (Gmail)", description: "Send and receive email via your Google Workspace mailbox.", authType: "oauth", status: "available" },
-      { provider: "outlook", category: "email", name: "Microsoft 365 (Outlook)", description: "Send and receive email via your M365 mailbox.", authType: "oauth", status: "available" },
-      { provider: "hubspot", category: "crm", name: "HubSpot", description: "Bi-directional CRM sync for contacts, deals, and companies.", authType: "oauth", status: "available" },
+      { provider: "outlook", category: "email", name: "Microsoft 365 (Outlook)", description: "Microsoft 365 mailbox support is not included in this release.", authType: "oauth", status: "coming_soon" },
+      { provider: "hubspot", category: "crm", name: "HubSpot", description: "HubSpot sync is not included in this release.", authType: "oauth", status: "coming_soon" },
       { provider: "salesforce", category: "crm", name: "Salesforce", description: "Bi-directional CRM sync.", authType: "oauth", status: "coming_soon" },
       { provider: "pipedrive", category: "crm", name: "Pipedrive", description: "Bi-directional CRM sync.", authType: "oauth", status: "coming_soon" },
-      { provider: "apollo", category: "enrichment", name: "Apollo.io", description: "Lead sourcing and contact enrichment.", authType: "api_key", status: "available" },
+      { provider: "apollo", category: "enrichment", name: "Apollo.io", description: "Apollo enrichment is not included in this release.", authType: "api_key", status: "coming_soon" },
       { provider: "clay", category: "enrichment", name: "Clay", description: "Waterfall enrichment with custom signals.", authType: "api_key", status: "coming_soon" },
-      { provider: "google_calendar", category: "calendar", name: "Google Calendar", description: "Booking and availability lookup.", authType: "oauth", status: "available" },
+      { provider: "google_calendar", category: "calendar", name: "Google Calendar", description: "Calendar actions are not included in this release.", authType: "oauth", status: "coming_soon" },
       { provider: "microsoft_calendar", category: "calendar", name: "Microsoft Calendar", description: "Booking and availability lookup.", authType: "oauth", status: "coming_soon" },
-      { provider: "slack", category: "communication", name: "Slack", description: "Notifications and reply alerts.", authType: "oauth", status: "available" },
+      { provider: "slack", category: "communication", name: "Slack", description: "Slack notifications are not included in this release.", authType: "oauth", status: "coming_soon" },
       { provider: "whatsapp", category: "communication", name: "WhatsApp Business", description: "Channel for booked-meeting confirmations.", authType: "oauth", status: "coming_soon" },
-      { provider: "elevenlabs", category: "voice", name: "ElevenLabs Voice", description: "AI voice for outbound calling.", authType: "api_key", status: "available" },
+      { provider: "elevenlabs", category: "voice", name: "ElevenLabs Voice", description: "Voice outreach is not included in this release.", authType: "api_key", status: "coming_soon" },
     ];
   }
 
   async findAll(orgId: string) {
     return this.prisma.integration.findMany({
-      where: { orgId },
+      where: { orgId, provider: "gmail" },
       orderBy: { createdAt: "desc" },
+      select: PUBLIC_INTEGRATION_SELECT,
     });
   }
 
   async findOne(id: string, orgId: string) {
     const integration = await this.prisma.integration.findFirst({
-      where: { id, orgId },
+      where: { id, orgId, provider: "gmail" },
+      select: PUBLIC_INTEGRATION_SELECT,
     });
     if (!integration) throw new NotFoundException("Integration not found");
     return integration;
@@ -118,33 +114,31 @@ export class IntegrationsService {
     orgId: string,
     data: { provider: string; credentials: Record<string, unknown> },
   ) {
-    const encrypted = encryptCredentials(data.credentials);
-    return this.prisma.integration.upsert({
-      where: { orgId_provider: { orgId, provider: data.provider } },
-      create: {
-        orgId,
-        provider: data.provider,
-        credentials: { encrypted } as unknown as Prisma.InputJsonValue,
-        // Dual-write: provider-specific services (gmail/hubspot) read tokens
-        // from the `encryptedCredentials` column, not `credentials.encrypted`.
-        // Keeping both shapes in lock-step prevents split-brain rows.
-        encryptedCredentials: encrypted,
-        status: "CONNECTED",
-      },
-      update: {
-        credentials: { encrypted } as unknown as Prisma.InputJsonValue,
-        encryptedCredentials: encrypted,
-        status: "CONNECTED",
-      },
-    });
+    void orgId;
+    void data;
+    throw new NotFoundException(
+      "Direct integration creation is unavailable; use Gmail OAuth",
+    );
   }
 
   async getDecryptedCredentials(
     orgId: string,
     provider: string,
   ): Promise<Record<string, unknown> | null> {
+    this.assertGmailProvider(provider);
     const integration = await this.prisma.integration.findFirst({
-      where: { orgId, provider, status: "CONNECTED" },
+      where: {
+        orgId,
+        provider: "gmail",
+        status: "CONNECTED",
+        encryptedCredentials: { not: null },
+        credentials: {
+          path: ["accountEmail"],
+          string_contains: "@",
+        },
+        lastHistoryId: { not: null },
+        lastSyncAt: { gte: gmailWatchFreshnessFloor() },
+      },
     });
     if (!integration) return null;
 
@@ -266,26 +260,6 @@ export class IntegrationsService {
   }
 
   /**
-   * Ensure a token payload carries an absolute expiry under BOTH field names:
-   * `expires_at` (this service's convention) and `expiry_date` (googleapis /
-   * gmail.service convention). Raw provider fields (`expires_in`, `scope`,
-   * ...) are preserved untouched.
-   */
-  private withAbsoluteExpiry(
-    tokens: Record<string, unknown>,
-  ): Record<string, unknown> {
-    const existing =
-      typeof tokens.expires_at === "number"
-        ? tokens.expires_at
-        : typeof tokens.expiry_date === "number"
-          ? tokens.expiry_date
-          : undefined;
-    const expiresAt = existing ?? this.computeExpiresAt(tokens);
-    if (expiresAt === undefined) return { ...tokens };
-    return { ...tokens, expires_at: expiresAt, expiry_date: expiresAt };
-  }
-
-  /**
    * Plaintext Gmail push-routing marker that gmail.service.ts stores in the
    * (non-secret) `credentials` JSON. Must survive token rewrites or inbound
    * push → orgId routing breaks (`findIntegrationByEmail`).
@@ -316,8 +290,20 @@ export class IntegrationsService {
     orgId: string,
     provider: string,
   ): Promise<Record<string, unknown> | null> {
+    this.assertGmailProvider(provider);
     const integration = await this.prisma.integration.findFirst({
-      where: { orgId, provider, status: "CONNECTED" },
+      where: {
+        orgId,
+        provider: "gmail",
+        status: "CONNECTED",
+        encryptedCredentials: { not: null },
+        credentials: {
+          path: ["accountEmail"],
+          string_contains: "@",
+        },
+        lastHistoryId: { not: null },
+        lastSyncAt: { gte: gmailWatchFreshnessFloor() },
+      },
     });
     if (!integration) return null;
 
@@ -430,7 +416,6 @@ export class IntegrationsService {
           // Mirror into the column gmail.service.ts/hubspot.service.ts read
           // so both storage shapes stay in lock-step after every refresh.
           encryptedCredentials: encrypted,
-          lastSyncAt: new Date(),
         },
       });
     } catch (err) {
@@ -488,6 +473,7 @@ export class IntegrationsService {
 
   /** Returns a provider's OAuth consent URL with a signed `state`. */
   getOAuthUrl(provider: string, orgId: string): string {
+    this.assertGmailProvider(provider);
     const config = OAUTH_CONFIGS[provider];
     if (!config) {
       throw new NotFoundException(`OAuth not supported for provider: ${provider}`);
@@ -497,6 +483,11 @@ export class IntegrationsService {
 
     if (!config.clientId) {
       // Mock flow for environments without real OAuth credentials.
+      if (process.env.NODE_ENV === "production") {
+        throw new ServiceUnavailableException(
+          `${provider} OAuth is not configured`,
+        );
+      }
       return `/api/integrations/${provider}/callback?code=mock_code&state=${encodeURIComponent(state)}`;
     }
 
@@ -514,91 +505,24 @@ export class IntegrationsService {
 
   /** Exchange the authorization code for tokens and store them encrypted. */
   async handleOAuthCallback(provider: string, code: string, orgId: string) {
-    const config = OAUTH_CONFIGS[provider];
-    if (!config) {
-      throw new NotFoundException(`OAuth not supported for provider: ${provider}`);
-    }
-
-    let tokens: Record<string, unknown>;
-
-    if (!config.clientId || code === "mock_code") {
-      tokens = {
-        access_token: `mock_${provider}_access_token_${Date.now()}`,
-        refresh_token: `mock_${provider}_refresh_token_${Date.now()}`,
-        token_type: "Bearer",
-        expires_in: 3600,
-        expires_at: Date.now() + 3600 * 1000,
-        scope: config.scopes.join(" "),
-      };
-    } else {
-      const body = new URLSearchParams({
-        grant_type: "authorization_code",
-        code,
-        redirect_uri: config.redirectUri || "",
-        client_id: config.clientId,
-        client_secret: config.clientSecret || "",
-      });
-      const response = await withCircuitBreaker(`oauth-${provider}`, () =>
-        fetchWithRetry(
-          config.tokenUrl,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/x-www-form-urlencoded" },
-            body: body.toString(),
-          },
-          { provider: `oauth-${provider}` },
-        ),
-      );
-      if (!response.ok) {
-        throw new Error(`Token exchange failed: ${response.status}`);
-      }
-      tokens = (await response.json()) as Record<string, unknown>;
-    }
-
-    // Compute the absolute expiry at STORE time (GL1 go-live blocker).
-    // Providers only send the relative `expires_in` (seconds); without an
-    // `expires_at`, refreshTokenIfNeeded had nothing to compare against and
-    // callback-stored tokens silently went 401 ~60 minutes after connect.
-    // Raw provider fields are preserved alongside the computed expiry.
-    const normalized = this.withAbsoluteExpiry(tokens);
-    const encrypted = encryptCredentials(normalized);
-
-    // Preserve the plaintext `accountEmail` push-routing marker if a prior
-    // gmail.service.handleCallback wrote one on this row — replacing the
-    // whole `credentials` JSON would break inbound push → orgId routing.
-    const existing = await this.prisma.integration.findUnique({
-      where: { orgId_provider: { orgId, provider } },
-      select: { credentials: true },
-    });
-    const accountEmail = this.extractAccountEmail(existing?.credentials);
-    const credentialsJson = (
-      accountEmail ? { encrypted, accountEmail } : { encrypted }
-    ) as unknown as Prisma.InputJsonValue;
-
-    return this.prisma.integration.upsert({
-      where: { orgId_provider: { orgId, provider } },
-      create: {
-        orgId,
-        provider,
-        credentials: credentialsJson,
-        // Dual-write: gmail.service.ts/hubspot.service.ts read tokens from
-        // the `encryptedCredentials` column, not `credentials.encrypted`.
-        encryptedCredentials: encrypted,
-        status: "CONNECTED",
-      },
-      update: {
-        credentials: credentialsJson,
-        encryptedCredentials: encrypted,
-        status: "CONNECTED",
-      },
-    });
+    this.assertGmailProvider(provider);
+    void code;
+    void orgId;
+    throw new NotFoundException(
+      "Generic OAuth callbacks are unavailable; use the canonical Gmail callback",
+    );
   }
 
   async checkHealth(
     id: string,
     orgId: string,
   ): Promise<{ status: string; message: string }> {
-    const integration = await this.findOne(id, orgId);
+    // This row stays inside the service. Only the derived status/message
+    // below crosses the controller boundary.
+    const integration = await this.prisma.integration.findFirst({
+      where: { id, orgId, provider: "gmail" },
+    });
+    if (!integration) throw new NotFoundException("Integration not found");
     try {
       const hasAnyBlob =
         Boolean(integration.encryptedCredentials) ||
@@ -633,47 +557,32 @@ export class IntegrationsService {
 
   /** Mock connect for non-prod/demo environments. */
   async simulateConnect(orgId: string, provider: string) {
-    if (process.env.NODE_ENV === "production") {
-      throw new NotFoundException("Endpoint not available");
-    }
-
-    const mockCredentials = this.withAbsoluteExpiry({
-      access_token: `mock_${provider}_token_${Date.now()}`,
-      refresh_token: `mock_${provider}_refresh_${Date.now()}`,
-      token_type: "Bearer",
-      expires_at: Date.now() + 3600 * 1000 * 24 * 30,
-      scope: OAUTH_CONFIGS[provider]?.scopes.join(" ") || "",
-    });
-    const encrypted = encryptCredentials(mockCredentials);
-
-    return this.prisma.integration.upsert({
-      where: { orgId_provider: { orgId, provider } },
-      create: {
-        orgId,
-        provider,
-        credentials: { encrypted } as unknown as Prisma.InputJsonValue,
-        encryptedCredentials: encrypted,
-        status: "CONNECTED",
-      },
-      update: {
-        credentials: { encrypted } as unknown as Prisma.InputJsonValue,
-        encryptedCredentials: encrypted,
-        status: "CONNECTED",
-      },
-    });
+    void orgId;
+    this.assertGmailProvider(provider);
+    throw new NotFoundException(
+      "Direct mock connect is unavailable; use the Gmail OAuth mock callback",
+    );
   }
 
   async disconnect(id: string, orgId: string) {
     const integration = await this.findOne(id, orgId);
-    return this.prisma.integration.delete({ where: { id: integration.id } });
+    return this.prisma.integration.delete({
+      where: { id: integration.id },
+      select: PUBLIC_INTEGRATION_SELECT,
+    });
   }
 
   async disconnectByProvider(orgId: string, provider: string) {
+    this.assertGmailProvider(provider);
     const integration = await this.prisma.integration.findFirst({
       where: { orgId, provider },
+      select: { id: true },
     });
     if (!integration) throw new NotFoundException("Integration not found");
-    return this.prisma.integration.delete({ where: { id: integration.id } });
+    return this.prisma.integration.delete({
+      where: { id: integration.id },
+      select: PUBLIC_INTEGRATION_SELECT,
+    });
   }
 
   /**
@@ -682,10 +591,12 @@ export class IntegrationsService {
    * lands here.
    */
   async connectApiKey(orgId: string, provider: string, apiKey: string) {
-    if (!apiKey || typeof apiKey !== "string") {
-      throw new NotFoundException("apiKey is required");
-    }
-    return this.create(orgId, { provider, credentials: { api_key: apiKey } });
+    void orgId;
+    void apiKey;
+    this.assertGmailProvider(provider);
+    throw new NotFoundException(
+      "API-key integrations are unavailable in this release",
+    );
   }
 
   /**
@@ -696,6 +607,7 @@ export class IntegrationsService {
     orgId: string,
     provider: string,
   ): Promise<{ ok: boolean; message: string }> {
+    this.assertGmailProvider(provider);
     const creds = await this.getDecryptedCredentials(orgId, provider);
     if (!creds) {
       return { ok: false, message: `${provider} is not connected.` };
@@ -705,5 +617,13 @@ export class IntegrationsService {
       return { ok: false, message: "Access token expired. Reconnect required." };
     }
     return { ok: true, message: `${provider} credentials are valid.` };
+  }
+
+  private assertGmailProvider(provider: string): void {
+    if (provider !== "gmail") {
+      throw new NotFoundException(
+        `Provider is not available in this release: ${provider}`,
+      );
+    }
   }
 }

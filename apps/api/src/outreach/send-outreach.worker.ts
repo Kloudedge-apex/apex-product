@@ -44,6 +44,9 @@ import {
   conversationReplyThreadScope,
   providerReplyThreadScope,
 } from "./reply-single-flight";
+import { assertArtifactDispatchEligible } from "./outreach-artifact-eligibility";
+import { gmailWatchFreshnessFloor } from "../integrations/gmail/gmail-watch-freshness";
+import { senderIdentityReadiness } from "./sender-identity.util";
 
 export { isLiveSendAllowedForOrg } from "./outreach-allowlist.util";
 
@@ -441,6 +444,13 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
 
     let result: ToolResult;
     try {
+      // Defense in depth for rows approved by an older build or a direct data
+      // repair. Reservation policy gates run first, but this validation still
+      // occurs after the claim and before any provider or credential access.
+      // A failure releases the claim through the normal provable-no-send path.
+      if (artifact.channel === OutreachChannel.EMAIL) {
+        assertArtifactDispatchEligible(artifact);
+      }
       result = await this.dispatch(artifact, liveAllowed);
     } catch (err) {
       if (liveAllowed && err instanceof ProviderDispatchUnknownError) {
@@ -503,6 +513,8 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
 
     const receiptId = extractReceiptId(result);
     const provider = extractProvider(result);
+    const providerThreadId =
+      liveAllowed && provider === "gmail" ? extractThreadId(result) : null;
 
     // Forced-mock sends terminate as SIMULATED, not SENT — dashboards and the
     // guarantee ledger must never count simulated traffic as delivered mail.
@@ -518,6 +530,7 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
             status: OutreachArtifactStatus.SENT,
             sentAt: deliveredAt,
             sendReceiptId: receiptId,
+            ...(providerThreadId ? { providerThreadId } : {}),
           }
         : {
             status: OutreachArtifactStatus.SIMULATED,
@@ -526,9 +539,10 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
     });
 
     // Materialize real Gmail delivery into the durable conversation store
-    // only after SENT is committed. A projection failure must never retry the
-    // already-successful provider call (which could duplicate delivery); the
-    // artifact receipt remains the recovery source for a later backfill.
+    // only after SENT + providerThreadId are committed on the artifact. A
+    // projection failure must never retry the already-successful provider call
+    // (which could duplicate delivery); the artifact remains sufficient for
+    // inbound correlation and is the recovery source for a later backfill.
     if (
       liveAllowed &&
       provider === "gmail" &&
@@ -1028,9 +1042,23 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
         if (!org) {
           throw new Error(`Org ${artifact.orgId} not found (required for email send)`);
         }
-        if (liveAllowed && !org.physicalAddress) {
+        const senderIdentity = senderIdentityReadiness(org);
+        if (liveAllowed && !senderIdentity.physicalAddressSet) {
           throw new BadRequestException(
             `Org ${artifact.orgId} is missing physicalAddress; cannot send live email outreach until configured (CAN-SPAM §7704(a)(5)).`,
+          );
+        }
+        if (liveAllowed && !senderIdentity.senderNameSet) {
+          throw new BadRequestException(
+            `Org ${artifact.orgId} is missing senderName; cannot send live email outreach until the reviewed sender identity is configured.`,
+          );
+        }
+        if (
+          liveAllowed &&
+          !senderIdentity.countrySet
+        ) {
+          throw new BadRequestException(
+            `Org ${artifact.orgId} is missing a valid two-letter country; cannot send live email outreach until the sender identity is complete.`,
           );
         }
 
@@ -1126,17 +1154,29 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
     const integrations = new Map<string, IntegrationCredentials>();
     try {
       const records = await this.prisma.integration.findMany({
-        where: { orgId, status: "CONNECTED" },
+        where: {
+          orgId,
+          provider: "gmail",
+          status: "CONNECTED",
+          encryptedCredentials: { not: null },
+          credentials: {
+            path: ["accountEmail"],
+            string_contains: "@",
+          },
+          lastHistoryId: { not: null },
+          lastSyncAt: { gte: gmailWatchFreshnessFloor() },
+        },
       });
       for (const record of records) {
+        if (record.provider !== "gmail") continue;
         try {
           const decrypted = await this.integrations.refreshTokenIfNeeded(
             orgId,
-            record.provider,
+            "gmail",
           );
           if (!decrypted) continue;
-          integrations.set(record.provider, {
-            provider: record.provider,
+          integrations.set("gmail", {
+            provider: "gmail",
             accessToken: (decrypted.access_token as string) || "",
             refreshToken: decrypted.refresh_token as string | undefined,
             expiresAt: decrypted.expires_at as number | undefined,

@@ -65,7 +65,7 @@ export class OrgsController {
    *
    * The response carries a computed `sendReadiness` object (GL5) so the FE
    * can render live-send truth instead of guessing:
-   *   { liveSendAllowed, physicalAddressSet, senderNameSet,
+   *   { liveSendAllowed, physicalAddressSet, senderNameSet, countrySet,
    *     mailboxConnected, dailyCapRemaining }
    * See OrgsService.computeSendReadiness for derivation.
    */

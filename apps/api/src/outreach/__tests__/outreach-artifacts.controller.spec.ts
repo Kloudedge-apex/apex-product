@@ -1,6 +1,10 @@
 import "reflect-metadata";
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { BadRequestException, UnauthorizedException } from "@nestjs/common";
+import {
+  BadRequestException,
+  RequestMethod,
+  UnauthorizedException,
+} from "@nestjs/common";
 import { OutreachArtifactStatus } from "@prisma/client";
 import type { Request } from "express";
 import { OutreachArtifactsController } from "../outreach-artifacts.controller";
@@ -9,6 +13,8 @@ import { OutreachArtifactsService } from "../outreach-artifacts.service";
 
 /** Nest stores @UseGuards() refs under this key (GUARDS_METADATA). */
 const GUARDS_METADATA = "__guards__";
+const PATH_METADATA = "path";
+const METHOD_METADATA = "method";
 
 type ServiceMock = Pick<OutreachArtifactsService, "approve" | "reject" | "listForOrg" | "listPageForOrg"> & {
   approve: ReturnType<typeof vi.fn>;
@@ -49,10 +55,42 @@ describe("OutreachArtifactsController — guard attachment (audit B11)", () => {
     expect(guardsOn("reject")).toContain(AdminOrManagerGuard);
   });
 
+  it("attaches AdminOrManagerGuard to the review-capability probe", () => {
+    expect(guardsOn("reviewCapability")).toContain(AdminOrManagerGuard);
+  });
+
   it("leaves the read-only routes un-gated so members can still review queues", () => {
     expect(guardsOn("list")).toHaveLength(0);
     expect(guardsOn("get")).toHaveLength(0);
     expect(guardsOn("listForGraphRun")).toHaveLength(0);
+  });
+
+  it("registers the static review-capability GET before the dynamic artifact route", () => {
+    const prototype = OutreachArtifactsController.prototype;
+    expect(
+      Reflect.getMetadata(PATH_METADATA, prototype.reviewCapability),
+    ).toBe("outreach-artifacts/review-capability");
+    expect(
+      Reflect.getMetadata(METHOD_METADATA, prototype.reviewCapability),
+    ).toBe(RequestMethod.GET);
+
+    const methods = Object.getOwnPropertyNames(prototype);
+    expect(methods.indexOf("reviewCapability")).toBeGreaterThan(-1);
+    expect(methods.indexOf("reviewCapability")).toBeLessThan(
+      methods.indexOf("get"),
+    );
+  });
+});
+
+describe("OutreachArtifactsController — review capability", () => {
+  it("returns the explicit positive capability after the guard succeeds", () => {
+    const controller = new OutreachArtifactsController(
+      mockService() as unknown as OutreachArtifactsService,
+    );
+
+    expect(controller.reviewCapability()).toEqual({
+      canReviewArtifacts: true,
+    });
   });
 });
 

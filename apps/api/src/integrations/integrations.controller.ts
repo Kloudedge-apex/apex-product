@@ -11,6 +11,7 @@ import {
 } from "@nestjs/common";
 import { Response } from "express";
 import { IntegrationsService } from "./integrations.service";
+import { GmailService } from "./gmail/gmail.service";
 import { OrgId } from "../common/org-context.decorator";
 import { SkipOrgGuard } from "../common/org-scope.guard";
 import { verifyOAuthState } from "../common/webhook-signature.util";
@@ -23,7 +24,10 @@ import {
 export class IntegrationsController {
   private readonly logger = new Logger(IntegrationsController.name);
 
-  constructor(private readonly integrationsService: IntegrationsService) {}
+  constructor(
+    private readonly integrationsService: IntegrationsService,
+    private readonly gmailService: GmailService,
+  ) {}
 
   @Get()
   findAll(@OrgId() orgId: string) {
@@ -165,7 +169,16 @@ export class IntegrationsController {
     }
 
     try {
-      await this.integrationsService.handleOAuthCallback(provider, code, orgId);
+      // Gmail owns extra callback invariants that the provider-neutral token
+      // exchange cannot establish: resolving the authenticated mailbox and
+      // registering users.watch so replies and DSNs can be routed back to the
+      // correct tenant. GmailModule exports GmailService, so the controller can
+      // delegate directly without making either service depend on the other.
+      if (provider === "gmail") {
+        await this.gmailService.handleCallback(code, orgId);
+      } else {
+        await this.integrationsService.handleOAuthCallback(provider, code, orgId);
+      }
       return res.redirect(`${frontendUrl}${returnPath}?connected=${provider}`);
     } catch (err) {
       this.logger.warn(

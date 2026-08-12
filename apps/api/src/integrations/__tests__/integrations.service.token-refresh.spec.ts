@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
+import { NotFoundException } from "@nestjs/common";
 import type { IntegrationsService } from "../integrations.service";
 import type { PrismaService } from "../../prisma/prisma.service";
 import { encryptCredentials, decryptCredentials } from "../crypto.util";
@@ -14,12 +15,10 @@ import { encryptCredentials, decryptCredentials } from "../crypto.util";
  * 2026-05-20 has a refresh_token but no expires_at).
  *
  * Required behavior under test:
- *   1. Callback stores an absolute `expires_at` (now + expires_in − 60s skew)
- *      for BOTH gmail and outlook, keeping the raw provider fields.
- *   2. Missing `expires_at` is treated as EXPIRED → refresh attempt.
- *   3. Permanent refresh failure (`invalid_grant`) flips the row to ERROR.
- *   4. A successful refresh persists the new token with a new `expires_at`.
- *   5. Split-brain reconciliation: rows written by gmail.service.ts
+ *   1. Missing `expires_at` is treated as EXPIRED → refresh attempt.
+ *   2. Permanent refresh failure (`invalid_grant`) flips the row to ERROR.
+ *   3. A successful refresh persists the new token with a new `expires_at`.
+ *   4. Split-brain reconciliation: rows written by gmail.service.ts
  *      (`encryptedCredentials` column + `credentials.accountEmail` +
  *      googleapis' `expiry_date`) are readable, and writes keep both shapes
  *      in lock-step without dropping `accountEmail`.
@@ -119,74 +118,6 @@ describe("IntegrationsService GL1 — OAuth token expiry + refresh", () => {
     vi.unstubAllGlobals();
   });
 
-  describe("handleOAuthCallback — absolute expires_at at store time", () => {
-    it.each(["gmail", "outlook"])(
-      "%s: stores expires_at = now + expires_in − 60s skew, keeping raw fields, in both shapes",
-      async (provider) => {
-        stubFetch(200, {
-          access_token: "live-access-token",
-          refresh_token: "live-refresh-token",
-          token_type: "Bearer",
-          expires_in: 3600,
-          scope: "send read",
-        });
-        prisma.integration.findUnique.mockResolvedValue(null);
-
-        const before = Date.now();
-        await service.handleOAuthCallback(provider, "real-auth-code", "org_a");
-        const after = Date.now();
-
-        expect(prisma.integration.upsert).toHaveBeenCalledTimes(1);
-        const upsertArg = prisma.integration.upsert.mock.calls[0][0] as {
-          create: Record<string, unknown>;
-          update: Record<string, unknown>;
-        };
-
-        const credentialsJson = upsertArg.create.credentials as Record<string, unknown>;
-        const stored = decryptCredentials(credentialsJson.encrypted as string);
-
-        // Absolute expiry computed with the 60s safety skew.
-        const expiresAt = stored.expires_at as number;
-        expect(typeof expiresAt).toBe("number");
-        expect(expiresAt).toBeGreaterThanOrEqual(before + 3600_000 - 60_000);
-        expect(expiresAt).toBeLessThanOrEqual(after + 3600_000 - 60_000);
-
-        // Raw provider fields kept; googleapis alias mirrors expires_at.
-        expect(stored.expires_in).toBe(3600);
-        expect(stored.access_token).toBe("live-access-token");
-        expect(stored.refresh_token).toBe("live-refresh-token");
-        expect(stored.expiry_date).toBe(expiresAt);
-
-        // Dual-write: gmail.service.ts reads the encryptedCredentials column.
-        expect(upsertArg.create.encryptedCredentials).toBe(credentialsJson.encrypted);
-        expect(upsertArg.update.encryptedCredentials).toBe(credentialsJson.encrypted);
-        expect(upsertArg.update.credentials).toEqual(credentialsJson);
-      },
-    );
-
-    it("preserves the accountEmail push-routing marker on re-connect", async () => {
-      stubFetch(200, {
-        access_token: "at",
-        refresh_token: "rt",
-        token_type: "Bearer",
-        expires_in: 3600,
-      });
-      prisma.integration.findUnique.mockResolvedValue({
-        credentials: { accountEmail: "founder@tenantzero.com" },
-      });
-
-      await service.handleOAuthCallback("gmail", "real-auth-code", "org_a");
-
-      const upsertArg = prisma.integration.upsert.mock.calls[0][0] as {
-        update: { credentials: Record<string, unknown> };
-      };
-      expect(upsertArg.update.credentials.accountEmail).toBe(
-        "founder@tenantzero.com",
-      );
-      expect(typeof upsertArg.update.credentials.encrypted).toBe("string");
-    });
-  });
-
   describe("refreshTokenIfNeeded — missing expires_at means EXPIRED", () => {
     it("refreshes a callback-stored legacy credential that has refresh_token but no expires_at", async () => {
       // Exact shape of the tenant-zero Gmail credential stored 2026-05-20:
@@ -231,7 +162,7 @@ describe("IntegrationsService GL1 — OAuth token expiry + refresh", () => {
       expect(stored.access_token).toBe("fresh-access-token");
       expect(stored.expires_at).toBe(expiresAt);
       expect(data.encryptedCredentials).toBe(credentialsJson.encrypted);
-      expect(data.lastSyncAt).toBeInstanceOf(Date);
+      expect(data).not.toHaveProperty("lastSyncAt");
     });
 
     it("does not refresh a still-fresh token", async () => {
@@ -252,20 +183,11 @@ describe("IntegrationsService GL1 — OAuth token expiry + refresh", () => {
       expect(prisma.integration.update).not.toHaveBeenCalled();
     });
 
-    it("returns api-key style credentials untouched (no refresh_token, no expires_at)", async () => {
-      const apiKeyCreds = { api_key: "apollo-key-123" };
-      prisma.integration.findFirst.mockResolvedValue(
-        connectedRow({
-          provider: "apollo",
-          credentials: { encrypted: encryptCredentials(apiKeyCreds) },
-        }),
-      );
-      const fetchMock = stubFetch(200, {});
-
-      const result = await service.refreshTokenIfNeeded("org_a", "apollo");
-
-      expect(result).toEqual(apiKeyCreds);
-      expect(fetchMock).not.toHaveBeenCalled();
+    it("rejects non-Gmail rows before reading provider credentials", async () => {
+      await expect(
+        service.refreshTokenIfNeeded("org_a", "apollo"),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(prisma.integration.findFirst).not.toHaveBeenCalled();
     });
   });
 

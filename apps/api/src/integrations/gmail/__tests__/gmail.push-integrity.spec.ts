@@ -14,8 +14,9 @@ vi.mock("google-auth-library", () => {
   return { OAuth2Client: MockOAuth2Client };
 });
 
-const { historyList, messagesGet } = vi.hoisted(() => ({
+const { historyList, messagesList, messagesGet } = vi.hoisted(() => ({
   historyList: vi.fn(),
+  messagesList: vi.fn(),
   messagesGet: vi.fn(),
 }));
 
@@ -32,7 +33,7 @@ vi.mock("googleapis", () => {
       gmail: vi.fn().mockReturnValue({
         users: {
           history: { list: historyList },
-          messages: { get: messagesGet },
+          messages: { list: messagesList, get: messagesGet },
         },
       }),
     },
@@ -48,12 +49,18 @@ function createMockPrisma() {
       update: vi.fn().mockResolvedValue({ id: "int_1" }),
       updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
+    outreachArtifact: {
+      findFirst: vi.fn().mockResolvedValue({ id: "artifact_1" }),
+    },
   } as unknown as PrismaService & {
     integration: {
       findUnique: ReturnType<typeof vi.fn>;
       findMany: ReturnType<typeof vi.fn>;
       update: ReturnType<typeof vi.fn>;
       updateMany: ReturnType<typeof vi.fn>;
+    };
+    outreachArtifact: {
+      findFirst: ReturnType<typeof vi.fn>;
     };
   };
 }
@@ -110,6 +117,8 @@ function connectedIntegration() {
       }),
     ),
     credentials: { accountEmail: "owner@example.com" },
+    lastHistoryId: "100",
+    lastSyncAt: new Date(),
   };
 }
 
@@ -171,8 +180,12 @@ describe("GmailService durable push handling", () => {
     prisma.integration.updateMany.mockImplementation(async (args) => {
       const input = args as {
         where: { lastHistoryId?: string | null };
-        data: { lastHistoryId?: string | null };
+        data: { lastHistoryId?: string | null; status?: string };
       };
+      if (input.data.status === "ERROR") {
+        durableHistoryId = null;
+        return { count: 1 };
+      }
       if (input.where.lastHistoryId !== durableHistoryId) return { count: 0 };
       durableHistoryId = input.data.lastHistoryId ?? null;
       return { count: 1 };
@@ -191,8 +204,10 @@ describe("GmailService durable push handling", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     historyList.mockReset();
+    messagesList.mockReset();
     messagesGet.mockReset();
     historyList.mockResolvedValue({ data: { history: [] } });
+    messagesList.mockResolvedValue({ data: { messages: [] } });
     prisma = createMockPrisma();
     suppression = createMockSuppression();
     store = createMockConversationStore();
@@ -482,27 +497,243 @@ describe("GmailService durable push handling", () => {
     expect(prisma.integration.updateMany).not.toHaveBeenCalled();
   });
 
-  it("resets an expired history cursor without fabricating message work", async () => {
+  it("recovers still-present messages but disables instead of advancing an expired cursor", async () => {
     connect("1");
     historyList.mockRejectedValue(
       Object.assign(new Error("Requested entity was not found"), {
         response: { status: 404 },
       }),
     );
+    messagesList
+      .mockResolvedValueOnce({
+        data: {
+          messages: [
+            { id: "msg_reply_1", threadId: "thread_1" },
+            { id: "msg_reply_1", threadId: "thread_1" },
+          ],
+          nextPageToken: "page_2",
+        },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          messages: [{ id: "msg_reply_1", threadId: "thread_1" }],
+        },
+      });
+    messagesGet.mockResolvedValue(
+      messageResponse({
+        id: "msg_reply_1",
+        from: "Pat <prospect@acme.com>",
+        // Recovery covers a reply that arrived in INBOX but was archived
+        // before the history-retention gap was detected.
+        labelIds: ["UNREAD"],
+      }),
+    );
+
     await expect(
       service.handlePushNotification({
         emailAddress: "owner@example.com",
         historyId: "500",
       }),
-    ).resolves.toBeUndefined();
+    ).rejects.toThrow("operator reconciliation and Gmail reconnect required");
+
+    expect(messagesList).toHaveBeenCalledTimes(2);
+    expect(messagesList.mock.calls[1][0]).toMatchObject({
+      userId: "me",
+      pageToken: "page_2",
+      includeSpamTrash: true,
+    });
+    expect(messagesGet).toHaveBeenCalledTimes(1);
+    expect(store.recordInboundGmailMessage).toHaveBeenCalledTimes(1);
     expect(prisma.integration.updateMany).toHaveBeenCalledWith({
       where: {
+        id: "int_1",
         orgId: "org_1",
         provider: "gmail",
-        lastHistoryId: "1",
+        status: "CONNECTED",
       },
-      data: { lastHistoryId: "500" },
+      data: expect.objectContaining({
+        status: "ERROR",
+        lastHistoryId: null,
+        lastErrorAt: expect.any(Date),
+        lastErrorMessage: expect.stringContaining(
+          "completeness cannot be proven",
+        ),
+      }),
     });
+    expect(prisma.integration.updateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({ data: { lastHistoryId: "500" } }),
+    );
+  });
+
+  it("recovers a DSN only when its failed recipient belongs to a sent artifact", async () => {
+    connect("1");
+    historyList.mockRejectedValue(
+      Object.assign(new Error("Requested entity was not found"), {
+        response: { status: 404 },
+      }),
+    );
+    messagesList.mockResolvedValue({
+      data: { messages: [{ id: "dsn_1", threadId: "dsn_thread" }] },
+    });
+    messagesGet.mockResolvedValue(
+      messageResponse({
+        id: "dsn_1",
+        from: "Mail Delivery <mailer-daemon@googlemail.com>",
+        subject: "Delivery Status Notification (Failure)",
+        extraHeaders: [
+          { name: "X-Failed-Recipients", value: "Prospect@Acme.com" },
+        ],
+      }),
+    );
+
+    await expect(
+      service.handlePushNotification({
+        emailAddress: "owner@example.com",
+        historyId: "500",
+      }),
+    ).rejects.toThrow("integration disabled");
+
+    expect(prisma.outreachArtifact.findFirst).toHaveBeenCalledWith({
+      where: {
+        orgId: "org_1",
+        channel: "EMAIL",
+        status: "SENT",
+        recipientRef: {
+          equals: "prospect@acme.com",
+          mode: "insensitive",
+        },
+      },
+      select: { id: true },
+    });
+    expect(suppression.suppress).toHaveBeenCalledWith(
+      expect.objectContaining({
+        orgId: "org_1",
+        recipientRef: "prospect@acme.com",
+        reason: OutreachSuppressionReason.BOUNCED,
+      }),
+    );
+  });
+
+  it("does not suppress an unrelated mailbox DSN during reconciliation", async () => {
+    connect("1");
+    historyList.mockRejectedValue(
+      Object.assign(new Error("Requested entity was not found"), {
+        response: { status: 404 },
+      }),
+    );
+    messagesList.mockResolvedValue({
+      data: { messages: [{ id: "dsn_unrelated", threadId: "dsn_thread" }] },
+    });
+    messagesGet.mockResolvedValue(
+      messageResponse({
+        id: "dsn_unrelated",
+        from: "Mail Delivery <mailer-daemon@googlemail.com>",
+        extraHeaders: [
+          { name: "X-Failed-Recipients", value: "other@example.net" },
+        ],
+      }),
+    );
+    prisma.outreachArtifact.findFirst.mockResolvedValue(null);
+
+    await expect(
+      service.handlePushNotification({
+        emailAddress: "owner@example.com",
+        historyId: "500",
+      }),
+    ).rejects.toThrow("integration disabled");
+
+    expect(suppression.suppress).not.toHaveBeenCalled();
     expect(store.recordInboundGmailMessage).not.toHaveBeenCalled();
+    expect(prisma.integration.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "ERROR",
+          lastHistoryId: null,
+          lastErrorMessage: expect.stringContaining(
+            "operator reconciliation and Gmail reconnect required",
+          ),
+        }),
+      }),
+    );
+  });
+
+  it("disables the integration when bounded reconciliation cannot prove completeness", async () => {
+    connect("1");
+    historyList.mockRejectedValue(
+      Object.assign(new Error("Requested entity was not found"), {
+        response: { status: 404 },
+      }),
+    );
+    for (let page = 0; page < 5; page += 1) {
+      messagesList.mockResolvedValueOnce({
+        data: {
+          messages: Array.from({ length: 100 }, (_, index) => ({
+            id: `msg_${page}_${index}`,
+            threadId: `thread_${page}_${index}`,
+          })),
+          nextPageToken: `page_${page + 2}`,
+        },
+      });
+    }
+
+    await expect(
+      service.handlePushNotification({
+        emailAddress: "owner@example.com",
+        historyId: "500",
+      }),
+    ).rejects.toThrow("integration disabled");
+
+    expect(messagesList).toHaveBeenCalledTimes(5);
+    expect(messagesGet).not.toHaveBeenCalled();
+    expect(prisma.integration.updateMany).toHaveBeenCalledTimes(1);
+    expect(prisma.integration.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "int_1",
+        orgId: "org_1",
+        provider: "gmail",
+        status: "CONNECTED",
+      },
+      data: expect.objectContaining({
+        status: "ERROR",
+        lastHistoryId: null,
+        lastErrorAt: expect.any(Date),
+        lastErrorMessage: expect.stringContaining(
+          "mailbox exceeds bounded reconciliation limit",
+        ),
+      }),
+    });
+  });
+
+  it("disables the integration when a reconciliation candidate cannot be persisted", async () => {
+    connect("1");
+    historyList.mockRejectedValue(
+      Object.assign(new Error("Requested entity was not found"), {
+        response: { status: 404 },
+      }),
+    );
+    messagesList.mockResolvedValue({
+      data: { messages: [{ id: "msg_reply_1", threadId: "thread_1" }] },
+    });
+    messagesGet.mockResolvedValue(
+      messageResponse({ id: "msg_reply_1", from: "prospect@acme.com" }),
+    );
+    store.recordInboundGmailMessage.mockRejectedValue(new Error("db down"));
+
+    await expect(
+      service.handlePushNotification({
+        emailAddress: "owner@example.com",
+        historyId: "500",
+      }),
+    ).rejects.toThrow("bounded reconciliation failed: db down");
+
+    expect(prisma.integration.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "ERROR",
+          lastHistoryId: null,
+          lastErrorMessage: expect.stringContaining("db down"),
+        }),
+      }),
+    );
   });
 });

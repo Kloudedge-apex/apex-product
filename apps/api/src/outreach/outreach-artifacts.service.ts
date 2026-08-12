@@ -2,7 +2,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
-  BadRequestException,
+  ConflictException,
   ServiceUnavailableException,
   Optional,
 } from "@nestjs/common";
@@ -16,6 +16,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { EvidenceLedgerService } from "../observability/evidence-ledger.service";
 import { LangSmithService } from "../observability/langsmith.service";
 import { OutreachSendQueueService } from "./outreach-send-queue.service";
+import { assertArtifactDispatchEligible } from "./outreach-artifact-eligibility";
 
 /** Dataset name for the regression set of rejected SDR drafts. */
 const BAD_SDR_DRAFTS_DATASET = "apex-bad-sdr-drafts";
@@ -252,10 +253,13 @@ export class OutreachArtifactsService {
           }`,
           err instanceof Error ? err.stack : undefined,
         );
-        throw new ServiceUnavailableException(
-          `Artifact ${updated.id} was approved but could not be queued for sending. ` +
-            `The approval is saved; the recovery sweep will queue it automatically.`,
-        );
+        throw new ServiceUnavailableException({
+          message:
+            `Artifact ${updated.id} was approved but could not be queued for sending. ` +
+            "The approval is saved; the recovery sweep will queue it automatically.",
+          approvalSaved: true,
+          artifactId: updated.id,
+        });
       }
     }
 
@@ -333,17 +337,12 @@ export class OutreachArtifactsService {
           throw new NotFoundException(`OutreachArtifact ${id} not found`);
         }
         if (artifact.status !== OutreachArtifactStatus.PENDING_REVIEW) {
-          throw new BadRequestException(
+          throw new ConflictException(
             `Artifact ${id} is ${artifact.status}; only PENDING_REVIEW can be ${action}`,
           );
         }
-        if (
-          decision === OutreachArtifactStatus.APPROVED &&
-          artifact.channel === OutreachChannel.HUBSPOT_NOTE
-        ) {
-          throw new BadRequestException(
-            "HubSpot note approval is unavailable because dispatch is not implemented",
-          );
+        if (decision === OutreachArtifactStatus.APPROVED) {
+          assertArtifactDispatchEligible(artifact);
         }
 
         return tx.outreachArtifact.update({
@@ -374,7 +373,7 @@ export class OutreachArtifactsService {
       if (!current) {
         throw new NotFoundException(`OutreachArtifact ${id} not found`);
       }
-      throw new BadRequestException(
+      throw new ConflictException(
         `Artifact ${id} is ${current.status}; only PENDING_REVIEW can be ${action}`,
       );
     }

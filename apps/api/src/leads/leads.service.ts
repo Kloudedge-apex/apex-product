@@ -2,6 +2,7 @@ import {
   Injectable,
   Logger,
   ConflictException,
+  NotFoundException,
   Inject,
   forwardRef,
 } from "@nestjs/common";
@@ -896,6 +897,18 @@ export class LeadsService {
   // ─── Job Helpers ─────────────────────────────────────
 
   private async createJob(orgId: string, icpProfileId: string, stage: ScrapeStage): Promise<string> {
+    // Defense in depth for every job-producing path, including legacy/direct
+    // callers that do not enter through GraphService. ScrapeJob currently has
+    // independent orgId and icpProfileId foreign keys, so validate the pair
+    // before creating a row and never allow a cross-tenant relation.
+    const ownedProfile = await this.prisma.icpProfile.findFirst({
+      where: { id: icpProfileId, orgId },
+      select: { id: true },
+    });
+    if (!ownedProfile) {
+      throw new NotFoundException("ICP profile not found");
+    }
+
     const job = await this.prisma.scrapeJob.create({
       data: { orgId, icpProfileId, stage, status: "QUEUED" },
     });

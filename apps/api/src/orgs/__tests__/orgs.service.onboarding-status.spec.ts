@@ -98,6 +98,7 @@ describe("OrgsService.getOnboardingStatus", () => {
         liveSendAllowed: true,
         physicalAddressSet: true,
         senderNameSet: true,
+        countrySet: true,
         mailboxConnected: true,
         dailyCapRemaining: 8,
       },
@@ -127,7 +128,14 @@ describe("OrgsService.getOnboardingStatus", () => {
       where: {
         orgId: ORG_ID,
         status: "CONNECTED",
-        provider: { in: ["gmail", "outlook"] },
+        provider: "gmail",
+        credentials: {
+          path: ["accountEmail"],
+          string_contains: "@",
+        },
+        encryptedCredentials: { not: null },
+        lastHistoryId: { not: null },
+        lastSyncAt: { gte: expect.any(Date) },
       },
     });
   });

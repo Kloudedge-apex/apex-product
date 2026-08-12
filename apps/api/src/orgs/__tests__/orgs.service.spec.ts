@@ -54,7 +54,18 @@ describe("OrgsService website validation", () => {
 
 describe("OrgsService concurrent bootstrap", () => {
   it("returns the workspace created by the winning request", async () => {
-    const org = { id: "org_trial", users: [{ clerkId: "clerk_new" }] };
+    const org = {
+      id: "org_trial",
+      users: [
+        {
+          id: "user_owner",
+          email: "owner@acme.example",
+          name: "Owner",
+          role: "OWNER",
+          createdAt: new Date("2026-08-13T00:00:00.000Z"),
+        },
+      ],
+    };
     const prisma = {
       user: {
         findUnique: vi
@@ -79,7 +90,26 @@ describe("OrgsService concurrent bootstrap", () => {
 
     expect(prisma.org.findUnique).toHaveBeenCalledWith({
       where: { id: org.id },
-      include: { users: true },
+      select: expect.objectContaining({
+        id: true,
+        users: {
+          select: {
+            id: true,
+            email: true,
+            name: true,
+            role: true,
+            createdAt: true,
+          },
+        },
+      }),
+    });
+    expect(prisma.user.findUnique).toHaveBeenNthCalledWith(1, {
+      where: { clerkId: "clerk_new" },
+      select: { orgId: true },
+    });
+    expect(prisma.user.findUnique).toHaveBeenNthCalledWith(2, {
+      where: { clerkId: "clerk_new" },
+      select: { orgId: true },
     });
   });
 });

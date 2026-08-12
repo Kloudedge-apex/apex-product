@@ -268,6 +268,30 @@ if [[ "${PUBLIC_HOST}" != *.* ]]; then
   echo "ERROR: API_PUBLIC_URL host is not a fully qualified public DNS name" >&2
   exit 1
 fi
+
+EXPECTED_GOOGLE_REDIRECT_URI="https://${PUBLIC_AUTHORITY}/api/integrations/gmail/callback"
+require_value \
+  "$(env_value "${API_JSON}" GOOGLE_REDIRECT_URI)" \
+  "${EXPECTED_GOOGLE_REDIRECT_URI}" \
+  "GOOGLE_REDIRECT_URI"
+
+GMAIL_PUBSUB_TOPIC="$(env_value "${API_JSON}" GMAIL_PUBSUB_TOPIC)"
+if [[ ! "${GMAIL_PUBSUB_TOPIC}" =~ ^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/topics/[A-Za-z][A-Za-z0-9._~+%-]{2,254}$ ]]; then
+  echo "ERROR: GMAIL_PUBSUB_TOPIC is not a canonical Pub/Sub topic resource name" >&2
+  exit 1
+fi
+
+EXPECTED_GMAIL_PUSH_AUDIENCE="https://${PUBLIC_AUTHORITY}/api/integrations/gmail/push"
+require_value \
+  "$(env_value "${API_JSON}" GMAIL_PUSH_AUDIENCE)" \
+  "${EXPECTED_GMAIL_PUSH_AUDIENCE}" \
+  "GMAIL_PUSH_AUDIENCE"
+
+GMAIL_PUSH_PUBLISHER_SA="$(env_value "${API_JSON}" GMAIL_PUSH_PUBLISHER_SA)"
+if [[ ! "${GMAIL_PUSH_PUBLISHER_SA}" =~ ^[a-z][a-z0-9-]{0,62}@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$ ]]; then
+  echo "ERROR: GMAIL_PUSH_PUBLISHER_SA is not a canonical Google service-account email" >&2
+  exit 1
+fi
 require_value \
   "$(json_value "${API_JSON}" '.properties.configuration.ingress.external')" \
   "true" \
@@ -327,6 +351,7 @@ REQUIRED_SHARED_SECRET_ENV_NAMES=(
   ENCRYPTION_KEY
   ADMIN_API_KEY
   GOOGLE_CLIENT_SECRET
+  METRICS_AUTH_TOKEN
 )
 for SECRET_NAME in "${REQUIRED_SHARED_SECRET_ENV_NAMES[@]}"; do
   require_secret_ref_name_parity "${SECRET_NAME}" "true"
@@ -366,7 +391,6 @@ OPTIONAL_SHARED_SECRET_ENV_NAMES=(
   HUBSPOT_ACCESS_TOKEN
   APOLLO_API_KEY
   INSTANTLY_API_KEY
-  METRICS_AUTH_TOKEN
   REDIS_PASSWORD
 )
 for SECRET_NAME in "${OPTIONAL_SHARED_SECRET_ENV_NAMES[@]}"; do

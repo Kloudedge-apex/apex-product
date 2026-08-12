@@ -8,9 +8,11 @@ import { OrgsService, SendReadiness } from "../orgs.service";
  * object, so each field's derivation is pinned here against a mocked prisma:
  *
  *   liveSendAllowed    ← isLiveSendAllowedForOrg (OUTREACH_LIVE_FOR_ORGS)
- *   physicalAddressSet ← Org.physicalAddress non-empty after trim
+ *   physicalAddressSet ← Org.physicalAddress satisfies the persisted 5-char floor
  *   senderNameSet      ← Org.senderName non-empty after trim
- *   mailboxConnected   ← CONNECTED gmail/outlook Integration row exists
+ *   countrySet         ← Org.country is uppercase, assigned ISO-3166 alpha-2
+ *   mailboxConnected   ← CONNECTED Gmail row has credentials, identity,
+ *                        cursor, and a recent successful watch renewal
  *   dailyCapRemaining  ← GL8a cap (OUTREACH_DAILY_CAP_PER_ORG, default 40)
  *                        minus confirmed/in-flight/unknown capacity, clamped
  *                        at 0
@@ -42,9 +44,24 @@ function buildService(opts?: { mailboxCount?: number; sentToday?: number }): {
 }
 
 function orgRow(
-  partial?: Partial<{ physicalAddress: string | null; senderName: string | null }>,
-): { id: string; physicalAddress: string | null; senderName: string | null } {
-  return { id: ORG_ID, physicalAddress: null, senderName: null, ...partial };
+  partial?: Partial<{
+    physicalAddress: string | null;
+    senderName: string | null;
+    country: string | null;
+  }>,
+): {
+  id: string;
+  physicalAddress: string | null;
+  senderName: string | null;
+  country: string | null;
+} {
+  return {
+    id: ORG_ID,
+    physicalAddress: null,
+    senderName: null,
+    country: null,
+    ...partial,
+  };
 }
 
 afterEach(() => {
@@ -58,6 +75,7 @@ describe("OrgsService.computeSendReadiness", () => {
     const readiness = await service.computeSendReadiness(orgRow());
 
     expect(Object.keys(readiness).sort()).toEqual([
+      "countrySet",
       "dailyCapRemaining",
       "liveSendAllowed",
       "mailboxConnected",
@@ -67,6 +85,7 @@ describe("OrgsService.computeSendReadiness", () => {
     expect(typeof readiness.liveSendAllowed).toBe("boolean");
     expect(typeof readiness.physicalAddressSet).toBe("boolean");
     expect(typeof readiness.senderNameSet).toBe("boolean");
+    expect(typeof readiness.countrySet).toBe("boolean");
     expect(typeof readiness.mailboxConnected).toBe("boolean");
     expect(typeof readiness.dailyCapRemaining).toBe("number");
   });
@@ -99,6 +118,7 @@ describe("OrgsService.computeSendReadiness", () => {
       [null, false],
       ["", false],
       ["   ", false],
+      ["abc", false],
       ["221B Baker Street, London", true],
     ];
     it.each(addressCases)(
@@ -125,22 +145,49 @@ describe("OrgsService.computeSendReadiness", () => {
       );
       expect(readiness.senderNameSet).toBe(expected);
     });
+
+    it.each([
+      [null, false],
+      ["us", false],
+      ["ZZ", false],
+      ["US", true],
+    ] as const)("country %j → %s", async (country, expected) => {
+      const { service } = buildService();
+      const readiness = await service.computeSendReadiness(
+        orgRow({ country }),
+      );
+      expect(readiness.countrySet).toBe(expected);
+    });
   });
 
-  describe("mailboxConnected (CONNECTED gmail/outlook Integration)", () => {
-    it("is false when no CONNECTED mailbox integration exists", async () => {
+  describe("mailboxConnected (identified + watched Gmail integration)", () => {
+    it("is false when no fully initialized Gmail integration exists", async () => {
       const { service } = buildService({ mailboxCount: 0 });
       const readiness = await service.computeSendReadiness(orgRow());
       expect(readiness.mailboxConnected).toBe(false);
     });
 
-    it("is true when a CONNECTED mailbox integration exists", async () => {
+    it("is false after cursor expiry disables the integration and clears its cursor", async () => {
+      const { service, prisma } = buildService({ mailboxCount: 0 });
+
+      const readiness = await service.computeSendReadiness(orgRow());
+
+      expect(readiness.mailboxConnected).toBe(false);
+      expect(prisma.integration.count).toHaveBeenCalledWith({
+        where: expect.objectContaining({
+          status: "CONNECTED",
+          lastHistoryId: { not: null },
+        }),
+      });
+    });
+
+    it("is true when an identified, watched Gmail integration exists", async () => {
       const { service } = buildService({ mailboxCount: 1 });
       const readiness = await service.computeSendReadiness(orgRow());
       expect(readiness.mailboxConnected).toBe(true);
     });
 
-    it("scopes the count to this org, CONNECTED status, mailbox providers only", async () => {
+    it("fails closed unless Gmail has a resolved accountEmail and watch cursor", async () => {
       const { service, prisma } = buildService({ mailboxCount: 1 });
       await service.computeSendReadiness(orgRow());
 
@@ -149,7 +196,14 @@ describe("OrgsService.computeSendReadiness", () => {
         where: {
           orgId: ORG_ID,
           status: "CONNECTED",
-          provider: { in: ["gmail", "outlook"] },
+          provider: "gmail",
+          credentials: {
+            path: ["accountEmail"],
+            string_contains: "@",
+          },
+          encryptedCredentials: { not: null },
+          lastHistoryId: { not: null },
+          lastSyncAt: { gte: expect.any(Date) },
         },
       });
     });
@@ -220,6 +274,7 @@ describe("OrgsService.findByClerkUser (GET /orgs/me payload)", () => {
         name: "Nikxius",
         physicalAddress: "221B Baker Street, London",
         senderName: "Ava",
+        country: "GB",
         agents: [],
         integrations: [],
       },
@@ -234,6 +289,7 @@ describe("OrgsService.findByClerkUser (GET /orgs/me payload)", () => {
       liveSendAllowed: true,
       physicalAddressSet: true,
       senderNameSet: true,
+      countrySet: true,
       mailboxConnected: true,
       dailyCapRemaining: 38,
     };

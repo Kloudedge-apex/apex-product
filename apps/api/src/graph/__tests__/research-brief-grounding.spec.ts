@@ -93,4 +93,43 @@ describe("assembleResearchBrief grounding (refusal-first)", () => {
     const brief = await assembleResearchBrief(prisma, lead());
     expect(brief.hasGroundingSignal).toBe(false);
   });
+
+  it("continues past a full page of stale rows to find a fresh grounding signal", async () => {
+    const stalePage = Array.from({ length: 25 }, (_, index) => ({
+      id: `stale-${index}`,
+      kind: "recent_hire",
+      payload: {
+        date: staleDate,
+        source: `https://example.com/stale-${index}`,
+        confidence: 0.9,
+        jobTitle: "SDR",
+      },
+      createdAt: new Date(Date.now() - index * 1000),
+    }));
+    const freshEvent = {
+      id: "fresh-1",
+      kind: "product_launch",
+      payload: {
+        date: freshDate,
+        source: "https://example.com/fresh",
+        confidence: 0.95,
+        product: "New platform",
+      },
+      createdAt: new Date(Date.now() - 30_000),
+    };
+    const prisma = fakePrisma([]);
+    prisma.evidenceEvent.findMany
+      .mockResolvedValueOnce(stalePage)
+      .mockResolvedValueOnce([freshEvent]);
+
+    const brief = await assembleResearchBrief(prisma, lead());
+
+    expect(brief.hasGroundingSignal).toBe(true);
+    expect(brief.facts.find((fact) => fact.id === "S1")?.date).toBe(freshDate);
+    expect(prisma.evidenceEvent.findMany).toHaveBeenCalledTimes(2);
+    expect(prisma.evidenceEvent.findMany.mock.calls[1]?.[0]).toMatchObject({
+      cursor: { id: "stale-24" },
+      skip: 1,
+    });
+  });
 });

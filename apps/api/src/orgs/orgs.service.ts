@@ -6,7 +6,7 @@ import {
   NotFoundException,
   Optional,
 } from "@nestjs/common";
-import { Plan } from "@prisma/client";
+import { Plan, type Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { EvidenceLedgerService } from "../observability/evidence-ledger.service";
 import { isLiveSendAllowedForOrg } from "../outreach/outreach-allowlist.util";
@@ -15,8 +15,9 @@ import {
   getDailySendCapPerOrg,
 } from "../outreach/send-outreach.worker";
 import { isIP } from "node:net";
-import { isISO31661Alpha2 } from "class-validator";
 import { buildTrialOrgSlug } from "../common/trial-org.util";
+import { gmailWatchFreshnessFloor } from "../integrations/gmail/gmail-watch-freshness";
+import { senderIdentityReadiness } from "../outreach/sender-identity.util";
 
 /**
  * Computed live-send truth for an org (GL5). The FE renders Dry Run / Live
@@ -27,7 +28,8 @@ import { buildTrialOrgSlug } from "../common/trial-org.util";
  *                        the worker uses to pick SENT vs SIMULATED
  *   physicalAddressSet → CAN-SPAM §7704(a)(5) fail-closed gate on live email
  *   senderNameSet      → sender-identity footer field
- *   mailboxConnected   → a CONNECTED gmail/outlook Integration row exists
+ *   mailboxConnected   → a CONNECTED Gmail row has a resolved accountEmail
+ *                        and a users.watch history cursor
  *   dailyCapRemaining  → GL8a per-org daily cap headroom for the current UTC
  *                        day, clamped at 0; null is reserved for "cap helper
  *                        unavailable" (not currently the case — the helper
@@ -37,6 +39,7 @@ export interface SendReadiness {
   liveSendAllowed: boolean;
   physicalAddressSet: boolean;
   senderNameSet: boolean;
+  countrySet: boolean;
   mailboxConnected: boolean;
   dailyCapRemaining: number | null;
 }
@@ -74,8 +77,44 @@ export interface OnboardingStatus {
   readyForLiveSend: boolean;
 }
 
-/** Integration.provider values that count as a sending mailbox for email. */
-const MAILBOX_PROVIDERS: string[] = ["gmail", "outlook"];
+/**
+ * Public org responses are an explicit allowlist. In particular, relation
+ * selects must never grow implicitly when authentication or provider-secret
+ * columns are added to Prisma models.
+ */
+const ORG_RESPONSE_SCALAR_SELECT = {
+  id: true,
+  name: true,
+  slug: true,
+  website: true,
+  physicalAddress: true,
+  country: true,
+  senderName: true,
+  plan: true,
+  trialEndsAt: true,
+  createdAt: true,
+  updatedAt: true,
+} as const satisfies Prisma.OrgSelect;
+
+const ORG_RESPONSE_USER_SELECT = {
+  id: true,
+  email: true,
+  name: true,
+  role: true,
+  createdAt: true,
+} as const satisfies Prisma.UserSelect;
+
+const ORG_RESPONSE_INTEGRATION_SELECT = {
+  id: true,
+  provider: true,
+  status: true,
+  scopes: true,
+  lastSyncAt: true,
+  lastErrorAt: true,
+  lastErrorMessage: true,
+  createdAt: true,
+  updatedAt: true,
+} as const satisfies Prisma.IntegrationSelect;
 
 /**
  * Optional best-effort LangSmith handle. We keep the interface here (instead of
@@ -130,11 +169,15 @@ export class OrgsService {
 
     const existingUser = await this.prisma.user.findUnique({
       where: { clerkId: data.clerkUserId },
+      select: { orgId: true },
     });
     if (existingUser) {
       const org = await this.prisma.org.findUnique({
         where: { id: existingUser.orgId },
-        include: { users: true },
+        select: {
+          ...ORG_RESPONSE_SCALAR_SELECT,
+          users: { select: ORG_RESPONSE_USER_SELECT },
+        },
       });
       return org;
     }
@@ -163,7 +206,10 @@ export class OrgsService {
             },
           },
         },
-        include: { users: true },
+        select: {
+          ...ORG_RESPONSE_SCALAR_SELECT,
+          users: { select: ORG_RESPONSE_USER_SELECT },
+        },
       });
     } catch (err) {
       // A protected request and POST /orgs can bootstrap concurrently. The
@@ -171,11 +217,15 @@ export class OrgsService {
       // workspace instead of surfacing a transient uniqueness error.
       const racedUser = await this.prisma.user.findUnique({
         where: { clerkId: data.clerkUserId },
+        select: { orgId: true },
       });
       if (racedUser) {
         const racedOrg = await this.prisma.org.findUnique({
           where: { id: racedUser.orgId },
-          include: { users: true },
+          select: {
+            ...ORG_RESPONSE_SCALAR_SELECT,
+            users: { select: ORG_RESPONSE_USER_SELECT },
+          },
         });
         if (racedOrg) return racedOrg;
       }
@@ -186,7 +236,11 @@ export class OrgsService {
   async findOne(id: string) {
     const org = await this.prisma.org.findUnique({
       where: { id },
-      include: { users: true, agents: true, integrations: true },
+      select: {
+        ...ORG_RESPONSE_SCALAR_SELECT,
+        users: { select: ORG_RESPONSE_USER_SELECT },
+        integrations: { select: ORG_RESPONSE_INTEGRATION_SELECT },
+      },
     });
     if (!org) throw new NotFoundException("Org not found");
     return org;
@@ -200,7 +254,14 @@ export class OrgsService {
   async findByClerkUser(clerkId: string) {
     const user = await this.prisma.user.findUnique({
       where: { clerkId },
-      include: { org: { include: { agents: true, integrations: true } } },
+      select: {
+        org: {
+          select: {
+            ...ORG_RESPONSE_SCALAR_SELECT,
+            integrations: { select: ORG_RESPONSE_INTEGRATION_SELECT },
+          },
+        },
+      },
     });
     if (!user) return null;
     const sendReadiness = await this.computeSendReadiness(user.org);
@@ -216,13 +277,28 @@ export class OrgsService {
     id: string;
     physicalAddress: string | null;
     senderName: string | null;
+    country: string | null;
   }): Promise<SendReadiness> {
+    const senderIdentity = senderIdentityReadiness(org);
+    const watchFreshnessFloor = gmailWatchFreshnessFloor();
     const [mailboxCount, capacityUsedToday] = await Promise.all([
       this.prisma.integration.count({
         where: {
           orgId: org.id,
           status: "CONNECTED",
-          provider: { in: MAILBOX_PROVIDERS },
+          provider: "gmail",
+          // GmailService writes accountEmail only after resolving the
+          // authenticated mailbox, and lastHistoryId only after users.watch
+          // succeeds. A generic CONNECTED row is therefore not enough for the
+          // guarded SDR loop: without both fields replies and DSNs cannot be
+          // routed or replayed safely.
+          credentials: {
+            path: ["accountEmail"],
+            string_contains: "@",
+          },
+          encryptedCredentials: { not: null },
+          lastHistoryId: { not: null },
+          lastSyncAt: { gte: watchFreshnessFloor },
         },
       }),
       // Exactly the same conservative capacity-risk rows as the worker:
@@ -237,8 +313,9 @@ export class OrgsService {
 
     return {
       liveSendAllowed: isLiveSendAllowedForOrg(org.id),
-      physicalAddressSet: (org.physicalAddress ?? "").trim().length > 0,
-      senderNameSet: (org.senderName ?? "").trim().length > 0,
+      physicalAddressSet: senderIdentity.physicalAddressSet,
+      senderNameSet: senderIdentity.senderNameSet,
+      countrySet: senderIdentity.countrySet,
       mailboxConnected: mailboxCount > 0,
       dailyCapRemaining: Math.max(
         0,
@@ -285,9 +362,8 @@ export class OrgsService {
     const sendReadiness = await this.computeSendReadiness(org);
     const nameSet = hasText(org.name);
     const websiteSet = hasText(org.website);
-    const senderNameSet = hasText(org.senderName);
-    const physicalAddressSet = hasText(org.physicalAddress);
-    const countrySet = isUppercaseIsoCountry(org.country);
+    const { senderNameSet, physicalAddressSet, countrySet } =
+      senderIdentityReadiness(org);
     const usableIcp = currentIcpProfile
       ? isUsableIcpProfile(currentIcpProfile)
       : false;
@@ -695,11 +771,6 @@ export class OrgsService {
 
 function hasText(value: string | null): boolean {
   return (value ?? "").trim().length > 0;
-}
-
-function isUppercaseIsoCountry(value: string | null): boolean {
-  const country = (value ?? "").trim();
-  return /^[A-Z]{2}$/.test(country) && isISO31661Alpha2(country);
 }
 
 function isUsableIcpProfile(profile: {

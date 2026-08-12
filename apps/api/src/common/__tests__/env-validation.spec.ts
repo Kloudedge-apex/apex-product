@@ -25,6 +25,15 @@ function baseProdEnv(): NodeJS.ProcessEnv {
     OPENAI_API_KEY: "sk-test-openai",
     GOOGLE_CLIENT_ID: "gmail-client-id",
     GOOGLE_CLIENT_SECRET: "gmail-client-secret",
+    GOOGLE_REDIRECT_URI:
+      "https://api.workforceos.xyz/api/integrations/gmail/callback",
+    GMAIL_PUBSUB_TOPIC:
+      "projects/workforce-prod/topics/gmail-inbound",
+    GMAIL_PUSH_AUDIENCE:
+      "https://api.workforceos.xyz/api/integrations/gmail/push",
+    GMAIL_PUSH_PUBLISHER_SA:
+      "gmail-push@workforce-prod.iam.gserviceaccount.com",
+    METRICS_AUTH_TOKEN: "metrics-test-token",
     API_PUBLIC_URL: "https://api.workforceos.xyz",
   } as NodeJS.ProcessEnv;
 }
@@ -132,6 +141,22 @@ describe("validateEnv", () => {
     expect(issues.some((i) => i.includes("GOOGLE_CLIENT_SECRET"))).toBe(true);
   });
 
+  it.each([undefined, "", "   "])(
+    "fails when METRICS_AUTH_TOKEN is %s in production",
+    (token) => {
+      const env = baseProdEnv();
+      if (token === undefined) {
+        delete env.METRICS_AUTH_TOKEN;
+      } else {
+        env.METRICS_AUTH_TOKEN = token;
+      }
+      const { issues } = validateEnv(env);
+      expect(issues).toContain(
+        "METRICS_AUTH_TOKEN is required when NODE_ENV=production",
+      );
+    },
+  );
+
   it("fails when API_PUBLIC_URL is missing in production", () => {
     const env = baseProdEnv();
     delete env.API_PUBLIC_URL;
@@ -148,6 +173,42 @@ describe("validateEnv", () => {
   ])("fails for invalid production API_PUBLIC_URL %s", (value, message) => {
     const env = baseProdEnv();
     env.API_PUBLIC_URL = value;
+    const { issues } = validateEnv(env);
+    expect(issues.some((issue) => issue.includes(message))).toBe(true);
+  });
+
+  it.each([
+    "GOOGLE_REDIRECT_URI",
+    "GMAIL_PUBSUB_TOPIC",
+    "GMAIL_PUSH_AUDIENCE",
+    "GMAIL_PUSH_PUBLISHER_SA",
+  ] as const)("requires nonblank %s in production", (name) => {
+    const env = baseProdEnv();
+    env[name] = "   ";
+    const { issues } = validateEnv(env);
+    expect(issues).toContain(`${name} is required when NODE_ENV=production`);
+  });
+
+  it.each([
+    [
+      "GOOGLE_REDIRECT_URI",
+      "https://wrong.example/api/integrations/gmail/callback",
+      "must equal https://api.workforceos.xyz/api/integrations/gmail/callback",
+    ],
+    [
+      "GMAIL_PUSH_AUDIENCE",
+      "https://wrong.example/api/integrations/gmail/push",
+      "must equal https://api.workforceos.xyz/api/integrations/gmail/push",
+    ],
+    ["GMAIL_PUBSUB_TOPIC", "gmail-inbound", "canonical projects/"],
+    [
+      "GMAIL_PUSH_PUBLISHER_SA",
+      "publisher@example.com",
+      "canonical Google service-account email",
+    ],
+  ] as const)("rejects noncanonical %s", (name, value, message) => {
+    const env = baseProdEnv();
+    env[name] = value;
     const { issues } = validateEnv(env);
     expect(issues.some((issue) => issue.includes(message))).toBe(true);
   });
@@ -221,6 +282,9 @@ describe("validateEnv", () => {
     expect(issues.some((i) => i.includes("OPENAI_API_KEY"))).toBe(false);
     expect(issues.some((i) => i.includes("GOOGLE_CLIENT_ID"))).toBe(false);
     expect(issues.some((i) => i.includes("GOOGLE_CLIENT_SECRET"))).toBe(false);
+    expect(issues.some((i) => i.includes("METRICS_AUTH_TOKEN"))).toBe(false);
+    expect(issues.some((i) => i.includes("GOOGLE_REDIRECT_URI"))).toBe(false);
+    expect(issues.some((i) => i.includes("GMAIL_PUBSUB_TOPIC"))).toBe(false);
   });
 });
 

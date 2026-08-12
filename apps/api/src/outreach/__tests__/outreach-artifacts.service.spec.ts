@@ -1,11 +1,13 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import {
   BadRequestException,
+  ConflictException,
   NotFoundException,
   ServiceUnavailableException,
 } from "@nestjs/common";
 import {
   OutreachArtifactStatus,
+  OutreachArtifactPurpose,
   OutreachChannel,
   Prisma,
   type OutreachArtifact,
@@ -45,19 +47,45 @@ async function flushMicrotasks(): Promise<void> {
   await Promise.resolve();
 }
 
+function approvablePayload(overrides: Record<string, unknown> = {}) {
+  return {
+    to: "dest@example.com",
+    subject: "Hi",
+    body: "Body",
+    qaIssues: [],
+    brief_facts: [
+      {
+        id: "S1",
+        category: "signal",
+        source: "https://example.com/source",
+        text: "Acme launched a new product.",
+      },
+    ],
+    groundedness_self_check: {
+      citedFactIds: ["S1"],
+      unsupportedClaims: [],
+    },
+    ...overrides,
+  };
+}
+
 function artifactRow(overrides: Partial<OutreachArtifact> = {}): OutreachArtifact {
   const now = new Date("2026-05-22T12:00:00Z");
   return {
     id: "art_1",
     orgId: "org_1",
     graphRunId: "graph_1",
+    purpose: OutreachArtifactPurpose.OUTBOUND,
+    conversationId: null,
+    providerThreadId: null,
+    replyToMessageId: null,
     toolName: "send_email",
     channel: OutreachChannel.EMAIL,
     recipientRef: "dest@example.com",
     subject: "Hi",
     bodyText: "Body",
     bodyHtml: null,
-    payload: {},
+    payload: approvablePayload(),
     status: OutreachArtifactStatus.PENDING_REVIEW,
     reviewerNote: null,
     reviewedBy: null,
@@ -232,7 +260,7 @@ describe("OutreachArtifactsService.approve / reject", () => {
     prisma.outreachArtifact.findUnique.mockResolvedValue(
       artifactRow({ status: OutreachArtifactStatus.APPROVED }),
     );
-    await expect(service.approve("org_1", "art_1", "user_x")).rejects.toThrow(BadRequestException);
+    await expect(service.approve("org_1", "art_1", "user_x")).rejects.toThrow(ConflictException);
   });
 
   it("refuses HubSpot-note approval while dispatch is unwired", async () => {
@@ -245,9 +273,66 @@ describe("OutreachArtifactsService.approve / reject", () => {
     expect(prisma.outreachArtifact.update).not.toHaveBeenCalled();
   });
 
+  it("refuses a draft whose final QA pass still has issues", async () => {
+    prisma.outreachArtifact.findUnique.mockResolvedValue(
+      artifactRow({
+        payload: approvablePayload({ qaIssues: ["placeholder_leak({{first_name}})"] }),
+      }),
+    );
+
+    await expect(service.approve("org_1", "art_1", "user_x")).rejects.toThrow(
+      "until all draft quality checks pass",
+    );
+    expect(prisma.outreachArtifact.update).not.toHaveBeenCalled();
+  });
+
+  it("refuses an agent refusal instead of treating it as sendable content", async () => {
+    prisma.outreachArtifact.findUnique.mockResolvedValue(
+      artifactRow({
+        payload: approvablePayload({
+          refusal: { reason: "insufficient_grounding", missing: ["signals"] },
+        }),
+      }),
+    );
+
+    await expect(service.approve("org_1", "art_1", "user_x")).rejects.toThrow(
+      "agent refused to produce a grounded draft",
+    );
+    expect(prisma.outreachArtifact.update).not.toHaveBeenCalled();
+  });
+
+  it("refuses missing or unsupported grounding metadata", async () => {
+    prisma.outreachArtifact.findUnique.mockResolvedValue(
+      artifactRow({
+        payload: approvablePayload({
+          groundedness_self_check: {
+            citedFactIds: [],
+            unsupportedClaims: ["Unverified revenue claim"],
+          },
+        }),
+      }),
+    );
+
+    await expect(service.approve("org_1", "art_1", "user_x")).rejects.toThrow(
+      "reviewer-visible grounding check",
+    );
+    expect(prisma.outreachArtifact.update).not.toHaveBeenCalled();
+  });
+
+  it("refuses when reviewed fields differ from the payload the worker will send", async () => {
+    prisma.outreachArtifact.findUnique.mockResolvedValue(
+      artifactRow({ payload: approvablePayload({ body: "Hidden replacement body" }) }),
+    );
+
+    await expect(service.approve("org_1", "art_1", "user_x")).rejects.toThrow(
+      "reviewed content does not match the send payload",
+    );
+    expect(prisma.outreachArtifact.update).not.toHaveBeenCalled();
+  });
+
   it("lets one opposite review decision win and blocks approval effects after rejection", async () => {
     const runId = "run_review_race";
-    let state = artifactRow({ payload: { langsmith_run_id: runId } });
+    let state = artifactRow({ payload: approvablePayload({ langsmith_run_id: runId }) });
     let releaseApproval!: () => void;
     const rejectionCommitted = new Promise<void>((resolve) => {
       releaseApproval = resolve;
@@ -315,7 +400,7 @@ describe("OutreachArtifactsService.approve / reject", () => {
     prisma.outreachArtifact.findUnique.mockResolvedValue(
       artifactRow({ status: OutreachArtifactStatus.SENT }),
     );
-    await expect(service.reject("org_1", "art_1", "user_x")).rejects.toThrow(BadRequestException);
+    await expect(service.reject("org_1", "art_1", "user_x")).rejects.toThrow(ConflictException);
   });
 });
 
@@ -352,9 +437,17 @@ describe("OutreachArtifactsService.approve — enqueue failure surfacing (audit 
       undefined,
       sendQueue as unknown as OutreachSendQueueService,
     );
-    await expect(service.approve("org_1", "art_1", "user_x")).rejects.toThrow(
-      ServiceUnavailableException,
-    );
+    const failure = await service
+      .approve("org_1", "art_1", "user_x")
+      .catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ServiceUnavailableException);
+    expect(
+      (failure as ServiceUnavailableException).getResponse(),
+    ).toEqual({
+      message: expect.stringContaining("approved but could not be queued"),
+      approvalSaved: true,
+      artifactId: "art_1",
+    });
   });
 
   it("persists APPROVED before the enqueue failure surfaces (sweep can recover)", async () => {
@@ -391,14 +484,7 @@ describe("OutreachArtifactsService.approve — LangSmith good-drafts dataset", (
   it("appends to apex-good-sdr-drafts when the artifact carries a langsmith_run_id", async () => {
     const runId = "run_good_1";
     prisma.outreachArtifact.findUnique.mockResolvedValue(
-      artifactRow({
-        payload: {
-          to: "dest@example.com",
-          subject: "Hi",
-          body: "Hello",
-          langsmith_run_id: runId,
-        },
-      }),
+      artifactRow({ payload: approvablePayload({ langsmith_run_id: runId }) }),
     );
     prisma.outreachArtifact.update.mockResolvedValue(
       artifactRow({
@@ -437,7 +523,7 @@ describe("OutreachArtifactsService.approve — LangSmith good-drafts dataset", (
 
   it("skips dataset append (and does not throw) for artifacts without a langsmith_run_id", async () => {
     prisma.outreachArtifact.findUnique.mockResolvedValue(
-      artifactRow({ payload: { to: "dest@example.com", subject: "Hi", body: "Hello" } }),
+      artifactRow(),
     );
     prisma.outreachArtifact.update.mockResolvedValue(
       artifactRow({ status: OutreachArtifactStatus.APPROVED, reviewedBy: "user_x" }),
@@ -460,7 +546,7 @@ describe("OutreachArtifactsService.approve — LangSmith good-drafts dataset", (
   it("flips status and does not throw when addRunToDataset rejects", async () => {
     const runId = "run_good_fails";
     prisma.outreachArtifact.findUnique.mockResolvedValue(
-      artifactRow({ payload: { langsmith_run_id: runId } }),
+      artifactRow({ payload: approvablePayload({ langsmith_run_id: runId }) }),
     );
     prisma.outreachArtifact.update.mockResolvedValue(
       artifactRow({
@@ -488,7 +574,7 @@ describe("OutreachArtifactsService.approve — LangSmith good-drafts dataset", (
   it("still records the human judgment when the enqueue hand-off fails", async () => {
     const runId = "run_good_enqueue_down";
     prisma.outreachArtifact.findUnique.mockResolvedValue(
-      artifactRow({ payload: { langsmith_run_id: runId } }),
+      artifactRow({ payload: approvablePayload({ langsmith_run_id: runId }) }),
     );
     prisma.outreachArtifact.update.mockResolvedValue(
       artifactRow({
@@ -517,7 +603,7 @@ describe("OutreachArtifactsService.approve — LangSmith good-drafts dataset", (
 
   it("no-ops when LangSmithService is not injected (e.g. tracing disabled)", async () => {
     prisma.outreachArtifact.findUnique.mockResolvedValue(
-      artifactRow({ payload: { langsmith_run_id: "run_x" } }),
+      artifactRow({ payload: approvablePayload({ langsmith_run_id: "run_x" }) }),
     );
     prisma.outreachArtifact.update.mockResolvedValue(
       artifactRow({ status: OutreachArtifactStatus.APPROVED, reviewedBy: "user_x" }),

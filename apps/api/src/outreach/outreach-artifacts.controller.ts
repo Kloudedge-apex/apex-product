@@ -65,6 +65,21 @@ export class OutreachArtifactsController {
     return this.artifacts.listForOrg(orgId, { status: parsed });
   }
 
+  /**
+   * Read-only authorization probe for review clients. A successful response
+   * means the same guard protecting approve/reject authorized this principal;
+   * denied principals receive the guard's 403 and unauthenticated callers the
+   * global org guard's 401.
+   *
+   * Keep this static route before `outreach-artifacts/:id` so the capability
+   * name can never be interpreted as an artifact id.
+   */
+  @Get("outreach-artifacts/review-capability")
+  @UseGuards(AdminOrManagerGuard)
+  reviewCapability(): { canReviewArtifacts: true } {
+    return { canReviewArtifacts: true };
+  }
+
   @Get("outreach-artifacts/:id")
   get(@OrgId() orgId: string | undefined, @Param("id") id: string) {
     if (!orgId) throw new BadRequestException("orgId required");

@@ -6,11 +6,18 @@ import {
   UnauthorizedException,
   BadRequestException,
   ForbiddenException,
+  ServiceUnavailableException,
+  ConflictException,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { google, gmail_v1, Auth } from "googleapis";
 import { OAuth2Client } from "google-auth-library";
-import { OutreachSuppressionReason } from "@prisma/client";
+import {
+  IntegrationStatus,
+  OutreachArtifactStatus,
+  OutreachChannel,
+  OutreachSuppressionReason,
+} from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { isWorkerEnabled } from "../../runtime/worker.service";
 import { SuppressionService } from "../../outreach/suppression.service";
@@ -19,6 +26,7 @@ import { encrypt, decrypt } from "../crypto.util";
 import {
   buildUnsubscribeUrl,
 } from "../../outreach/unsubscribe-token.util";
+import { isGmailWatchFresh } from "./gmail-watch-freshness";
 
 interface GmailTokens {
   access_token: string;
@@ -99,6 +107,14 @@ const GMAIL_SCOPES = [
 // every connected mailbox comfortably inside that window — losing the watch
 // silently kills DSN auto-suppress AND reply→stop-outreach. GL7.
 const WATCH_RENEWAL_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+// Gmail recommends a full sync when a history cursor falls outside its
+// retention window. Keep that recovery finite: dedicated SDR mailboxes below
+// this ceiling reconcile automatically; larger or pathological mailboxes are
+// disabled for operator review rather than silently skipping an unknown gap.
+const EXPIRED_CURSOR_RECONCILIATION_MAX_MESSAGES = 500;
+const EXPIRED_CURSOR_RECONCILIATION_PAGE_SIZE = 100;
+const EXPIRED_CURSOR_RECONCILIATION_MAX_PAGES = 10;
 
 @Injectable()
 export class GmailService implements OnModuleInit, OnModuleDestroy {
@@ -225,6 +241,7 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
           renewed++;
         } catch (err) {
           failed++;
+          await this.recordWatchRenewalFailure(integration.orgId, err);
           this.logger.warn("gmail.watch renewal failed for org", {
             orgId: integration.orgId,
             error: err instanceof Error ? err.message : String(err),
@@ -333,19 +350,53 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
         throw err;
       }
 
-      // Gmail documents 404 for an out-of-retention startHistoryId. Those
-      // changes are no longer retrievable, so establish the notification's
-      // cursor as the new durable baseline instead of retrying forever.
-      this.logger.warn("gmail.history cursor expired; resetting watermark", {
+      // Gmail documents 404 for an out-of-retention startHistoryId. Advancing
+      // directly to this push's historyId would permanently skip replies and
+      // bounces in the retention gap. Recover still-present messages from a
+      // bounded mailbox scan, then disable the integration: enumeration can
+      // never prove that a gap contained no permanently deleted message.
+      this.logger.warn("gmail.history cursor expired; reconciling mailbox", {
         orgId,
         startHistoryId,
         error: err instanceof Error ? err.message : String(err),
       });
-      await this.advanceWatermark(
+
+      let reconciliationFailure: string | null = null;
+      try {
+        await this.reconcileExpiredHistoryCursor(
+          orgId,
+          integration.id,
+          emailAddress,
+          gmail,
+        );
+      } catch (reconciliationError) {
+        reconciliationFailure =
+          reconciliationError instanceof Error
+            ? reconciliationError.message
+            : String(reconciliationError);
+      }
+
+      // Mailbox enumeration can recover replies and DSNs that are still
+      // present, but it cannot prove that nothing was permanently deleted
+      // during the history gap. Never manufacture a new trusted baseline.
+      // Preserve any concrete reconciliation failure in the operator-facing
+      // reason, clear the cursor, and require reconciliation/reconnect before
+      // readiness or provider access can resume.
+      const reason = reconciliationFailure
+        ? `bounded reconciliation failed: ${reconciliationFailure}; operator reconciliation and Gmail reconnect required`
+        : "bounded reconciliation processed still-present messages, but cursor-expiry completeness cannot be proven because messages may have been permanently deleted; operator reconciliation and Gmail reconnect required";
+      await this.markHistoryReconciliationIncomplete(
+        integration.id,
         orgId,
-        latestHistoryId(startHistoryId, historyId),
+        reason,
       );
-      return;
+      this.logger.error(
+        "gmail.history cursor expired; integration disabled after bounded recovery",
+        { orgId, integrationId: integration.id, reason },
+      );
+      throw new Error(
+        `Gmail history cursor expired; integration disabled: ${reason}`,
+      );
     }
 
     // De-duplicate (history can repeat ids across pages).
@@ -386,6 +437,116 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
       orgId,
       latestHistoryId(startHistoryId, historyId),
     );
+  }
+
+  /**
+   * Bounded full-sync fallback for Gmail's expired-history 404.
+   *
+   * We enumerate the bounded, currently visible mailbox index before
+   * performing any writes. This recovers still-present messages but is never
+   * treated as proof of history-gap completeness because deleted messages are
+   * absent. Provider message ids are de-duplicated before materialization;
+   * ConversationStore then refuses to persist unrelated inbox threads, while
+   * DSNs require an org-owned SENT artifact for the failed recipient.
+   */
+  private async reconcileExpiredHistoryCursor(
+    orgId: string,
+    integrationId: string,
+    integrationEmail: string,
+    gmail: gmail_v1.Gmail,
+  ): Promise<void> {
+    const messageIds = new Set<string>();
+    let listedMessages = 0;
+    let pageCount = 0;
+    let pageToken: string | undefined;
+
+    do {
+      if (
+        listedMessages >= EXPIRED_CURSOR_RECONCILIATION_MAX_MESSAGES ||
+        pageCount >= EXPIRED_CURSOR_RECONCILIATION_MAX_PAGES
+      ) {
+        throw new Error(
+          `mailbox exceeds bounded reconciliation limit (${EXPIRED_CURSOR_RECONCILIATION_MAX_MESSAGES} messages)`,
+        );
+      }
+
+      const remaining =
+        EXPIRED_CURSOR_RECONCILIATION_MAX_MESSAGES - listedMessages;
+      const response = await gmail.users.messages.list({
+        userId: "me",
+        maxResults: Math.min(
+          EXPIRED_CURSOR_RECONCILIATION_PAGE_SIZE,
+          remaining,
+        ),
+        pageToken,
+        // A reply can be archived or trashed after it triggered the original
+        // INBOX watch. Full reconciliation must still inspect it; correlation
+        // below prevents unrelated mailbox content from being persisted.
+        includeSpamTrash: true,
+      });
+      pageCount += 1;
+
+      const pageMessages = response.data.messages ?? [];
+      if (pageMessages.length > remaining) {
+        throw new Error(
+          "Gmail returned more reconciliation messages than requested",
+        );
+      }
+      listedMessages += pageMessages.length;
+      for (const message of pageMessages) {
+        if (!message.id) {
+          throw new Error(
+            "Gmail reconciliation returned a message without an id",
+          );
+        }
+        messageIds.add(message.id);
+      }
+      pageToken = response.data.nextPageToken ?? undefined;
+    } while (pageToken);
+
+    for (const messageId of messageIds) {
+      const message = await this.getMessage(orgId, messageId, gmail);
+      await this.maybeMaterializeInboundMessage(
+        orgId,
+        integrationId,
+        integrationEmail,
+        message,
+        {
+          allowArchived: true,
+          requireSentArtifactForDsn: true,
+        },
+      );
+    }
+
+    this.logger.log("gmail.history reconciliation complete", {
+      orgId,
+      integrationId,
+      listedMessages,
+      uniqueMessages: messageIds.size,
+    });
+  }
+
+  private async markHistoryReconciliationIncomplete(
+    integrationId: string,
+    orgId: string,
+    reason: string,
+  ): Promise<void> {
+    await this.prisma.integration.updateMany({
+      where: {
+        id: integrationId,
+        orgId,
+        provider: "gmail",
+        status: IntegrationStatus.CONNECTED,
+      },
+      data: {
+        status: IntegrationStatus.ERROR,
+        lastHistoryId: null,
+        lastErrorAt: new Date(),
+        lastErrorMessage:
+          `Gmail history reconciliation incomplete: ${reason}`.slice(0, 1000),
+      },
+    });
+    this.historyWatermark.delete(orgId);
   }
 
   /**
@@ -453,10 +614,14 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
     integrationId: string,
     integrationEmail: string,
     message: GmailMessage,
+    options: {
+      allowArchived?: boolean;
+      requireSentArtifactForDsn?: boolean;
+    } = {},
   ): Promise<void> {
     // Skip messages sent by us — Gmail surfaces SENT alongside INBOX changes.
     if (message.labelIds.includes("SENT")) return;
-    if (!message.labelIds.includes("INBOX")) return;
+    if (!options.allowArchived && !message.labelIds.includes("INBOX")) return;
 
     // Defense in depth: if the From header matches the integration owner,
     // it's our own outbound — don't loop.
@@ -473,7 +638,11 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
     // materializing a customer conversation so the send worker never re-mails
     // a bouncing address.
     if (isDeliveryStatusNotification(message)) {
-      await this.handleDeliveryStatusNotification(orgId, message);
+      await this.handleDeliveryStatusNotification(
+        orgId,
+        message,
+        options.requireSentArtifactForDsn === true,
+      );
       return;
     }
 
@@ -533,6 +702,7 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
   private async handleDeliveryStatusNotification(
     orgId: string,
     message: GmailMessage,
+    requireSentArtifact = false,
   ): Promise<void> {
     const failedRecipient = extractFailedRecipient(message);
     if (!failedRecipient) {
@@ -542,6 +712,32 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
         from: message.from,
       });
       return;
+    }
+
+    if (requireSentArtifact) {
+      const sentArtifact = await this.prisma.outreachArtifact.findFirst({
+        where: {
+          orgId,
+          channel: OutreachChannel.EMAIL,
+          status: OutreachArtifactStatus.SENT,
+          recipientRef: {
+            equals: failedRecipient,
+            mode: "insensitive",
+          },
+        },
+        select: { id: true },
+      });
+      if (!sentArtifact) {
+        this.logger.debug(
+          "gmail.history ignored unrelated DSN during recovery",
+          {
+            orgId,
+            messageId: message.id,
+            failedRecipient,
+          },
+        );
+        return;
+      }
     }
 
     const { created } = await this.suppression.suppress({
@@ -612,6 +808,32 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
   }
 
   async handleCallback(code: string, orgId: string): Promise<void> {
+    if (code === "mock_code") {
+      if (process.env.NODE_ENV === "production") {
+        throw new ServiceUnavailableException(
+          "Gmail OAuth mock callbacks are disabled in production",
+        );
+      }
+      const now = Date.now();
+      const mockTokens: GmailTokens = {
+        access_token: `mock_gmail_access_token_${now}`,
+        refresh_token: `mock_gmail_refresh_token_${now}`,
+        expiry_date: now + 30 * 24 * 60 * 60 * 1000,
+        token_type: "Bearer",
+        scope: GMAIL_SCOPES.join(" "),
+      };
+      const safeOrgId = orgId.toLowerCase().replace(/[^a-z0-9._-]/g, "-");
+      await this.persistCallbackState({
+        orgId,
+        encryptedCredentials: encrypt(JSON.stringify(mockTokens)),
+        accountEmail: `mock+${safeOrgId}@local.invalid`,
+        status: IntegrationStatus.CONNECTED,
+        lastHistoryId: `mock-history-${now}`,
+        errorMessage: null,
+      });
+      return;
+    }
+
     const oauth2Client = this.createOAuth2Client();
     const { tokens } = await oauth2Client.getToken(code);
 
@@ -629,52 +851,216 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
 
     const encryptedCreds = encrypt(JSON.stringify(tokenData));
 
+    const oauthForSetup = this.createOAuth2Client();
+    oauthForSetup.setCredentials({
+      access_token: tokenData.access_token,
+      refresh_token: tokenData.refresh_token,
+      expiry_date: tokenData.expiry_date,
+    });
+    const gmail = google.gmail({ version: "v1", auth: oauthForSetup });
+
     // Resolve the authenticated Gmail address so push deliveries can map
     // `emailAddress` → orgId without a schema migration. We stash it in the
     // (non-secret) `credentials` JSON column.
     let accountEmail = "";
     try {
-      const oauthForProfile = this.createOAuth2Client();
-      oauthForProfile.setCredentials({
-        access_token: tokenData.access_token,
-        refresh_token: tokenData.refresh_token,
-        expiry_date: tokenData.expiry_date,
-      });
-      const gmail = google.gmail({ version: "v1", auth: oauthForProfile });
       const profile = await gmail.users.getProfile({ userId: "me" });
-      accountEmail = (profile.data.emailAddress ?? "").trim().toLowerCase();
-    } catch {
-      // Non-fatal — push routing will degrade but OAuth still succeeds.
+      accountEmail = mailboxEmail(profile.data.emailAddress ?? "") ?? "";
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      await this.persistCallbackState({
+        orgId,
+        encryptedCredentials: encryptedCreds,
+        accountEmail: "",
+        status: IntegrationStatus.ERROR,
+        lastHistoryId: null,
+        errorMessage: `Gmail mailbox profile resolution failed: ${reason}`,
+      });
+      throw new ServiceUnavailableException(
+        "Gmail mailbox profile could not be resolved",
+      );
     }
 
-    await this.prisma.integration.upsert({
-      where: { orgId_provider: { orgId, provider: "gmail" } },
-      create: {
+    if (!accountEmail) {
+      await this.persistCallbackState({
         orgId,
-        provider: "gmail",
-        credentials: { accountEmail },
         encryptedCredentials: encryptedCreds,
-        status: "CONNECTED",
-        scopes: GMAIL_SCOPES,
-      },
-      update: {
+        accountEmail: "",
+        status: IntegrationStatus.ERROR,
+        lastHistoryId: null,
+        errorMessage: "Gmail mailbox profile returned no usable email address",
+      });
+      throw new ServiceUnavailableException(
+        "Gmail mailbox profile returned no usable email address",
+      );
+    }
+
+    if (!this.pushPubsubTopic.trim()) {
+      await this.persistCallbackState({
+        orgId,
         encryptedCredentials: encryptedCreds,
-        credentials: { accountEmail },
-        status: "CONNECTED",
-        scopes: GMAIL_SCOPES,
-        lastSyncAt: new Date(),
-      },
+        accountEmail,
+        status: IntegrationStatus.PENDING,
+        lastHistoryId: null,
+        errorMessage: "GMAIL_PUBSUB_TOPIC is not configured",
+      });
+      throw new ServiceUnavailableException(
+        "Gmail inbound watch is not configured",
+      );
+    }
+
+    // Persist the OAuth grant in a non-active state before the remote watch
+    // call. A crash, timeout, or provider error can therefore never leave a
+    // stale CONNECTED row or readiness cursor from an earlier connection.
+    await this.persistCallbackState({
+      orgId,
+      encryptedCredentials: encryptedCreds,
+      accountEmail,
+      status: IntegrationStatus.PENDING,
+      lastHistoryId: null,
+      errorMessage: null,
     });
 
-    // Subscribe this mailbox to our Pub/Sub topic so inbound replies push to
-    // /integrations/gmail/push. Non-fatal — OAuth succeeds even if watch fails
-    // (e.g., topic env not configured in dev), the mailbox just won't get
-    // realtime pushes until backfilled.
-    await this.registerWatch(orgId).catch((err) => {
-      this.logger.warn("gmail.users.watch registration failed", {
-        orgId,
-        error: err instanceof Error ? err.message : String(err),
+    let watchData: gmail_v1.Schema$WatchResponse;
+    try {
+      const watchResponse = await gmail.users.watch({
+        userId: "me",
+        requestBody: {
+          topicName: this.pushPubsubTopic,
+          labelIds: ["INBOX"],
+          labelFilterBehavior: "INCLUDE",
+        },
       });
+      watchData = watchResponse.data;
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      await this.persistCallbackState({
+        orgId,
+        encryptedCredentials: encryptedCreds,
+        accountEmail,
+        status: IntegrationStatus.ERROR,
+        lastHistoryId: null,
+        errorMessage: `gmail.users.watch failed: ${reason}`,
+      });
+      throw new ServiceUnavailableException(
+        "Gmail inbound watch registration failed",
+      );
+    }
+
+    const initialHistoryId = (watchData.historyId ?? "").trim();
+    if (!initialHistoryId) {
+      await this.persistCallbackState({
+        orgId,
+        encryptedCredentials: encryptedCreds,
+        accountEmail,
+        status: IntegrationStatus.ERROR,
+        lastHistoryId: null,
+        errorMessage: "gmail.users.watch returned no initial historyId",
+      });
+      throw new ServiceUnavailableException(
+        "Gmail inbound watch returned no history cursor",
+      );
+    }
+
+    // This is the only callback write allowed to activate Gmail. Identity and
+    // the durable initial cursor are committed together, so readers can never
+    // observe CONNECTED without both readiness proofs.
+    try {
+      await this.persistCallbackState({
+        orgId,
+        encryptedCredentials: encryptedCreds,
+        accountEmail,
+        status: IntegrationStatus.CONNECTED,
+        lastHistoryId: initialHistoryId,
+        errorMessage: null,
+      });
+    } catch (err) {
+      if (err instanceof ConflictException) {
+        await this.persistCallbackState({
+          orgId,
+          encryptedCredentials: encryptedCreds,
+          accountEmail,
+          status: IntegrationStatus.ERROR,
+          lastHistoryId: null,
+          errorMessage: err.message,
+        });
+      }
+      throw err;
+    }
+    this.logger.log("gmail OAuth activation complete", {
+      orgId,
+      accountEmail,
+      historyId: initialHistoryId,
+      expiration: watchData.expiration,
+    });
+  }
+
+  private async persistCallbackState(input: {
+    orgId: string;
+    encryptedCredentials: string;
+    accountEmail: string;
+    status: IntegrationStatus;
+    lastHistoryId: string | null;
+    errorMessage: string | null;
+  }): Promise<void> {
+    const errorMessage = input.errorMessage?.slice(0, 1000) ?? null;
+    const now = new Date();
+    const state = {
+      credentials: { accountEmail: input.accountEmail },
+      encryptedCredentials: input.encryptedCredentials,
+      status: input.status,
+      scopes: GMAIL_SCOPES,
+      lastHistoryId: input.lastHistoryId,
+      lastSyncAt:
+        input.status === IntegrationStatus.CONNECTED ? now : null,
+      lastErrorAt: errorMessage ? now : null,
+      lastErrorMessage: errorMessage,
+    };
+
+    const upsert = (client: Pick<PrismaService, "integration">) =>
+      client.integration.upsert({
+        where: { orgId_provider: { orgId: input.orgId, provider: "gmail" } },
+        create: {
+          orgId: input.orgId,
+          provider: "gmail",
+          ...state,
+        },
+        update: state,
+      });
+
+    if (input.status !== IntegrationStatus.CONNECTED) {
+      await upsert(this.prisma);
+      return;
+    }
+
+    // Serialize activations by normalized mailbox. The JSON accountEmail
+    // marker cannot carry a Prisma unique constraint, so this transaction
+    // takes a stable PostgreSQL advisory lock before checking and activating.
+    // Concurrent callbacks for the same mailbox therefore elect exactly one
+    // organization; the loser remains non-active and receives a conflict.
+    await this.prisma.$transaction(async (tx) => {
+      const mailboxLockKey = `gmail-mailbox:${input.accountEmail}`;
+      await tx.$queryRaw`
+        SELECT pg_advisory_xact_lock(hashtextextended(${mailboxLockKey}, 0))
+      `;
+      const duplicate = await tx.integration.findFirst({
+        where: {
+          orgId: { not: input.orgId },
+          provider: "gmail",
+          status: IntegrationStatus.CONNECTED,
+          credentials: {
+            path: ["accountEmail"],
+            equals: input.accountEmail,
+          },
+        },
+        select: { id: true },
+      });
+      if (duplicate) {
+        throw new ConflictException(
+          "This Gmail mailbox is already connected to another organization",
+        );
+      }
+      await upsert(tx);
     });
   }
 
@@ -693,7 +1079,7 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
       });
       return null;
     }
-    const gmail = await this.getGmailClient(orgId);
+    const gmail = await this.getGmailClient(orgId, { allowStaleWatch: true });
     const response = await gmail.users.watch({
       userId: "me",
       requestBody: {
@@ -721,10 +1107,49 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
         data: { lastHistoryId: response.data.historyId },
       });
     }
+    await this.prisma.integration.updateMany({
+      where: {
+        orgId,
+        provider: "gmail",
+        status: "CONNECTED",
+      },
+      data: {
+        lastSyncAt: new Date(),
+        lastErrorAt: null,
+        lastErrorMessage: null,
+      },
+    });
     return {
       historyId: response.data.historyId ?? undefined,
       expiration: response.data.expiration ?? undefined,
     };
+  }
+
+  private async recordWatchRenewalFailure(
+    orgId: string,
+    error: unknown,
+  ): Promise<void> {
+    const reason = error instanceof Error ? error.message : String(error);
+    try {
+      await this.prisma.integration.updateMany({
+        where: { orgId, provider: "gmail", status: "CONNECTED" },
+        data: {
+          lastErrorAt: new Date(),
+          lastErrorMessage: `gmail.users.watch renewal failed: ${reason}`.slice(
+            0,
+            1000,
+          ),
+        },
+      });
+    } catch (persistError) {
+      this.logger.error("gmail.watch renewal failure could not be persisted", {
+        orgId,
+        error:
+          persistError instanceof Error
+            ? persistError.message
+            : String(persistError),
+      });
+    }
   }
 
   async listMessages(
@@ -941,8 +1366,11 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  private async getGmailClient(orgId: string): Promise<gmail_v1.Gmail> {
-    const tokens = await this.getTokens(orgId);
+  private async getGmailClient(
+    orgId: string,
+    options: { allowStaleWatch?: boolean } = {},
+  ): Promise<gmail_v1.Gmail> {
+    const tokens = await this.getTokens(orgId, options);
     const oauth2Client = this.createOAuth2Client();
     oauth2Client.setCredentials({
       access_token: tokens.access_token,
@@ -966,7 +1394,10 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
     return google.gmail({ version: "v1", auth: oauth2Client });
   }
 
-  private async getTokens(orgId: string): Promise<GmailTokens> {
+  private async getTokens(
+    orgId: string,
+    options: { allowStaleWatch?: boolean } = {},
+  ): Promise<GmailTokens> {
     const integration = await this.prisma.integration.findUnique({
       where: { orgId_provider: { orgId, provider: "gmail" } },
     });
@@ -979,9 +1410,40 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
       throw new UnauthorizedException("No credentials stored for Gmail integration");
     }
 
+    const credentials = isRecord(integration.credentials)
+      ? integration.credentials
+      : {};
+    const accountEmail =
+      typeof credentials.accountEmail === "string"
+        ? mailboxEmail(credentials.accountEmail)
+        : null;
+    if (!accountEmail) {
+      throw new UnauthorizedException(
+        "Gmail mailbox identity is not initialized",
+      );
+    }
+    if (
+      !options.allowStaleWatch &&
+      (!(integration.lastHistoryId ?? "").trim() ||
+        !isGmailWatchFresh(integration.lastSyncAt))
+    ) {
+      throw new UnauthorizedException(
+        "Gmail inbound watch is not initialized or recently renewed",
+      );
+    }
+
     try {
       const decrypted = decrypt(integration.encryptedCredentials);
-      return JSON.parse(decrypted) as GmailTokens;
+      const parsed = JSON.parse(decrypted) as Partial<GmailTokens>;
+      if (
+        typeof parsed.access_token !== "string" ||
+        !parsed.access_token.trim() ||
+        typeof parsed.refresh_token !== "string" ||
+        !parsed.refresh_token.trim()
+      ) {
+        throw new Error("Gmail OAuth tokens are incomplete");
+      }
+      return parsed as GmailTokens;
     } catch {
       throw new UnauthorizedException("Failed to decrypt Gmail credentials");
     }
@@ -993,7 +1455,6 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
       where: { orgId_provider: { orgId, provider: "gmail" } },
       data: {
         encryptedCredentials: encryptedCreds,
-        lastSyncAt: new Date(),
       },
     });
   }

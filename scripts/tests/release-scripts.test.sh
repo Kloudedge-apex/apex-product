@@ -1562,6 +1562,9 @@ write_containerapp_fixture() {
               {name: "OUTREACH_ALLOW_WILDCARD", value: "false"},
               {name: "CLERK_AUTHORIZED_PARTIES", value: "https://workforceos.xyz"},
               {name: "GOOGLE_CLIENT_ID", value: "gmail-client-id.apps.googleusercontent.com"},
+              {name: "GOOGLE_REDIRECT_URI", value: "https://api.workforceos.xyz/api/integrations/gmail/callback"},
+              {name: "GMAIL_PUBSUB_TOPIC", value: "projects/workforce-prod/topics/gmail-inbound"},
+              {name: "GMAIL_PUSH_AUDIENCE", value: "https://api.workforceos.xyz/api/integrations/gmail/push"},
               {name: "GMAIL_PUSH_PUBLISHER_SA", value: "gmail-push@project.iam.gserviceaccount.com"},
               {name: "DATABASE_URL", secretRef: "database-url"},
               {name: "REDIS_URL", secretRef: "redis-url"},
@@ -1569,6 +1572,7 @@ write_containerapp_fixture() {
               {name: "ENCRYPTION_KEY", secretRef: "encryption-key"},
               {name: "ADMIN_API_KEY", secretRef: "admin-api-key"},
               {name: "GOOGLE_CLIENT_SECRET", secretRef: "google-client-secret"},
+              {name: "METRICS_AUTH_TOKEN", secretRef: "metrics-auth-token"},
               {name: "AZURE_OPENAI_KEY", secretRef: "azure-openai-key"}
             ],
             probes: [
@@ -1631,6 +1635,76 @@ EOF
     API_REVISION_FILE="${harness}/api-revision.json" WORKER_REVISION_FILE="${harness}/worker-revision.json" \
     "${harness}/scripts/verify-containerapp-release-config.sh" \
     "${api_image}" "${worker_image}" >/dev/null
+  pass
+
+  jq '(.properties.template.containers[0].env[] | select(.name == "GOOGLE_REDIRECT_URI").value) = "https://wrong.example/api/integrations/gmail/callback"' \
+    "${harness}/api.json" >"${harness}/api-wrong-google-redirect.json"
+  jq '(.properties.template.containers[0].env[] | select(.name == "GOOGLE_REDIRECT_URI").value) = "https://wrong.example/api/integrations/gmail/callback"' \
+    "${harness}/worker.json" >"${harness}/worker-wrong-google-redirect.json"
+  if env PATH="${harness}/bin:${PATH}" \
+    API_JSON_FILE="${harness}/api-wrong-google-redirect.json" \
+    WORKER_JSON_FILE="${harness}/worker-wrong-google-redirect.json" \
+    API_REVISION_FILE="${harness}/api-revision.json" WORKER_REVISION_FILE="${harness}/worker-revision.json" \
+    "${harness}/scripts/verify-containerapp-release-config.sh" \
+    "${api_image}" "${worker_image}" >/dev/null 2>&1; then
+    fail "Container App verifier accepted a noncanonical Gmail OAuth redirect URI"
+  fi
+  pass
+
+  jq '(.properties.template.containers[0].env[] | select(.name == "GMAIL_PUSH_AUDIENCE").value) = ""' \
+    "${harness}/api.json" >"${harness}/api-empty-gmail-audience.json"
+  jq '(.properties.template.containers[0].env[] | select(.name == "GMAIL_PUSH_AUDIENCE").value) = ""' \
+    "${harness}/worker.json" >"${harness}/worker-empty-gmail-audience.json"
+  if env PATH="${harness}/bin:${PATH}" \
+    API_JSON_FILE="${harness}/api-empty-gmail-audience.json" \
+    WORKER_JSON_FILE="${harness}/worker-empty-gmail-audience.json" \
+    API_REVISION_FILE="${harness}/api-revision.json" WORKER_REVISION_FILE="${harness}/worker-revision.json" \
+    "${harness}/scripts/verify-containerapp-release-config.sh" \
+    "${api_image}" "${worker_image}" >/dev/null 2>&1; then
+    fail "Container App verifier accepted an empty Gmail push audience"
+  fi
+  pass
+
+  jq '(.properties.template.containers[0].env[] | select(.name == "GMAIL_PUBSUB_TOPIC").value) = "gmail-inbound"' \
+    "${harness}/api.json" >"${harness}/api-invalid-gmail-topic.json"
+  jq '(.properties.template.containers[0].env[] | select(.name == "GMAIL_PUBSUB_TOPIC").value) = "gmail-inbound"' \
+    "${harness}/worker.json" >"${harness}/worker-invalid-gmail-topic.json"
+  if env PATH="${harness}/bin:${PATH}" \
+    API_JSON_FILE="${harness}/api-invalid-gmail-topic.json" \
+    WORKER_JSON_FILE="${harness}/worker-invalid-gmail-topic.json" \
+    API_REVISION_FILE="${harness}/api-revision.json" WORKER_REVISION_FILE="${harness}/worker-revision.json" \
+    "${harness}/scripts/verify-containerapp-release-config.sh" \
+    "${api_image}" "${worker_image}" >/dev/null 2>&1; then
+    fail "Container App verifier accepted a malformed Gmail Pub/Sub topic"
+  fi
+  pass
+
+  jq '.properties.template.containers[0].env |= map(select(.name != "METRICS_AUTH_TOKEN"))' \
+    "${harness}/api.json" >"${harness}/api-missing-metrics-token.json"
+  jq '.properties.template.containers[0].env |= map(select(.name != "METRICS_AUTH_TOKEN"))' \
+    "${harness}/worker.json" >"${harness}/worker-missing-metrics-token.json"
+  if env PATH="${harness}/bin:${PATH}" \
+    API_JSON_FILE="${harness}/api-missing-metrics-token.json" \
+    WORKER_JSON_FILE="${harness}/worker-missing-metrics-token.json" \
+    API_REVISION_FILE="${harness}/api-revision.json" WORKER_REVISION_FILE="${harness}/worker-revision.json" \
+    "${harness}/scripts/verify-containerapp-release-config.sh" \
+    "${api_image}" "${worker_image}" >/dev/null 2>&1; then
+    fail "Container App verifier accepted a missing METRICS_AUTH_TOKEN secretRef"
+  fi
+  pass
+
+  jq '(.properties.template.containers[0].env[] | select(.name == "METRICS_AUTH_TOKEN")) = {name: "METRICS_AUTH_TOKEN", value: "inline-test-value"}' \
+    "${harness}/api.json" >"${harness}/api-inline-metrics-token.json"
+  jq '(.properties.template.containers[0].env[] | select(.name == "METRICS_AUTH_TOKEN")) = {name: "METRICS_AUTH_TOKEN", value: "inline-test-value"}' \
+    "${harness}/worker.json" >"${harness}/worker-inline-metrics-token.json"
+  if env PATH="${harness}/bin:${PATH}" \
+    API_JSON_FILE="${harness}/api-inline-metrics-token.json" \
+    WORKER_JSON_FILE="${harness}/worker-inline-metrics-token.json" \
+    API_REVISION_FILE="${harness}/api-revision.json" WORKER_REVISION_FILE="${harness}/worker-revision.json" \
+    "${harness}/scripts/verify-containerapp-release-config.sh" \
+    "${api_image}" "${worker_image}" >/dev/null 2>&1; then
+    fail "Container App verifier accepted an inline METRICS_AUTH_TOKEN"
+  fi
   pass
 
   jq '(.properties.template.containers[0].env[] | select(.name == "OUTREACH_LIVE_FOR_ORGS").value) = "different-org"' \

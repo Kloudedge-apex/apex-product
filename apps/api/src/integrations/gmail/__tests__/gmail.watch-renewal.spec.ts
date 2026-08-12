@@ -85,7 +85,9 @@ function connectedIntegrationRow(orgId: string) {
     provider: "gmail",
     status: "CONNECTED",
     encryptedCredentials: encrypt(JSON.stringify(tokens)),
-    credentials: {},
+    credentials: { accountEmail: `${orgId}@example.com` },
+    lastHistoryId: "900",
+    lastSyncAt: new Date(),
   };
 }
 
@@ -207,6 +209,26 @@ describe("GmailService watch auto-renewal (GL7)", () => {
 
       expect(watchFn).toHaveBeenCalledTimes(2);
       expect(result).toEqual({ renewed: 1, failed: 1 });
+      expect(mockPrisma.integration.updateMany).toHaveBeenCalledWith({
+        where: {
+          orgId: "org_bad",
+          provider: "gmail",
+          status: "CONNECTED",
+        },
+        data: {
+          lastErrorAt: expect.any(Date),
+          lastErrorMessage: expect.stringContaining("invalid_grant"),
+        },
+      });
+      const failureWrite = (
+        mockPrisma.integration.updateMany as ReturnType<typeof vi.fn>
+      ).mock.calls.find((call) =>
+        String(call[0]?.data?.lastErrorMessage ?? "").includes(
+          "invalid_grant",
+        ),
+      )?.[0];
+      expect(failureWrite?.data).not.toHaveProperty("status");
+      expect(failureWrite?.data).not.toHaveProperty("lastSyncAt");
     });
 
     it("survives a per-org credential failure (disconnected mid-sweep) without aborting", async () => {
@@ -273,6 +295,18 @@ describe("GmailService watch auto-renewal (GL7)", () => {
           lastHistoryId: null,
         },
         data: { lastHistoryId: "1000" },
+      });
+      expect(mockPrisma.integration.updateMany).toHaveBeenCalledWith({
+        where: {
+          orgId: "org_1",
+          provider: "gmail",
+          status: "CONNECTED",
+        },
+        data: {
+          lastSyncAt: expect.any(Date),
+          lastErrorAt: null,
+          lastErrorMessage: null,
+        },
       });
     });
   });

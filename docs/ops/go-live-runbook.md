@@ -174,6 +174,8 @@ federation, or break-glass change.
 differences, compares the shared authentication, provider, compliance, health,
 and observability values, and rejects `OUTREACH_LIVE_FOR_ORGS="*"` and
 `OUTREACH_ALLOW_WILDCARD=true`. Sensitive variables must use `secretRef`.
+`METRICS_AUTH_TOKEN` is required on both roles and must use the same non-empty
+secret reference; production startup also rejects a missing or blank value.
 The verifier can compare secret-reference names but cannot compare redacted
 app-local secret values. Before rollout, the approved configuration evidence
 must establish that every shared API/worker reference resolves to the same
@@ -621,10 +623,13 @@ Code: `metrics.service.ts` (`publishQueueDepth`) + the 30s pollers in
 api and worker; primed at boot).
 
 ```bash
-curl -fsS "https://${API_FQDN}/api/metrics" | grep bullmq_queue_depth
-# If METRICS_AUTH_TOKEN is set on apex-gtm-api, add:
-#   -H "Authorization: Bearer $METRICS_AUTH_TOKEN"
+curl -fsS \
+  -H "Authorization: Bearer $METRICS_AUTH_TOKEN" \
+  "https://${API_FQDN}/api/metrics" | grep bullmq_queue_depth
 ```
+
+Production requires `METRICS_AUTH_TOKEN`; local and test environments may omit
+it for unauthenticated scraping.
 
 Gauge: `bullmq_queue_depth{queue="outreach-send"|"graph-runs", state="waiting"|"active"|"delayed"|"failed"|"completed"}`.
 
@@ -784,7 +789,7 @@ spans are present, and inline evaluator feedback fired on the LLM runs
 
 **Step 9 — post-smoke sweep**
 
-- `curl -fsS "https://${API_FQDN}/api/metrics" | grep 'bullmq_queue_depth{queue="outreach-send"'` → `waiting` and `active` back to 0.
+- `curl -fsS -H "Authorization: Bearer $METRICS_AUTH_TOKEN" "https://${API_FQDN}/api/metrics" | grep 'bullmq_queue_depth{queue="outreach-send"'` → `waiting` and `active` back to 0.
 - Triage #1 query → no new `auto-failed:` rows.
 - `/api/health/worker` → 200.
 - Log the smoke result (artifact id, Gmail message id, LangSmith run id,

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { ConflictException } from "@nestjs/common";
+import { ConflictException, NotFoundException } from "@nestjs/common";
 import { LeadsService } from "../leads.service";
 import { PrismaService } from "../../prisma/prisma.service";
 import { GraphService } from "../../graph/graph.service";
@@ -20,6 +20,7 @@ function mockPrisma() {
     $queryRaw: vi.fn().mockResolvedValue([]),
     scrapeJob: {
       findFirst: vi.fn(),
+      create: vi.fn(),
     },
     icpProfile: {
       findFirst: vi.fn(),
@@ -30,7 +31,10 @@ function mockPrisma() {
   } as unknown as PrismaService & {
     $transaction: ReturnType<typeof vi.fn>;
     $queryRaw: ReturnType<typeof vi.fn>;
-    scrapeJob: { findFirst: ReturnType<typeof vi.fn> };
+    scrapeJob: {
+      findFirst: ReturnType<typeof vi.fn>;
+      create: ReturnType<typeof vi.fn>;
+    };
     icpProfile: {
       findFirst: ReturnType<typeof vi.fn>;
       findFirstOrThrow: ReturnType<typeof vi.fn>;
@@ -202,5 +206,23 @@ describe("LeadsService.upsertCurrentIcpProfile", () => {
       data: expect.objectContaining({ orgId: "org_1", name: "Default ICP" }),
     });
     expect(prisma.icpProfile.update).not.toHaveBeenCalled();
+  });
+});
+
+describe("LeadsService ScrapeJob tenant boundary", () => {
+  it("rejects a foreign ICP before creating an enrichment job", async () => {
+    const prisma = mockPrisma();
+    const service = buildService(prisma);
+    prisma.icpProfile.findFirst.mockResolvedValue(null);
+
+    await expect(
+      service.runEnrichmentStage("org_1", "icp_foreign", []),
+    ).rejects.toBeInstanceOf(NotFoundException);
+
+    expect(prisma.icpProfile.findFirst).toHaveBeenCalledWith({
+      where: { id: "icp_foreign", orgId: "org_1" },
+      select: { id: true },
+    });
+    expect(prisma.scrapeJob.create).not.toHaveBeenCalled();
   });
 });

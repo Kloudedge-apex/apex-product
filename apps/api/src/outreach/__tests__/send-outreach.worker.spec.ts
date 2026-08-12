@@ -36,7 +36,24 @@ function artifactRow(overrides: Partial<OutreachArtifact> = {}): OutreachArtifac
     subject: "Hi",
     bodyText: "Body",
     bodyHtml: null,
-    payload: { to: "dest@example.com", subject: "Hi", body: "Body" },
+    payload: {
+      to: "dest@example.com",
+      subject: "Hi",
+      body: "Body",
+      qaIssues: [],
+      brief_facts: [
+        {
+          id: "S1",
+          category: "signal",
+          source: "https://example.com/source",
+          text: "Acme launched a new product.",
+        },
+      ],
+      groundedness_self_check: {
+        citedFactIds: ["S1"],
+        unsupportedClaims: [],
+      },
+    },
     status: OutreachArtifactStatus.APPROVED,
     reviewerNote: null,
     reviewedBy: "user_x",
@@ -90,7 +107,7 @@ function mockPrisma() {
         name: "Acme Inc",
         physicalAddress: "123 Main St, Springfield IL 62704",
         country: "US",
-        senderName: null,
+        senderName: "Acme Sales",
       }),
     },
   } as unknown as PrismaService & {
@@ -280,6 +297,76 @@ describe("SendOutreachWorker.processArtifact", () => {
     } finally {
       delete process.env.OUTREACH_LIVE_FOR_ORGS;
     }
+  });
+
+  it.each([
+    [
+      {
+        id: "org_1",
+        name: "Acme Inc",
+        physicalAddress: "  ",
+        country: "US",
+        senderName: "Acme Sales",
+      },
+      "missing physicalAddress",
+    ],
+    [
+      {
+        id: "org_1",
+        name: "Acme Inc",
+        physicalAddress: "123 Main St, Springfield IL 62704",
+        country: "US",
+        senderName: "   ",
+      },
+      "missing senderName",
+    ],
+    [
+      {
+        id: "org_1",
+        name: "Acme Inc",
+        physicalAddress: "123 Main St, Springfield IL 62704",
+        country: "ZZ",
+        senderName: "Acme Sales",
+      },
+      "missing a valid two-letter country",
+    ],
+  ])("fails closed before a live provider call when sender identity is incomplete: %s", async (org, message) => {
+    process.env.OUTREACH_LIVE_FOR_ORGS = "org_1";
+    try {
+      prisma.outreachArtifact.findUnique.mockResolvedValue(artifactRow());
+      prisma.org.findUnique.mockResolvedValue(org);
+      const sendSpy = vi.spyOn(SendEmailTool.prototype, "execute");
+
+      await expect(worker.processArtifact("art_1", "org_1")).rejects.toThrow(message);
+
+      expect(sendSpy).not.toHaveBeenCalled();
+      expect(prisma.outreachArtifact.update).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.OUTREACH_LIVE_FOR_ORGS;
+    }
+  });
+
+  it("refuses a legacy APPROVED email that fails the dispatch eligibility check", async () => {
+    const unsafe = artifactRow();
+    prisma.outreachArtifact.findUnique.mockResolvedValue({
+      ...unsafe,
+      payload: {
+        ...(unsafe.payload as Record<string, unknown>),
+        qaIssues: ["unsupported_claims(1)"],
+      },
+    });
+    const sendSpy = vi.spyOn(SendEmailTool.prototype, "execute");
+
+    await expect(worker.processArtifact("art_1", "org_1")).rejects.toThrow(
+      "until all draft quality checks pass",
+    );
+
+    expect(sendSpy).not.toHaveBeenCalled();
+    expect(prisma.outreachArtifact.updateMany).toHaveBeenLastCalledWith({
+      where: { id: "art_1", status: OutreachArtifactStatus.SENDING },
+      data: { status: OutreachArtifactStatus.APPROVED },
+    });
+    expect(prisma.outreachArtifact.update).not.toHaveBeenCalled();
   });
 
   it("commits the reservation transaction before provider I/O begins", async () => {
@@ -772,8 +859,49 @@ describe("SendOutreachWorker.processArtifact", () => {
       // Allowlisted org → loadIntegrations() runs → prisma.integration.findMany
       // is queried. We only assert the side-effect, not the result.
       expect(prisma.integration.findMany).toHaveBeenCalledWith({
-        where: { orgId: "org_1", status: "CONNECTED" },
+        where: {
+          orgId: "org_1",
+          provider: "gmail",
+          status: "CONNECTED",
+          encryptedCredentials: { not: null },
+          credentials: {
+            path: ["accountEmail"],
+            string_contains: "@",
+          },
+          lastHistoryId: { not: null },
+          lastSyncAt: { gte: expect.any(Date) },
+        },
       });
+    } finally {
+      delete process.env.OUTREACH_LIVE_FOR_ORGS;
+    }
+  });
+
+  it("ignores an arbitrary provider row even if a mocked database returns it", async () => {
+    process.env.OUTREACH_LIVE_FOR_ORGS = "org_1";
+    try {
+      prisma.outreachArtifact.findUnique.mockResolvedValue(artifactRow());
+      prisma.integration.findMany.mockResolvedValue([
+        { provider: "outlook" },
+      ]);
+      const refresh = integrations.refreshTokenIfNeeded as ReturnType<
+        typeof vi.fn
+      >;
+      vi.spyOn(SendEmailTool.prototype, "execute").mockResolvedValueOnce({
+        success: true,
+        data: {
+          sent: false,
+          mock: true,
+          provider: "mock",
+          messageId: "mock_1",
+        },
+      });
+
+      await expect(worker.processArtifact("art_1", "org_1")).rejects.toThrow(
+        /mock mode/,
+      );
+
+      expect(refresh).not.toHaveBeenCalled();
     } finally {
       delete process.env.OUTREACH_LIVE_FOR_ORGS;
     }
@@ -1168,8 +1296,16 @@ describe("SendOutreachWorker GL8b — recipient cooldown", () => {
   });
 
   it("queries org-scoped delivery risk using a trimmed, case-folded recipient", async () => {
+    const artifact = artifactRow();
     prisma.outreachArtifact.findUnique.mockResolvedValue(
-      artifactRow({ recipientRef: "  Dest@Example.COM  " }),
+      {
+        ...artifact,
+        recipientRef: "  Dest@Example.COM  ",
+        payload: {
+          ...(artifact.payload as Record<string, unknown>),
+          to: "  Dest@Example.COM  ",
+        },
+      },
     );
     prisma.outreachArtifact.update.mockResolvedValue(
       artifactRow({ status: OutreachArtifactStatus.SIMULATED }),
@@ -1277,22 +1413,19 @@ describe("SendOutreachWorker GL8b — recipient cooldown", () => {
     });
   });
 
-  it("skips the cooldown query when the artifact has no recipientRef", async () => {
+  it("skips the cooldown query and rejects an email with no recipientRef", async () => {
     prisma.outreachArtifact.findUnique.mockResolvedValue(
       artifactRow({ recipientRef: null }),
     );
-    prisma.outreachArtifact.update.mockResolvedValue(
-      artifactRow({ status: OutreachArtifactStatus.SIMULATED }),
-    );
-    vi.spyOn(SendEmailTool.prototype, "execute").mockResolvedValueOnce({
-      success: true,
-      data: { sent: false, mock: true, provider: "mock", messageId: "m_2" },
-    });
+    const sendSpy = vi.spyOn(SendEmailTool.prototype, "execute");
 
-    await worker.processArtifact("art_1", "org_1");
+    await expect(worker.processArtifact("art_1", "org_1")).rejects.toThrow(
+      "reviewed content does not match the send payload",
+    );
 
     // Only the advisory-lock SELECT runs; no recipient-risk SELECT follows.
     expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
+    expect(sendSpy).not.toHaveBeenCalled();
   });
 });
 
@@ -1953,6 +2086,7 @@ describe("SendOutreachWorker conversation safety gates", () => {
         status: OutreachArtifactStatus.SENT,
         sentAt: expect.any(Date),
         sendReceiptId: "gmail_message_1",
+        providerThreadId: "gmail_thread_1",
       },
     });
     expect(
@@ -2006,6 +2140,7 @@ describe("SendOutreachWorker conversation safety gates", () => {
       data: expect.objectContaining({
         status: OutreachArtifactStatus.SENT,
         sendReceiptId: "gmail_message_1",
+        providerThreadId: "gmail_thread_1",
       }),
     });
     expect(prisma.outreachArtifact.updateMany).toHaveBeenCalledTimes(1);

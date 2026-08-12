@@ -1,4 +1,4 @@
-import { ConflictException } from "@nestjs/common";
+import { ConflictException, NotFoundException } from "@nestjs/common";
 import { GraphRunStatus } from "@prisma/client";
 import { describe, expect, it, vi } from "vitest";
 import type { PrismaService } from "../../prisma/prisma.service";
@@ -13,8 +13,19 @@ type StoredRun = {
   dispatchGeneration: number;
 };
 
-function lifecyclePrisma() {
+function lifecyclePrisma(
+  ownedProfileIds: readonly string[] = ["icp_1", "icp_2", "icp_3"],
+) {
   const rows: StoredRun[] = [];
+  const ownedProfiles = new Set(ownedProfileIds);
+  const icpProfile = {
+    findMany: vi.fn(
+      async (args: { where: { orgId: string; id: { in: string[] } } }) =>
+        args.where.id.in
+          .filter((id) => ownedProfiles.has(id))
+          .map((id) => ({ id })),
+    ),
+  };
   const graphRun = {
     findFirst: vi.fn(async (args: { where: { orgId?: string } }) =>
       rows.find(
@@ -31,6 +42,7 @@ function lifecyclePrisma() {
     }),
   };
   const tx = {
+    icpProfile,
     graphRun,
     $queryRaw: vi.fn().mockResolvedValue([]),
   };
@@ -52,10 +64,12 @@ function lifecyclePrisma() {
 
   return {
     rows,
+    icpProfile,
     graphRun,
     tx,
     prisma: {
       graphRun,
+      icpProfile,
       $transaction,
     } as unknown as PrismaService,
   };
@@ -124,5 +138,36 @@ describe("GraphService durable start lifecycle", () => {
     expect(db.rows[0].startIcpProfileIds).toEqual(["icp_1"]);
     expect(db.rows[0].dispatchGeneration).toBe(0);
     expect(enqueueGraphRun).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a foreign ICP before creating or enqueueing a GraphRun", async () => {
+    const db = lifecyclePrisma(["icp_owned"]);
+    const { service, enqueueGraphRun } = graphService(db.prisma);
+
+    await expect(
+      service.runPipelineGraph("org_1", ["icp_foreign"]),
+    ).rejects.toBeInstanceOf(NotFoundException);
+
+    expect(db.graphRun.create).not.toHaveBeenCalled();
+    expect(enqueueGraphRun).not.toHaveBeenCalled();
+  });
+
+  it("rejects an owned-plus-foreign ICP list instead of accepting the owned subset", async () => {
+    const db = lifecyclePrisma(["icp_owned"]);
+    const { service, enqueueGraphRun } = graphService(db.prisma);
+
+    await expect(
+      service.runPipelineGraph("org_1", ["icp_owned", "icp_foreign"]),
+    ).rejects.toThrow("One or more ICP profiles were not found");
+
+    expect(db.icpProfile.findMany).toHaveBeenCalledWith({
+      where: {
+        orgId: "org_1",
+        id: { in: ["icp_owned", "icp_foreign"] },
+      },
+      select: { id: true },
+    });
+    expect(db.graphRun.create).not.toHaveBeenCalled();
+    expect(enqueueGraphRun).not.toHaveBeenCalled();
   });
 });
