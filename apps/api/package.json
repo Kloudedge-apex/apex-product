@@ -11,7 +11,7 @@
     "build": "tsc -p tsconfig.build.json --outDir dist",
     "start": "node dist/main",
     "start:prod": "node dist/main",
-    "lint": "eslint \"src/**/*.ts\"",
+    "lint": "node --max-old-space-size=6144 ./node_modules/eslint/bin/eslint.js \"src/**/*.ts\"",
     "pretype-check": "pnpm prisma:generate",
     "type-check": "tsc --noEmit",
     "pretest": "pnpm prisma:generate",
