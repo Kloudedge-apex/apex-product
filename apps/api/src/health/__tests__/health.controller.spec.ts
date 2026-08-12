@@ -96,6 +96,32 @@ describe("HealthController", () => {
     await expect(controller.ready()).rejects.toBeInstanceOf(ServiceUnavailableException);
   });
 
+  it("/ready times out and throws 503 when redis ping never settles", async () => {
+    const ping = vi.fn(() => new Promise<string>(() => undefined));
+    queueSvc = {
+      getBullQueue: () => ({ client: Promise.resolve({ ping }) }),
+    };
+    controller = new HealthController(prisma as never, queueSvc as never, workerHealth as never);
+
+    const err = await controller
+      .ready({ HEALTH_CHECK_TIMEOUT_MS: "5" })
+      .catch((error: unknown) => error);
+    expect(err).toBeInstanceOf(ServiceUnavailableException);
+    expect(ping).toHaveBeenCalledTimes(1);
+  });
+
+  it("/ready times out and throws 503 when postgres never settles", async () => {
+    prisma = {
+      $queryRaw: vi.fn(() => new Promise(() => undefined)),
+    };
+    controller = new HealthController(prisma as never, queueSvc as never, workerHealth as never);
+
+    const err = await controller
+      .ready({ HEALTH_CHECK_TIMEOUT_MS: "5" })
+      .catch((error: unknown) => error);
+    expect(err).toBeInstanceOf(ServiceUnavailableException);
+  });
+
   it("/ready returns ok when bullQueue is null (dev DB-polling fallback)", async () => {
     queueSvc = makeQueueService({ nullQueue: true });
     controller = new HealthController(prisma as never, queueSvc as never, workerHealth as never);

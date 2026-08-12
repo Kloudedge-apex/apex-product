@@ -3,9 +3,9 @@
 # deploy-prod.sh — canonical manual prod deploy (audit B7).
 #
 # Meant to be run from the release branch (release/go-live-*) AFTER CI is
-# green. Builds the image once in ACR tagged with the short git SHA (never
-# `latest`), then rolls BOTH Container Apps to that exact tag so api and
-# worker can never drift apart.
+# green. Builds the image once in ACR with a full-git-SHA traceability tag,
+# resolves that tag to a content digest, then rolls BOTH Container Apps to
+# the exact digest so api and worker cannot drift or be retargeted.
 #
 #   registry  ledgracr            ACR repo  apex-api
 #   RG        Ledgr-prod          apps      apex-gtm-api, apex-gtm-worker
@@ -46,14 +46,15 @@ if [[ "$BRANCH" != release/* ]]; then
   echo "         Prod is expected to ship from release/go-live-*." >&2
 fi
 
-# Immutable SHA tag — never :latest, so every running revision is traceable
-# back to an exact commit.
-TAG="$(git rev-parse --short HEAD)"
-IMAGE="${REGISTRY}.azurecr.io/${ACR_REPO}:${TAG}"
+# Full-SHA traceability tag. Tags remain mutable registry aliases, so the
+# deployment identity is resolved to a content digest after the build.
+COMMIT="$(git rev-parse HEAD)"
+TAG="${COMMIT}"
+TAGGED_IMAGE="${REGISTRY}.azurecr.io/${ACR_REPO}:${TAG}"
 
 echo "Branch : ${BRANCH}"
-echo "Commit : $(git rev-parse HEAD)"
-echo "Image  : ${IMAGE}"
+echo "Commit : ${COMMIT}"
+echo "Build tag: ${TAGGED_IMAGE}"
 echo "Apps   : ${API_APP} + ${WORKER_APP} (rg ${RESOURCE_GROUP})"
 echo
 
@@ -69,10 +70,25 @@ fi
 az acr build \
   --registry "${REGISTRY}" \
   --image "${ACR_REPO}:${TAG}" \
+  --build-arg "VCS_REF=${COMMIT}" \
   --file "${DOCKERFILE}" \
   .
 
-# --- Roll BOTH apps to the same image ---------------------------------------
+# Resolve once. A digest is immutable even if the traceability tag is later
+# moved, and using one frozen value prevents API/worker drift.
+DIGEST="$(az acr repository show \
+  --name "${REGISTRY}" \
+  --image "${ACR_REPO}:${TAG}" \
+  --query digest \
+  --output tsv)"
+if [[ ! "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  echo "ERROR: ACR returned an invalid manifest digest: ${DIGEST:-<empty>}" >&2
+  exit 1
+fi
+IMAGE="${REGISTRY}.azurecr.io/${ACR_REPO}@${DIGEST}"
+echo "Resolved image: ${IMAGE}"
+
+# --- Roll BOTH apps to the same digest --------------------------------------
 for APP in "${API_APP}" "${WORKER_APP}"; do
   echo "Rolling ${APP} -> ${IMAGE}"
   az containerapp update \
@@ -80,7 +96,7 @@ for APP in "${API_APP}" "${WORKER_APP}"; do
     --resource-group "${RESOURCE_GROUP}" \
     --image "${IMAGE}" \
     --output none
-  echo "Rolled ${APP} to ${TAG}"
+  echo "Rolled ${APP} to ${DIGEST}"
 done
 
 cat <<EOF

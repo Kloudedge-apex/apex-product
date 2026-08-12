@@ -109,8 +109,14 @@ Apex itself is the first dogfood org. The pipeline is wired to run end-to-end (I
 
 ### Safety contract
 
-1. **Worker gated** by `WORKER_ENABLED`. Anywhere the flag is unset, BullMQ workers never start.
-2. **Fail-fast env validation** at boot — missing `DATABASE_URL`, `REDIS_URL`, `CLERK_SECRET_KEY`, `ENCRYPTION_KEY` (64 hex chars in prod), `OPENAI_API_KEY`, or `WORKER_ENABLED` aborts startup.
+1. **Workers are independently fail-closed.** `WORKER_ENABLED`,
+   `GRAPH_RUN_WORKER_ENABLED`, and `OUTREACH_WORKER_ENABLED` must each equal
+   `true` to start their consumer. Legacy cadence scheduling is separately
+   disabled unless `SCHEDULER_ENABLED=true` and remains outside the guarded-SDR
+   release boundary.
+2. **Fail-fast env validation** rejects missing database, Redis, encryption,
+   public-URL, Clerk verification/webhook, LLM, Gmail OAuth, CORS, and admin
+   configuration before a production process can serve traffic.
 3. **`SideEffectPolicy` is fail-closed.** Every tool call resolves to an entry in `TOOL_POLICY_METADATA`. Unknown tools default to `EXTERNAL_WRITE + requiresApproval=true + allowedDryRun=false`. The guard runs at the executor layer, so subagent paths cannot bypass it.
 4. **Outreach is dry-run by default.** `send_email` / `hubspot` without an `ApprovalEnvelope` produces a `PENDING_REVIEW` `OutreachArtifact` instead of sending.
 5. **SDR outreach is a graph subgraph**, not a tool call. It builds a brief, drafts a message, QA-checks it (placeholder leaks, length bounds), redrafts once on failure, and **always** terminates at `recordDryRun`.
@@ -191,21 +197,24 @@ pnpm db:push          # push schema to current DATABASE_URL
 
 ### Backend (Azure Container Apps)
 
-API and worker run from the same image, gated by `WORKER_ENABLED`:
+API and worker run from one immutable image. Their independent worker gates are
+set by deployment role; `SCHEDULER_ENABLED` stays false for the guarded-SDR
+release:
 
 ```bash
 # Build & push to ACR
-az acr build -r ledgracrazurecrio \
-  -t apex-gtm/api:<tag> \
+az acr build --registry ledgracr \
+  --image apex-api:<full-git-sha> \
+  --build-arg VCS_REF=<full-git-sha> \
   -f apps/api/Dockerfile .
 
 # Roll API
 az containerapp update -n apex-gtm-api -g Ledgr-prod \
-  --image ledgracrazurecrio.azurecr.io/apex-gtm/api:<tag>
+  --image ledgracr.azurecr.io/apex-api@sha256:<verified-manifest-digest>
 
-# Roll worker (same image, WORKER_ENABLED=true)
+# Roll worker to the same digest; set all three worker gates explicitly.
 az containerapp update -n apex-gtm-worker -g Ledgr-prod \
-  --image ledgracrazurecrio.azurecr.io/apex-gtm/api:<tag>
+  --image ledgracr.azurecr.io/apex-api@sha256:<verified-manifest-digest>
 ```
 
 All sensitive env vars are wired via `secretref`:

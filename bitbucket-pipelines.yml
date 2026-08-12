@@ -1,8 +1,9 @@
 # Apex backend CI/CD
 #
 # Pull requests → install, lint, type-check, test.
-# Push to master → tests, then build image via `az acr build`, then roll
-# apex-gtm-api and apex-gtm-worker in parallel.
+# Push to master → tests, then build image via `az acr build` and freeze its
+# manifest digest. Production rollout is always an explicit manual action
+# after the independent GitHub image-contract job is green.
 #
 # Required Bitbucket repository variables (Repository settings → Pipelines
 # → Repository variables):
@@ -18,7 +19,7 @@
 # DB schema changes are NOT touched by CI — keep the existing
 # firewall-open → diff → approve → push → close workflow manual.
 
-image: node:20-bookworm
+image: node:24-bookworm
 
 definitions:
   caches:
@@ -36,15 +37,7 @@ definitions:
           - pnpm --filter @apex/db exec prisma generate
           - pnpm lint
           - pnpm type-check
-          # FIXME: executor.service.spec.ts and runtime-integration.spec.ts
-          # have pre-existing prisma.$transaction mock incompleteness from
-          # Phase 2.5. Excluded here so CI is green; fix the mocks and remove
-          # these exclusions.
-          - >
-            pnpm --filter @apex/api exec vitest run
-            --reporter=default
-            --exclude='**/runtime/__tests__/executor.service.spec.ts'
-            --exclude='**/runtime/__tests__/runtime-integration.spec.ts'
+          - pnpm --filter @apex/api exec vitest run --reporter=default
 
     - step: &build-image
         name: Build image and push to ACR
@@ -52,7 +45,7 @@ definitions:
         script:
           - az login --service-principal -u $AZURE_SP_APP_ID -p $AZURE_SP_PASSWORD --tenant $AZURE_TENANT_ID --output none
           # Tag scheme:
-          #   :$BITBUCKET_COMMIT  — immutable SHA tag, what deploys roll forward to
+          #   :$BITBUCKET_COMMIT  — full-SHA traceability tag
           #   :v$STAMP            — human-readable timestamp, matches manual `az acr build` provenance
           #   :latest             — moving pointer, used by the manual redeploy fallback
           - export STAMP=$(date -u +%Y%m%d%H%M%S)
@@ -62,36 +55,19 @@ definitions:
             --image apex-api:$BITBUCKET_COMMIT
             --image apex-api:v$STAMP
             --image apex-api:latest
+            --build-arg VCS_REF=$BITBUCKET_COMMIT
             --file apps/api/Dockerfile
             .
-
-    - step: &deploy-api
-        name: Roll apex-gtm-api
-        image: mcr.microsoft.com/azure-cli:latest
-        deployment: production-api
-        script:
-          - az login --service-principal -u $AZURE_SP_APP_ID -p $AZURE_SP_PASSWORD --tenant $AZURE_TENANT_ID --output none
           - >
-            az containerapp update
-            --name apex-gtm-api
-            --resource-group Ledgr-prod
-            --image ledgracr.azurecr.io/apex-api:$BITBUCKET_COMMIT
-            --output none
-          - echo "Rolled apex-gtm-api to $BITBUCKET_COMMIT"
-
-    - step: &deploy-worker
-        name: Roll apex-gtm-worker
-        image: mcr.microsoft.com/azure-cli:latest
-        deployment: production-worker
-        script:
-          - az login --service-principal -u $AZURE_SP_APP_ID -p $AZURE_SP_PASSWORD --tenant $AZURE_TENANT_ID --output none
-          - >
-            az containerapp update
-            --name apex-gtm-worker
-            --resource-group Ledgr-prod
-            --image ledgracr.azurecr.io/apex-api:$BITBUCKET_COMMIT
-            --output none
-          - echo "Rolled apex-gtm-worker to $BITBUCKET_COMMIT"
+            IMAGE_DIGEST="$(az acr repository show
+            --name ledgracr
+            --image apex-api:$BITBUCKET_COMMIT
+            --query digest
+            --output tsv)"
+            && printf '%s\n' "$IMAGE_DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'
+            && printf '%s\n' "$IMAGE_DIGEST" > image-digest.txt
+        artifacts:
+          - image-digest.txt
 
 pipelines:
   pull-requests:
@@ -102,9 +78,6 @@ pipelines:
     master:
       - step: *install-and-test
       - step: *build-image
-      - parallel:
-          - step: *deploy-api
-          - step: *deploy-worker
 
     'phase-2.5-*':
       - step: *install-and-test
@@ -130,6 +103,9 @@ pipelines:
           image: mcr.microsoft.com/azure-cli:latest
           script:
             - az login --service-principal -u $AZURE_SP_APP_ID -p $AZURE_SP_PASSWORD --tenant $AZURE_TENANT_ID --output none
-            - echo "Rolling to ledgracr.azurecr.io/apex-api:$IMAGE_TAG"
-            - az containerapp update -n apex-gtm-api -g Ledgr-prod --image ledgracr.azurecr.io/apex-api:$IMAGE_TAG --output none
-            - az containerapp update -n apex-gtm-worker -g Ledgr-prod --image ledgracr.azurecr.io/apex-api:$IMAGE_TAG --output none
+            - export IMAGE_DIGEST="$(az acr repository show --name ledgracr --image apex-api:$IMAGE_TAG --query digest --output tsv)"
+            - printf '%s\n' "$IMAGE_DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'
+            - export IMAGE="ledgracr.azurecr.io/apex-api@$IMAGE_DIGEST"
+            - echo "Resolved apex-api:$IMAGE_TAG to $IMAGE"
+            - az containerapp update -n apex-gtm-api -g Ledgr-prod --image "$IMAGE" --output none
+            - az containerapp update -n apex-gtm-worker -g Ledgr-prod --image "$IMAGE" --output none

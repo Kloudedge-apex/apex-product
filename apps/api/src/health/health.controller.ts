@@ -4,6 +4,7 @@ import { SkipOrgGuard } from "../common/org-scope.guard";
 import { PrismaService } from "../prisma/prisma.service";
 import { GraphRunQueueService } from "../graph/graph-run-queue.service";
 import { WorkerHealthService } from "./worker-health.service";
+import { healthCheckTimeoutMs, withHealthTimeout } from "./health-timeout";
 
 /**
  * Liveness + readiness probes. Audit P0 #14, GO-LIVE GL9.
@@ -56,12 +57,17 @@ export class HealthController {
 
   @Get("ready")
   @HttpCode(HttpStatus.OK)
-  async ready() {
+  async ready(env: NodeJS.ProcessEnv = process.env) {
     const checks: Record<string, "ok" | string> = {};
+    const timeoutMs = healthCheckTimeoutMs(env);
 
     // Postgres — a real query against the connection.
     try {
-      await this.prisma.$queryRaw`SELECT 1`;
+      await withHealthTimeout(
+        this.prisma.$queryRaw`SELECT 1`,
+        "Postgres readiness query",
+        timeoutMs,
+      );
       checks.postgres = "ok";
     } catch (err) {
       checks.postgres = err instanceof Error ? err.message : "unknown error";
@@ -76,8 +82,16 @@ export class HealthController {
       const queue = this.graphRunQueue.getBullQueue();
       if (queue) {
         // BullMQ Queue exposes .client which is a Promise<IORedis>; await + ping.
-        const client = await queue.client;
-        await client.ping();
+        const client = await withHealthTimeout(
+          queue.client,
+          "Redis client acquisition",
+          timeoutMs,
+        );
+        await withHealthTimeout(
+          client.ping(),
+          "Redis readiness ping",
+          timeoutMs,
+        );
         checks.redis = "ok";
       } else {
         checks.redis = "ok"; // dev fallback mode — not a readiness failure

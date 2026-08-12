@@ -11,6 +11,8 @@ import {
   QueueDepthCounts,
   QueueStats,
 } from "../observability/metrics/metrics.service";
+import { QueueService, RUN_QUEUE_NAME } from "../runtime/queue.service";
+import { healthCheckTimeoutMs, withHealthTimeout } from "./health-timeout";
 
 /**
  * GO-LIVE GL9: minimum worker-detection layer.
@@ -22,15 +24,17 @@ import {
  * alone, so it works from BOTH the api and the worker process (the BullMQ
  * Queue producer reads counts + the fleet-wide consumer list from Redis).
  *
- * Two failure conditions per queue:
+ * Two failure conditions per queue across agent runs, graph runs, and
+ * outreach sends:
  *
  *  1. NO CONSUMERS — `Queue.getWorkers()` (Redis CLIENT LIST, fleet-wide)
  *     reports zero attached consumers while jobs are backlogged
- *     (waiting+active > 0), OR while THIS process is env-gated to consume the
- *     queue (GRAPH_RUN_WORKER_ENABLED / OUTREACH_WORKER_ENABLED — mirrored
- *     here instead of imported from the worker files to keep HealthModule's
- *     file-import graph tiny; see outreach/suppression.module.ts for the
- *     boot-cycle incident that rule comes from).
+ *     (waiting+active > 0), OR while the process is env-gated to consume the
+ *     queue. Production probes always require all three fleet consumers, even
+ *     when served by an API process whose local worker gates are false. Gate
+ *     names are mirrored here instead of imported from worker files to keep
+ *     HealthModule's file-import graph tiny; see outreach/suppression.module.ts
+ *     for the boot-cycle incident that rule comes from.
  *
  *  2. STALLED — backlog was non-zero at a snapshot at least
  *     `stallWindowMs` ago, has not shrunk since, and neither the completed
@@ -71,12 +75,12 @@ export function workerStallWindowMs(
 
 /**
  * Env var that gates consumption of each queue in a given process. Mirrors
- * isGraphRunWorkerEnabled() / isOutreachWorkerEnabled() ("true" only,
- * case-sensitive, default off).
+ * the three worker gate helpers ("true" only, case-sensitive, default off).
  */
 const CONSUMER_GATE_ENV: Readonly<Record<string, string>> = {
   [GRAPH_RUN_QUEUE_NAME]: "GRAPH_RUN_WORKER_ENABLED",
   [OUTREACH_SEND_QUEUE_NAME]: "OUTREACH_WORKER_ENABLED",
+  [RUN_QUEUE_NAME]: "WORKER_ENABLED",
 };
 
 interface QueueSnapshot {
@@ -116,6 +120,7 @@ export class WorkerHealthService {
   constructor(
     private readonly graphRunQueue: GraphRunQueueService,
     private readonly outreachSendQueue: OutreachSendQueueService,
+    private readonly runQueue: QueueService,
   ) {}
 
   /**
@@ -131,12 +136,15 @@ export class WorkerHealthService {
     const sources: ReadonlyArray<readonly [string, QueueStatsSource]> = [
       [GRAPH_RUN_QUEUE_NAME, this.graphRunQueue],
       [OUTREACH_SEND_QUEUE_NAME, this.outreachSendQueue],
+      [RUN_QUEUE_NAME, this.runQueue],
     ];
 
-    const queues: QueueHealthVerdict[] = [];
-    for (const [name, source] of sources) {
-      queues.push(await this.evaluateQueue(name, source, now, windowMs, env));
-    }
+    const timeoutMs = healthCheckTimeoutMs(env);
+    const queues = await Promise.all(
+      sources.map(([name, source]) =>
+        this.evaluateQueue(name, source, now, windowMs, timeoutMs, env),
+      ),
+    );
     return {
       healthy: queues.every((q) => q.healthy),
       stallWindowMs: windowMs,
@@ -149,11 +157,16 @@ export class WorkerHealthService {
     source: QueueStatsSource,
     now: number,
     windowMs: number,
+    timeoutMs: number,
     env: NodeJS.ProcessEnv,
   ): Promise<QueueHealthVerdict> {
     let stats: QueueStats | null;
     try {
-      stats = await source.getQueueStats();
+      stats = await withHealthTimeout(
+        source.getQueueStats(),
+        `${name} queue stats`,
+        timeoutMs,
+      );
     } catch (err) {
       // Redis unreachable → we cannot confirm consumption. Fail the probe;
       // /health/ready fails on the same condition, so this adds no new
@@ -197,14 +210,19 @@ export class WorkerHealthService {
     if (stats.workerCount === 0) {
       const gateEnvName = CONSUMER_GATE_ENV[name];
       const processExpectsConsumers =
-        gateEnvName !== undefined && env[gateEnvName] === "true";
+        env.NODE_ENV === "production" ||
+        (gateEnvName !== undefined && env[gateEnvName] === "true");
       if (backlog > 0) {
         reasons.push(
           `${backlog} job(s) backlogged on "${name}" with zero BullMQ consumers attached`,
         );
       } else if (processExpectsConsumers) {
         reasons.push(
-          `this process sets ${gateEnvName ?? "?"}=true but zero BullMQ consumers are attached to "${name}"`,
+          `${
+            env.NODE_ENV === "production"
+              ? "production requires an attached consumer"
+              : `this process sets ${gateEnvName ?? "?"}=true`
+          } but zero BullMQ consumers are attached to "${name}"`,
         );
       }
     }

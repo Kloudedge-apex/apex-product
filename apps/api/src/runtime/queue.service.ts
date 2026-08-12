@@ -1,5 +1,6 @@
 import { Injectable, Logger, OnModuleDestroy } from "@nestjs/common";
 import { Queue, JobsOptions, ConnectionOptions } from "bullmq";
+import type { QueueStats } from "../observability/metrics/metrics.service";
 
 export interface QueueJob {
   id: string;
@@ -237,6 +238,30 @@ export class QueueService implements OnModuleDestroy {
       return this.bullQueue.getActiveCount();
     }
     return this.memProcessing.size;
+  }
+
+  /** Point-in-time stats used by the worker readiness probe. */
+  async getQueueStats(): Promise<QueueStats | null> {
+    if (!this.bullQueue) return null;
+    const [counts, workers] = await Promise.all([
+      this.bullQueue.getJobCounts(
+        "waiting",
+        "active",
+        "delayed",
+        "failed",
+        "completed",
+      ),
+      this.bullQueue.getWorkers(),
+    ]);
+    return {
+      queueName: RUN_QUEUE_NAME,
+      waiting: counts.waiting ?? 0,
+      active: counts.active ?? 0,
+      delayed: counts.delayed ?? 0,
+      failed: counts.failed ?? 0,
+      completed: counts.completed ?? 0,
+      workerCount: workers.length,
+    };
   }
 
   async onModuleDestroy() {

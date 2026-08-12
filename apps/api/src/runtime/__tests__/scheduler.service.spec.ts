@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
-import { SchedulerService } from "../scheduler.service";
+import { isSchedulerEnabled, SchedulerService } from "../scheduler.service";
 import { PrismaService } from "../../prisma/prisma.service";
 import { RuntimeService } from "../runtime.service";
 
@@ -24,9 +24,12 @@ describe("SchedulerService", () => {
   let scheduler: SchedulerService;
   let mockPrisma: ReturnType<typeof createMockPrisma>;
   let mockRuntime: ReturnType<typeof createMockRuntime>;
+  let previousSchedulerEnabled: string | undefined;
 
   beforeEach(() => {
     vi.useFakeTimers();
+    previousSchedulerEnabled = process.env.SCHEDULER_ENABLED;
+    process.env.SCHEDULER_ENABLED = "true";
     mockPrisma = createMockPrisma();
     mockRuntime = createMockRuntime();
     scheduler = new SchedulerService(mockPrisma, mockRuntime);
@@ -34,7 +37,23 @@ describe("SchedulerService", () => {
 
   afterEach(() => {
     scheduler.onModuleDestroy();
+    if (previousSchedulerEnabled === undefined) {
+      delete process.env.SCHEDULER_ENABLED;
+    } else {
+      process.env.SCHEDULER_ENABLED = previousSchedulerEnabled;
+    }
     vi.useRealTimers();
+  });
+
+  it("is fail-closed unless explicitly enabled", () => {
+    expect(isSchedulerEnabled({})).toBe(false);
+    expect(isSchedulerEnabled({ SCHEDULER_ENABLED: "false" })).toBe(false);
+    expect(isSchedulerEnabled({ SCHEDULER_ENABLED: "TRUE" })).toBe(false);
+    expect(isSchedulerEnabled({ SCHEDULER_ENABLED: "true" })).toBe(true);
+
+    scheduler.onModuleInit({});
+    vi.advanceTimersByTime(120000);
+    expect(mockPrisma.agent.findMany).not.toHaveBeenCalled();
   });
 
   it("should start interval on module init", () => {

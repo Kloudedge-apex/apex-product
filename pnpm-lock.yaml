@@ -24,9 +24,6 @@ importers:
 
   apps/api:
     dependencies:
-      '@apex/db':
-        specifier: workspace:*
-        version: link:../../packages/db
       '@hubspot/api-client':
         specifier: ^13.4.0
         version: 13.4.0

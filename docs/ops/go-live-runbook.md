@@ -105,6 +105,12 @@ Then verify `https://${API_FQDN}/api/health/ready` and perform the owned-recipie
 smoke below. A missing or invalid production value must make the revision fail
 startup; never bypass that guard with `BASE_URL`.
 
+The image liveness check targets `/api/health/live`. Configure the API revision's
+readiness probe to `/api/health/ready` and the worker revision's readiness probe
+to `/api/health/worker`; both dependency probes are bounded by
+`HEALTH_CHECK_TIMEOUT_MS` (default 2000 ms). Keep `SCHEDULER_ENABLED=false` on
+both guarded-SDR revisions because cadence scheduling is deferred.
+
 ---
 
 ## (a) KILL SWITCHES
@@ -413,14 +419,17 @@ curl -fsS "https://${API_FQDN}/api/health/worker" | jq .
 - `200 {"status":"ok", ...}` — healthy.
 - `503 {"status":"degraded", ...}` — at least one queue unhealthy; `queues[].reasons` says why.
 
-Per queue (`graph-runs`, `outreach-send`) it reports `mode`
+Per queue (`graph-runs`, `outreach-send`, `agent-runs`) it reports `mode`
 (`bullmq`/`fallback`), `healthy`, `reasons`, `workerCount` (fleet-wide),
 `backlog` (waiting+active), full `counts`, and `observedWindowMs`. Failure
 conditions — exactly two:
 
 1. **No consumers** — zero attached consumers while backlog > 0, or while the
-   probed process itself sets the queue's gate env (`GRAPH_RUN_WORKER_ENABLED`
-   / `OUTREACH_WORKER_ENABLED`) to `true`.
+   probed process itself sets the queue's gate env (`WORKER_ENABLED` /
+   `GRAPH_RUN_WORKER_ENABLED` / `OUTREACH_WORKER_ENABLED`) to `true`. In
+   production, all three consumers are required even when the probe is served
+   by an API process whose local worker gates are false, so API-ingress checks
+   still assess the fleet-wide worker deployment.
 2. **Stalled** — backlog was non-zero a full stall window ago (default 5 min;
    `WORKER_HEALTH_STALL_WINDOW_MS`), has not shrunk, and neither completed nor
    failed counts moved. Consumers attached, nothing flowing.

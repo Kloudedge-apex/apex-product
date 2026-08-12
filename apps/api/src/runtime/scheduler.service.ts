@@ -2,6 +2,13 @@ import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from "@nestjs/commo
 import { PrismaService } from "../prisma/prisma.service";
 import { RuntimeService } from "./runtime.service";
 
+/** Cadence scheduling is deferred from the guarded-SDR release and fail-closed. */
+export function isSchedulerEnabled(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return env.SCHEDULER_ENABLED === "true";
+}
+
 @Injectable()
 export class SchedulerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(SchedulerService.name);
@@ -12,9 +19,17 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
     private runtime: RuntimeService,
   ) {}
 
-  onModuleInit() {
+  onModuleInit(env: NodeJS.ProcessEnv = process.env) {
+    if (!isSchedulerEnabled(env)) {
+      this.logger.log(
+        "Scheduler disabled in this process (set SCHEDULER_ENABLED=true to enable)",
+      );
+      return;
+    }
     // Check schedules every 60 seconds
     this.intervalHandle = setInterval(() => this.checkSchedules(), 60000);
+    this.intervalHandle.unref();
+    this.logger.log("Scheduler enabled (60s polling interval)");
   }
 
   onModuleDestroy() {

@@ -5,3 +5,21 @@ node_modules
 dist
 apps/api/dist
 apps/web/.next
+
+# Remote builders receive the entire context before Dockerfile COPY rules are
+# evaluated. Never upload local configuration, package-registry credentials,
+# private keys, or certificate bundles to ACR/CI builders.
+.env
+.env.*
+**/.env
+**/.env.*
+.npmrc
+**/.npmrc
+*.key
+*.pem
+*.p12
+*.pfx
+**/*.key
+**/*.pem
+**/*.p12
+**/*.pfx
