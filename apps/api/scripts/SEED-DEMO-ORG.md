@@ -8,8 +8,8 @@ in a 10/10/10 PENDING_REVIEW/APPROVED/SENT split.
 
 1. **Sign up the demo user** via the production FE
    ([https://workforceos.xyz](https://workforceos.xyz)) using whatever email
-   you want to record the Loom from (e.g. `demo@nikxius.ai`). Pick a
-   memorable org name — this is what appears on-camera.
+   you control and want to record the Loom from. Pick a memorable org name —
+   this is what appears on-camera.
 
 2. **Capture the new Org id**. From the dashboard hit `GET /api/orgs/me`
    in the network tab, or check the URL after onboarding completes.

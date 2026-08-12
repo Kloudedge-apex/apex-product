@@ -15,6 +15,8 @@ import {
 import type { IntegrationCredentials, ToolContext, ToolResult } from "../tool.interface";
 
 const ORIGINAL_FETCH = globalThis.fetch;
+const ORIGINAL_NODE_ENV = process.env.NODE_ENV;
+const ORIGINAL_API_PUBLIC_URL = process.env.API_PUBLIC_URL;
 
 function mockResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -55,6 +57,10 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.fetch = ORIGINAL_FETCH;
+  if (ORIGINAL_NODE_ENV === undefined) delete process.env.NODE_ENV;
+  else process.env.NODE_ENV = ORIGINAL_NODE_ENV;
+  if (ORIGINAL_API_PUBLIC_URL === undefined) delete process.env.API_PUBLIC_URL;
+  else process.env.API_PUBLIC_URL = ORIGINAL_API_PUBLIC_URL;
 });
 
 describe("SendEmailTool — provider/mode stamping (GL2)", () => {
@@ -140,6 +146,63 @@ describe("SendEmailTool — provider/mode stamping (GL2)", () => {
     const decoded = Buffer.from(raw, "base64url").toString("utf8");
     expect(decoded).toContain("In-Reply-To: <message-1@example.com>");
     expect(decoded).toContain("References: <message-1@example.com>");
+  });
+
+  it("advertises only the public HTTPS one-click URL in Gmail unsubscribe headers", async () => {
+    process.env.NODE_ENV = "production";
+    process.env.API_PUBLIC_URL = "https://api.workforceos.xyz";
+    let requestBody: Record<string, unknown> | null = null;
+    globalThis.fetch = (async (_url, init) => {
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return mockResponse(200, { id: "gmail_msg_1" });
+    }) as typeof fetch;
+
+    const result = await new SendEmailTool().execute(
+      PARAMS,
+      buildContext(
+        new Map([["gmail", creds("gmail", "real-token")]]),
+      ),
+    );
+
+    expect(result.success).toBe(true);
+    const raw = String(requestBody?.raw ?? "");
+    const decoded = Buffer.from(raw, "base64url").toString("utf8");
+    expect(decoded).toMatch(
+      /List-Unsubscribe: <https:\/\/api\.workforceos\.xyz\/api\/u\/[A-Za-z0-9_.~%-]+>/,
+    );
+    expect(decoded).toContain(
+      "List-Unsubscribe-Post: List-Unsubscribe=One-Click",
+    );
+    expect(decoded).not.toContain("mailto:");
+  });
+
+  it("advertises only the public HTTPS one-click URL in Outlook headers", async () => {
+    process.env.NODE_ENV = "production";
+    process.env.API_PUBLIC_URL = "https://api.workforceos.xyz";
+    let requestBody: Record<string, unknown> | null = null;
+    globalThis.fetch = (async (_url, init) => {
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return mockResponse(202, {});
+    }) as typeof fetch;
+
+    const result = await new SendEmailTool().execute(
+      PARAMS,
+      buildContext(
+        new Map([["outlook", creds("outlook", "real-token")]]),
+      ),
+    );
+
+    expect(result.success).toBe(true);
+    const message = requestBody?.message as
+      | { internetMessageHeaders?: Array<{ name: string; value: string }> }
+      | undefined;
+    const unsubscribe = message?.internetMessageHeaders?.find(
+      (header) => header.name === "List-Unsubscribe",
+    );
+    expect(unsubscribe?.value).toMatch(
+      /^<https:\/\/api\.workforceos\.xyz\/api\/u\/[A-Za-z0-9_.~%-]+>$/,
+    );
+    expect(unsubscribe?.value).not.toContain("mailto:");
   });
 
   it("rejects CRLF header injection before making a provider request", async () => {

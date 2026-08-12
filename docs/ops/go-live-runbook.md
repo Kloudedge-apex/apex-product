@@ -82,6 +82,29 @@ After schema apply, verify the exact candidate image against the production
 gates in the workspace `docs/PRODUCT_COMPLETION_CONTRACT.md` before adding any
 organization to `OUTREACH_LIVE_FOR_ORGS`.
 
+### Public unsubscribe-origin preflight
+
+`API_PUBLIC_URL` is a production boot requirement on both the API and worker.
+Set it to the externally reachable HTTPS API origin (for example,
+`https://${API_FQDN}`; an optional trailing `/api` is normalized). Do not use an
+internal hostname, localhost, credentials, query parameters, or fragments. The
+worker stamps this origin into the visible footer and the RFC 8058
+`List-Unsubscribe` header, so a bad value is a send-safety failure, not a
+cosmetic configuration issue.
+
+Before enabling a live organization, confirm both apps carry the same value:
+
+```bash
+az containerapp show -n apex-gtm-api -g Ledgr-prod \
+  --query "properties.template.containers[0].env[?name=='API_PUBLIC_URL'].value | [0]" -o tsv
+az containerapp show -n apex-gtm-worker -g Ledgr-prod \
+  --query "properties.template.containers[0].env[?name=='API_PUBLIC_URL'].value | [0]" -o tsv
+```
+
+Then verify `https://${API_FQDN}/api/health/ready` and perform the owned-recipient
+smoke below. A missing or invalid production value must make the revision fail
+startup; never bypass that guard with `BASE_URL`.
+
 ---
 
 ## (a) KILL SWITCHES
@@ -485,16 +508,18 @@ for this org, and GL8b will cooldown-block it for 14 days regardless.
 **Preconditions**
 
 1. Worker healthy: `curl -fsS "https://${API_FQDN}/api/health/worker" | jq '.healthy'` → `true`, `workerCount ≥ 1` on `outreach-send`.
-2. Allowlist contains the org:
+2. `API_PUBLIC_URL` is identical on API and worker, equals the public API origin,
+   and `curl -fsS "https://${API_FQDN}/api/health/ready"` succeeds.
+3. Allowlist contains the org:
    ```bash
    az containerapp show -n apex-gtm-worker -g Ledgr-prod \
      --query "properties.template.containers[0].env[?name=='OUTREACH_LIVE_FOR_ORGS'].value | [0]" -o tsv
    ```
-3. Org has `physicalAddress` set (live email fail-closes without it):
+4. Org has `physicalAddress` set (live email fail-closes without it):
    ```sql
    SELECT "physicalAddress", "senderName", country FROM "Org" WHERE id = 'cmpe63k370000ap01vsiehbj2';
    ```
-4. Daily-cap headroom (triage #3 query) — count must be < 40.
+5. Daily-cap headroom (triage #3 query) — count must be < 40.
 
 **Step 1 — fresh-or-refreshed Gmail token (GL1)**
 
@@ -569,7 +594,7 @@ In the sender mailbox: same message in Sent, Gmail message id matches
 
 Gmail → "Show original" on the received message. Must be present:
 
-- `List-Unsubscribe: <mailto:...>, <https://.../api/u/<token>>`
+- `List-Unsubscribe: <https://.../api/u/<token>>`
 - `List-Unsubscribe-Post: List-Unsubscribe=One-Click`
 - Body footer: sender name, physical postal address, visible Unsubscribe link
   (CAN-SPAM §7704(a)(5)).

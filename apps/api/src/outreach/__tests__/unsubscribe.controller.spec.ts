@@ -181,6 +181,8 @@ describe("UnsubscribeController — GET human landing unchanged", () => {
     expect(typeof res.body).toBe("string");
     expect(res.body as string).toContain("<!doctype html");
     expect(res.body as string).toContain("unsubscribed");
+    expect(res.body as string).toContain("Workforce OS");
+    expect(res.body as string).not.toContain("Nikxius");
     expect(service.suppress).toHaveBeenCalledWith(
       expect.objectContaining({ source: "unsubscribe_token" }),
     );

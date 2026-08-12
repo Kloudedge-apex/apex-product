@@ -1,4 +1,5 @@
 import * as crypto from "node:crypto";
+import { isIP } from "node:net";
 
 /**
  * One-click unsubscribe token (RFC 8058 / CAN-SPAM List-Unsubscribe-Post).
@@ -57,9 +58,17 @@ function base64urlEncode(input: Buffer): string {
 }
 
 function base64urlDecode(input: string): Buffer | null {
+  if (!/^[A-Za-z0-9_-]+$/.test(input)) return null;
   const padded = input + "=".repeat((4 - (input.length % 4)) % 4);
   try {
-    return Buffer.from(padded.replace(/-/g, "+").replace(/_/g, "/"), "base64");
+    const decoded = Buffer.from(
+      padded.replace(/-/g, "+").replace(/_/g, "/"),
+      "base64",
+    );
+    // Reject alternate spellings whose unused trailing bits decode to the
+    // same bytes. Tokens have one canonical wire representation, so changing
+    // any character is always detected as tampering.
+    return base64urlEncode(decoded) === input ? decoded : null;
   } catch {
     return null;
   }
@@ -142,11 +151,104 @@ export function verifyUnsubscribeToken(
  */
 export const API_GLOBAL_PREFIX = "api";
 
+function isNonPublicHostname(hostname: string): boolean {
+  const normalized = hostname
+    .toLowerCase()
+    .replace(/\.$/, "")
+    .replace(/^\[|\]$/g, "");
+  if (!normalized || isIP(normalized) !== 0 || !normalized.includes(".")) {
+    return true;
+  }
+
+  const reservedSuffixes = [
+    "arpa",
+    "corp",
+    "example",
+    "home",
+    "internal",
+    "invalid",
+    "lan",
+    "local",
+    "localhost",
+    "onion",
+    "test",
+  ];
+  if (
+    reservedSuffixes.some(
+      (suffix) =>
+        normalized === suffix || normalized.endsWith(`.${suffix}`),
+    )
+  ) {
+    return true;
+  }
+
+  if (normalized.length > 253) return true;
+  const labels = normalized.split(".");
+  return labels.some(
+    (label) =>
+      label.length === 0 ||
+      label.length > 63 ||
+      !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label),
+  );
+}
+
+/**
+ * Resolve the externally reachable API origin used in compliance links.
+ * Production deliberately has no legacy or localhost fallback: a worker must
+ * fail before it can send mail carrying an unusable unsubscribe target.
+ */
+export function resolveApiPublicOrigin(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const isProduction = env.NODE_ENV === "production";
+  const explicit = env.API_PUBLIC_URL?.trim();
+  if (isProduction && !explicit) {
+    throw new Error(
+      "API_PUBLIC_URL is required when NODE_ENV=production (public HTTPS API origin)",
+    );
+  }
+
+  const raw = explicit || "http://localhost:3000";
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error("API_PUBLIC_URL must be a valid absolute URL");
+  }
+
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("API_PUBLIC_URL must use http or https");
+  }
+  if (isProduction && parsed.protocol !== "https:") {
+    throw new Error("API_PUBLIC_URL must use https in production");
+  }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error(
+      "API_PUBLIC_URL must not contain credentials, a query, or a fragment",
+    );
+  }
+
+  const path = parsed.pathname.replace(/\/+$/, "") || "/";
+  if (path !== "/" && path !== `/${API_GLOBAL_PREFIX}`) {
+    throw new Error(
+      `API_PUBLIC_URL path must be empty or /${API_GLOBAL_PREFIX}`,
+    );
+  }
+  if (isProduction && isNonPublicHostname(parsed.hostname)) {
+    throw new Error(
+      "API_PUBLIC_URL must use a public DNS hostname in production",
+    );
+  }
+
+  return parsed.origin;
+}
+
 /**
  * Build the public unsubscribe URL stamped on outbound email
  * `List-Unsubscribe` headers. Reads API_PUBLIC_URL (canonical for the api
- * Container App's externally-routable hostname); falls back to the legacy
- * BASE_URL or http://localhost:3000 for dev.
+ * Container App's externally-routable hostname). Production requires that
+ * value and rejects an invalid/non-public origin. Development retains only
+ * the localhost fallback.
  *
  * The result always carries exactly one `/${API_GLOBAL_PREFIX}` segment:
  * a base that already ends in `/api` is not doubled, a bare hostname gets
@@ -158,30 +260,7 @@ export function buildUnsubscribeUrl(
   recipientRef: string,
   env: NodeJS.ProcessEnv = process.env,
 ): string {
-  const base =
-    env.API_PUBLIC_URL?.trim() ||
-    env.BASE_URL?.trim() ||
-    "http://localhost:3000";
-  const trimmed = base.replace(/\/+$/, "");
-  // Tolerate operators who set API_PUBLIC_URL with the prefix already
-  // included — never emit a `/api/api/` double segment.
-  const origin = trimmed.endsWith(`/${API_GLOBAL_PREFIX}`)
-    ? trimmed.slice(0, -(API_GLOBAL_PREFIX.length + 1))
-    : trimmed;
+  const origin = resolveApiPublicOrigin(env);
   const token = signUnsubscribeToken({ orgId, recipientRef, env });
   return `${origin}/${API_GLOBAL_PREFIX}/u/${encodeURIComponent(token)}`;
-}
-
-/**
- * Build the RFC 8058 `mailto:` unsubscribe target. Most providers (Google,
- * Yahoo) accept either or both; we ship both so dumb clients still work.
- */
-export function buildUnsubscribeMailto(
-  orgId: string,
-  recipientRef: string,
-  env: NodeJS.ProcessEnv = process.env,
-): string {
-  const domain = env.UNSUBSCRIBE_MAILTO_DOMAIN?.trim() || "unsubscribe.nikxius.com";
-  const token = signUnsubscribeToken({ orgId, recipientRef, env });
-  return `unsubscribe+${token}@${domain}`;
 }

@@ -6,10 +6,7 @@ import {
   fetchWithRetry,
   withCircuitBreaker,
 } from "../../common/http-retry.util";
-import {
-  buildUnsubscribeMailto,
-  buildUnsubscribeUrl,
-} from "../../outreach/unsubscribe-token.util";
+import { buildUnsubscribeUrl } from "../../outreach/unsubscribe-token.util";
 
 /**
  * Build CAN-SPAM / RFC 8058 List-Unsubscribe headers for outbound. Audit
@@ -18,7 +15,7 @@ import {
 function buildUnsubscribeHeaders(orgId: string | undefined, recipient: string) {
   if (!orgId || !recipient) return null;
   return {
-    listUnsubscribe: `<mailto:${buildUnsubscribeMailto(orgId, recipient)}>, <${buildUnsubscribeUrl(orgId, recipient)}>`,
+    listUnsubscribe: `<${buildUnsubscribeUrl(orgId, recipient)}>`,
     listUnsubscribePost: "List-Unsubscribe=One-Click",
   };
 }

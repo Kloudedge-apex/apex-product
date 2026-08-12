@@ -1,11 +1,15 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { UnauthorizedException, BadRequestException } from "@nestjs/common";
+import { google } from "googleapis";
 import { GmailService } from "../gmail.service";
 import { PrismaService } from "../../../prisma/prisma.service";
 import { SuppressionService } from "../../../outreach/suppression.service";
 import { ConversationStoreService } from "../../../conversation-store/conversation-store.service";
 import { ConfigService } from "@nestjs/config";
 import { encrypt } from "../../crypto.util";
+
+const ORIGINAL_NODE_ENV = process.env.NODE_ENV;
+const ORIGINAL_API_PUBLIC_URL = process.env.API_PUBLIC_URL;
 
 // Mock google-auth-library (OAuth2Client used for OIDC verification)
 vi.mock("google-auth-library", () => {
@@ -214,6 +218,13 @@ describe("GmailService", () => {
     );
   });
 
+  afterEach(() => {
+    if (ORIGINAL_NODE_ENV === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = ORIGINAL_NODE_ENV;
+    if (ORIGINAL_API_PUBLIC_URL === undefined) delete process.env.API_PUBLIC_URL;
+    else process.env.API_PUBLIC_URL = ORIGINAL_API_PUBLIC_URL;
+  });
+
   describe("getAuthUrl", () => {
     it("should return a Google OAuth URL", () => {
       const url = service.getAuthUrl("org_1");
@@ -312,6 +323,44 @@ describe("GmailService", () => {
       });
 
       expect(result.id).toBe("sent_msg_1");
+    });
+
+    it("advertises only the public HTTPS one-click unsubscribe URL", async () => {
+      process.env.NODE_ENV = "production";
+      process.env.API_PUBLIC_URL = "https://api.workforceos.xyz";
+      const integration = createConnectedIntegration();
+      (mockPrisma.integration.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(integration);
+
+      await service.sendEmail("org_1", {
+        to: "recipient@example.com",
+        subject: "Test Email",
+        body: "Hello, this is a test.",
+        unsubscribeContext: {
+          orgId: "org_1",
+          recipientRef: "recipient@example.com",
+        },
+      });
+
+      const gmailFactory = google.gmail as unknown as ReturnType<typeof vi.fn>;
+      const gmailClient = gmailFactory.mock.results.at(-1)?.value as {
+        users: {
+          messages: { send: ReturnType<typeof vi.fn> };
+        };
+      };
+      const request = gmailClient.users.messages.send.mock.calls.at(-1)?.[0] as {
+        requestBody?: { raw?: string };
+      };
+      const decoded = Buffer.from(
+        request.requestBody?.raw ?? "",
+        "base64url",
+      ).toString("utf8");
+      expect(decoded).toMatch(
+        /List-Unsubscribe: <https:\/\/api\.workforceos\.xyz\/api\/u\/[A-Za-z0-9_.~%-]+>/,
+      );
+      expect(decoded).toContain(
+        "List-Unsubscribe-Post: List-Unsubscribe=One-Click",
+      );
+      expect(decoded).not.toContain("mailto:");
     });
   });
 

@@ -279,7 +279,7 @@ const UNGROUNDED_REFUSAL: DrafterRefusal = {
 // "reference a specific signal" because (a) the brief lists explicit fact_ids,
 // (b) refusal is a first-class JSON output, and (c) the model declares which
 // fact_ids it used in the self-check, giving evaluators a deterministic citation.
-const SDR_DRAFT_SYSTEM_PROMPT = `You are Apex SDR, an outbound writer for first-touch B2B cold email.
+const SDR_DRAFT_SYSTEM_PROMPT = `You are an outbound SDR writing on behalf of the sender's organization.
 
 <role>
 Write one short cold email to one named buyer. You are calibrated for

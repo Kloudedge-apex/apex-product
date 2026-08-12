@@ -26,9 +26,11 @@ describe("buildUnsubscribeUrl — global api prefix (audit B11)", () => {
     const url = buildUnsubscribeUrl(
       "org_1",
       "person@example.com",
-      envWith({ API_PUBLIC_URL: "https://api.nikxius.com" }),
+      envWith({ API_PUBLIC_URL: "https://api.workforceos.xyz" }),
     );
-    expect(url).toMatch(/^https:\/\/api\.nikxius\.com\/api\/u\/[A-Za-z0-9_.~%-]+$/);
+    expect(url).toMatch(
+      /^https:\/\/api\.workforceos\.xyz\/api\/u\/[A-Za-z0-9_.~%-]+$/,
+    );
     expect(url).toContain("/api/u/");
   });
 
@@ -36,9 +38,11 @@ describe("buildUnsubscribeUrl — global api prefix (audit B11)", () => {
     const url = buildUnsubscribeUrl(
       "org_1",
       "person@example.com",
-      envWith({ API_PUBLIC_URL: "https://api.nikxius.com///" }),
+      envWith({ API_PUBLIC_URL: "https://api.workforceos.xyz///" }),
     );
-    expect(url.startsWith("https://api.nikxius.com/api/u/")).toBe(true);
+    expect(url.startsWith("https://api.workforceos.xyz/api/u/")).toBe(
+      true,
+    );
     expect(url).not.toContain("///");
   });
 
@@ -46,19 +50,12 @@ describe("buildUnsubscribeUrl — global api prefix (audit B11)", () => {
     const url = buildUnsubscribeUrl(
       "org_1",
       "person@example.com",
-      envWith({ API_PUBLIC_URL: "https://api.nikxius.com/api" }),
+      envWith({ API_PUBLIC_URL: "https://api.workforceos.xyz/api" }),
     );
-    expect(url.startsWith("https://api.nikxius.com/api/u/")).toBe(true);
+    expect(url.startsWith("https://api.workforceos.xyz/api/u/")).toBe(
+      true,
+    );
     expect(url).not.toContain("/api/api/");
-  });
-
-  it("applies the prefix on the legacy BASE_URL fallback too", () => {
-    const url = buildUnsubscribeUrl(
-      "org_1",
-      "person@example.com",
-      envWith({ BASE_URL: "https://legacy.nikxius.com" }),
-    );
-    expect(url.startsWith("https://legacy.nikxius.com/api/u/")).toBe(true);
   });
 
   it("applies the prefix on the localhost dev fallback", () => {
@@ -66,8 +63,64 @@ describe("buildUnsubscribeUrl — global api prefix (audit B11)", () => {
     expect(url.startsWith("http://localhost:3000/api/u/")).toBe(true);
   });
 
+  it("requires API_PUBLIC_URL in production even when legacy BASE_URL is set", () => {
+    expect(() =>
+      buildUnsubscribeUrl(
+        "org_1",
+        "person@example.com",
+        envWith({
+          NODE_ENV: "production",
+          BASE_URL: "https://legacy.workforceos.xyz",
+        }),
+      ),
+    ).toThrow("API_PUBLIC_URL is required");
+  });
+
+  it.each([
+    ["http://api.workforceos.xyz", "must use https"],
+    ["https://localhost", "public DNS hostname"],
+    ["https://api", "public DNS hostname"],
+    ["https://metadata.google.internal", "public DNS hostname"],
+    ["https://api.workforceos.example", "public DNS hostname"],
+    ["https://127.0.0.1", "public DNS hostname"],
+    ["https://10.2.3.4", "public DNS hostname"],
+    ["https://[::1]", "public DNS hostname"],
+    ["https://[fd00::1]", "public DNS hostname"],
+    ["https://[::ffff:127.0.0.1]", "public DNS hostname"],
+    ["https://[fe90::1]", "public DNS hostname"],
+    ["https://api_workforceos.xyz", "public DNS hostname"],
+    ["https://user:pass@api.workforceos.xyz", "credentials"],
+    ["https://api.workforceos.xyz/other", "path must be empty or /api"],
+    ["https://api.workforceos.xyz?x=1", "query"],
+    ["not-a-url", "valid absolute URL"],
+  ])("rejects invalid production API_PUBLIC_URL %s", (value, message) => {
+    expect(() =>
+      buildUnsubscribeUrl(
+        "org_1",
+        "person@example.com",
+        envWith({ NODE_ENV: "production", API_PUBLIC_URL: value }),
+      ),
+    ).toThrow(message);
+  });
+
+  it("accepts and normalizes a public HTTPS production origin", () => {
+    const url = buildUnsubscribeUrl(
+      "org_1",
+      "person@example.com",
+      envWith({
+        NODE_ENV: "production",
+        API_PUBLIC_URL: "https://api.workforceos.xyz/api/",
+      }),
+    );
+    expect(url.startsWith("https://api.workforceos.xyz/api/u/")).toBe(
+      true,
+    );
+  });
+
   it("round-trips: the token embedded in the URL verifies back to org + recipient", () => {
-    const env = envWith({ API_PUBLIC_URL: "https://api.nikxius.com" });
+    const env = envWith({
+      API_PUBLIC_URL: "https://api.workforceos.xyz",
+    });
     const url = buildUnsubscribeUrl("org_1", "Person@Example.com ", env);
     const token = decodeURIComponent(url.split("/u/")[1]);
 

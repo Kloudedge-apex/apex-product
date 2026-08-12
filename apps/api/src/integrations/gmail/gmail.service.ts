@@ -17,7 +17,6 @@ import { SuppressionService } from "../../outreach/suppression.service";
 import { ConversationStoreService } from "../../conversation-store/conversation-store.service";
 import { encrypt, decrypt } from "../crypto.util";
 import {
-  buildUnsubscribeMailto,
   buildUnsubscribeUrl,
 } from "../../outreach/unsubscribe-token.util";
 
@@ -857,11 +856,7 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
         options.unsubscribeContext.orgId,
         options.unsubscribeContext.recipientRef,
       );
-      const mailto = buildUnsubscribeMailto(
-        options.unsubscribeContext.orgId,
-        options.unsubscribeContext.recipientRef,
-      );
-      mimeLines.push(`List-Unsubscribe: <mailto:${mailto}>, <${url}>`);
+      mimeLines.push(`List-Unsubscribe: <${url}>`);
       mimeLines.push("List-Unsubscribe-Post: List-Unsubscribe=One-Click");
     }
 

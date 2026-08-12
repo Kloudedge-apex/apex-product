@@ -37,8 +37,8 @@ async function bootstrap() {
   // ── Swagger / OpenAPI docs (dev only) ───────────────────────────────────
   if (!isProd) {
     const swaggerConfig = new DocumentBuilder()
-      .setTitle("Apex AI Workforce Platform")
-      .setDescription("REST API for Apex.")
+      .setTitle("Workforce OS API")
+      .setDescription("REST API for the Workforce OS guarded GTM platform.")
       .setVersion("1.0")
       .addBearerAuth({ type: "http", scheme: "bearer", bearerFormat: "JWT" })
       .build();

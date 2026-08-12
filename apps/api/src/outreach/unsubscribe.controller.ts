@@ -137,7 +137,7 @@ export class UnsubscribeController {
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>${status} — Nikxius</title>
+  <title>${status} — Workforce OS</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 540px; margin: 5rem auto; padding: 0 1.25rem; color: #222; }

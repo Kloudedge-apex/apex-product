@@ -1,6 +1,7 @@
 import * as crypto from "crypto";
 import { Logger } from "@nestjs/common";
 import { isWorkerEnabled } from "../runtime/worker.service";
+import { resolveApiPublicOrigin } from "../outreach/unsubscribe-token.util";
 
 /**
  * Fail-fast startup config validator.
@@ -82,6 +83,16 @@ export function validateEnv(
   }
 
   if (isProd) {
+    try {
+      resolveApiPublicOrigin(env);
+    } catch (err) {
+      issues.push(
+        err instanceof Error
+          ? err.message
+          : "API_PUBLIC_URL is invalid for production",
+      );
+    }
+
     // Hard-fail only on credentials whose absence would crash the very
     // first request and which BOTH the api and the worker need at boot.
     // Anything else is warned-not-thrown so a partial config doesn't take

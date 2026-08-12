@@ -25,6 +25,7 @@ function baseProdEnv(): NodeJS.ProcessEnv {
     OPENAI_API_KEY: "sk-test-openai",
     GOOGLE_CLIENT_ID: "gmail-client-id",
     GOOGLE_CLIENT_SECRET: "gmail-client-secret",
+    API_PUBLIC_URL: "https://api.workforceos.xyz",
   } as NodeJS.ProcessEnv;
 }
 
@@ -129,6 +130,26 @@ describe("validateEnv", () => {
     delete env.GOOGLE_CLIENT_SECRET;
     const { issues } = validateEnv(env);
     expect(issues.some((i) => i.includes("GOOGLE_CLIENT_SECRET"))).toBe(true);
+  });
+
+  it("fails when API_PUBLIC_URL is missing in production", () => {
+    const env = baseProdEnv();
+    delete env.API_PUBLIC_URL;
+    const { issues } = validateEnv(env);
+    expect(issues.some((i) => i.includes("API_PUBLIC_URL is required"))).toBe(
+      true,
+    );
+  });
+
+  it.each([
+    ["http://api.workforceos.xyz", "must use https"],
+    ["https://localhost", "public DNS hostname"],
+    ["https://api.workforceos.xyz/wrong", "path must be empty or /api"],
+  ])("fails for invalid production API_PUBLIC_URL %s", (value, message) => {
+    const env = baseProdEnv();
+    env.API_PUBLIC_URL = value;
+    const { issues } = validateEnv(env);
+    expect(issues.some((issue) => issue.includes(message))).toBe(true);
   });
 
   it("treats empty-string LLM keys the same as unset", () => {

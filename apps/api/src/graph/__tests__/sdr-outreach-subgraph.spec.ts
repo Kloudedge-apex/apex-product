@@ -8,7 +8,14 @@ import {
   type SubgraphDeps,
 } from "../nodes/sdr-outreach-subgraph";
 
-const { qaCheck, parseDrafterJson } = _internalForTests;
+const { qaCheck, parseDrafterJson, SDR_DRAFT_SYSTEM_PROMPT } = _internalForTests;
+
+describe("SDR draft system prompt", () => {
+  it("uses a tenant-neutral role rather than a legacy product identity", () => {
+    expect(SDR_DRAFT_SYSTEM_PROMPT).toContain("sender's organization");
+    expect(SDR_DRAFT_SYSTEM_PROMPT).not.toMatch(/Apex SDR|Nikxius/i);
+  });
+});
 
 const VALID_BODY = "Hi Alice, noticed Acme is scaling SaaS at 50-200 headcount and rolling out new product lines. We help teams at your stage tighten SDR pipeline without adding reps. Worth a 15-min call next week?";
 
