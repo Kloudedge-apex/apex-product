@@ -1,6 +1,7 @@
 import {
   Injectable,
   Logger,
+  BadRequestException,
   NotFoundException,
   ConflictException,
   ServiceUnavailableException,
@@ -20,6 +21,15 @@ import {
   assertArtifactDispatchEligible,
   assertArtifactRecipientCurrent,
 } from "./outreach-artifact-eligibility";
+import {
+  effectiveArtifactStatusWhere,
+  isReservedFailureNote,
+} from "./outreach-artifact-failure";
+import {
+  OutreachArtifactPageResponseDto,
+  OutreachArtifactResponseDto,
+  toOutreachArtifactResponse,
+} from "./outreach-artifact-response.dto";
 
 /** Dataset name for the regression set of rejected SDR drafts. */
 const BAD_SDR_DRAFTS_DATASET = "apex-bad-sdr-drafts";
@@ -41,7 +51,9 @@ type ReviewDecision =
 function extractLangsmithRunId(payload: unknown): string | null {
   if (!payload || typeof payload !== "object") return null;
   const candidate = (payload as Record<string, unknown>).langsmith_run_id;
-  return typeof candidate === "string" && candidate.length > 0 ? candidate : null;
+  return typeof candidate === "string" && candidate.length > 0
+    ? candidate
+    : null;
 }
 
 /**
@@ -83,7 +95,9 @@ export class OutreachArtifactsService {
    * for tools that do not map to a channel — those calls produce no
    * reviewable artifact (e.g. read-only tools should never reach here).
    */
-  async recordDryRun(input: CreateDryRunArtifactInput): Promise<OutreachArtifact | null> {
+  async recordDryRun(
+    input: CreateDryRunArtifactInput,
+  ): Promise<OutreachArtifact | null> {
     const channel = channelForTool(input.toolName);
     if (!channel) {
       this.logger.warn(
@@ -156,24 +170,28 @@ export class OutreachArtifactsService {
     return artifact;
   }
 
-  async listForOrg(orgId: string, opts: { status?: OutreachArtifactStatus } = {}) {
-    return this.prisma.outreachArtifact.findMany({
+  async listForOrg(
+    orgId: string,
+    opts: { status?: OutreachArtifactStatus } = {},
+  ): Promise<OutreachArtifactResponseDto[]> {
+    const artifacts = await this.prisma.outreachArtifact.findMany({
       where: {
         orgId,
-        ...(opts.status ? { status: opts.status } : {}),
+        ...(opts.status ? effectiveArtifactStatusWhere(opts.status) : {}),
       },
       orderBy: { createdAt: "desc" },
       take: 100,
     });
+    return artifacts.map(toOutreachArtifactResponse);
   }
 
   async listPageForOrg(
     orgId: string,
     opts: { status?: OutreachArtifactStatus; page: number; limit: number },
-  ) {
+  ): Promise<OutreachArtifactPageResponseDto> {
     const where = {
       orgId,
-      ...(opts.status ? { status: opts.status } : {}),
+      ...(opts.status ? effectiveArtifactStatusWhere(opts.status) : {}),
     };
     const [items, total] = await Promise.all([
       this.prisma.outreachArtifact.findMany({
@@ -184,22 +202,33 @@ export class OutreachArtifactsService {
       }),
       this.prisma.outreachArtifact.count({ where }),
     ]);
-    return { items, total, page: opts.page, limit: opts.limit };
+    return {
+      items: items.map(toOutreachArtifactResponse),
+      total,
+      page: opts.page,
+      limit: opts.limit,
+    };
   }
 
-  async listForGraphRun(orgId: string, graphRunId: string) {
-    return this.prisma.outreachArtifact.findMany({
+  async listForGraphRun(
+    orgId: string,
+    graphRunId: string,
+  ): Promise<OutreachArtifactResponseDto[]> {
+    const artifacts = await this.prisma.outreachArtifact.findMany({
       where: { orgId, graphRunId },
       orderBy: { createdAt: "asc" },
     });
+    return artifacts.map(toOutreachArtifactResponse);
   }
 
-  async get(orgId: string, id: string): Promise<OutreachArtifact> {
-    const artifact = await this.prisma.outreachArtifact.findUnique({ where: { id } });
+  async get(orgId: string, id: string): Promise<OutreachArtifactResponseDto> {
+    const artifact = await this.prisma.outreachArtifact.findUnique({
+      where: { id },
+    });
     if (!artifact || artifact.orgId !== orgId) {
       throw new NotFoundException(`OutreachArtifact ${id} not found`);
     }
-    return artifact;
+    return toOutreachArtifactResponse(artifact);
   }
 
   async approve(
@@ -284,6 +313,11 @@ export class OutreachArtifactsService {
     reviewedBy: string,
     reviewerNote?: string,
   ): Promise<OutreachArtifact> {
+    if (isReservedFailureNote(reviewerNote)) {
+      throw new BadRequestException(
+        "Reviewer notes cannot use the reserved auto-failed: system prefix",
+      );
+    }
     const updated = await this.transitionReview(
       orgId,
       id,
@@ -377,7 +411,10 @@ export class OutreachArtifactsService {
       // Prisma reports a failed conditional update as P2025. Re-read through
       // the compound tenant key so the loser gets the committed decision and
       // never proceeds to dataset or queue side effects.
-      if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== "P2025") {
+      if (
+        !(err instanceof Prisma.PrismaClientKnownRequestError) ||
+        err.code !== "P2025"
+      ) {
         throw err;
       }
       const current = await this.prisma.outreachArtifact.findUnique({

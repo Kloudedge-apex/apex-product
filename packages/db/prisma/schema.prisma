@@ -92,7 +92,7 @@ enum OutreachArtifactStatus {
   // when no provider attempt or a provider-rejected response is proven. A
   // stale claim is terminal DELIVERY_UNKNOWN because process death cannot
   // prove whether the provider accepted the request.
-  // NOTE: SENDING/SIMULATED/DELIVERY_UNKNOWN are appended at the end of the
+  // NOTE: SENDING/SIMULATED/DELIVERY_UNKNOWN/FAILED are appended at the end of the
   // enum to mirror the ALTER TYPE … ADD VALUE migrations (keeps prod and
   // schema.prisma value order in sync for drift checks).
   SENDING
@@ -107,6 +107,11 @@ enum OutreachArtifactStatus {
   // disabled for this artifact; an operator must reconcile provider state
   // before deciding whether a separately reviewed replacement is warranted.
   DELIVERY_UNKNOWN
+  // Terminal dispatch failure after retry exhaustion where provider
+  // acceptance is known to be impossible (pre-dispatch failure or explicit
+  // provider rejection). This is operational truth, not a human rejection;
+  // the worker never retries this artifact automatically.
+  FAILED
 }
 
 enum OutreachChannel {
@@ -723,18 +728,18 @@ model ScrapeJob {
 // the PrismaCheckpointSaver (implements BaseCheckpointSaver).
 
 model GraphRun {
-  id                 String             @id @default(cuid())
-  orgId              String
-  org                Org                @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  threadId           String             @unique
-  graphName          String // e.g. "pipeline-supervisor"
-  status             GraphRunStatus     @default(RUNNING)
-  currentNode        String?
-  state              Json? // last snapshot of public state (for the UI)
+  id                      String             @id @default(cuid())
+  orgId                   String
+  org                     Org                @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  threadId                String             @unique
+  graphName               String // e.g. "pipeline-supervisor"
+  status                  GraphRunStatus     @default(RUNNING)
+  currentNode             String?
+  state                   Json? // last snapshot of public state (for the UI)
   // Durable canonical input for a first invocation. A worker checks for an
   // existing GraphCheckpoint before using this seed, so crash recovery never
   // re-seeds a thread that has already checkpointed.
-  startIcpProfileIds String[]            @default([])
+  startIcpProfileIds      String[]           @default([])
   // The reviewer decision remains on the run until a worker successfully
   // drives it through LangGraph. `false` is a real pending rejection; null
   // means there is no pending resume command.
@@ -743,22 +748,22 @@ model GraphRun {
   // Monotonic dispatch fence. Every resume/recovery increments this value;
   // BullMQ job ids include it so retained completed jobs cannot swallow a
   // later dispatch and stale jobs cannot drive a newer lifecycle phase.
-  dispatchGeneration Int                @default(0)
-  needsApproval      Boolean            @default(false)
-  approvedAt         DateTime?
-  approvedBy         String?
-  error              String?
-  startedAt          DateTime           @default(now())
+  dispatchGeneration      Int                @default(0)
+  needsApproval           Boolean            @default(false)
+  approvedAt              DateTime?
+  approvedBy              String?
+  error                   String?
+  startedAt               DateTime           @default(now())
   // Mutable worker/recovery activity clock. Keep startedAt immutable so run
   // dates and elapsed durations continue to describe the original run.
-  lastActivityAt     DateTime           @default(now())
-  completedAt        DateTime?
+  lastActivityAt          DateTime           @default(now())
+  completedAt             DateTime?
   // LangSmith root run id captured by whichever node makes the first traced
   // LLM call. Persisted (instead of held in an in-memory Map) so a graph that
   // crashes and resumes on a fresh pod can still post run-level feedback for
   // its earlier legs. Nullable: legacy rows and tracing-disabled envs leave it null.
-  langsmithRootRunId String?
-  outreachArtifacts  OutreachArtifact[]
+  langsmithRootRunId      String?
+  outreachArtifacts       OutreachArtifact[]
 
   @@index([orgId])
   @@index([status])
@@ -839,6 +844,10 @@ model OutreachArtifact {
   reviewerNote      String?
   reviewedBy        String?
   reviewedAt        DateTime?
+  // Operational failure evidence is deliberately separate from reviewer
+  // fields so retry exhaustion cannot be misreported as a human rejection.
+  failureReason     String?
+  failedAt          DateTime?
   // Set once the artifact is actually delivered. Together with sendReceiptId
   // these prove a real send happened post-approval.
   sentAt            DateTime?
@@ -846,6 +855,11 @@ model OutreachArtifact {
   createdAt         DateTime                @default(now())
   updatedAt         DateTime                @updatedAt
   deliveredMessages ConversationMessage[]   @relation("DeliveredArtifactMessage")
+  // PostgreSQL additionally owns the review-gated partial unique indexes
+  // OutreachArtifact_one_reply_per_inbound_uniq and
+  // OutreachArtifact_one_open_reply_per_conversation_uniq. Prisma 6 cannot
+  // express their status predicates here; see the review-only 2026-08-12
+  // expand migration.
 
   @@unique([id, orgId])
   @@index([orgId])
@@ -855,11 +869,6 @@ model OutreachArtifact {
   @@index([orgId, createdAt])
   @@index([conversationId, createdAt])
   @@index([orgId, providerThreadId])
-  // PostgreSQL additionally owns the review-gated partial unique indexes
-  // OutreachArtifact_one_reply_per_inbound_uniq and
-  // OutreachArtifact_one_open_reply_per_conversation_uniq. Prisma 6 cannot
-  // express their status predicates here; see the review-only 2026-08-12
-  // expand migration.
 }
 
 // Durable, org-scoped projection of a provider email thread. Provider IDs are

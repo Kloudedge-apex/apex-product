@@ -111,9 +111,7 @@ function createPrismaMock() {
     outreachArtifact,
     $queryRaw,
   };
-  type TransactionCallback = (
-    tx: typeof transactionClient,
-  ) => Promise<unknown>;
+  type TransactionCallback = (tx: typeof transactionClient) => Promise<unknown>;
   let transactionTail: Promise<unknown> = Promise.resolve();
   const $transaction = vi.fn((operation: unknown) => {
     if (Array.isArray(operation)) return Promise.all(operation);
@@ -251,9 +249,9 @@ describe("ConversationsService", () => {
     it("uses an org-scoped lookup and returns NotFound for an inaccessible conversation", async () => {
       prisma.conversation.findFirst.mockResolvedValue(null);
 
-      await expect(service.get("org_1", "conversation_other")).rejects.toBeInstanceOf(
-        NotFoundException,
-      );
+      await expect(
+        service.get("org_1", "conversation_other"),
+      ).rejects.toBeInstanceOf(NotFoundException);
 
       expect(prisma.conversation.findFirst).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -293,6 +291,27 @@ describe("ConversationsService", () => {
 
       expect(result.pendingDraftId).toBe("unknown_delivery");
     });
+
+    it("does not expose a terminal FAILED reply as a pending draft blocker", async () => {
+      prisma.conversation.findFirst.mockResolvedValue(
+        conversationRow({
+          messages: [inboundMessage({ id: "message_latest" })],
+          outreachArtifacts: [
+            {
+              id: "failed_reply",
+              status: OutreachArtifactStatus.FAILED,
+              replyToMessageId: "message_latest",
+            },
+          ],
+          followUpTasks: [],
+          meetings: [],
+        }),
+      );
+
+      const result = await service.get("org_1", "conversation_1");
+
+      expect(result.pendingDraftId).toBeNull();
+    });
   });
 
   describe("read and archive state", () => {
@@ -302,7 +321,9 @@ describe("ConversationsService", () => {
         conversationRow({ unreadCount: 0 }),
       );
 
-      await expect(service.markRead("org_1", "conversation_1")).resolves.toEqual({
+      await expect(
+        service.markRead("org_1", "conversation_1"),
+      ).resolves.toEqual({
         affected: 1,
       });
       expect(prisma.conversation.findFirst).toHaveBeenCalledWith({
@@ -324,12 +345,16 @@ describe("ConversationsService", () => {
         conversationRow({ archivedAt: new Date("2026-08-12T00:00:00.000Z") }),
       );
 
-      await expect(service.archive("org_1", "conversation_1")).resolves.toEqual({
-        affected: 1,
-      });
-      await expect(service.archive("org_1", "conversation_1")).resolves.toEqual({
-        affected: 0,
-      });
+      await expect(service.archive("org_1", "conversation_1")).resolves.toEqual(
+        {
+          affected: 1,
+        },
+      );
+      await expect(service.archive("org_1", "conversation_1")).resolves.toEqual(
+        {
+          affected: 0,
+        },
+      );
 
       expect(prisma.conversation.update).toHaveBeenCalledTimes(1);
       expect(prisma.conversation.update).toHaveBeenCalledWith({
@@ -491,8 +516,7 @@ describe("ConversationsService", () => {
           recipientRef: "buyer@example.com",
           subject: "Re: Pilot discussion",
           bodyText: "Thanks <team>.\n\nTuesday works for us.",
-          bodyHtml:
-            "<p>Thanks &lt;team&gt;.</p>\n<p>Tuesday works for us.</p>",
+          bodyHtml: "<p>Thanks &lt;team&gt;.</p>\n<p>Tuesday works for us.</p>",
           payload: {
             to: "buyer@example.com",
             subject: "Re: Pilot discussion",
@@ -564,32 +588,35 @@ describe("ConversationsService", () => {
           body: Array.from({ length: 181 }, () => "word").join(" "),
         }),
       ],
-    ])("rejects %s and persists FAILED intelligence only", async (_label, content) => {
-      prisma.conversation.findFirst.mockResolvedValue(
-        conversationRow({ messages: [inboundMessage()] }),
-      );
-      prisma.conversation.update.mockResolvedValue(conversationRow());
-      llm.chat.mockResolvedValue({
-        content,
-        tokensUsed: 1,
-        model: "test",
-        cost: 0,
-      });
+    ])(
+      "rejects %s and persists FAILED intelligence only",
+      async (_label, content) => {
+        prisma.conversation.findFirst.mockResolvedValue(
+          conversationRow({ messages: [inboundMessage()] }),
+        );
+        prisma.conversation.update.mockResolvedValue(conversationRow());
+        llm.chat.mockResolvedValue({
+          content,
+          tokensUsed: 1,
+          model: "test",
+          cost: 0,
+        });
 
-      await expect(
-        service.generateReplyDraft("org_1", "conversation_1"),
-      ).rejects.toBeInstanceOf(ServiceUnavailableException);
+        await expect(
+          service.generateReplyDraft("org_1", "conversation_1"),
+        ).rejects.toBeInstanceOf(ServiceUnavailableException);
 
-      expect(prisma.outreachArtifact.create).not.toHaveBeenCalled();
-      expect(prisma.conversation.update).toHaveBeenLastCalledWith({
-        where: { id_orgId: { id: "conversation_1", orgId: "org_1" } },
-        data: {
-          intelligenceStatus: ConversationIntelligenceStatus.FAILED,
-          intelligenceError: expect.any(String),
-          intelligenceUpdatedAt: expect.any(Date),
-        },
-      });
-    });
+        expect(prisma.outreachArtifact.create).not.toHaveBeenCalled();
+        expect(prisma.conversation.update).toHaveBeenLastCalledWith({
+          where: { id_orgId: { id: "conversation_1", orgId: "org_1" } },
+          data: {
+            intelligenceStatus: ConversationIntelligenceStatus.FAILED,
+            intelligenceError: expect.any(String),
+            intelligenceUpdatedAt: expect.any(Date),
+          },
+        });
+      },
+    );
 
     it("marks intelligence FAILED and creates no artifact when the model call fails", async () => {
       prisma.conversation.findFirst.mockResolvedValue(
@@ -723,9 +750,7 @@ describe("ConversationsService", () => {
         false,
         true,
       ]);
-      expect(
-        prisma.$queryRaw.mock.calls.map((call) => call[1]),
-      ).toEqual(
+      expect(prisma.$queryRaw.mock.calls.map((call) => call[1])).toEqual(
         expect.arrayContaining([
           "outreach-send-reservation:org_1",
           "outreach-reply-thread:org_1:conversation:conversation_1",
@@ -805,10 +830,7 @@ describe("ConversationsService", () => {
           }),
       );
 
-      const aiRequest = service.generateReplyDraft(
-        "org_1",
-        "conversation_1",
-      );
+      const aiRequest = service.generateReplyDraft("org_1", "conversation_1");
       await vi.waitFor(() => expect(llm.chat).toHaveBeenCalledTimes(1));
 
       const humanResult = await service.createHumanReplyDraft(
@@ -921,9 +943,11 @@ describe("ConversationsService", () => {
     });
 
     it("does not create a human reply for an inaccessible or non-Gmail thread", async () => {
-      prisma.conversation.findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce(
-        conversationRow({ integration: { provider: "outlook" } }),
-      );
+      prisma.conversation.findFirst
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(
+          conversationRow({ integration: { provider: "outlook" } }),
+        );
 
       await expect(
         service.createHumanReplyDraft("org_1", "conversation_other", {

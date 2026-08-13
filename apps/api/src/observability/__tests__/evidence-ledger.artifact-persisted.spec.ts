@@ -44,7 +44,7 @@ describe("artifactPersisted", () => {
     });
   });
 
-  it("accepts every OutreachArtifactStatus, including DELIVERY_UNKNOWN", async () => {
+  it("accepts every OutreachArtifactStatus, including FAILED", async () => {
     // Compile-time lock: `status` is typed as the full Prisma enum here, so
     // when a new enum value lands (as SENDING/SIMULATED did in the week-1
     // send-path work) without widening the ledger's status union, tsc fails
@@ -52,7 +52,9 @@ describe("artifactPersisted", () => {
     // passes `artifact.status` straight off the row.
     const prisma = fakePrisma();
     const svc = new EvidenceLedgerService(prisma);
-    const statuses: OutreachArtifactStatus[] = Object.values(OutreachArtifactStatus);
+    const statuses: OutreachArtifactStatus[] = Object.values(
+      OutreachArtifactStatus,
+    );
     for (const status of statuses) {
       await svc.artifactPersisted({
         orgId: "o1",
@@ -66,5 +68,6 @@ describe("artifactPersisted", () => {
     expect(statuses).toContain("SENDING");
     expect(statuses).toContain("SIMULATED");
     expect(statuses).toContain("DELIVERY_UNKNOWN");
+    expect(statuses).toContain("FAILED");
   });
 });

@@ -1,4 +1,4 @@
--- Fail-closed postconditions for the synthetic seven-file rehearsal.
+-- Fail-closed postconditions for the synthetic eight-file rehearsal.
 -- Successful execution emits no row data. The controller separately records
 -- only the resulting aggregate counts in its non-authoritative receipt.
 
@@ -36,6 +36,35 @@ BEGIN
       AND e.enumlabel = 'DELIVERY_UNKNOWN'
   ) THEN
     RAISE EXCEPTION 'DELIVERY_UNKNOWN enum postcondition failed';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_enum AS e
+    JOIN pg_type AS t ON t.oid = e.enumtypid
+    JOIN pg_namespace AS n ON n.oid = t.typnamespace
+    WHERE n.nspname = current_schema()
+      AND t.typname = 'OutreachArtifactStatus'
+      AND e.enumlabel = 'FAILED'
+  ) THEN
+    RAISE EXCEPTION 'FAILED enum postcondition failed';
+  END IF;
+
+  IF (
+    SELECT COUNT(*)
+    FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = 'OutreachArtifact'
+      AND (
+        (column_name = 'failureReason' AND data_type = 'text'
+          AND is_nullable = 'YES')
+        OR (column_name = 'failedAt'
+          AND data_type = 'timestamp without time zone'
+          AND datetime_precision = 3
+          AND is_nullable = 'YES')
+      )
+  ) <> 2 THEN
+    RAISE EXCEPTION 'OutreachArtifact FAILED evidence-column postcondition failed';
   END IF;
 
   IF (
@@ -148,6 +177,7 @@ BEGIN
         OR position('replyToMessageIdISNOTNULL' IN actual_predicate) = 0
         OR position('''SENT''::OutreachArtifactStatus' IN actual_predicate) = 0
         OR position('''DELIVERY_UNKNOWN''::OutreachArtifactStatus' IN actual_predicate) = 0
+        OR position('''FAILED''::OutreachArtifactStatus' IN actual_predicate) <> 0
       )
     THEN
       RAISE EXCEPTION 'inbound-reply fixed-index predicate postcondition failed';
@@ -159,6 +189,7 @@ BEGIN
         OR position('conversationIdISNOTNULL' IN actual_predicate) = 0
         OR position('''DELIVERY_UNKNOWN''::OutreachArtifactStatus' IN actual_predicate) = 0
         OR position('''SENT''::OutreachArtifactStatus' IN actual_predicate) <> 0
+        OR position('''FAILED''::OutreachArtifactStatus' IN actual_predicate) <> 0
       )
     THEN
       RAISE EXCEPTION 'open-reply fixed-index predicate postcondition failed';

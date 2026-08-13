@@ -10,6 +10,7 @@ describe("DashboardService.activity outreach lifecycle", () => {
       OutreachArtifactStatus.SENT,
       OutreachArtifactStatus.SIMULATED,
       OutreachArtifactStatus.DELIVERY_UNKNOWN,
+      OutreachArtifactStatus.FAILED,
     ];
     const prisma = activityPrisma(
       statuses.map((status, index) => ({
@@ -18,6 +19,13 @@ describe("DashboardService.activity outreach lifecycle", () => {
         status,
         createdAt: new Date(`2026-08-12T08:00:0${index}.000Z`),
         reviewedAt,
+        reviewerNote: null,
+        failureReason:
+          status === OutreachArtifactStatus.FAILED ? "provider rejected" : null,
+        failedAt:
+          status === OutreachArtifactStatus.FAILED
+            ? new Date("2026-08-12T08:03:00.000Z")
+            : null,
         updatedAt: new Date(`2026-08-12T08:02:0${index}.000Z`),
       })),
     );
@@ -36,6 +44,107 @@ describe("DashboardService.activity outreach lifecycle", () => {
     }
   });
 
+  it("emits FAILED as approved then failed, never as a human rejection", async () => {
+    const reviewedAt = new Date("2026-08-12T10:01:00.000Z");
+    const failedAt = new Date("2026-08-12T10:05:00.000Z");
+    const prisma = activityPrisma([
+      {
+        id: "artifact_failed",
+        toolName: "send_email",
+        status: OutreachArtifactStatus.FAILED,
+        createdAt: new Date("2026-08-12T10:00:00.000Z"),
+        reviewedAt,
+        updatedAt: failedAt,
+        reviewerNote: null,
+        failureReason: "provider rejected after retries",
+        failedAt,
+      },
+    ]);
+    const service = new DashboardService(prisma as never);
+
+    const events = await service.activity("org_1", 30);
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        id: "artifact:artifact_failed:approved",
+        kind: "draft_approved",
+        at: reviewedAt.toISOString(),
+      }),
+    );
+    expect(events).toContainEqual({
+      id: "artifact:artifact_failed:failed",
+      kind: "draft_failed",
+      text: "Outreach dispatch failed without provider acceptance",
+      at: failedAt.toISOString(),
+      leadId: "",
+    });
+    expect(events.some((event) => event.kind === "draft_rejected")).toBe(false);
+  });
+
+  it("does not classify an unattested legacy auto-failed marker", async () => {
+    const overwrittenReviewTime = new Date("2026-08-12T10:05:00.000Z");
+    const prisma = activityPrisma([
+      {
+        id: "artifact_legacy_failed",
+        toolName: "send_email",
+        status: OutreachArtifactStatus.REJECTED,
+        createdAt: new Date("2026-08-12T10:00:00.000Z"),
+        reviewedAt: overwrittenReviewTime,
+        updatedAt: overwrittenReviewTime,
+        reviewerNote: "auto-failed: legacy provider rejection",
+        failureReason: null,
+        failedAt: null,
+      },
+    ]);
+    const service = new DashboardService(prisma as never);
+
+    const events = await service.activity("org_1", 30);
+
+    expect(
+      events.some(
+        (event) => event.id === "artifact:artifact_legacy_failed:approved",
+      ),
+    ).toBe(false);
+    expect(events.some((event) => event.kind === "draft_failed")).toBe(false);
+    expect(events.some((event) => event.kind === "draft_rejected")).toBe(false);
+  });
+
+  it("retains approval timing for a gated compatibility failure with failedAt evidence", async () => {
+    const reviewedAt = new Date("2026-08-12T10:01:00.000Z");
+    const failedAt = new Date("2026-08-12T10:05:00.000Z");
+    const prisma = activityPrisma([
+      {
+        id: "artifact_gated_failed",
+        toolName: "send_email",
+        status: OutreachArtifactStatus.REJECTED,
+        createdAt: new Date("2026-08-12T10:00:00.000Z"),
+        reviewedAt,
+        updatedAt: failedAt,
+        reviewerNote: "auto-failed: gated provider rejection",
+        failureReason: "gated provider rejection",
+        failedAt,
+      },
+    ]);
+    const service = new DashboardService(prisma as never);
+
+    const events = await service.activity("org_1", 30);
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        id: "artifact:artifact_gated_failed:approved",
+        kind: "draft_approved",
+        at: reviewedAt.toISOString(),
+      }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        id: "artifact:artifact_gated_failed:failed",
+        kind: "draft_failed",
+        at: failedAt.toISOString(),
+      }),
+    );
+  });
+
   it("emits distinct sent and delivery-unknown incidents at updatedAt", async () => {
     const sentUpdatedAt = new Date("2026-08-12T09:05:00.000Z");
     const unknownUpdatedAt = new Date("2026-08-12T09:06:00.000Z");
@@ -46,6 +155,9 @@ describe("DashboardService.activity outreach lifecycle", () => {
         status: OutreachArtifactStatus.SENT,
         createdAt: new Date("2026-08-12T09:00:00.000Z"),
         reviewedAt: new Date("2026-08-12T09:01:00.000Z"),
+        reviewerNote: null,
+        failureReason: null,
+        failedAt: null,
         updatedAt: sentUpdatedAt,
       },
       {
@@ -54,6 +166,9 @@ describe("DashboardService.activity outreach lifecycle", () => {
         status: OutreachArtifactStatus.DELIVERY_UNKNOWN,
         createdAt: new Date("2026-08-12T09:00:30.000Z"),
         reviewedAt: new Date("2026-08-12T09:01:30.000Z"),
+        reviewerNote: "delivery-unknown: provider outcome was ambiguous",
+        failureReason: null,
+        failedAt: null,
         updatedAt: unknownUpdatedAt,
       },
     ]);
@@ -93,6 +208,9 @@ function activityPrisma(
     createdAt: Date;
     updatedAt: Date;
     reviewedAt: Date | null;
+    reviewerNote?: string | null;
+    failureReason?: string | null;
+    failedAt?: Date | null;
   }>,
 ) {
   return {

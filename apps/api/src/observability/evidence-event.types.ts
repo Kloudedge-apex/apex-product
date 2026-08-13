@@ -1,4 +1,4 @@
-import type { Prisma } from "@prisma/client";
+import type { OutreachArtifactStatus, Prisma } from "@prisma/client";
 
 export const EVIDENCE_EVENT_KIND = {
   leadSourced: "lead.sourced",
@@ -88,20 +88,9 @@ export interface ApprovalDeniedPayload extends Prisma.InputJsonObject {
 
 export interface ArtifactPersistedPayload extends Prisma.InputJsonObject {
   readonly kind: typeof EVIDENCE_EVENT_KIND.artifactPersisted;
-  // Mirrors Prisma's OutreachArtifactStatus. SENDING (transient send-worker
-  // CAS claim), SIMULATED (forced-mock send), and DELIVERY_UNKNOWN
-  // (operator-reconciled ambiguous provider outcome) are appended last to
-  // match the enum's ALTER TYPE … ADD VALUE placement in schema.prisma.
-  readonly status:
-    | "DRAFT"
-    | "PENDING_REVIEW"
-    | "APPROVED"
-    | "REJECTED"
-    | "SENT"
-    | "SUPPRESSED"
-    | "SENDING"
-    | "SIMULATED"
-    | "DELIVERY_UNKNOWN";
+  // Directly use Prisma's complete enum so new terminal states cannot silently
+  // drift out of the evidence payload contract.
+  readonly status: OutreachArtifactStatus;
   readonly channel: "EMAIL" | "LINKEDIN" | "HUBSPOT_NOTE";
 }
 

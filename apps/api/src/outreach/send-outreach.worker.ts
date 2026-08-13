@@ -71,6 +71,23 @@ export function isOutreachWorkerEnabled(
   return env.OUTREACH_WORKER_ENABLED === "true";
 }
 
+const FAILED_STATUS_WRITE_ACK = "readers-drained-legacy-inventory-reviewed-v1";
+
+/**
+ * New enum writes stay disabled until every API/BFF reader is enum-aware and
+ * the legacy marker inventory has been reviewed. Requiring both values keeps
+ * a partial or mistyped production configuration on the legacy-compatible
+ * representation during the expand phase.
+ */
+export function failedStatusWritesEnabled(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return (
+    env.OUTREACH_FAILED_STATUS_WRITES_ENABLED === "true" &&
+    env.OUTREACH_FAILED_STATUS_WRITES_ACK === FAILED_STATUS_WRITE_ACK
+  );
+}
+
 /**
  * Per-org allowlist for real outbound sends. Without this gate, any org with
  * connected Gmail/Outlook credentials would real-send post-approval — there
@@ -434,7 +451,9 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
         );
         return;
       case "REPLY_CONFLICT":
-        this.logger.warn(`Reply artifact ${artifactId} policy-skipped — ${reservation.reason}`);
+        this.logger.warn(
+          `Reply artifact ${artifactId} policy-skipped — ${reservation.reason}`,
+        );
         return;
       case "DAILY_CAP":
         this.logger.warn(
@@ -487,7 +506,7 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
     // tell the customer their email went out when nothing left the building.
     // Treat it exactly like a failed dispatch: release the claim and throw so
     // BullMQ's retry envelope re-attempts and, at exhaustion, the failed
-    // handler marks the artifact terminal auto-failed. Non-allowlisted orgs
+    // handler marks the artifact terminal FAILED. Non-allowlisted orgs
     // never reach this branch — their mock results stay on the honest
     // SIMULATED path below.
     if (liveAllowed && isMockModeResult(result)) {
@@ -594,9 +613,7 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
   ): Promise<SendReservationDecision> {
     const now = new Date();
     const cooldownFloor = new Date(now.getTime() - RECIPIENT_COOLDOWN_MS);
-    const freshSendingFloor = new Date(
-      now.getTime() - SENDING_STALE_AGE_MS,
-    );
+    const freshSendingFloor = new Date(now.getTime() - SENDING_STALE_AGE_MS);
 
     return this.prisma.$transaction(async (tx) => {
       await acquireOrgSendReservationLock(tx, artifact.orgId);
@@ -799,21 +816,21 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
         // can never jump the queue merely because it was approved first.
         const canonicalReviewable =
           threadDeliveryBlocker || sourceDeliveryBlocker
-          ? null
-          : await tx.outreachArtifact.findFirst({
-              where: {
-                ...replySourceWhere,
-                status: {
-                  in: [
-                    OutreachArtifactStatus.DRAFT,
-                    OutreachArtifactStatus.PENDING_REVIEW,
-                    OutreachArtifactStatus.APPROVED,
-                  ],
+            ? null
+            : await tx.outreachArtifact.findFirst({
+                where: {
+                  ...replySourceWhere,
+                  status: {
+                    in: [
+                      OutreachArtifactStatus.DRAFT,
+                      OutreachArtifactStatus.PENDING_REVIEW,
+                      OutreachArtifactStatus.APPROVED,
+                    ],
+                  },
                 },
-              },
-              orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-              select: { id: true, status: true },
-            });
+                orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+                select: { id: true, status: true },
+              });
         if (
           !threadDeliveryBlocker &&
           !sourceDeliveryBlocker &&
@@ -1041,10 +1058,18 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
         // §7704(a)(5) cannot be composed without it. Audit P0 #2.
         const org = await this.prisma.org.findUnique({
           where: { id: artifact.orgId },
-          select: { id: true, name: true, physicalAddress: true, country: true, senderName: true },
+          select: {
+            id: true,
+            name: true,
+            physicalAddress: true,
+            country: true,
+            senderName: true,
+          },
         });
         if (!org) {
-          throw new Error(`Org ${artifact.orgId} not found (required for email send)`);
+          throw new Error(
+            `Org ${artifact.orgId} not found (required for email send)`,
+          );
         }
         const senderIdentity = senderIdentityReadiness(org);
         if (liveAllowed && !senderIdentity.physicalAddressSet) {
@@ -1057,10 +1082,7 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
             `Org ${artifact.orgId} is missing senderName; cannot send live email outreach until the reviewed sender identity is configured.`,
           );
         }
-        if (
-          liveAllowed &&
-          !senderIdentity.countrySet
-        ) {
+        if (liveAllowed && !senderIdentity.countrySet) {
           throw new BadRequestException(
             `Org ${artifact.orgId} is missing a valid two-letter country; cannot send live email outreach until the sender identity is complete.`,
           );
@@ -1109,11 +1131,11 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
           recipient_urn:
             typeof payload.recipient_urn === "string"
               ? payload.recipient_urn
-              : artifact.recipientRef ?? "",
+              : (artifact.recipientRef ?? ""),
           body:
             typeof payload.body === "string"
               ? payload.body
-              : artifact.bodyText ?? "",
+              : (artifact.bodyText ?? ""),
         };
         if (typeof payload.integration_id === "string") {
           args.integration_id = payload.integration_id;
@@ -1316,7 +1338,8 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
     if (this.reconcileInFlight) return;
     this.reconcileInFlight = true;
     try {
-      const { deliveryUnknown, requeued } = await this.reconcileStuckArtifacts();
+      const { deliveryUnknown, requeued } =
+        await this.reconcileStuckArtifacts();
       if (deliveryUnknown > 0 || requeued > 0) {
         this.logger.log(
           `Reconcile sweep: quarantined ${deliveryUnknown} stale SENDING claim(s) as DELIVERY_UNKNOWN, re-enqueued ${requeued} stranded APPROVED artifact(s)`,
@@ -1447,11 +1470,12 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Called when BullMQ has exhausted retries. An APPROVED row is a confirmed
-   * pre-dispatch/provider-rejected failure and reuses REJECTED with the
-   * `auto-failed:` marker. A row still SENDING is not safe to classify: the
-   * claim-release or unknown-outcome persistence may have failed, so it is
-   * quarantined as DELIVERY_UNKNOWN rather than being auto-retried or called
-   * rejected.
+   * pre-dispatch/provider-rejected failure and becomes terminal FAILED. The
+   * original human approval identity/timestamp remain untouched; operational
+   * evidence is written to failureReason/failedAt. A row still SENDING is not
+   * safe to classify: the claim-release or unknown-outcome persistence may
+   * have failed, so it is quarantined as DELIVERY_UNKNOWN rather than being
+   * auto-retried or called failed.
    */
   private async markTerminalFailure(
     artifactId: string,
@@ -1476,16 +1500,27 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
         return;
       }
 
+      const failedAt = new Date();
+      const failureReason = reason.slice(0, 1000);
+      const writeFirstClassFailure = failedStatusWritesEnabled();
       await this.prisma.outreachArtifact.updateMany({
         where: {
           id: artifactId,
+          orgId,
           status: OutreachArtifactStatus.APPROVED,
         },
-        data: {
-          status: OutreachArtifactStatus.REJECTED,
-          reviewerNote: `auto-failed: ${reason}`.slice(0, 1000),
-          reviewedAt: new Date(),
-        },
+        data: writeFirstClassFailure
+          ? {
+              status: OutreachArtifactStatus.FAILED,
+              failureReason,
+              failedAt,
+            }
+          : {
+              status: OutreachArtifactStatus.REJECTED,
+              reviewerNote: `auto-failed: ${failureReason}`.slice(0, 1000),
+              failureReason,
+              failedAt,
+            },
       });
     } catch (err) {
       this.logger.error(
@@ -1515,7 +1550,11 @@ function isAmbiguousLiveFailure(
     );
   }
   if (channel === OutreachChannel.LINKEDIN) {
-    if (!result.data || typeof result.data !== "object" || Array.isArray(result.data)) {
+    if (
+      !result.data ||
+      typeof result.data !== "object" ||
+      Array.isArray(result.data)
+    ) {
       return true;
     }
     const data = result.data as Record<string, unknown>;
@@ -1550,13 +1589,15 @@ function extractThreadId(result: ToolResult): string | null {
   if (!result.data || typeof result.data !== "object") return null;
   const data = result.data as Record<string, unknown>;
   const threadId = data.threadId;
-  return typeof threadId === "string" && threadId.length > 0
-    ? threadId
-    : null;
+  return typeof threadId === "string" && threadId.length > 0 ? threadId : null;
 }
 
 function accountEmailFromCredentials(credentials: unknown): string | null {
-  if (!credentials || typeof credentials !== "object" || Array.isArray(credentials)) {
+  if (
+    !credentials ||
+    typeof credentials !== "object" ||
+    Array.isArray(credentials)
+  ) {
     return null;
   }
   const value = (credentials as Record<string, unknown>).accountEmail;

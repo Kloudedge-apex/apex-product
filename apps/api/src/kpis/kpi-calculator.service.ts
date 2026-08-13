@@ -13,6 +13,11 @@ import {
   whereLeadScores,
   whereOutreachArtifactsInWindow,
 } from "./queries";
+import {
+  failedArtifactWhere,
+  humanRejectedArtifactWhere,
+  reviewedDecisionArtifactWhere,
+} from "../outreach/outreach-artifact-failure";
 
 export interface KpiPrismaClient {
   readonly evidenceEvent: {
@@ -27,7 +32,9 @@ export interface KpiPrismaClient {
     count(args: Prisma.OutreachArtifactCountArgs): Promise<number>;
   };
   readonly leadScore: {
-    findMany(args: Prisma.LeadScoreFindManyArgs): Promise<Array<{ score: number }>>;
+    findMany(
+      args: Prisma.LeadScoreFindManyArgs,
+    ): Promise<Array<{ score: number }>>;
     count(args: Prisma.LeadScoreCountArgs): Promise<number>;
   };
 }
@@ -67,6 +74,7 @@ export interface QualityKpi {
     readonly pending_review: number;
     readonly approved: number;
     readonly rejected: number;
+    readonly failed: number;
     readonly sent: number;
   };
   readonly lead_score_distribution: {
@@ -110,7 +118,10 @@ function percentiles(values: readonly number[]): Percentiles {
   const sorted = [...values].sort((a, b) => a - b);
 
   const pick = (p: number): number => {
-    const idx = Math.max(0, Math.min(sorted.length - 1, Math.ceil(p * sorted.length) - 1));
+    const idx = Math.max(
+      0,
+      Math.min(sorted.length - 1, Math.ceil(p * sorted.length) - 1),
+    );
     return sorted[idx] ?? 0;
   };
 
@@ -128,7 +139,11 @@ function durationsFromEvidenceEvents(
     const payload = ev.payload;
     if (payload && typeof payload === "object" && !Array.isArray(payload)) {
       const maybeDuration = (payload as Record<string, unknown>).duration_ms;
-      if (typeof maybeDuration === "number" && Number.isFinite(maybeDuration) && maybeDuration >= 0) {
+      if (
+        typeof maybeDuration === "number" &&
+        Number.isFinite(maybeDuration) &&
+        maybeDuration >= 0
+      ) {
         durations.push(maybeDuration);
       }
     }
@@ -144,7 +159,11 @@ function costUsdFromEvidenceEvents(
     const payload = ev.payload;
     if (payload && typeof payload === "object" && !Array.isArray(payload)) {
       const maybeCost = (payload as Record<string, unknown>).cost_usd;
-      if (typeof maybeCost === "number" && Number.isFinite(maybeCost) && maybeCost >= 0) {
+      if (
+        typeof maybeCost === "number" &&
+        Number.isFinite(maybeCost) &&
+        maybeCost >= 0
+      ) {
         total += maybeCost;
       }
     }
@@ -165,41 +184,53 @@ export class KpiCalculatorService {
     const since = windowSince(window.windowDays);
 
     const [graphRunsTotal, graphRunsFailed] = await Promise.all([
-      this.prisma.graphRun.count({ where: whereGraphRunsInWindow(orgId, since) }),
+      this.prisma.graphRun.count({
+        where: whereGraphRunsInWindow(orgId, since),
+      }),
       this.prisma.graphRun.count({
         where: { ...whereGraphRunsInWindow(orgId, since), status: "FAILED" },
       }),
     ]);
 
-    const [leadSourced, leadScored, messageDrafted, qa, messageSent, crmSynced] =
-      await Promise.all([
-        this.prisma.evidenceEvent.findMany({
-          where: whereEvidenceEventsInWindow(orgId, since, ["lead.sourced"]),
-          select: { payload: true },
-        }),
-        this.prisma.evidenceEvent.findMany({
-          where: whereEvidenceEventsInWindow(orgId, since, ["lead.scored"]),
-          select: { payload: true },
-        }),
-        this.prisma.evidenceEvent.findMany({
-          where: whereEvidenceEventsInWindow(orgId, since, ["message.drafted"]),
-          select: { payload: true },
-        }),
-        this.prisma.evidenceEvent.findMany({
-          where: whereEvidenceEventsInWindow(orgId, since, ["qa.pass", "qa.fail"]),
-          select: { payload: true },
-        }),
-        this.prisma.evidenceEvent.findMany({
-          where: whereEvidenceEventsInWindow(orgId, since, ["message.sent"]),
-          select: { payload: true },
-        }),
-        this.prisma.evidenceEvent.findMany({
-          where: whereEvidenceEventsInWindow(orgId, since, ["crm.synced"]),
-          select: { payload: true },
-        }),
-      ]);
+    const [
+      leadSourced,
+      leadScored,
+      messageDrafted,
+      qa,
+      messageSent,
+      crmSynced,
+    ] = await Promise.all([
+      this.prisma.evidenceEvent.findMany({
+        where: whereEvidenceEventsInWindow(orgId, since, ["lead.sourced"]),
+        select: { payload: true },
+      }),
+      this.prisma.evidenceEvent.findMany({
+        where: whereEvidenceEventsInWindow(orgId, since, ["lead.scored"]),
+        select: { payload: true },
+      }),
+      this.prisma.evidenceEvent.findMany({
+        where: whereEvidenceEventsInWindow(orgId, since, ["message.drafted"]),
+        select: { payload: true },
+      }),
+      this.prisma.evidenceEvent.findMany({
+        where: whereEvidenceEventsInWindow(orgId, since, [
+          "qa.pass",
+          "qa.fail",
+        ]),
+        select: { payload: true },
+      }),
+      this.prisma.evidenceEvent.findMany({
+        where: whereEvidenceEventsInWindow(orgId, since, ["message.sent"]),
+        select: { payload: true },
+      }),
+      this.prisma.evidenceEvent.findMany({
+        where: whereEvidenceEventsInWindow(orgId, since, ["crm.synced"]),
+        select: { payload: true },
+      }),
+    ]);
 
-    const errorRate = graphRunsTotal > 0 ? graphRunsFailed / graphRunsTotal : null;
+    const errorRate =
+      graphRunsTotal > 0 ? graphRunsFailed / graphRunsTotal : null;
 
     return {
       windowDays: window.windowDays,
@@ -209,7 +240,9 @@ export class KpiCalculatorService {
       durations_ms: {
         lead_sourced: percentiles(durationsFromEvidenceEvents(leadSourced)),
         lead_scored: percentiles(durationsFromEvidenceEvents(leadScored)),
-        message_drafted: percentiles(durationsFromEvidenceEvents(messageDrafted)),
+        message_drafted: percentiles(
+          durationsFromEvidenceEvents(messageDrafted),
+        ),
         qa: percentiles(durationsFromEvidenceEvents(qa)),
       },
       activity: {
@@ -225,30 +258,46 @@ export class KpiCalculatorService {
   ): Promise<QualityKpi> {
     const since = windowSince(window.windowDays);
 
-    const [
-      pendingReview,
-      approved,
-      rejected,
-      sent,
-      scores,
-    ] = await Promise.all([
-      this.prisma.outreachArtifact.count({
-        where: whereOutreachArtifactsInWindow(orgId, since, OutreachArtifactStatus.PENDING_REVIEW),
-      }),
-      this.prisma.outreachArtifact.count({
-        where: whereOutreachArtifactsInWindow(orgId, since, OutreachArtifactStatus.APPROVED),
-      }),
-      this.prisma.outreachArtifact.count({
-        where: whereOutreachArtifactsInWindow(orgId, since, OutreachArtifactStatus.REJECTED),
-      }),
-      this.prisma.outreachArtifact.count({
-        where: whereOutreachArtifactsInWindow(orgId, since, OutreachArtifactStatus.SENT),
-      }),
-      this.prisma.leadScore.findMany({
-        where: whereLeadScores(orgId),
-        select: { score: true },
-      }),
-    ]);
+    const [pendingReview, approved, rejected, failed, sent, scores] =
+      await Promise.all([
+        this.prisma.outreachArtifact.count({
+          where: whereOutreachArtifactsInWindow(
+            orgId,
+            since,
+            OutreachArtifactStatus.PENDING_REVIEW,
+          ),
+        }),
+        this.prisma.outreachArtifact.count({
+          where: whereOutreachArtifactsInWindow(
+            orgId,
+            since,
+            OutreachArtifactStatus.APPROVED,
+          ),
+        }),
+        this.prisma.outreachArtifact.count({
+          where: {
+            ...whereOutreachArtifactsInWindow(orgId, since),
+            ...humanRejectedArtifactWhere(),
+          },
+        }),
+        this.prisma.outreachArtifact.count({
+          where: {
+            ...whereOutreachArtifactsInWindow(orgId, since),
+            ...failedArtifactWhere(),
+          },
+        }),
+        this.prisma.outreachArtifact.count({
+          where: whereOutreachArtifactsInWindow(
+            orgId,
+            since,
+            OutreachArtifactStatus.SENT,
+          ),
+        }),
+        this.prisma.leadScore.findMany({
+          where: whereLeadScores(orgId),
+          select: { score: true },
+        }),
+      ]);
 
     let a = 0;
     let b = 0;
@@ -265,6 +314,7 @@ export class KpiCalculatorService {
         pending_review: pendingReview,
         approved,
         rejected,
+        failed,
         sent,
       },
       lead_score_distribution: { A: a, B: b, C: c },
@@ -310,13 +360,17 @@ export class KpiCalculatorService {
 
     const [rejected, reviewed] = await Promise.all([
       this.prisma.outreachArtifact.count({
-        where: whereOutreachArtifactsInWindow(orgId, since, OutreachArtifactStatus.REJECTED),
+        where: {
+          orgId,
+          reviewedAt: { gte: since },
+          ...humanRejectedArtifactWhere(),
+        },
       }),
       this.prisma.outreachArtifact.count({
         where: {
           orgId,
-          updatedAt: { gte: since },
-          status: { in: [OutreachArtifactStatus.APPROVED, OutreachArtifactStatus.REJECTED] },
+          reviewedAt: { gte: since },
+          ...reviewedDecisionArtifactWhere(),
         },
       }),
     ]);

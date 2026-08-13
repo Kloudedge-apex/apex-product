@@ -114,11 +114,12 @@ MIGRATIONS=(
   "docs/migrations/2026-06-01_outreach-artifact-unique.sql"
   "docs/migrations/2026-08-12_conversation-store-expand.sql"
   "docs/migrations/2026-08-12_outreach-delivery-unknown-expand.sql"
+  "docs/migrations/2026-08-13_outreach-artifact-failed-expand.sql"
   "docs/migrations/2026-08-12_conversation-reply-single-flight-expand.sql"
   "docs/migrations/2026-08-12_graph-run-activity-expand.sql"
   "docs/migrations/2026-08-12_graph-run-lifecycle-expand.sql"
 )
-WRITER_PAUSE=("observed" "observed" "not-required" "not-required" "observed" "not-required" "observed")
+WRITER_PAUSE=("observed" "observed" "not-required" "not-required" "not-required" "observed" "not-required" "observed")
 EXPECTED_MIGRATION_COUNT="${#MIGRATIONS[@]}"
 
 if ! jq -e \

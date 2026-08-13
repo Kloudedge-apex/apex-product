@@ -110,11 +110,14 @@ export function validateEnv(
     // LLM provider: at least one of OPENAI_API_KEY / AZURE_OPENAI_KEY /
     // ANTHROPIC_API_KEY must be set. Prod uses Azure OpenAI today, but the
     // codepath chooses dynamically.
-    const hasAnyLlmKey = ["OPENAI_API_KEY", "AZURE_OPENAI_KEY", "ANTHROPIC_API_KEY"]
-      .some((k) => {
-        const v = env[k];
-        return typeof v === "string" && v.length > 0;
-      });
+    const hasAnyLlmKey = [
+      "OPENAI_API_KEY",
+      "AZURE_OPENAI_KEY",
+      "ANTHROPIC_API_KEY",
+    ].some((k) => {
+      const v = env[k];
+      return typeof v === "string" && v.length > 0;
+    });
     if (!hasAnyLlmKey) {
       issues.push(
         "At least one of OPENAI_API_KEY / AZURE_OPENAI_KEY / ANTHROPIC_API_KEY must be set when NODE_ENV=production",
@@ -144,6 +147,27 @@ export function validateEnv(
       issues.push(
         'OUTREACH_LIVE_FOR_ORGS="*" enables live outreach for ALL orgs and is refused when NODE_ENV=production. ' +
           "List org ids explicitly, or set OUTREACH_ALLOW_WILDCARD=true to override deliberately.",
+      );
+    }
+
+    const failedWrites = env.OUTREACH_FAILED_STATUS_WRITES_ENABLED;
+    if (
+      failedWrites !== undefined &&
+      failedWrites !== "true" &&
+      failedWrites !== "false"
+    ) {
+      issues.push(
+        "OUTREACH_FAILED_STATUS_WRITES_ENABLED must be exactly true or false when set",
+      );
+    }
+    if (
+      failedWrites === "true" &&
+      env.OUTREACH_FAILED_STATUS_WRITES_ACK !==
+        "readers-drained-legacy-inventory-reviewed-v1"
+    ) {
+      issues.push(
+        "OUTREACH_FAILED_STATUS_WRITES_ENABLED=true requires " +
+          "OUTREACH_FAILED_STATUS_WRITES_ACK=readers-drained-legacy-inventory-reviewed-v1",
       );
     }
   }
@@ -223,20 +247,21 @@ function isNonPublicHostname(hostname: string): boolean {
   ];
   if (
     reservedSuffixes.some(
-      (suffix) =>
-        normalized === suffix || normalized.endsWith(`.${suffix}`),
+      (suffix) => normalized === suffix || normalized.endsWith(`.${suffix}`),
     )
   ) {
     return true;
   }
 
   if (normalized.length > 253) return true;
-  return normalized.split(".").some(
-    (label) =>
-      label.length === 0 ||
-      label.length > 63 ||
-      !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label),
-  );
+  return normalized
+    .split(".")
+    .some(
+      (label) =>
+        label.length === 0 ||
+        label.length > 63 ||
+        !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label),
+    );
 }
 
 function validateProductionGmailConfiguration(
@@ -283,9 +308,7 @@ function validateProductionGmailConfiguration(
 
   const publisherServiceAccount = env.GMAIL_PUSH_PUBLISHER_SA?.trim();
   if (!publisherServiceAccount) {
-    issues.push(
-      "GMAIL_PUSH_PUBLISHER_SA is required when NODE_ENV=production",
-    );
+    issues.push("GMAIL_PUSH_PUBLISHER_SA is required when NODE_ENV=production");
   } else if (
     !/^[a-z][a-z0-9-]{0,62}@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$/.test(
       publisherServiceAccount,

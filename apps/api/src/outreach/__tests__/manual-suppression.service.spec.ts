@@ -4,10 +4,7 @@ import {
   OutreachSuppressionReason,
   VerificationResult,
 } from "@prisma/client";
-import {
-  BadRequestException,
-  NotFoundException,
-} from "@nestjs/common";
+import { BadRequestException, NotFoundException } from "@nestjs/common";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PrismaService } from "../../prisma/prisma.service";
 import { SuppressionService } from "../suppression.service";
@@ -82,7 +79,9 @@ describe("SuppressionService manual admin workflows", () => {
           reason: OutreachSuppressionReason.MANUAL,
           source: "admin_manual",
         });
-      prisma.outreachSuppression.update.mockResolvedValue({ id: "suppression_1" });
+      prisma.outreachSuppression.update.mockResolvedValue({
+        id: "suppression_1",
+      });
 
       const result = await service.suppressArtifactRecipient({
         orgId: "org_1",
@@ -112,7 +111,6 @@ describe("SuppressionService manual admin workflows", () => {
               OutreachArtifactStatus.DRAFT,
               OutreachArtifactStatus.PENDING_REVIEW,
               OutreachArtifactStatus.APPROVED,
-              OutreachArtifactStatus.REJECTED,
             ],
           },
         },
@@ -136,10 +134,12 @@ describe("SuppressionService manual admin workflows", () => {
     });
 
     it.each([
+      OutreachArtifactStatus.REJECTED,
       OutreachArtifactStatus.SENDING,
       OutreachArtifactStatus.SENT,
       OutreachArtifactStatus.SIMULATED,
       OutreachArtifactStatus.DELIVERY_UNKNOWN,
+      OutreachArtifactStatus.FAILED,
     ])("never rewrites an artifact currently in %s", async (status) => {
       prisma.outreachArtifact.findFirst
         .mockResolvedValueOnce({

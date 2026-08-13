@@ -607,8 +607,8 @@ test_deploy_admission() {
     "az containerapp update --name apex-gtm-api" \
     "az containerapp show --name apex-gtm-api --resource-group Ledgr-prod --output json"
   assert_before "${CALL_LOG}" "verify-registry" "az containerapp update"
-  assert_before "${CALL_LOG}" "az containerapp update --name apex-gtm-worker" \
-    "az containerapp update --name apex-gtm-api"
+  assert_before "${CALL_LOG}" "az containerapp update --name apex-gtm-api" \
+    "az containerapp update --name apex-gtm-worker"
   if grep -F -- "az acr build" "${CALL_LOG}" | grep -Fq -- "${HARNESS}/repo"; then
     fail "ACR build used the mutable source repository instead of the private snapshot"
   fi
@@ -745,18 +745,18 @@ test_deploy_rollback() {
   rollback_worker="az containerapp update --name apex-gtm-worker --resource-group Ledgr-prod --image ${previous_worker_image} --output none"
   rollback_api="az containerapp update --name apex-gtm-api --resource-group Ledgr-prod --image ${previous_api_image} --output none"
 
-  # A failed read-back after the worker mutation must restore the worker and
-  # leave the API untouched.
+  # A failed read-back after the reader-first API mutation must restore the API
+  # and leave the writer worker untouched.
   FAKE_CONFIG_FAIL_CALL=3
   if run_fake_deploy >/dev/null 2>&1; then
-    fail "deploy succeeded after worker post-update verification failed"
+    fail "deploy succeeded after API post-update verification failed"
   fi
-  assert_log_contains "${CALL_LOG}" "${forward_worker}"
-  assert_log_contains "${CALL_LOG}" "${rollback_worker}"
-  assert_immediately_preceded_by "${CALL_LOG}" "${rollback_worker}" \
-    "az containerapp show --name apex-gtm-worker --resource-group Ledgr-prod --output json"
-  assert_log_excludes "${CALL_LOG}" "az containerapp update --name apex-gtm-api"
-  assert_before "${CALL_LOG}" "${forward_worker}" "${rollback_worker}"
+  assert_log_contains "${CALL_LOG}" "${forward_api}"
+  assert_log_contains "${CALL_LOG}" "${rollback_api}"
+  assert_immediately_preceded_by "${CALL_LOG}" "${rollback_api}" \
+    "az containerapp show --name apex-gtm-api --resource-group Ledgr-prod --output json"
+  assert_log_excludes "${CALL_LOG}" "az containerapp update --name apex-gtm-worker"
+  assert_before "${CALL_LOG}" "${forward_api}" "${rollback_api}"
   assert_log_contains "${CALL_LOG}" "verify-containerapps ${previous_api_image} ${previous_worker_image}"
   assert_log_excludes "${CALL_LOG}" \
     "push --force-with-lease=refs/heads/workforce-os-release-lock/production-gtm-platform:${FAKE_LEASE_COMMIT} https://github.com/Kloudedge-apex/apex-product.git :refs/heads/workforce-os-release-lock/production-gtm-platform"
@@ -770,13 +770,14 @@ test_deploy_rollback() {
   if run_fake_deploy >/dev/null 2>&1; then
     fail "deploy succeeded after rollout and rollback verification both failed"
   fi
-  assert_log_contains "${CALL_LOG}" "${forward_worker}"
-  assert_log_contains "${CALL_LOG}" "${rollback_worker}"
+  assert_log_contains "${CALL_LOG}" "${forward_api}"
+  assert_log_contains "${CALL_LOG}" "${rollback_api}"
   assert_log_excludes "${CALL_LOG}" \
     "push --force-with-lease=refs/heads/workforce-os-release-lock/production-gtm-platform:${FAKE_LEASE_COMMIT} https://github.com/Kloudedge-apex/apex-product.git :refs/heads/workforce-os-release-lock/production-gtm-platform"
   pass
 
-  # A failed final read-back must restore API first, worker second, and verify
+  # A failed final read-back must disable the writer first, restore the API
+  # reader second, and verify
   # the two captured immutable references.
   reset_deploy_harness
   FAKE_CONFIG_FAIL_FROM_CALL=""
@@ -793,15 +794,16 @@ test_deploy_rollback() {
   assert_immediately_preceded_by "${CALL_LOG}" "${rollback_worker}" \
     "az containerapp show --name apex-gtm-worker --resource-group Ledgr-prod --output json"
   assert_before "${CALL_LOG}" "${forward_api}" "${rollback_api}"
-  assert_before "${CALL_LOG}" "${rollback_api}" "${rollback_worker}"
+  assert_before "${CALL_LOG}" "${forward_api}" "${forward_worker}"
+  assert_before "${CALL_LOG}" "${rollback_worker}" "${rollback_api}"
   assert_log_contains "${CALL_LOG}" "verify-containerapps ${previous_api_image} ${previous_worker_image}"
   pass
 
   # TERM is not an ERR condition in Bash. The explicit signal trap must still
-  # restore a worker mutation and preserve the conventional 143 exit status.
+  # restore an API reader mutation and preserve the conventional 143 exit status.
   reset_deploy_harness
   FAKE_CONFIG_FAIL_CALL=""
-  FAKE_SIGNAL_APP="apex-gtm-worker"
+  FAKE_SIGNAL_APP="apex-gtm-api"
   FAKE_SIGNAL_IMAGE="${requested_image}"
   FAKE_SIGNAL_NAME="TERM"
   (trap - EXIT; run_fake_deploy >"${HARNESS}/signal-output.log" 2>&1) &
@@ -834,11 +836,11 @@ test_deploy_rollback() {
   if [[ ${rollout_status} -ne 143 ]]; then
     fail "TERM rollout exited ${rollout_status}, expected 143"
   fi
-  assert_log_contains "${CALL_LOG}" "signal-ready TERM after apex-gtm-worker update"
-  assert_log_contains "${CALL_LOG}" "${forward_worker}"
-  assert_log_contains "${CALL_LOG}" "${rollback_worker}"
-  assert_log_excludes "${CALL_LOG}" "az containerapp update --name apex-gtm-api"
-  assert_before "${CALL_LOG}" "${forward_worker}" "${rollback_worker}"
+  assert_log_contains "${CALL_LOG}" "signal-ready TERM after apex-gtm-api update"
+  assert_log_contains "${CALL_LOG}" "${forward_api}"
+  assert_log_contains "${CALL_LOG}" "${rollback_api}"
+  assert_log_excludes "${CALL_LOG}" "az containerapp update --name apex-gtm-worker"
+  assert_before "${CALL_LOG}" "${forward_api}" "${rollback_api}"
   pass
 }
 
@@ -1660,11 +1662,12 @@ test_migration_receipt_verifier() {
     "docs/migrations/2026-06-01_outreach-artifact-unique.sql"
     "docs/migrations/2026-08-12_conversation-store-expand.sql"
     "docs/migrations/2026-08-12_outreach-delivery-unknown-expand.sql"
+    "docs/migrations/2026-08-13_outreach-artifact-failed-expand.sql"
     "docs/migrations/2026-08-12_conversation-reply-single-flight-expand.sql"
     "docs/migrations/2026-08-12_graph-run-activity-expand.sql"
     "docs/migrations/2026-08-12_graph-run-lifecycle-expand.sql"
   )
-  pauses=("observed" "observed" "not-required" "not-required" "observed" "not-required" "observed")
+  pauses=("observed" "observed" "not-required" "not-required" "not-required" "observed" "not-required" "observed")
   for path in "${paths[@]}"; do
     mkdir -p "${harness}/repo/$(dirname "${path}")"
     cp "${REPO_ROOT}/${path}" "${harness}/repo/${path}"
@@ -2174,6 +2177,44 @@ EOF
     "${harness}/scripts/verify-containerapp-release-config.sh" \
     "${api_image}" "${worker_image}" >/dev/null 2>&1; then
     fail "Container App verifier accepted an inline METRICS_AUTH_TOKEN"
+  fi
+  pass
+
+  jq '.properties.template.containers[0].env += [{name: "OUTREACH_FAILED_STATUS_WRITES_ENABLED", value: "yes"}]' \
+    "${harness}/worker.json" >"${harness}/worker-invalid-failed-write-gate.json"
+  if env PATH="${harness}/bin:${PATH}" \
+    API_JSON_FILE="${harness}/api.json" \
+    WORKER_JSON_FILE="${harness}/worker-invalid-failed-write-gate.json" \
+    API_REVISION_FILE="${harness}/api-revision.json" WORKER_REVISION_FILE="${harness}/worker-revision.json" \
+    "${harness}/scripts/verify-containerapp-release-config.sh" \
+    "${api_image}" "${worker_image}" >/dev/null 2>&1; then
+    fail "Container App verifier accepted an invalid FAILED write gate"
+  fi
+  pass
+
+  jq '.properties.template.containers[0].env += [{name: "OUTREACH_FAILED_STATUS_WRITES_ENABLED", value: "true"}]' \
+    "${harness}/worker.json" >"${harness}/worker-unattested-failed-write-gate.json"
+  if env PATH="${harness}/bin:${PATH}" \
+    API_JSON_FILE="${harness}/api.json" \
+    WORKER_JSON_FILE="${harness}/worker-unattested-failed-write-gate.json" \
+    API_REVISION_FILE="${harness}/api-revision.json" WORKER_REVISION_FILE="${harness}/worker-revision.json" \
+    "${harness}/scripts/verify-containerapp-release-config.sh" \
+    "${api_image}" "${worker_image}" >/dev/null 2>&1; then
+    fail "Container App verifier accepted an unattested FAILED write gate"
+  fi
+  pass
+
+  jq '.properties.template.containers[0].env += [
+    {name: "OUTREACH_FAILED_STATUS_WRITES_ENABLED", value: "true"},
+    {name: "OUTREACH_FAILED_STATUS_WRITES_ACK", value: "readers-drained-legacy-inventory-reviewed-v1"}
+  ]' "${harness}/worker.json" >"${harness}/worker-attested-failed-write-gate.json"
+  if ! env PATH="${harness}/bin:${PATH}" \
+    API_JSON_FILE="${harness}/api.json" \
+    WORKER_JSON_FILE="${harness}/worker-attested-failed-write-gate.json" \
+    API_REVISION_FILE="${harness}/api-revision.json" WORKER_REVISION_FILE="${harness}/worker-revision.json" \
+    "${harness}/scripts/verify-containerapp-release-config.sh" \
+    "${api_image}" "${worker_image}" >/dev/null 2>&1; then
+    fail "Container App verifier rejected the attested FAILED write gate"
   fi
   pass
 

@@ -16,7 +16,10 @@ const GUARDS_METADATA = "__guards__";
 const PATH_METADATA = "path";
 const METHOD_METADATA = "method";
 
-type ServiceMock = Pick<OutreachArtifactsService, "approve" | "reject" | "listForOrg" | "listPageForOrg"> & {
+type ServiceMock = Pick<
+  OutreachArtifactsService,
+  "approve" | "reject" | "listForOrg" | "listPageForOrg"
+> & {
   approve: ReturnType<typeof vi.fn>;
   reject: ReturnType<typeof vi.fn>;
   listForOrg: ReturnType<typeof vi.fn>;
@@ -28,7 +31,9 @@ function mockService(): ServiceMock {
     approve: vi.fn().mockResolvedValue({ id: "art_1" }),
     reject: vi.fn().mockResolvedValue({ id: "art_1" }),
     listForOrg: vi.fn().mockResolvedValue([]),
-    listPageForOrg: vi.fn().mockResolvedValue({ items: [], total: 0, page: 1, limit: 20 }),
+    listPageForOrg: vi
+      .fn()
+      .mockResolvedValue({ items: [], total: 0, page: 1, limit: 20 }),
   };
 }
 
@@ -67,9 +72,9 @@ describe("OutreachArtifactsController — guard attachment (audit B11)", () => {
 
   it("registers the static review-capability GET before the dynamic artifact route", () => {
     const prototype = OutreachArtifactsController.prototype;
-    expect(
-      Reflect.getMetadata(PATH_METADATA, prototype.reviewCapability),
-    ).toBe("outreach-artifacts/review-capability");
+    expect(Reflect.getMetadata(PATH_METADATA, prototype.reviewCapability)).toBe(
+      "outreach-artifacts/review-capability",
+    );
     expect(
       Reflect.getMetadata(METHOD_METADATA, prototype.reviewCapability),
     ).toBe(RequestMethod.GET);
@@ -112,12 +117,25 @@ describe("OutreachArtifactsController — server-derived attribution (audit B8)"
       { reviewedBy: "forged@attacker.example" },
       reqWithClerkUser("clerk_user_real"),
     );
-    expect(service.approve).toHaveBeenCalledWith("org_1", "art_1", "clerk_user_real");
+    expect(service.approve).toHaveBeenCalledWith(
+      "org_1",
+      "art_1",
+      "clerk_user_real",
+    );
   });
 
   it("approve tolerates an empty body (deprecated reviewedBy no longer required)", async () => {
-    await controller.approve("org_1", "art_1", {}, reqWithClerkUser("clerk_user_real"));
-    expect(service.approve).toHaveBeenCalledWith("org_1", "art_1", "clerk_user_real");
+    await controller.approve(
+      "org_1",
+      "art_1",
+      {},
+      reqWithClerkUser("clerk_user_real"),
+    );
+    expect(service.approve).toHaveBeenCalledWith(
+      "org_1",
+      "art_1",
+      "clerk_user_real",
+    );
   });
 
   it("approve throws Unauthorized when no authenticated principal is on the request", () => {
@@ -129,7 +147,12 @@ describe("OutreachArtifactsController — server-derived attribution (audit B8)"
 
   it("approve still requires orgId", () => {
     expect(() =>
-      controller.approve(undefined, "art_1", {}, reqWithClerkUser("clerk_user_real")),
+      controller.approve(
+        undefined,
+        "art_1",
+        {},
+        reqWithClerkUser("clerk_user_real"),
+      ),
     ).toThrow(BadRequestException);
     expect(service.approve).not.toHaveBeenCalled();
   });
@@ -161,6 +184,14 @@ describe("OutreachArtifactsController — server-derived attribution (audit B8)"
 
     expect(service.listForOrg).toHaveBeenCalledWith("org_1", {
       status: OutreachArtifactStatus.DELIVERY_UNKNOWN,
+    });
+  });
+
+  it("accepts FAILED as an artifact status filter", async () => {
+    await controller.list("org_1", "failed");
+
+    expect(service.listForOrg).toHaveBeenCalledWith("org_1", {
+      status: OutreachArtifactStatus.FAILED,
     });
   });
 

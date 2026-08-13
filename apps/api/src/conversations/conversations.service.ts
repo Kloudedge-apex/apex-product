@@ -189,8 +189,7 @@ export class ConversationsService {
         .map((message) => ({
           id: message.id,
           direction: message.direction.toLowerCase(),
-          bodyHtml:
-            message.bodyHtml ?? plainTextToHtml(message.bodyText ?? ""),
+          bodyHtml: message.bodyHtml ?? plainTextToHtml(message.bodyText ?? ""),
           sentAt: message.sentAt.toISOString(),
           senderName: message.senderName ?? message.senderEmail,
         })),
@@ -244,7 +243,9 @@ export class ConversationsService {
       (message) => message.direction === "INBOUND",
     );
     if (!latestInbound) {
-      throw new BadRequestException("Conversation has no inbound message to reply to");
+      throw new BadRequestException(
+        "Conversation has no inbound message to reply to",
+      );
     }
 
     const existing = await this.findBlockingReplyArtifact(
@@ -276,10 +277,7 @@ export class ConversationsService {
         .slice()
         .reverse()
         .map((message) => {
-          const body = (message.bodyText ?? "").slice(
-            0,
-            MAX_MESSAGE_CHARS,
-          );
+          const body = (message.bodyText ?? "").slice(0, MAX_MESSAGE_CHARS);
           return `[${message.direction}] ${message.senderEmail}:\n${body}`;
         })
         .join("\n\n");
@@ -319,7 +317,8 @@ export class ConversationsService {
       );
       generated = parseGeneratedReply(response.content);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Unknown draft error";
+      const message =
+        error instanceof Error ? error.message : "Unknown draft error";
       const failureWasCurrent = await this.updateIntelligenceIfSourceCurrent(
         {
           orgId,
@@ -389,13 +388,17 @@ export class ConversationsService {
     const body = normalizeDraftBody(input.body);
     const latestInbound = conversation.messages[0];
     if (!latestInbound) {
-      throw new BadRequestException("Conversation has no inbound message to reply to");
+      throw new BadRequestException(
+        "Conversation has no inbound message to reply to",
+      );
     }
     const persisted = await this.persistReplyArtifact({
       orgId,
       conversationId: id,
       contactEmail: conversation.contactEmail,
-      subject: normalizeSubject(input.subject ?? replySubject(conversation.subject)),
+      subject: normalizeSubject(
+        input.subject ?? replySubject(conversation.subject),
+      ),
       body,
       providerThreadId: conversation.providerThreadId,
       sourceMessageId: latestInbound.id,
@@ -444,7 +447,9 @@ export class ConversationsService {
     });
     if (!row) throw new NotFoundException(`Follow-up ${followUpId} not found`);
     if (row.status !== FollowUpStatus.OPEN) {
-      throw new BadRequestException(`Follow-up ${followUpId} is already ${row.status}`);
+      throw new BadRequestException(
+        `Follow-up ${followUpId} is already ${row.status}`,
+      );
     }
     return this.prisma.followUpTask.update({
       where: { id: followUpId },
@@ -487,7 +492,8 @@ export class ConversationsService {
     return this.meetings.create({
       orgId,
       title: normalizeSubject(
-        input.title ?? `Meeting with ${conversation.contactName ?? conversation.contactEmail}`,
+        input.title ??
+          `Meeting with ${conversation.contactName ?? conversation.contactEmail}`,
       ),
       scheduledFor: input.scheduledFor,
       attendeeEmails: [conversation.contactEmail],
@@ -522,10 +528,7 @@ export class ConversationsService {
         purpose: OutreachArtifactPurpose.REPLY,
         AND: [
           {
-            OR: [
-              { conversationId },
-              { providerThreadId },
-            ],
+            OR: [{ conversationId }, { providerThreadId }],
           },
           {
             OR: [
@@ -582,9 +585,7 @@ export class ConversationsService {
       threadId: input.providerThreadId,
       conversationId: input.conversationId,
       purpose: "REPLY",
-      ...(input.inReplyTo
-        ? { inReplyTo: input.inReplyTo }
-        : {}),
+      ...(input.inReplyTo ? { inReplyTo: input.inReplyTo } : {}),
     };
 
     try {
@@ -614,9 +615,7 @@ export class ConversationsService {
           select: { id: true },
         });
         if (!latestInbound || latestInbound.id !== input.sourceMessageId) {
-          throw new ConflictException(
-            staleReplySourceConflict().message,
-          );
+          throw new ConflictException(staleReplySourceConflict().message);
         }
 
         const existing = await this.findBlockingReplyArtifact(
@@ -825,6 +824,8 @@ function existingReplyMessage(status: OutreachArtifactStatus): string {
       return "A reply has already been sent for the latest inbound message.";
     case OutreachArtifactStatus.DELIVERY_UNKNOWN:
       return "A reply in this conversation has an unresolved delivery outcome; reconcile it before creating another.";
+    case OutreachArtifactStatus.FAILED:
+      return "The prior reply failed without provider acceptance. Create a separate, newly reviewed replacement.";
     case OutreachArtifactStatus.SENDING:
       return "A reply in this conversation is already being sent.";
     case OutreachArtifactStatus.APPROVED:
@@ -860,7 +861,10 @@ function shapeConversation(row: ConversationWithPerson) {
 function parseGeneratedReply(raw: string): GeneratedReply {
   let value: unknown;
   try {
-    const trimmed = raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+    const trimmed = raw
+      .trim()
+      .replace(/^```(?:json)?\s*/i, "")
+      .replace(/\s*```$/, "");
     const start = trimmed.indexOf("{");
     const end = trimmed.lastIndexOf("}");
     if (start < 0 || end <= start) throw new Error("No JSON object");
@@ -869,12 +873,18 @@ function parseGeneratedReply(raw: string): GeneratedReply {
     throw new ServiceUnavailableException("Reply model returned invalid JSON");
   }
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new ServiceUnavailableException("Reply model returned an invalid object");
+    throw new ServiceUnavailableException(
+      "Reply model returned an invalid object",
+    );
   }
   const object = value as Record<string, unknown>;
   const sentiment = parseSentimentValue(object.sentiment);
   const sentimentConfidence = object.sentimentConfidence;
-  const nextBestAction = requireString(object.nextBestAction, "nextBestAction", 500);
+  const nextBestAction = requireString(
+    object.nextBestAction,
+    "nextBestAction",
+    500,
+  );
   const nextBestActionType = parseNextActionValue(object.nextBestActionType);
   const body = requireString(object.body, "body", MAX_REPLY_CHARS);
   if (body.split(/\s+/).filter(Boolean).length > 180) {
@@ -909,12 +919,16 @@ function parseSentimentValue(value: unknown): ConversationSentiment {
   if (normalized in ConversationSentiment) {
     return normalized as ConversationSentiment;
   }
-  throw new ServiceUnavailableException("Reply model returned an unknown sentiment");
+  throw new ServiceUnavailableException(
+    "Reply model returned an unknown sentiment",
+  );
 }
 
 function parseNextActionValue(value: unknown): ConversationNextActionType {
   if (typeof value !== "string") {
-    throw new ServiceUnavailableException("Reply model omitted nextBestActionType");
+    throw new ServiceUnavailableException(
+      "Reply model omitted nextBestActionType",
+    );
   }
   const normalized = value.toUpperCase();
   if (normalized in ConversationNextActionType) {
@@ -925,29 +939,39 @@ function parseNextActionValue(value: unknown): ConversationNextActionType {
   );
 }
 
-function requireString(value: unknown, field: string, maxLength: number): string {
+function requireString(
+  value: unknown,
+  field: string,
+  maxLength: number,
+): string {
   if (typeof value !== "string") {
     throw new ServiceUnavailableException(`Reply model omitted ${field}`);
   }
   const trimmed = value.trim();
   if (trimmed.length === 0 || trimmed.length > maxLength) {
-    throw new ServiceUnavailableException(`Reply model returned invalid ${field}`);
+    throw new ServiceUnavailableException(
+      `Reply model returned invalid ${field}`,
+    );
   }
   return trimmed;
 }
 
 function normalizeDraftBody(value: string): string {
   const trimmed = value.trim();
-  if (trimmed.length === 0) throw new BadRequestException("body cannot be empty");
+  if (trimmed.length === 0)
+    throw new BadRequestException("body cannot be empty");
   if (trimmed.length > MAX_REPLY_CHARS) {
-    throw new BadRequestException(`body cannot exceed ${MAX_REPLY_CHARS} characters`);
+    throw new BadRequestException(
+      `body cannot exceed ${MAX_REPLY_CHARS} characters`,
+    );
   }
   return trimmed;
 }
 
 function normalizeSubject(value: string): string {
   const trimmed = value.trim();
-  if (trimmed.length === 0) throw new BadRequestException("subject cannot be empty");
+  if (trimmed.length === 0)
+    throw new BadRequestException("subject cannot be empty");
   if (trimmed.includes("\r") || trimmed.includes("\n")) {
     throw new BadRequestException("subject cannot contain line breaks");
   }

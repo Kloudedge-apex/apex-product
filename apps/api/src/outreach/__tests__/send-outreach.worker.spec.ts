@@ -20,7 +20,9 @@ import {
 } from "../../runtime/tools/send-email.tool";
 import { LinkedInSendMessageTool } from "../../runtime/tools/linkedin-send-message.tool";
 
-function artifactRow(overrides: Partial<OutreachArtifact> = {}): OutreachArtifact {
+function artifactRow(
+  overrides: Partial<OutreachArtifact> = {},
+): OutreachArtifact {
   const now = new Date("2026-05-25T12:00:00Z");
   return {
     id: "art_1",
@@ -70,6 +72,8 @@ function artifactRow(overrides: Partial<OutreachArtifact> = {}): OutreachArtifac
     reviewerNote: null,
     reviewedBy: "user_x",
     reviewedAt: now,
+    failureReason: null,
+    failedAt: null,
     sentAt: null,
     sendReceiptId: null,
     createdAt: now,
@@ -181,7 +185,9 @@ function fakeBullJob(completed: boolean) {
   };
 }
 
-function mockQueue(bullQueue: FakeBullQueue | null = null): OutreachSendQueueService & {
+function mockQueue(
+  bullQueue: FakeBullQueue | null = null,
+): OutreachSendQueueService & {
   enqueue: ReturnType<typeof vi.fn>;
 } {
   return {
@@ -300,9 +306,9 @@ describe("SendOutreachWorker.processArtifact", () => {
         prisma.outreachArtifact.count.mock.invocationCallOrder[0] ??
           Number.POSITIVE_INFINITY,
       );
-      expect(prisma.outreachArtifact.count.mock.invocationCallOrder[0]).toBeLessThan(
-        claimOrder,
-      );
+      expect(
+        prisma.outreachArtifact.count.mock.invocationCallOrder[0],
+      ).toBeLessThan(claimOrder);
 
       expect(prisma.outreachArtifact.update).toHaveBeenCalledWith({
         where: { id: "art_1" },
@@ -396,21 +402,26 @@ describe("SendOutreachWorker.processArtifact", () => {
       },
       "missing a valid two-letter country",
     ],
-  ])("fails closed before a live provider call when sender identity is incomplete: %s", async (org, message) => {
-    process.env.OUTREACH_LIVE_FOR_ORGS = "org_1";
-    try {
-      prisma.outreachArtifact.findUnique.mockResolvedValue(artifactRow());
-      prisma.org.findUnique.mockResolvedValue(org);
-      const sendSpy = vi.spyOn(SendEmailTool.prototype, "execute");
+  ])(
+    "fails closed before a live provider call when sender identity is incomplete: %s",
+    async (org, message) => {
+      process.env.OUTREACH_LIVE_FOR_ORGS = "org_1";
+      try {
+        prisma.outreachArtifact.findUnique.mockResolvedValue(artifactRow());
+        prisma.org.findUnique.mockResolvedValue(org);
+        const sendSpy = vi.spyOn(SendEmailTool.prototype, "execute");
 
-      await expect(worker.processArtifact("art_1", "org_1")).rejects.toThrow(message);
+        await expect(worker.processArtifact("art_1", "org_1")).rejects.toThrow(
+          message,
+        );
 
-      expect(sendSpy).not.toHaveBeenCalled();
-      expect(prisma.outreachArtifact.update).not.toHaveBeenCalled();
-    } finally {
-      delete process.env.OUTREACH_LIVE_FOR_ORGS;
-    }
-  });
+        expect(sendSpy).not.toHaveBeenCalled();
+        expect(prisma.outreachArtifact.update).not.toHaveBeenCalled();
+      } finally {
+        delete process.env.OUTREACH_LIVE_FOR_ORGS;
+      }
+    },
+  );
 
   it("refuses a legacy APPROVED email that fails the dispatch eligibility check", async () => {
     const unsafe = artifactRow();
@@ -694,7 +705,9 @@ describe("SendOutreachWorker.processArtifact", () => {
     process.env.OUTREACH_LIVE_FOR_ORGS = "org_1";
     try {
       prisma.outreachArtifact.findUnique.mockResolvedValue(artifactRow());
-      prisma.org.findUnique.mockRejectedValueOnce(new Error("database unavailable"));
+      prisma.org.findUnique.mockRejectedValueOnce(
+        new Error("database unavailable"),
+      );
       const sendSpy = vi.spyOn(SendEmailTool.prototype, "execute");
 
       await expect(worker.processArtifact("art_1", "org_1")).rejects.toThrow(
@@ -725,7 +738,10 @@ describe("SendOutreachWorker.processArtifact", () => {
       prisma.outreachArtifact.update.mockResolvedValue(
         artifactRow({ status: OutreachArtifactStatus.SENT }),
       );
-      vi.spyOn(LinkedInSendMessageTool.prototype, "execute").mockResolvedValueOnce({
+      vi.spyOn(
+        LinkedInSendMessageTool.prototype,
+        "execute",
+      ).mockResolvedValueOnce({
         success: true,
         data: {
           sent: true,
@@ -770,7 +786,10 @@ describe("SendOutreachWorker.processArtifact", () => {
           payload: { recipient_urn: "urn:li:person:abc", body: "hi" },
         }),
       );
-      vi.spyOn(LinkedInSendMessageTool.prototype, "execute").mockResolvedValueOnce({
+      vi.spyOn(
+        LinkedInSendMessageTool.prototype,
+        "execute",
+      ).mockResolvedValueOnce({
         success: false,
         data: {
           sent: false,
@@ -806,7 +825,10 @@ describe("SendOutreachWorker.processArtifact", () => {
           payload: { recipient_urn: "urn:li:person:abc", body: "hi" },
         }),
       );
-      vi.spyOn(LinkedInSendMessageTool.prototype, "execute").mockResolvedValueOnce({
+      vi.spyOn(
+        LinkedInSendMessageTool.prototype,
+        "execute",
+      ).mockResolvedValueOnce({
         success: false,
         data: {
           sent: false,
@@ -893,7 +915,9 @@ describe("SendOutreachWorker.processArtifact", () => {
 
       await worker.processArtifact("art_1", "org_blocked");
 
-      const ctxArg = sendSpy.mock.calls[0]?.[1] as { integrations: Map<string, unknown> };
+      const ctxArg = sendSpy.mock.calls[0]?.[1] as {
+        integrations: Map<string, unknown>;
+      };
       expect(ctxArg.integrations.size).toBe(0);
       // loadIntegrations() must NOT run for blocked orgs — confirms we skipped
       // the prisma query path entirely rather than just emptying the Map.
@@ -946,9 +970,7 @@ describe("SendOutreachWorker.processArtifact", () => {
     process.env.OUTREACH_LIVE_FOR_ORGS = "org_1";
     try {
       prisma.outreachArtifact.findUnique.mockResolvedValue(artifactRow());
-      prisma.integration.findMany.mockResolvedValue([
-        { provider: "outlook" },
-      ]);
+      prisma.integration.findMany.mockResolvedValue([{ provider: "outlook" }]);
       const refresh = integrations.refreshTokenIfNeeded as ReturnType<
         typeof vi.fn
       >;
@@ -1091,7 +1113,7 @@ describe("SendOutreachWorker GL2 — mock-mode result while live send is require
     );
 
     // Claim released back to APPROVED so the BullMQ retry envelope (and at
-    // exhaustion the auto-failed terminal handler) owns the outcome.
+    // exhaustion the FAILED terminal handler) owns the outcome.
     expect(prisma.outreachArtifact.updateMany).toHaveBeenCalledWith({
       where: { id: "art_1", status: OutreachArtifactStatus.SENDING },
       data: { status: OutreachArtifactStatus.APPROVED },
@@ -1125,7 +1147,10 @@ describe("SendOutreachWorker GL2 — mock-mode result while live send is require
         payload: { recipient_urn: "urn:li:person:abc", body: "hi" },
       }),
     );
-    vi.spyOn(LinkedInSendMessageTool.prototype, "execute").mockResolvedValueOnce({
+    vi.spyOn(
+      LinkedInSendMessageTool.prototype,
+      "execute",
+    ).mockResolvedValueOnce({
       success: true,
       data: {
         sent: false,
@@ -1153,7 +1178,9 @@ describe("SendOutreachWorker GL2 — mock-mode result while live send is require
       data: { sent: false, mock: true, provider: "mock", messageId: "mock_3" },
     });
 
-    await expect(worker.processArtifact("art_1", "org_1")).resolves.toBeUndefined();
+    await expect(
+      worker.processArtifact("art_1", "org_1"),
+    ).resolves.toBeUndefined();
 
     expect(prisma.outreachArtifact.update).toHaveBeenCalledWith({
       where: { id: "art_1" },
@@ -1198,7 +1225,9 @@ describe("SendOutreachWorker GL8a — per-org daily send cap", () => {
     prisma.outreachArtifact.count.mockResolvedValue(40); // default cap
     const sendSpy = vi.spyOn(SendEmailTool.prototype, "execute");
 
-    await expect(worker.processArtifact("art_1", "org_1")).resolves.toBeUndefined();
+    await expect(
+      worker.processArtifact("art_1", "org_1"),
+    ).resolves.toBeUndefined();
 
     // No CAS claim, no dispatch, no terminal write — the row stays APPROVED
     // with its old updatedAt so the reconcile sweep retries it tomorrow.
@@ -1313,18 +1342,26 @@ describe("getDailySendCapPerOrg", () => {
   it("defaults to 40 when the env var is unset or empty", () => {
     expect(getDailySendCapPerOrg({})).toBe(40);
     expect(getDailySendCapPerOrg({ OUTREACH_DAILY_CAP_PER_ORG: "" })).toBe(40);
-    expect(getDailySendCapPerOrg({ OUTREACH_DAILY_CAP_PER_ORG: "  " })).toBe(40);
+    expect(getDailySendCapPerOrg({ OUTREACH_DAILY_CAP_PER_ORG: "  " })).toBe(
+      40,
+    );
   });
 
   it("parses a positive integer override", () => {
     expect(getDailySendCapPerOrg({ OUTREACH_DAILY_CAP_PER_ORG: "5" })).toBe(5);
-    expect(getDailySendCapPerOrg({ OUTREACH_DAILY_CAP_PER_ORG: " 100 " })).toBe(100);
+    expect(getDailySendCapPerOrg({ OUTREACH_DAILY_CAP_PER_ORG: " 100 " })).toBe(
+      100,
+    );
   });
 
   it("falls back to the default on zero, negative, or garbage (typo cannot disable the cap)", () => {
     expect(getDailySendCapPerOrg({ OUTREACH_DAILY_CAP_PER_ORG: "0" })).toBe(40);
-    expect(getDailySendCapPerOrg({ OUTREACH_DAILY_CAP_PER_ORG: "-3" })).toBe(40);
-    expect(getDailySendCapPerOrg({ OUTREACH_DAILY_CAP_PER_ORG: "lots" })).toBe(40);
+    expect(getDailySendCapPerOrg({ OUTREACH_DAILY_CAP_PER_ORG: "-3" })).toBe(
+      40,
+    );
+    expect(getDailySendCapPerOrg({ OUTREACH_DAILY_CAP_PER_ORG: "lots" })).toBe(
+      40,
+    );
   });
 });
 
@@ -1369,7 +1406,9 @@ describe("SendOutreachWorker GL8b — recipient cooldown", () => {
       ]);
     const sendSpy = vi.spyOn(SendEmailTool.prototype, "execute");
 
-    await expect(worker.processArtifact("art_1", "org_1")).resolves.toBeUndefined();
+    await expect(
+      worker.processArtifact("art_1", "org_1"),
+    ).resolves.toBeUndefined();
 
     expect(prisma.outreachArtifact.updateMany).toHaveBeenCalledWith({
       where: {
@@ -1398,16 +1437,14 @@ describe("SendOutreachWorker GL8b — recipient cooldown", () => {
 
   it("queries org-scoped delivery risk using a trimmed, case-folded recipient", async () => {
     const artifact = artifactRow();
-    prisma.outreachArtifact.findUnique.mockResolvedValue(
-      {
-        ...artifact,
-        recipientRef: "  Dest@Example.COM  ",
-        payload: {
-          ...(artifact.payload as Record<string, unknown>),
-          to: "  Dest@Example.COM  ",
-        },
+    prisma.outreachArtifact.findUnique.mockResolvedValue({
+      ...artifact,
+      recipientRef: "  Dest@Example.COM  ",
+      payload: {
+        ...(artifact.payload as Record<string, unknown>),
+        to: "  Dest@Example.COM  ",
       },
-    );
+    });
     prisma.outreachArtifact.update.mockResolvedValue(
       artifactRow({ status: OutreachArtifactStatus.SIMULATED }),
     );
@@ -1437,16 +1474,14 @@ describe("SendOutreachWorker GL8b — recipient cooldown", () => {
     prisma.outreachArtifact.findUnique.mockResolvedValue(
       artifactRow({ recipientRef: "  DEST@example.com " }),
     );
-    prisma.$queryRaw
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([
-        {
-          id: "art_unknown",
-          status: OutreachArtifactStatus.DELIVERY_UNKNOWN,
-          sentAt: null,
-          updatedAt: new Date("2026-08-12T05:00:00.000Z"),
-        },
-      ]);
+    prisma.$queryRaw.mockResolvedValueOnce([]).mockResolvedValueOnce([
+      {
+        id: "art_unknown",
+        status: OutreachArtifactStatus.DELIVERY_UNKNOWN,
+        sentAt: null,
+        updatedAt: new Date("2026-08-12T05:00:00.000Z"),
+      },
+    ]);
     const sendSpy = vi.spyOn(SendEmailTool.prototype, "execute");
 
     await worker.processArtifact("art_1", "org_1");
@@ -1468,16 +1503,14 @@ describe("SendOutreachWorker GL8b — recipient cooldown", () => {
 
   it("defers without suppressing when the same recipient has a fresh SENDING claim", async () => {
     prisma.outreachArtifact.findUnique.mockResolvedValue(artifactRow());
-    prisma.$queryRaw
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([
-        {
-          id: "art_in_flight",
-          status: OutreachArtifactStatus.SENDING,
-          sentAt: null,
-          updatedAt: new Date(),
-        },
-      ]);
+    prisma.$queryRaw.mockResolvedValueOnce([]).mockResolvedValueOnce([
+      {
+        id: "art_in_flight",
+        status: OutreachArtifactStatus.SENDING,
+        sentAt: null,
+        updatedAt: new Date(),
+      },
+    ]);
     const sendSpy = vi.spyOn(SendEmailTool.prototype, "execute");
 
     await worker.processArtifact("art_1", "org_1");
@@ -1767,16 +1800,14 @@ describe("SendOutreachWorker conversation safety gates", () => {
     prisma.outreachArtifact.findUnique.mockResolvedValue(
       artifactRow({ purpose: OutreachArtifactPurpose.FOLLOW_UP }),
     );
-    prisma.$queryRaw
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([
-        {
-          id: "art_previous",
-          status: OutreachArtifactStatus.SENT,
-          sentAt: new Date("2026-08-11T12:00:00.000Z"),
-          updatedAt: new Date("2026-08-11T12:00:00.000Z"),
-        },
-      ]);
+    prisma.$queryRaw.mockResolvedValueOnce([]).mockResolvedValueOnce([
+      {
+        id: "art_previous",
+        status: OutreachArtifactStatus.SENT,
+        sentAt: new Date("2026-08-11T12:00:00.000Z"),
+        updatedAt: new Date("2026-08-11T12:00:00.000Z"),
+      },
+    ]);
 
     await worker.processArtifact("art_1", "org_1");
 
@@ -2012,10 +2043,7 @@ describe("SendOutreachWorker conversation safety gates", () => {
     const sentSourceQuery = prisma.outreachArtifact.findFirst.mock
       .calls[1]?.[0] as { where: { AND: Array<Record<string, unknown>> } };
     expect(sentSourceQuery.where.AND[1]).toEqual({
-      OR: [
-        { replyToMessageId: "msg_new" },
-        { replyToMessageId: null },
-      ],
+      OR: [{ replyToMessageId: "msg_new" }, { replyToMessageId: null }],
     });
     expect(prisma.outreachArtifact.update).toHaveBeenCalledWith({
       where: { id: "art_1" },
@@ -2051,16 +2079,15 @@ describe("SendOutreachWorker conversation safety gates", () => {
     ]);
 
     prisma.outreachArtifact.findUnique.mockImplementation(
-      async (args: { where: { id: string } }) => rows.get(args.where.id) ?? null,
+      async (args: { where: { id: string } }) =>
+        rows.get(args.where.id) ?? null,
     );
     prisma.conversationMessage.findFirst.mockResolvedValue({ id: "msg_1" });
     prisma.outreachArtifact.findFirst.mockImplementation(
       async (args: {
         where: {
           id?: { not?: string };
-          status?:
-            | OutreachArtifactStatus
-            | { in?: OutreachArtifactStatus[] };
+          status?: OutreachArtifactStatus | { in?: OutreachArtifactStatus[] };
         };
       }) => {
         const statusFilter =
@@ -2177,9 +2204,11 @@ describe("SendOutreachWorker conversation safety gates", () => {
 
     await worker.processArtifact("art_1", "org_1");
 
-    const sentWriteOrder = prisma.outreachArtifact.update.mock.invocationCallOrder[0];
+    const sentWriteOrder =
+      prisma.outreachArtifact.update.mock.invocationCallOrder[0];
     const projectionOrder =
-      conversationStore.recordDeliveredGmailArtifact.mock.invocationCallOrder[0];
+      conversationStore.recordDeliveredGmailArtifact.mock
+        .invocationCallOrder[0];
     expect(sentWriteOrder).toBeLessThan(projectionOrder);
     expect(prisma.outreachArtifact.update).toHaveBeenCalledWith({
       where: { id: "art_1" },
@@ -2190,22 +2219,22 @@ describe("SendOutreachWorker conversation safety gates", () => {
         providerThreadId: "gmail_thread_1",
       },
     });
-    expect(
-      conversationStore.recordDeliveredGmailArtifact,
-    ).toHaveBeenCalledWith({
-      orgId: "org_1",
-      integrationId: "gmail_integration_1",
-      artifactId: "art_1",
-      providerThreadId: "gmail_thread_1",
-      providerMessageId: "gmail_message_1",
-      senderEmail: "sender@acme.com",
-      toEmails: ["dest@example.com"],
-      subject: "Hi",
-      bodyText: "Body",
-      bodyHtml: null,
-      snippet: "Body",
-      sentAt: expect.any(Date),
-    });
+    expect(conversationStore.recordDeliveredGmailArtifact).toHaveBeenCalledWith(
+      {
+        orgId: "org_1",
+        integrationId: "gmail_integration_1",
+        artifactId: "art_1",
+        providerThreadId: "gmail_thread_1",
+        providerMessageId: "gmail_message_1",
+        senderEmail: "sender@acme.com",
+        toEmails: ["dest@example.com"],
+        subject: "Hi",
+        bodyText: "Body",
+        bodyHtml: null,
+        snippet: "Body",
+        sentAt: expect.any(Date),
+      },
+    );
   });
 
   it("does not release the claim or re-dispatch when post-SENT projection fails", async () => {
@@ -2281,8 +2310,16 @@ describe("SendOutreachWorker.reconcileStuckArtifacts (recovery sweep)", () => {
 
   it("quarantines stale SENDING claims as DELIVERY_UNKNOWN without re-enqueueing", async () => {
     const stale = [
-      artifactRow({ id: "art_a", orgId: "org_a", status: OutreachArtifactStatus.SENDING }),
-      artifactRow({ id: "art_b", orgId: "org_b", status: OutreachArtifactStatus.SENDING }),
+      artifactRow({
+        id: "art_a",
+        orgId: "org_a",
+        status: OutreachArtifactStatus.SENDING,
+      }),
+      artifactRow({
+        id: "art_b",
+        orgId: "org_b",
+        status: OutreachArtifactStatus.SENDING,
+      }),
     ];
     prisma.outreachArtifact.findMany
       .mockResolvedValueOnce(stale) // SENDING pass
@@ -2311,15 +2348,16 @@ describe("SendOutreachWorker.reconcileStuckArtifacts (recovery sweep)", () => {
   it("re-enqueues stranded APPROVED rows (jobId dedup makes duplicates a no-op)", async () => {
     prisma.outreachArtifact.findMany
       .mockResolvedValueOnce([]) // SENDING pass
-      .mockResolvedValueOnce([
-        artifactRow({ id: "art_old", orgId: "org_1" }),
-      ]);
+      .mockResolvedValueOnce([artifactRow({ id: "art_old", orgId: "org_1" })]);
 
     const result = await worker.reconcileStuckArtifacts();
 
     expect(result).toEqual({ deliveryUnknown: 0, requeued: 1 });
     expect(queue.enqueue).toHaveBeenCalledTimes(1);
-    expect(queue.enqueue).toHaveBeenCalledWith({ artifactId: "art_old", orgId: "org_1" });
+    expect(queue.enqueue).toHaveBeenCalledWith({
+      artifactId: "art_old",
+      orgId: "org_1",
+    });
     // No claim/release churn on the APPROVED pass — enqueue only.
     expect(prisma.outreachArtifact.updateMany).not.toHaveBeenCalled();
   });
@@ -2327,7 +2365,11 @@ describe("SendOutreachWorker.reconcileStuckArtifacts (recovery sweep)", () => {
   it("skips a stale claim that resolved between findMany and quarantine", async () => {
     prisma.outreachArtifact.findMany
       .mockResolvedValueOnce([
-        artifactRow({ id: "art_won", orgId: "org_1", status: OutreachArtifactStatus.SENDING }),
+        artifactRow({
+          id: "art_won",
+          orgId: "org_1",
+          status: OutreachArtifactStatus.SENDING,
+        }),
       ])
       .mockResolvedValueOnce([]);
     // The guarded updateMany finds the row no longer SENDING (raced to SENT).
@@ -2387,7 +2429,9 @@ describe("SendOutreachWorker reconcile sweep — completed-jobId cleanup (GL8a d
     prisma = mockPrisma();
   });
 
-  function buildWorker(queue: ReturnType<typeof mockQueue>): SendOutreachWorker {
+  function buildWorker(
+    queue: ReturnType<typeof mockQueue>,
+  ): SendOutreachWorker {
     const suppression = {
       isSuppressed: vi.fn(async () => false),
       isSuppressedInTransaction: vi.fn(async () => false),
@@ -2408,7 +2452,9 @@ describe("SendOutreachWorker reconcile sweep — completed-jobId cleanup (GL8a d
     const worker = buildWorker(queue);
     prisma.outreachArtifact.findMany
       .mockResolvedValueOnce([]) // SENDING pass
-      .mockResolvedValueOnce([artifactRow({ id: "art_deferred", orgId: "org_1" })]);
+      .mockResolvedValueOnce([
+        artifactRow({ id: "art_deferred", orgId: "org_1" }),
+      ]);
 
     const result = await worker.reconcileStuckArtifacts();
 
@@ -2433,7 +2479,9 @@ describe("SendOutreachWorker reconcile sweep — completed-jobId cleanup (GL8a d
     const worker = buildWorker(queue);
     prisma.outreachArtifact.findMany
       .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([artifactRow({ id: "art_live_job", orgId: "org_1" })]);
+      .mockResolvedValueOnce([
+        artifactRow({ id: "art_live_job", orgId: "org_1" }),
+      ]);
 
     await worker.reconcileStuckArtifacts();
 
@@ -2450,7 +2498,9 @@ describe("SendOutreachWorker reconcile sweep — completed-jobId cleanup (GL8a d
     const worker = buildWorker(queue);
     prisma.outreachArtifact.findMany
       .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([artifactRow({ id: "art_no_job", orgId: "org_1" })]);
+      .mockResolvedValueOnce([
+        artifactRow({ id: "art_no_job", orgId: "org_1" }),
+      ]);
 
     await worker.reconcileStuckArtifacts();
 
@@ -2488,7 +2538,11 @@ describe("SendOutreachWorker reconcile sweep — completed-jobId cleanup (GL8a d
     const worker = buildWorker(queue);
     prisma.outreachArtifact.findMany
       .mockResolvedValueOnce([
-        artifactRow({ id: "art_stale", orgId: "org_1", status: OutreachArtifactStatus.SENDING }),
+        artifactRow({
+          id: "art_stale",
+          orgId: "org_1",
+          status: OutreachArtifactStatus.SENDING,
+        }),
       ])
       .mockResolvedValueOnce([]);
 
@@ -2506,6 +2560,9 @@ describe("SendOutreachWorker terminal-failure handler", () => {
 
   beforeEach(() => {
     vi.restoreAllMocks();
+    process.env.OUTREACH_FAILED_STATUS_WRITES_ENABLED = "true";
+    process.env.OUTREACH_FAILED_STATUS_WRITES_ACK =
+      "readers-drained-legacy-inventory-reviewed-v1";
     prisma = mockPrisma();
     const suppression = {
       isSuppressed: vi.fn(async () => false),
@@ -2518,6 +2575,11 @@ describe("SendOutreachWorker terminal-failure handler", () => {
       suppression,
       mockLedger(),
     );
+  });
+
+  afterEach(() => {
+    delete process.env.OUTREACH_FAILED_STATUS_WRITES_ENABLED;
+    delete process.env.OUTREACH_FAILED_STATUS_WRITES_ACK;
   });
 
   function markTerminal(artifactId: string, orgId: string, reason: string) {
@@ -2534,10 +2596,10 @@ describe("SendOutreachWorker terminal-failure handler", () => {
     ).markTerminalFailure(artifactId, orgId, reason);
   }
 
-  it("flips an APPROVED row to REJECTED with the auto-failed marker when retries exhaust", async () => {
+  it("flips an APPROVED row to FAILED without overwriting human approval evidence", async () => {
     prisma.outreachArtifact.findUnique.mockResolvedValue(artifactRow());
     prisma.outreachArtifact.update.mockResolvedValue(
-      artifactRow({ status: OutreachArtifactStatus.REJECTED }),
+      artifactRow({ status: OutreachArtifactStatus.FAILED }),
     );
 
     await markTerminal("art_1", "org_1", "gmail 500 after 3 attempts");
@@ -2545,14 +2607,43 @@ describe("SendOutreachWorker terminal-failure handler", () => {
     expect(prisma.outreachArtifact.updateMany).toHaveBeenCalledWith({
       where: {
         id: "art_1",
+        orgId: "org_1",
+        status: OutreachArtifactStatus.APPROVED,
+      },
+      data: expect.objectContaining({
+        status: OutreachArtifactStatus.FAILED,
+        failureReason: "gmail 500 after 3 attempts",
+        failedAt: expect.any(Date),
+      }),
+    });
+    const data = prisma.outreachArtifact.updateMany.mock.calls[0]?.[0]?.data;
+    expect(data).not.toHaveProperty("reviewedAt");
+    expect(data).not.toHaveProperty("reviewedBy");
+    expect(data).not.toHaveProperty("reviewerNote");
+  });
+
+  it("keeps the legacy-compatible representation until the write gate is attested", async () => {
+    delete process.env.OUTREACH_FAILED_STATUS_WRITES_ACK;
+    prisma.outreachArtifact.findUnique.mockResolvedValue(artifactRow());
+
+    await markTerminal("art_1", "org_1", "gmail 500 after 3 attempts");
+
+    expect(prisma.outreachArtifact.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "art_1",
+        orgId: "org_1",
         status: OutreachArtifactStatus.APPROVED,
       },
       data: expect.objectContaining({
         status: OutreachArtifactStatus.REJECTED,
-        reviewerNote: expect.stringContaining("auto-failed:"),
-        reviewedAt: expect.any(Date),
+        reviewerNote: "auto-failed: gmail 500 after 3 attempts",
+        failureReason: "gmail 500 after 3 attempts",
+        failedAt: expect.any(Date),
       }),
     });
+    const data = prisma.outreachArtifact.updateMany.mock.calls[0]?.[0]?.data;
+    expect(data).not.toHaveProperty("reviewedAt");
+    expect(data).not.toHaveProperty("reviewedBy");
   });
 
   it("quarantines a SENDING claim at retry exhaustion as DELIVERY_UNKNOWN", async () => {
@@ -2577,7 +2668,21 @@ describe("SendOutreachWorker terminal-failure handler", () => {
 
     await markTerminal("art_1", "org_1", "stale failure event");
 
-    expect(prisma.outreachArtifact.update).not.toHaveBeenCalled();
+    expect(prisma.outreachArtifact.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("leaves an already FAILED row unchanged on a duplicate failure event", async () => {
+    prisma.outreachArtifact.findUnique.mockResolvedValue(
+      artifactRow({
+        status: OutreachArtifactStatus.FAILED,
+        failureReason: "first terminal reason",
+        failedAt: new Date(),
+      }),
+    );
+
+    await markTerminal("art_1", "org_1", "duplicate event");
+
+    expect(prisma.outreachArtifact.updateMany).not.toHaveBeenCalled();
   });
 });
 
@@ -2587,32 +2692,44 @@ describe("isLiveSendAllowedForOrg", () => {
   });
 
   it("returns false when env var is empty string", () => {
-    expect(isLiveSendAllowedForOrg("org_x", { OUTREACH_LIVE_FOR_ORGS: "" })).toBe(false);
+    expect(
+      isLiveSendAllowedForOrg("org_x", { OUTREACH_LIVE_FOR_ORGS: "" }),
+    ).toBe(false);
   });
 
   it("returns false when env var is whitespace only", () => {
-    expect(isLiveSendAllowedForOrg("org_x", { OUTREACH_LIVE_FOR_ORGS: "   " })).toBe(false);
+    expect(
+      isLiveSendAllowedForOrg("org_x", { OUTREACH_LIVE_FOR_ORGS: "   " }),
+    ).toBe(false);
   });
 
   it("returns true for org listed in comma-separated allowlist", () => {
     expect(
-      isLiveSendAllowedForOrg("org_b", { OUTREACH_LIVE_FOR_ORGS: "org_a,org_b,org_c" }),
+      isLiveSendAllowedForOrg("org_b", {
+        OUTREACH_LIVE_FOR_ORGS: "org_a,org_b,org_c",
+      }),
     ).toBe(true);
   });
 
   it("returns false for org not in allowlist", () => {
     expect(
-      isLiveSendAllowedForOrg("org_z", { OUTREACH_LIVE_FOR_ORGS: "org_a,org_b" }),
+      isLiveSendAllowedForOrg("org_z", {
+        OUTREACH_LIVE_FOR_ORGS: "org_a,org_b",
+      }),
     ).toBe(false);
   });
 
   it("tolerates whitespace around comma-separated entries", () => {
     expect(
-      isLiveSendAllowedForOrg("org_b", { OUTREACH_LIVE_FOR_ORGS: " org_a , org_b , org_c " }),
+      isLiveSendAllowedForOrg("org_b", {
+        OUTREACH_LIVE_FOR_ORGS: " org_a , org_b , org_c ",
+      }),
     ).toBe(true);
   });
 
   it("wildcard '*' permits any org (dev only)", () => {
-    expect(isLiveSendAllowedForOrg("any_org", { OUTREACH_LIVE_FOR_ORGS: "*" })).toBe(true);
+    expect(
+      isLiveSendAllowedForOrg("any_org", { OUTREACH_LIVE_FOR_ORGS: "*" }),
+    ).toBe(true);
   });
 });

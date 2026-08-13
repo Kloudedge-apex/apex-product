@@ -853,22 +853,6 @@ rollback_partial_rollout() {
   trap '' HUP INT TERM
   set +e
   echo "ERROR: rollout did not complete; restoring the captured immutable images." >&2
-  if [[ "${API_UPDATE_ATTEMPTED}" == "true" ]]; then
-    rollback_state="${RUNTIME_STATE_DIR}/rollback-api-current.json"
-    rollback_result_state="${RUNTIME_STATE_DIR}/rollback-api-result.json"
-    current_image=""
-    capture_containerapp_state "${API_APP}" "${rollback_state}" || rollback_failed="true"
-    current_image="$(containerapp_state_value \
-      "${rollback_state}" '.properties.template.containers[0].image')" || rollback_failed="true"
-    if [[ "${current_image}" == "${IMAGE}" ]]; then
-      update_containerapp_image \
-        "${API_APP}" "${IMAGE}" "${PREVIOUS_API_IMAGE}" \
-        "${rollback_state}" "${rollback_result_state}" || rollback_failed="true"
-    elif [[ "${current_image}" != "${PREVIOUS_API_IMAGE}" ]]; then
-      echo "ERROR: ${API_APP} changed outside this rollout; refusing to overwrite it during rollback" >&2
-      rollback_failed="true"
-    fi
-  fi
   if [[ "${WORKER_UPDATE_ATTEMPTED}" == "true" ]]; then
     rollback_state="${RUNTIME_STATE_DIR}/rollback-worker-current.json"
     rollback_result_state="${RUNTIME_STATE_DIR}/rollback-worker-result.json"
@@ -882,6 +866,22 @@ rollback_partial_rollout() {
         "${rollback_state}" "${rollback_result_state}" || rollback_failed="true"
     elif [[ "${current_image}" != "${PREVIOUS_WORKER_IMAGE}" ]]; then
       echo "ERROR: ${WORKER_APP} changed outside this rollout; refusing to overwrite it during rollback" >&2
+      rollback_failed="true"
+    fi
+  fi
+  if [[ "${API_UPDATE_ATTEMPTED}" == "true" ]]; then
+    rollback_state="${RUNTIME_STATE_DIR}/rollback-api-current.json"
+    rollback_result_state="${RUNTIME_STATE_DIR}/rollback-api-result.json"
+    current_image=""
+    capture_containerapp_state "${API_APP}" "${rollback_state}" || rollback_failed="true"
+    current_image="$(containerapp_state_value \
+      "${rollback_state}" '.properties.template.containers[0].image')" || rollback_failed="true"
+    if [[ "${current_image}" == "${IMAGE}" ]]; then
+      update_containerapp_image \
+        "${API_APP}" "${IMAGE}" "${PREVIOUS_API_IMAGE}" \
+        "${rollback_state}" "${rollback_result_state}" || rollback_failed="true"
+    elif [[ "${current_image}" != "${PREVIOUS_API_IMAGE}" ]]; then
+      echo "ERROR: ${API_APP} changed outside this rollout; refusing to overwrite it during rollback" >&2
       rollback_failed="true"
     fi
   fi
@@ -911,25 +911,27 @@ trap 'rollback_on_signal 129' HUP
 trap 'rollback_on_signal 130' INT
 trap 'rollback_on_signal 143' TERM
 
-# Worker first: if it cannot provision, the public API remains untouched.
+# Readers first: the compatible API must be fully active before a new worker
+# can persist newly appended enum values such as FAILED. Rollback reverses this
+# order so the writer is disabled before an older reader is restored.
 RELEASE_LOCK_SAFE_TO_RELEASE="false"
-WORKER_UPDATE_ATTEMPTED="true"
-echo "Rolling ${WORKER_APP} -> ${IMAGE}"
-WORKER_RESULT_STATE="${RUNTIME_STATE_DIR}/worker-result.json"
-update_containerapp_image \
-  "${WORKER_APP}" "${PREVIOUS_WORKER_IMAGE}" "${IMAGE}" \
-  "${PREFLIGHT_WORKER_STATE}" "${WORKER_RESULT_STATE}"
-run_snapshot_helper "scripts/verify-containerapp-release-config.sh" \
-  "${PREVIOUS_API_IMAGE}" \
-  "${IMAGE}"
-echo "Worker is healthy on ${DIGEST}"
-
 API_UPDATE_ATTEMPTED="true"
 echo "Rolling ${API_APP} -> ${IMAGE}"
 API_RESULT_STATE="${RUNTIME_STATE_DIR}/api-result.json"
 update_containerapp_image \
   "${API_APP}" "${PREVIOUS_API_IMAGE}" "${IMAGE}" \
   "${PREFLIGHT_API_STATE}" "${API_RESULT_STATE}"
+run_snapshot_helper "scripts/verify-containerapp-release-config.sh" \
+  "${IMAGE}" \
+  "${PREVIOUS_WORKER_IMAGE}"
+echo "API reader is healthy on ${DIGEST}"
+
+WORKER_UPDATE_ATTEMPTED="true"
+echo "Rolling ${WORKER_APP} -> ${IMAGE}"
+WORKER_RESULT_STATE="${RUNTIME_STATE_DIR}/worker-result.json"
+update_containerapp_image \
+  "${WORKER_APP}" "${PREVIOUS_WORKER_IMAGE}" "${IMAGE}" \
+  "${PREFLIGHT_WORKER_STATE}" "${WORKER_RESULT_STATE}"
 run_snapshot_helper "scripts/verify-containerapp-release-config.sh" "${IMAGE}" "${IMAGE}"
 echo "API and worker are healthy on ${DIGEST}"
 

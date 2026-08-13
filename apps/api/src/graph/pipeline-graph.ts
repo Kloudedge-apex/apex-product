@@ -36,6 +36,10 @@ import {
   sameSelectedOutreachRecipient,
   selectOutreachRecipient,
 } from "./outreach-recipient";
+import {
+  artifactFailureReason,
+  isFailedArtifact,
+} from "../outreach/outreach-artifact-failure";
 
 const MAX_OUTREACH = 10;
 const PERSON_SNAPSHOT_BATCH_SIZE = 200;
@@ -100,7 +104,10 @@ export class StageFailureError extends Error {
 }
 
 /** Build a `{ stageStatuses }` partial update for a single stage. */
-function stageStatus(stage: StageName, status: StageStatus): Partial<PipelineState> {
+function stageStatus(
+  stage: StageName,
+  status: StageStatus,
+): Partial<PipelineState> {
   return { stageStatuses: { [stage]: status } };
 }
 
@@ -110,18 +117,19 @@ function stageStatus(stage: StageName, status: StageStatus): Partial<PipelineSta
  * stops the run, but if state is rehydrated (e.g. from a checkpoint) or a
  * test invokes a node directly we still want the gate.
  */
-function upstreamFailed(
-  state: PipelineState,
-  upstream: StageName,
-): boolean {
+function upstreamFailed(state: PipelineState, upstream: StageName): boolean {
   return state.stageStatuses?.[upstream] === "FAILED";
 }
 
-function outcomeStatusForArtifact(
-  status: OutreachArtifactStatus | undefined,
-): "queued" | "sent" | "persisted" {
-  if (status === "PENDING_REVIEW") return "queued";
-  if (status === "SENT") return "sent";
+function outcomeStatusForArtifact(artifact: {
+  readonly status: OutreachArtifactStatus;
+  readonly reviewerNote?: string | null;
+  readonly failureReason?: string | null;
+  readonly failedAt?: Date | null;
+}): "queued" | "sent" | "persisted" | "failed" {
+  if (isFailedArtifact(artifact)) return "failed";
+  if (artifact.status === "PENDING_REVIEW") return "queued";
+  if (artifact.status === "SENT") return "sent";
   return "persisted";
 }
 
@@ -139,9 +147,7 @@ function outcomeStatusForArtifact(
  *                                END (when all stages done)
  */
 export function buildPipelineGraph(deps: Deps) {
-  const supervisor = async (
-    state: PipelineState,
-  ): Promise<Command> => {
+  const supervisor = async (state: PipelineState): Promise<Command> => {
     return withNodeSpan(
       NODE.SUPERVISOR,
       {
@@ -164,7 +170,9 @@ export function buildPipelineGraph(deps: Deps) {
     );
   };
 
-  const sourcingAgent = async (state: PipelineState): Promise<Partial<PipelineState>> => {
+  const sourcingAgent = async (
+    state: PipelineState,
+  ): Promise<Partial<PipelineState>> => {
     return withNodeSpan(
       NODE.SOURCING,
       {
@@ -175,7 +183,10 @@ export function buildPipelineGraph(deps: Deps) {
       async () => {
         const startedAt = Date.now();
         const update: Partial<PipelineState> = {
-          ...nowMsg(NODE.SOURCING, `sourcing for ${state.icpProfileIds.length} ICP(s)`),
+          ...nowMsg(
+            NODE.SOURCING,
+            `sourcing for ${state.icpProfileIds.length} ICP(s)`,
+          ),
         };
         const errors: PipelineState["errors"] = [];
 
@@ -194,7 +205,9 @@ export function buildPipelineGraph(deps: Deps) {
             totalPeople += people;
             for (const id of companyIds) runCompanyIds.add(id);
             for (const id of personIds) runPersonIds.add(id);
-            log.log(`sourcing[${icpId}] companies=${companies} people=${people}`);
+            log.log(
+              `sourcing[${icpId}] companies=${companies} people=${people}`,
+            );
           } catch (err) {
             const msg = err instanceof Error ? err.message : "unknown";
             errors.push({
@@ -217,13 +230,14 @@ export function buildPipelineGraph(deps: Deps) {
         // only the companies THIS run sourced. Org+id filter is
         // defence-in-depth against id collisions.
         const companyIdList = [...runCompanyIds];
-        const companies = companyIdList.length > 0
-          ? await deps.prisma.company.findMany({
-              where: { orgId: state.orgId, id: { in: companyIdList } },
-              select: { id: true, domain: true, name: true },
-              take: 200,
-            })
-          : [];
+        const companies =
+          companyIdList.length > 0
+            ? await deps.prisma.company.findMany({
+                where: { orgId: state.orgId, id: { in: companyIdList } },
+                select: { id: true, domain: true, name: true },
+                take: 200,
+              })
+            : [];
 
         update.sourcedCompanies = companies;
         update.sourcedPersonIds = [...runPersonIds];
@@ -233,9 +247,15 @@ export function buildPipelineGraph(deps: Deps) {
         // FAILED iff every ICP yielded zero rows AND we sourced nothing into
         // the DB. A run with no leads anywhere cannot drive downstream stages,
         // so throw to terminate the run cleanly via graph.service's catch.
-        if (totalCompanies === 0 && totalPeople === 0 && companies.length === 0) {
+        if (
+          totalCompanies === 0 &&
+          totalPeople === 0 &&
+          companies.length === 0
+        ) {
           Object.assign(update, stageStatus(STAGE.SOURCING, "FAILED"));
-          log.warn(`sourcing FAILED — no_leads_from_any_source for org=${state.orgId}`);
+          log.warn(
+            `sourcing FAILED — no_leads_from_any_source for org=${state.orgId}`,
+          );
           throw new StageFailureError(
             STAGE.SOURCING,
             "no_leads_from_any_source",
@@ -245,14 +265,18 @@ export function buildPipelineGraph(deps: Deps) {
 
         // PARTIAL if some ICPs errored but we still got rows; otherwise COMPLETE.
         const status: StageStatus =
-          errors.length > 0 && errors.length < state.icpProfileIds.length ? "PARTIAL" : "COMPLETE";
+          errors.length > 0 && errors.length < state.icpProfileIds.length
+            ? "PARTIAL"
+            : "COMPLETE";
         Object.assign(update, stageStatus(STAGE.SOURCING, status));
         return update;
       },
     );
   };
 
-  const enrichmentAgent = async (state: PipelineState): Promise<Partial<PipelineState>> => {
+  const enrichmentAgent = async (
+    state: PipelineState,
+  ): Promise<Partial<PipelineState>> => {
     return withNodeSpan(
       NODE.ENRICHMENT,
       {
@@ -262,16 +286,25 @@ export function buildPipelineGraph(deps: Deps) {
       },
       async () => {
         if (upstreamFailed(state, STAGE.SOURCING)) {
-          log.warn(`skipping ${STAGE.ENRICHMENT} — upstream ${STAGE.SOURCING} failed`);
+          log.warn(
+            `skipping ${STAGE.ENRICHMENT} — upstream ${STAGE.SOURCING} failed`,
+          );
           return {
             stagesCompleted: [STAGE.ENRICHMENT],
             ...stageStatus(STAGE.ENRICHMENT, "FAILED"),
-            ...nowMsg(NODE.ENRICHMENT, `skipped — upstream ${STAGE.SOURCING} failed`, "warn"),
+            ...nowMsg(
+              NODE.ENRICHMENT,
+              `skipped — upstream ${STAGE.SOURCING} failed`,
+              "warn",
+            ),
           };
         }
 
         const update: Partial<PipelineState> = {
-          ...nowMsg(NODE.ENRICHMENT, `enriching for ${state.icpProfileIds.length} ICP(s)`),
+          ...nowMsg(
+            NODE.ENRICHMENT,
+            `enriching for ${state.icpProfileIds.length} ICP(s)`,
+          ),
         };
         const errors: PipelineState["errors"] = [];
 
@@ -282,14 +315,17 @@ export function buildPipelineGraph(deps: Deps) {
         const runPersonIds = new Set<string>(state.sourcedPersonIds);
         for (const icpId of state.icpProfileIds) {
           try {
-            const { merged, enriched, personIds } = await deps.leads.runEnrichmentStage(
-              state.orgId,
-              icpId,
-              state.sourcedPersonIds,
-            );
+            const { merged, enriched, personIds } =
+              await deps.leads.runEnrichmentStage(
+                state.orgId,
+                icpId,
+                state.sourcedPersonIds,
+              );
             totalEnriched += enriched;
             for (const id of personIds) runPersonIds.add(id);
-            log.log(`enrichment[${icpId}] merged=${merged} enriched=${enriched}`);
+            log.log(
+              `enrichment[${icpId}] merged=${merged} enriched=${enriched}`,
+            );
           } catch (err) {
             const msg = err instanceof Error ? err.message : "unknown";
             errors.push({
@@ -340,7 +376,10 @@ export function buildPipelineGraph(deps: Deps) {
           offset < personIdList.length;
           offset += PERSON_SNAPSHOT_BATCH_SIZE
         ) {
-          const ids = personIdList.slice(offset, offset + PERSON_SNAPSHOT_BATCH_SIZE);
+          const ids = personIdList.slice(
+            offset,
+            offset + PERSON_SNAPSHOT_BATCH_SIZE,
+          );
           people.push(...(await fetchPeople(ids)));
         }
         people.sort((a, b) => a.id.localeCompare(b.id));
@@ -365,10 +404,14 @@ export function buildPipelineGraph(deps: Deps) {
         // FAILED iff sourcing produced rows but enrichment landed nothing
         // useful (no enriched contacts and none with an email in the DB).
         const inputRows = state.sourcedCompanies.length;
-        const enrichedWithEmail = enrichedPeople.filter((p) => !!p.email).length;
+        const enrichedWithEmail = enrichedPeople.filter(
+          (p) => !!p.email,
+        ).length;
         if (totalEnriched === 0 && enrichedWithEmail === 0 && inputRows > 0) {
           Object.assign(update, stageStatus(STAGE.ENRICHMENT, "FAILED"));
-          log.warn(`enrichment FAILED — enrichment_yielded_zero (input_companies=${inputRows})`);
+          log.warn(
+            `enrichment FAILED — enrichment_yielded_zero (input_companies=${inputRows})`,
+          );
           throw new StageFailureError(
             STAGE.ENRICHMENT,
             "enrichment_yielded_zero",
@@ -380,14 +423,18 @@ export function buildPipelineGraph(deps: Deps) {
         // enriched fewer contacts than companies suggested we should have
         // (cheap heuristic — exact "expected count" isn't available here).
         const status: StageStatus =
-          errors.length > 0 || enrichedWithEmail < inputRows ? "PARTIAL" : "COMPLETE";
+          errors.length > 0 || enrichedWithEmail < inputRows
+            ? "PARTIAL"
+            : "COMPLETE";
         Object.assign(update, stageStatus(STAGE.ENRICHMENT, status));
         return update;
       },
     );
   };
 
-  const scoringAgent = async (state: PipelineState): Promise<Partial<PipelineState>> => {
+  const scoringAgent = async (
+    state: PipelineState,
+  ): Promise<Partial<PipelineState>> => {
     return withNodeSpan(
       NODE.SCORING,
       {
@@ -397,17 +444,26 @@ export function buildPipelineGraph(deps: Deps) {
       },
       async () => {
         if (upstreamFailed(state, STAGE.ENRICHMENT)) {
-          log.warn(`skipping ${STAGE.SCORING} — upstream ${STAGE.ENRICHMENT} failed`);
+          log.warn(
+            `skipping ${STAGE.SCORING} — upstream ${STAGE.ENRICHMENT} failed`,
+          );
           return {
             stagesCompleted: [STAGE.SCORING],
             ...stageStatus(STAGE.SCORING, "FAILED"),
-            ...nowMsg(NODE.SCORING, `skipped — upstream ${STAGE.ENRICHMENT} failed`, "warn"),
+            ...nowMsg(
+              NODE.SCORING,
+              `skipped — upstream ${STAGE.ENRICHMENT} failed`,
+              "warn",
+            ),
           };
         }
 
         const startedAt = Date.now();
         const update: Partial<PipelineState> = {
-          ...nowMsg(NODE.SCORING, `scoring for ${state.icpProfileIds.length} ICP(s)`),
+          ...nowMsg(
+            NODE.SCORING,
+            `scoring for ${state.icpProfileIds.length} ICP(s)`,
+          ),
         };
         const errors: PipelineState["errors"] = [];
 
@@ -448,14 +504,15 @@ export function buildPipelineGraph(deps: Deps) {
         // query that lived here previously was the root cause of the
         // 200-lead-leak bug.
         const scoredIdList = [...runScoredIds];
-        const scores = scoredIdList.length > 0
-          ? await deps.prisma.leadScore.findMany({
-              where: { orgId: state.orgId, personId: { in: scoredIdList } },
-              orderBy: [{ score: "desc" }, { personId: "asc" }],
-              take: 100,
-              select: { personId: true, score: true },
-            })
-          : [];
+        const scores =
+          scoredIdList.length > 0
+            ? await deps.prisma.leadScore.findMany({
+                where: { orgId: state.orgId, personId: { in: scoredIdList } },
+                orderBy: [{ score: "desc" }, { personId: "asc" }],
+                take: 100,
+                select: { personId: true, score: true },
+              })
+            : [];
 
         const scoredLeads = scores.map((s) => ({
           personId: s.personId,
@@ -471,7 +528,11 @@ export function buildPipelineGraph(deps: Deps) {
         // is NOT FAILED — that's a valid signal that the ICP simply doesn't
         // match the available leads. The approval/outreach stages handle the
         // empty-qualified-set case downstream.
-        if (totalScored === 0 && scoredLeads.length === 0 && state.enrichedPeople.length > 0) {
+        if (
+          totalScored === 0 &&
+          scoredLeads.length === 0 &&
+          state.enrichedPeople.length > 0
+        ) {
           Object.assign(update, stageStatus(STAGE.SCORING, "FAILED"));
           log.warn(
             `scoring FAILED — scoring_yielded_zero (enriched_input=${state.enrichedPeople.length})`,
@@ -533,7 +594,9 @@ export function buildPipelineGraph(deps: Deps) {
     );
   };
 
-  const outreachAgent = async (state: PipelineState): Promise<Partial<PipelineState>> => {
+  const outreachAgent = async (
+    state: PipelineState,
+  ): Promise<Partial<PipelineState>> => {
     return withNodeSpan(
       NODE.OUTREACH,
       {
@@ -543,11 +606,17 @@ export function buildPipelineGraph(deps: Deps) {
       },
       async () => {
         if (upstreamFailed(state, STAGE.SCORING)) {
-          log.warn(`skipping ${STAGE.OUTREACH} — upstream ${STAGE.SCORING} failed`);
+          log.warn(
+            `skipping ${STAGE.OUTREACH} — upstream ${STAGE.SCORING} failed`,
+          );
           return {
             stagesCompleted: [STAGE.OUTREACH],
             ...stageStatus(STAGE.OUTREACH, "FAILED"),
-            ...nowMsg(NODE.OUTREACH, `skipped — upstream ${STAGE.SCORING} failed`, "warn"),
+            ...nowMsg(
+              NODE.OUTREACH,
+              `skipped — upstream ${STAGE.SCORING} failed`,
+              "warn",
+            ),
           };
         }
 
@@ -686,15 +755,23 @@ export function buildPipelineGraph(deps: Deps) {
           // a BullMQ retry mid-loop would re-run it for every target,
           // including ones already persisted by require_human_review.
           if (graphRun?.id) {
-            const existingArtifact = await deps.prisma.outreachArtifact.findFirst({
-              where: {
-                orgId: state.orgId,
-                graphRunId: graphRun.id,
-                toolName: "send_email",
-                recipientRef: email,
-              },
-              select: { id: true, status: true, payload: true },
-            });
+            const existingArtifact =
+              await deps.prisma.outreachArtifact.findFirst({
+                where: {
+                  orgId: state.orgId,
+                  graphRunId: graphRun.id,
+                  toolName: "send_email",
+                  recipientRef: email,
+                },
+                select: {
+                  id: true,
+                  status: true,
+                  payload: true,
+                  reviewerNote: true,
+                  failureReason: true,
+                  failedAt: true,
+                },
+              });
             if (existingArtifact) {
               const payloadPersonId = personIdFromArtifactPayload(
                 existingArtifact.payload,
@@ -724,11 +801,19 @@ export function buildPipelineGraph(deps: Deps) {
                 continue;
               }
               claimedRecipients.set(email, person.id);
+              const outcomeStatus = outcomeStatusForArtifact(existingArtifact);
               outreachResults.push({
                 personId: person.id,
                 agentRunId: existingArtifact.id,
-                status: outcomeStatusForArtifact(existingArtifact.status),
+                status: outcomeStatus,
                 artifactStatus: existingArtifact.status,
+                ...(outcomeStatus === "failed"
+                  ? {
+                      error:
+                        artifactFailureReason(existingArtifact) ??
+                        "dispatch_failed",
+                    }
+                  : {}),
                 recipient,
               });
               continue;
@@ -783,11 +868,17 @@ export function buildPipelineGraph(deps: Deps) {
             outreachResults.push({
               personId: person.id,
               agentRunId: result.artifactId ?? undefined,
-              status: result.artifactId
-                ? outcomeStatusForArtifact(artifactStatus)
-                : "failed",
+              status:
+                result.artifactId && artifactStatus
+                  ? outcomeStatusForArtifact({ status: artifactStatus })
+                  : "failed",
               ...(artifactStatus ? { artifactStatus } : {}),
-              error: result.artifactId ? undefined : `qa_failed: ${result.qaIssues.join(",")}`,
+              error:
+                result.artifactId && artifactStatus !== "FAILED"
+                  ? undefined
+                  : result.artifactId
+                    ? "dispatch_failed"
+                    : `qa_failed: ${result.qaIssues.join(",")}`,
               recipient,
             });
           } catch (err) {
@@ -813,19 +904,31 @@ export function buildPipelineGraph(deps: Deps) {
         const sent = persistedResults.filter(
           (result) => result.artifactStatus === "SENT",
         ).length;
-        const otherPersisted = generated - pendingReview - sent;
+        const failedPersisted = persistedResults.filter(
+          (result) => result.status === "failed",
+        ).length;
+        const failedOutcomes = outreachResults.filter(
+          (result) => result.status === "failed",
+        ).length;
+        const successfulOutcomes = outreachResults.length - failedOutcomes;
+        const otherPersisted =
+          generated - pendingReview - sent - failedPersisted;
         // PARTIAL if at least one artifact landed but not all targets
         // produced one; COMPLETE if every target got a persisted artifact;
         // FAILED if a non-empty target set produced none.
         const outreachStatus: StageStatus =
-          generated === targets.length ? "COMPLETE" : generated > 0 ? "PARTIAL" : "FAILED";
+          failedOutcomes === 0 && generated === targets.length
+            ? "COMPLETE"
+            : successfulOutcomes > 0
+              ? "PARTIAL"
+              : "FAILED";
         return {
           outreachResults,
           stagesCompleted: [STAGE.OUTREACH],
           ...stageStatus(STAGE.OUTREACH, outreachStatus),
           ...nowMsg(
             NODE.OUTREACH,
-            `artifacts present for ${generated}/${targets.length} target(s): ${pendingReview} pending review, ${sent} sent, ${otherPersisted} other persisted — no external send attempted`,
+            `artifacts present for ${generated}/${targets.length} target(s): ${pendingReview} pending review, ${sent} sent, ${failedOutcomes} failed, ${otherPersisted} other persisted`,
             outreachStatus === "FAILED" ? "error" : "info",
           ),
         };

@@ -7,6 +7,8 @@
 --      conversationId, replyToMessageId, Conversation, and ConversationMessage.
 --   2. 2026-08-12_outreach-delivery-unknown-expand.sql has added the
 --      DELIVERY_UNKNOWN enum value.
+--   3. 2026-08-13_outreach-artifact-failed-expand.sql has added the FAILED
+--      terminal non-send value.
 --
 -- Contract:
 --   1. For one (orgId, conversationId, replyToMessageId), at most one REPLY
@@ -17,7 +19,7 @@
 --      inbound message suppresses older not-yet-dispatched drafts first.
 --      Confirmed SENT history does not consume this conversation-wide slot,
 --      but still permanently consumes its source-specific slot.
---   REJECTED, SUPPRESSED, and SIMULATED are terminal non-send states and
+--   REJECTED, FAILED, SUPPRESSED, and SIMULATED are terminal non-send states and
 --   intentionally release both slots for a separately reviewed replacement.
 --
 -- Legacy rows with null conversationId or replyToMessageId cannot be safely

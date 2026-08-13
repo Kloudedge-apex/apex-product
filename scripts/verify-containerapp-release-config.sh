@@ -202,6 +202,24 @@ for GATE in WORKER_ENABLED GRAPH_RUN_WORKER_ENABLED OUTREACH_WORKER_ENABLED; do
   require_value "$(env_value "${API_JSON}" "${GATE}")" "false" "API ${GATE}"
   require_value "$(env_value "${WORKER_JSON}" "${GATE}")" "true" "worker ${GATE}"
 done
+API_FAILED_WRITE_GATE="$(env_value "${API_JSON}" OUTREACH_FAILED_STATUS_WRITES_ENABLED)"
+WORKER_FAILED_WRITE_GATE="$(env_value "${WORKER_JSON}" OUTREACH_FAILED_STATUS_WRITES_ENABLED)"
+if [[ -n "${API_FAILED_WRITE_GATE}" && "${API_FAILED_WRITE_GATE}" != "false" ]]; then
+  echo "ERROR: API OUTREACH_FAILED_STATUS_WRITES_ENABLED must be absent or false" >&2
+  exit 1
+fi
+if [[ -n "${WORKER_FAILED_WRITE_GATE}" &&
+  "${WORKER_FAILED_WRITE_GATE}" != "false" &&
+  "${WORKER_FAILED_WRITE_GATE}" != "true" ]]; then
+  echo "ERROR: worker OUTREACH_FAILED_STATUS_WRITES_ENABLED must be absent, false, or true" >&2
+  exit 1
+fi
+if [[ "${WORKER_FAILED_WRITE_GATE}" == "true" ]]; then
+  require_value \
+    "$(env_value "${WORKER_JSON}" OUTREACH_FAILED_STATUS_WRITES_ACK)" \
+    "readers-drained-legacy-inventory-reviewed-v1" \
+    "worker first-class FAILED write attestation"
+fi
 require_value "$(env_value "${API_JSON}" SCHEDULER_ENABLED)" "false" "API SCHEDULER_ENABLED"
 require_value "$(env_value "${WORKER_JSON}" SCHEDULER_ENABLED)" "false" "worker SCHEDULER_ENABLED"
 

@@ -1,10 +1,15 @@
 import { Inject, Injectable, Logger } from "@nestjs/common";
-import { GraphRunStatus, OutreachArtifactStatus } from "@prisma/client";
+import { GraphRunStatus } from "@prisma/client";
 import type { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { QUALIFIED_THRESHOLD } from "../common/qualification.constants";
 import { LangSmithService } from "./langsmith.service";
 import { EVIDENCE_EVENT_KIND } from "./evidence-event.types";
+import {
+  approvedOutcomeArtifactWhere,
+  failedArtifactWhere,
+  humanRejectedArtifactWhere,
+} from "../outreach/outreach-artifact-failure";
 
 /**
  * Minimal Prisma surface this service depends on. Lets specs hand-roll a fake
@@ -54,6 +59,7 @@ export interface RunLevelScore {
     readonly messages_sent: number;
     readonly approved_artifacts: number;
     readonly rejected_artifacts: number;
+    readonly failed_artifacts: number;
     readonly total_artifacts: number;
   };
 }
@@ -101,7 +107,10 @@ export class RunLevelEvaluatorService {
     if (!graphRunId || !runId) return;
     this.langsmithRunIds.set(graphRunId, runId);
     void this.prisma.graphRun
-      .update({ where: { id: graphRunId }, data: { langsmithRootRunId: runId } })
+      .update({
+        where: { id: graphRunId },
+        data: { langsmithRootRunId: runId },
+      })
       .catch((err) => {
         this.logger.warn(
           `failed to persist langsmithRootRunId for graphRun=${graphRunId}: ${
@@ -135,40 +144,53 @@ export class RunLevelEvaluatorService {
     const since = run.startedAt;
     const until = run.completedAt ?? new Date();
 
-    const [qualifiedLeads, messagesSent, approvedCount, rejectedCount, totalArtifacts] =
-      await Promise.all([
-        this.prisma.leadScore.count({
-          where: {
-            orgId: run.orgId,
-            score: { gte: QUALIFIED_THRESHOLD },
-            updatedAt: { gte: since, lte: until },
-          },
-        }),
-        this.prisma.evidenceEvent.count({
-          where: {
-            orgId: run.orgId,
-            runId: graphRunId,
-            kind: EVIDENCE_EVENT_KIND.messageSent,
-          },
-        }),
-        this.prisma.outreachArtifact.count({
-          where: {
-            orgId: run.orgId,
-            graphRunId,
-            status: OutreachArtifactStatus.APPROVED,
-          },
-        }),
-        this.prisma.outreachArtifact.count({
-          where: {
-            orgId: run.orgId,
-            graphRunId,
-            status: OutreachArtifactStatus.REJECTED,
-          },
-        }),
-        this.prisma.outreachArtifact.count({
-          where: { orgId: run.orgId, graphRunId },
-        }),
-      ]);
+    const [
+      qualifiedLeads,
+      messagesSent,
+      approvedCount,
+      rejectedCount,
+      failedCount,
+      totalArtifacts,
+    ] = await Promise.all([
+      this.prisma.leadScore.count({
+        where: {
+          orgId: run.orgId,
+          score: { gte: QUALIFIED_THRESHOLD },
+          updatedAt: { gte: since, lte: until },
+        },
+      }),
+      this.prisma.evidenceEvent.count({
+        where: {
+          orgId: run.orgId,
+          runId: graphRunId,
+          kind: EVIDENCE_EVENT_KIND.messageSent,
+        },
+      }),
+      this.prisma.outreachArtifact.count({
+        where: {
+          orgId: run.orgId,
+          graphRunId,
+          ...approvedOutcomeArtifactWhere(),
+        },
+      }),
+      this.prisma.outreachArtifact.count({
+        where: {
+          orgId: run.orgId,
+          graphRunId,
+          ...humanRejectedArtifactWhere(),
+        },
+      }),
+      this.prisma.outreachArtifact.count({
+        where: {
+          orgId: run.orgId,
+          graphRunId,
+          ...failedArtifactWhere(),
+        },
+      }),
+      this.prisma.outreachArtifact.count({
+        where: { orgId: run.orgId, graphRunId },
+      }),
+    ]);
 
     const pipeline_completed =
       run.status === GraphRunStatus.COMPLETED
@@ -177,17 +199,27 @@ export class RunLevelEvaluatorService {
           ? 0.5
           : 0;
 
-    const qualified_leads_produced = Math.min(qualifiedLeads / QUALIFIED_TARGET, 1);
+    const qualified_leads_produced = Math.min(
+      qualifiedLeads / QUALIFIED_TARGET,
+      1,
+    );
 
-    // Denominator is max(approvedCount, 1) so a run with zero approvals
+    // approvedCount includes every current state proving human approval,
+    // including terminal FAILED and post-approval SUPPRESSED. The denominator
+    // is max(approvedCount, 1) so
+    // a run with zero approvals
     // doesn't divide-by-zero; the resulting 0/1 == 0 reflects the reality
     // that nothing reached send. We also clamp at 1 because in-loop tool
     // calls can produce sends without an artifact, which would otherwise
     // push this above 1.
-    const messages_reached_send = Math.min(messagesSent / Math.max(approvedCount, 1), 1);
+    const messages_reached_send = Math.min(
+      messagesSent / Math.max(approvedCount, 1),
+      1,
+    );
 
-    const rejectionRate = totalArtifacts > 0 ? rejectedCount / totalArtifacts : 0;
-    const approval_drop_off_rate = 1 - rejectionRate;
+    const reviewedDecisions = approvedCount + rejectedCount;
+    const approval_drop_off_rate =
+      reviewedDecisions > 0 ? approvedCount / reviewedDecisions : 1;
 
     const subScores: RunLevelSubScores = {
       pipeline_completed,
@@ -212,7 +244,8 @@ export class RunLevelEvaluatorService {
 
     const breakdown =
       `status=${run.status} qualified=${qualifiedLeads}/${QUALIFIED_TARGET} ` +
-      `sent=${messagesSent} approved=${approvedCount} rejected=${rejectedCount}/${totalArtifacts} ` +
+      `sent=${messagesSent} approved=${approvedCount} rejected=${rejectedCount} ` +
+      `failed=${failedCount}/${totalArtifacts} ` +
       `composite=${composite_score.toFixed(3)}`;
 
     const score: RunLevelScore = {
@@ -228,6 +261,7 @@ export class RunLevelEvaluatorService {
         messages_sent: messagesSent,
         approved_artifacts: approvedCount,
         rejected_artifacts: rejectedCount,
+        failed_artifacts: failedCount,
         total_artifacts: totalArtifacts,
       },
     };
@@ -242,7 +276,8 @@ export class RunLevelEvaluatorService {
   ): Promise<void> {
     // Prefer the in-memory cache (same-pod hot path); fall back to the
     // persisted column when the pod that captured the id has since rolled.
-    const runId = this.langsmithRunIds.get(score.graphRunId) ?? persistedRunId ?? undefined;
+    const runId =
+      this.langsmithRunIds.get(score.graphRunId) ?? persistedRunId ?? undefined;
     if (!runId) {
       this.logger.log(
         `no langsmith root run for graphRun=${score.graphRunId} — skipping run-level feedback`,
@@ -250,7 +285,7 @@ export class RunLevelEvaluatorService {
       return;
     }
 
-    // Fire all five feedback posts in parallel; LangSmithService.createFeedback
+    // Fire all feedback posts in parallel; LangSmithService.createFeedback
     // swallows its own errors so one failure can't take down the others.
     await Promise.all([
       this.langsmith.createFeedback({
@@ -283,6 +318,12 @@ export class RunLevelEvaluatorService {
         key: "run_approval_drop_off",
         score: score.subScores.approval_drop_off_rate,
         value: score.counts.rejected_artifacts,
+      }),
+      this.langsmith.createFeedback({
+        runId,
+        key: "run_dispatch_failures",
+        value: score.counts.failed_artifacts,
+        comment: `failed=${score.counts.failed_artifacts} approved=${score.counts.approved_artifacts}`,
       }),
     ]);
   }

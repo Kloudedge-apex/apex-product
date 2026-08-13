@@ -94,8 +94,10 @@ const ARTIFACT_STATUSES_SAFE_TO_SUPPRESS: readonly OutreachArtifactStatus[] = [
   OutreachArtifactStatus.DRAFT,
   OutreachArtifactStatus.PENDING_REVIEW,
   OutreachArtifactStatus.APPROVED,
-  OutreachArtifactStatus.REJECTED,
 ];
+// REJECTED and FAILED are intentionally absent: manual recipient suppression
+// is recorded, but must not erase terminal human-decision or dispatch-failure
+// truth on the artifact. This also preserves legacy auto-failed REJECTED rows.
 
 interface PersonEmailCandidate {
   readonly id: string;
@@ -410,15 +412,11 @@ export class SuppressionService {
     if (!recipientRef) return false;
     const key = recipientRef.toLowerCase().trim();
     if (!key) return false;
-    return this.isSuppressedFromLookup(
-      orgId,
-      key,
-      options,
-      () =>
-        this.prisma.outreachSuppression.findUnique({
-          where: { orgId_recipientRef: { orgId, recipientRef: key } },
-          select: { id: true, reason: true, source: true },
-        }),
+    return this.isSuppressedFromLookup(orgId, key, options, () =>
+      this.prisma.outreachSuppression.findUnique({
+        where: { orgId_recipientRef: { orgId, recipientRef: key } },
+        select: { id: true, reason: true, source: true },
+      }),
     );
   }
 
@@ -436,15 +434,11 @@ export class SuppressionService {
     if (!recipientRef) return false;
     const key = recipientRef.toLowerCase().trim();
     if (!key) return false;
-    return this.isSuppressedFromLookup(
-      orgId,
-      key,
-      options,
-      () =>
-        tx.outreachSuppression.findUnique({
-          where: { orgId_recipientRef: { orgId, recipientRef: key } },
-          select: { id: true, reason: true, source: true },
-        }),
+    return this.isSuppressedFromLookup(orgId, key, options, () =>
+      tx.outreachSuppression.findUnique({
+        where: { orgId_recipientRef: { orgId, recipientRef: key } },
+        select: { id: true, reason: true, source: true },
+      }),
     );
   }
 
@@ -582,9 +576,7 @@ function normalizeEmailRef(value: string | null | undefined): string | null {
   return normalized;
 }
 
-function resolvePersonEmail(
-  candidates: readonly PersonEmailCandidate[],
-):
+function resolvePersonEmail(candidates: readonly PersonEmailCandidate[]):
   | { readonly recipientRef: string; readonly reason?: never }
   | {
       readonly recipientRef: null;

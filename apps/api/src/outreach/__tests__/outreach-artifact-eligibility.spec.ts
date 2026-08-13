@@ -64,6 +64,8 @@ function artifactRow(
     reviewerNote: null,
     reviewedBy: null,
     reviewedAt: null,
+    failureReason: null,
+    failedAt: null,
     sentAt: null,
     sendReceiptId: null,
     createdAt: now,
@@ -96,18 +98,21 @@ describe("assertArtifactDispatchEligible", () => {
   it.each([
     approvablePayload({ bodyContentType: "html" }),
     approvablePayload({ body: "<p>Body</p>" }),
-  ])("rejects HTML rendering that is not bound to the plain-text review surface", (payload) => {
-    const body = String(payload.body);
-    expect(() =>
-      assertArtifactDispatchEligible(
-        artifactRow(payload, { bodyText: body }),
-      ),
-    ).toThrow(
-      new BadRequestException(
-        "Artifact cannot be approved because this release only dispatches reviewer-bound plain-text bodies",
-      ),
-    );
-  });
+  ])(
+    "rejects HTML rendering that is not bound to the plain-text review surface",
+    (payload) => {
+      const body = String(payload.body);
+      expect(() =>
+        assertArtifactDispatchEligible(
+          artifactRow(payload, { bodyText: body }),
+        ),
+      ).toThrow(
+        new BadRequestException(
+          "Artifact cannot be approved because this release only dispatches reviewer-bound plain-text bodies",
+        ),
+      );
+    },
+  );
 
   it("binds approval to bodyText even when bodyHtml matches the send payload", () => {
     expect(() =>
@@ -193,16 +198,15 @@ describe("assertArtifactDispatchEligible", () => {
     );
   });
 
-  it.each([
-    {},
-    [123],
-    [""],
-  ])("rejects malformed QA metadata: %j", (qaIssues) => {
-    expectRejected(
-      approvablePayload({ qaIssues }),
-      "Artifact cannot be approved because its draft quality metadata is invalid",
-    );
-  });
+  it.each([{}, [123], [""]])(
+    "rejects malformed QA metadata: %j",
+    (qaIssues) => {
+      expectRejected(
+        approvablePayload({ qaIssues }),
+        "Artifact cannot be approved because its draft quality metadata is invalid",
+      );
+    },
+  );
 
   it("rejects a well-formed failed QA check", () => {
     expectRejected(
@@ -358,7 +362,9 @@ describe("assertArtifactRecipientCurrent", () => {
 
     await expect(
       assertArtifactRecipientCurrent(store as never, artifactRow(payload)),
-    ).rejects.toThrow("exact recipient snapshot is no longer current and eligible");
+    ).rejects.toThrow(
+      "exact recipient snapshot is no longer current and eligible",
+    );
   });
 
   it("does not require a person snapshot for a conversation reply", async () => {
@@ -367,8 +373,17 @@ describe("assertArtifactRecipientCurrent", () => {
       assertArtifactRecipientCurrent(
         store as never,
         artifactRow(
-          { to: "dest@example.com", subject: "Re: Hi", body: "Reply", bodyContentType: "text" },
-          { purpose: OutreachArtifactPurpose.REPLY, bodyText: "Reply", subject: "Re: Hi" },
+          {
+            to: "dest@example.com",
+            subject: "Re: Hi",
+            body: "Reply",
+            bodyContentType: "text",
+          },
+          {
+            purpose: OutreachArtifactPurpose.REPLY,
+            bodyText: "Reply",
+            subject: "Re: Hi",
+          },
         ),
       ),
     ).resolves.toBeUndefined();

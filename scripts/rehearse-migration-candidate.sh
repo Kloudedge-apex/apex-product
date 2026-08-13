@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Rehearse the reviewed seven-file migration sequence against a disposable,
+# Rehearse the reviewed eight-file migration sequence against a disposable,
 # loopback-only PostgreSQL database populated with two synthetic tenants.
 # This script never produces staging or production migration authority.
 
@@ -21,6 +21,7 @@ MIGRATIONS=(
   "docs/migrations/2026-06-01_outreach-artifact-unique.sql"
   "docs/migrations/2026-08-12_conversation-store-expand.sql"
   "docs/migrations/2026-08-12_outreach-delivery-unknown-expand.sql"
+  "docs/migrations/2026-08-13_outreach-artifact-failed-expand.sql"
   "docs/migrations/2026-08-12_conversation-reply-single-flight-expand.sql"
   "docs/migrations/2026-08-12_graph-run-activity-expand.sql"
   "docs/migrations/2026-08-12_graph-run-lifecycle-expand.sql"
@@ -335,7 +336,7 @@ for index in "${!MIGRATIONS[@]}"; do
       --set=identity_expected_organization_count="${IDENTITY_EXPECTED_ORGANIZATION_COUNT}" \
       --set=identity_event_offset="${IDENTITY_EVENT_OFFSET}" \
       --file="${RECONCILIATION_FILE}" >/dev/null
-  elif [[ "${index}" == "3" && "${ADVERSARY}" == "reply-duplicate" ]]; then
+  elif [[ "${index}" == "4" && "${ADVERSARY}" == "reply-duplicate" ]]; then
     psql --no-psqlrc --dbname="${DATABASE_URL}" --set=ON_ERROR_STOP=1 >/dev/null <<'SQL'
 BEGIN;
 INSERT INTO "Conversation" (
@@ -372,7 +373,7 @@ INSERT INTO "OutreachArtifact" (
   );
 COMMIT;
 SQL
-  elif [[ "${index}" == "5" && "${ADVERSARY}" == "graph-run-duplicate" ]]; then
+  elif [[ "${index}" == "6" && "${ADVERSARY}" == "graph-run-duplicate" ]]; then
     psql --no-psqlrc --dbname="${DATABASE_URL}" --set=ON_ERROR_STOP=1 \
       --command="
         INSERT INTO \"GraphRun\" (

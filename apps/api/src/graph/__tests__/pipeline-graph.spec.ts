@@ -126,7 +126,8 @@ describe("pipeline-graph (supervisor routing)", () => {
 
       llm: {
         chat: async () => ({
-          content: '{"subject":"Quick question about Acme growth","body":"Hi Alice, noticed Acme is at 50-200 headcount and scaling SaaS. Curious how you are handling SDR pipeline — we help teams at your stage. Worth a 15-min call next week?"}',
+          content:
+            '{"subject":"Quick question about Acme growth","body":"Hi Alice, noticed Acme is at 50-200 headcount and scaling SaaS. Curious how you are handling SDR pipeline — we help teams at your stage. Worth a 15-min call next week?"}',
           tokensUsed: 100,
           model: "test",
           cost: 0,
@@ -139,7 +140,9 @@ describe("pipeline-graph (supervisor routing)", () => {
           callLog.push(`artifact:${artifactCounter}`);
           return { id: `art_${artifactCounter}` };
         },
-      } as unknown as Parameters<typeof buildPipelineGraph>[0]["outreachArtifacts"],
+      } as unknown as Parameters<
+        typeof buildPipelineGraph
+      >[0]["outreachArtifacts"],
 
       evidenceLedger: {
         leadSourced: async () => undefined,
@@ -152,11 +155,15 @@ describe("pipeline-graph (supervisor routing)", () => {
         approvalGranted: async () => undefined,
         approvalDenied: async () => undefined,
         artifactPersisted: async () => undefined,
-      } as unknown as Parameters<typeof buildPipelineGraph>[0]["evidenceLedger"],
+      } as unknown as Parameters<
+        typeof buildPipelineGraph
+      >[0]["evidenceLedger"],
 
       signalExtraction: {
         extractForCompany: async () => [],
-      } as unknown as Parameters<typeof buildPipelineGraph>[0]["signalExtraction"],
+      } as unknown as Parameters<
+        typeof buildPipelineGraph
+      >[0]["signalExtraction"],
     };
   });
 
@@ -195,8 +202,12 @@ describe("pipeline-graph (supervisor routing)", () => {
     // Phase 2.5: outreach must NOT invoke runtime.triggerRun — that path
     // would bypass the SideEffectPolicy gate. The subgraph produces a
     // reviewable artifact instead.
-    expect(callLog.filter((c) => c.startsWith("runtime.trigger"))).toHaveLength(0);
-    expect(callLog.filter((c) => c.startsWith("artifact:")).length).toBeGreaterThan(0);
+    expect(callLog.filter((c) => c.startsWith("runtime.trigger"))).toHaveLength(
+      0,
+    );
+    expect(
+      callLog.filter((c) => c.startsWith("artifact:")).length,
+    ).toBeGreaterThan(0);
     expect(result.outreachResults?.[0]?.status).toBe("queued");
     expect(result.outreachResults?.[0]?.agentRunId).toMatch(/^art_/);
     expect(result.outreachResults?.[0]?.recipient).toMatchObject({
@@ -260,7 +271,9 @@ describe("pipeline-graph (supervisor routing)", () => {
         error: "person_not_found_or_cross_org",
       },
     ]);
-    expect(callLog.filter((entry) => entry.startsWith("artifact:"))).toHaveLength(0);
+    expect(
+      callLog.filter((entry) => entry.startsWith("artifact:")),
+    ).toHaveLength(0);
   });
 
   it("persists the exact selected recipient and its provenance on the draft", async () => {
@@ -301,7 +314,9 @@ describe("pipeline-graph (supervisor routing)", () => {
           recordedArgs.push(input.toolArgs);
           return { id: "artifact_verified" };
         },
-      } as unknown as Parameters<typeof buildPipelineGraph>[0]["outreachArtifacts"],
+      } as unknown as Parameters<
+        typeof buildPipelineGraph
+      >[0]["outreachArtifacts"],
     };
 
     const graph = buildPipelineGraph(provenanceDeps).compile({
@@ -356,7 +371,9 @@ describe("pipeline-graph (supervisor routing)", () => {
           recordedArgs.push(input.toolArgs);
           return { id: "artifact_legacy", status: "PENDING_REVIEW" };
         },
-      } as unknown as Parameters<typeof buildPipelineGraph>[0]["outreachArtifacts"],
+      } as unknown as Parameters<
+        typeof buildPipelineGraph
+      >[0]["outreachArtifacts"],
     };
     const graph = buildPipelineGraph(legacyDeps).compile({
       checkpointer: new MemorySaver(),
@@ -368,7 +385,12 @@ describe("pipeline-graph (supervisor routing)", () => {
         orgId,
         runId: "t_legacy_recipient_match",
         icpProfileIds: [icpId],
-        stagesCompleted: [STAGE.SOURCING, STAGE.ENRICHMENT, STAGE.SCORING, STAGE.RESEARCH],
+        stagesCompleted: [
+          STAGE.SOURCING,
+          STAGE.ENRICHMENT,
+          STAGE.SCORING,
+          STAGE.RESEARCH,
+        ],
         enrichedPeople: [
           {
             id: "p1",
@@ -434,19 +456,28 @@ describe("pipeline-graph (supervisor routing)", () => {
           artifactCalls += 1;
           return { id: "must_not_exist" };
         },
-      } as unknown as Parameters<typeof buildPipelineGraph>[0]["outreachArtifacts"],
+      } as unknown as Parameters<
+        typeof buildPipelineGraph
+      >[0]["outreachArtifacts"],
     };
     const graph = buildPipelineGraph(legacyDeps).compile({
       checkpointer: new MemorySaver(),
     });
-    const config = { configurable: { thread_id: "t_legacy_recipient_changed" } };
+    const config = {
+      configurable: { thread_id: "t_legacy_recipient_changed" },
+    };
 
     await graph.invoke(
       {
         orgId,
         runId: "t_legacy_recipient_changed",
         icpProfileIds: [icpId],
-        stagesCompleted: [STAGE.SOURCING, STAGE.ENRICHMENT, STAGE.SCORING, STAGE.RESEARCH],
+        stagesCompleted: [
+          STAGE.SOURCING,
+          STAGE.ENRICHMENT,
+          STAGE.SCORING,
+          STAGE.RESEARCH,
+        ],
         enrichedPeople: [
           {
             id: "p1",
@@ -478,11 +509,17 @@ describe("pipeline-graph (supervisor routing)", () => {
   });
 
   it.each([
-    ["REJECTED", "persisted", "0 sent, 1 other persisted"],
-    ["SENT", "sent", "1 sent, 0 other persisted"],
+    [
+      "REJECTED",
+      "persisted",
+      "COMPLETE",
+      "0 sent, 0 failed, 1 other persisted",
+    ],
+    ["SENT", "sent", "COMPLETE", "1 sent, 0 failed, 0 other persisted"],
+    ["FAILED", "failed", "FAILED", "0 sent, 1 failed, 0 other persisted"],
   ] as const)(
     "reports an existing %s artifact truthfully while preserving the generated count",
-    async (artifactStatus, outcomeStatus, messageFragment) => {
+    async (artifactStatus, outcomeStatus, stageStatus, messageFragment) => {
       let recordCalls = 0;
       const existingDeps = {
         ...deps,
@@ -505,7 +542,9 @@ describe("pipeline-graph (supervisor routing)", () => {
             recordCalls += 1;
             return { id: "must_not_exist" };
           },
-        } as unknown as Parameters<typeof buildPipelineGraph>[0]["outreachArtifacts"],
+        } as unknown as Parameters<
+          typeof buildPipelineGraph
+        >[0]["outreachArtifacts"],
       };
       const graph = buildPipelineGraph(existingDeps).compile({
         checkpointer: new MemorySaver(),
@@ -513,9 +552,14 @@ describe("pipeline-graph (supervisor routing)", () => {
       const threadId = `t_existing_${artifactStatus.toLowerCase()}`;
       const config = { configurable: { thread_id: threadId } };
 
-      await graph.invoke({ orgId, runId: threadId, icpProfileIds: [icpId] }, config);
+      await graph.invoke(
+        { orgId, runId: threadId, icpProfileIds: [icpId] },
+        config,
+      );
       const result = await graph.invoke(
-        new Command({ resume: { approved: true, approvedBy: "alice@acme.io" } }),
+        new Command({
+          resume: { approved: true, approvedBy: "alice@acme.io" },
+        }),
         config,
       );
 
@@ -528,10 +572,10 @@ describe("pipeline-graph (supervisor routing)", () => {
           artifactStatus,
         }),
       ]);
-      expect(result.stageStatuses?.[STAGE.OUTREACH]).toBe("COMPLETE");
-      const outreachMessage = [...result.messages].reverse().find(
-        (message) => message.node === NODE.OUTREACH,
-      );
+      expect(result.stageStatuses?.[STAGE.OUTREACH]).toBe(stageStatus);
+      const outreachMessage = [...result.messages]
+        .reverse()
+        .find((message) => message.node === NODE.OUTREACH);
       expect(outreachMessage?.text).toContain(messageFragment);
       expect(outreachMessage?.text).not.toContain("reviewable");
     },
@@ -580,7 +624,9 @@ describe("pipeline-graph (supervisor routing)", () => {
           artifactCalls += 1;
           return { id: "must_not_exist" };
         },
-      } as unknown as Parameters<typeof buildPipelineGraph>[0]["outreachArtifacts"],
+      } as unknown as Parameters<
+        typeof buildPipelineGraph
+      >[0]["outreachArtifacts"],
     };
     const graph = buildPipelineGraph(staleDeps).compile({
       checkpointer: new MemorySaver(),
@@ -645,7 +691,9 @@ describe("pipeline-graph (supervisor routing)", () => {
             status: "PENDING_REVIEW",
           };
         },
-      } as unknown as Parameters<typeof buildPipelineGraph>[0]["outreachArtifacts"],
+      } as unknown as Parameters<
+        typeof buildPipelineGraph
+      >[0]["outreachArtifacts"],
     };
     const graph = buildPipelineGraph(sharedAddressDeps).compile({
       checkpointer: new MemorySaver(),
@@ -674,10 +722,12 @@ describe("pipeline-graph (supervisor routing)", () => {
       }),
     ]);
     expect(result.stageStatuses?.[STAGE.OUTREACH]).toBe("PARTIAL");
-    const outreachMessage = [...result.messages].reverse().find(
-      (message) => message.node === NODE.OUTREACH,
+    const outreachMessage = [...result.messages]
+      .reverse()
+      .find((message) => message.node === NODE.OUTREACH);
+    expect(outreachMessage?.text).toContain(
+      "artifacts present for 1/2 target(s)",
     );
-    expect(outreachMessage?.text).toContain("artifacts present for 1/2 target(s)");
   });
 
   it("counts an existing shared-address artifact for its rightful person", async () => {
@@ -722,12 +772,16 @@ describe("pipeline-graph (supervisor routing)", () => {
           artifactCalls += 1;
           return { id: "must_not_exist" };
         },
-      } as unknown as Parameters<typeof buildPipelineGraph>[0]["outreachArtifacts"],
+      } as unknown as Parameters<
+        typeof buildPipelineGraph
+      >[0]["outreachArtifacts"],
     };
     const graph = buildPipelineGraph(existingSharedDeps).compile({
       checkpointer: new MemorySaver(),
     });
-    const config = { configurable: { thread_id: "t_existing_shared_recipient" } };
+    const config = {
+      configurable: { thread_id: "t_existing_shared_recipient" },
+    };
 
     await graph.invoke(
       { orgId, runId: "t_existing_shared_recipient", icpProfileIds: [icpId] },
@@ -812,7 +866,9 @@ describe("pipeline-graph (supervisor routing)", () => {
           recordedArgs.push(input.toolArgs);
           return { id: "artifact_p201" };
         },
-      } as unknown as Parameters<typeof buildPipelineGraph>[0]["outreachArtifacts"],
+      } as unknown as Parameters<
+        typeof buildPipelineGraph
+      >[0]["outreachArtifacts"],
     };
 
     const graph = buildPipelineGraph(pagedDeps).compile({
@@ -865,7 +921,9 @@ describe("pipeline-graph (supervisor routing)", () => {
     );
 
     expect(result.approved).toBe(false);
-    expect(callLog.filter((c) => c.startsWith("runtime.trigger"))).toHaveLength(0);
+    expect(callLog.filter((c) => c.startsWith("runtime.trigger"))).toHaveLength(
+      0,
+    );
     expect(callLog.filter((c) => c.startsWith("artifact:"))).toHaveLength(0);
     expect(result.outreachResults ?? []).toHaveLength(0);
     // Supervisor short-circuits to END when approved=false, so OUTREACH
@@ -885,7 +943,10 @@ describe("pipeline-graph (supervisor routing)", () => {
     const graph = buildPipelineGraph(deps).compile({ checkpointer });
     const config = { configurable: { thread_id: "t_status_happy" } };
 
-    await graph.invoke({ orgId, runId: "t_status_happy", icpProfileIds: [icpId] }, config);
+    await graph.invoke(
+      { orgId, runId: "t_status_happy", icpProfileIds: [icpId] },
+      config,
+    );
     const result = await graph.invoke(
       new Command({ resume: { approved: true, approvedBy: "alice@acme.io" } }),
       config,
@@ -894,7 +955,13 @@ describe("pipeline-graph (supervisor routing)", () => {
     // Fixture: sourcing/enrichment/scoring all succeed. No stage is FAILED.
     // The exact COMPLETE vs PARTIAL split depends on how many DB-snapshot
     // rows the mocks return; the important contract is "no FAILED".
-    for (const stage of [STAGE.SOURCING, STAGE.ENRICHMENT, STAGE.SCORING, STAGE.APPROVAL, STAGE.OUTREACH]) {
+    for (const stage of [
+      STAGE.SOURCING,
+      STAGE.ENRICHMENT,
+      STAGE.SCORING,
+      STAGE.APPROVAL,
+      STAGE.OUTREACH,
+    ]) {
       expect(result.stageStatuses?.[stage]).not.toBe("FAILED");
       expect(["COMPLETE", "PARTIAL"]).toContain(result.stageStatuses?.[stage]);
     }
@@ -1013,7 +1080,10 @@ describe("pipeline-graph (supervisor routing)", () => {
     const graph = buildPipelineGraph(lowScoreDeps).compile({ checkpointer });
     const config = { configurable: { thread_id: "t_low_scores" } };
 
-    await graph.invoke({ orgId, runId: "t_low_scores", icpProfileIds: [icpId] }, config);
+    await graph.invoke(
+      { orgId, runId: "t_low_scores", icpProfileIds: [icpId] },
+      config,
+    );
     const result = await graph.invoke(
       new Command({ resume: { approved: true, approvedBy: "alice@acme.io" } }),
       config,
@@ -1086,8 +1156,16 @@ describe("pipeline-graph (supervisor routing)", () => {
       emails: Array<ReturnType<typeof eligibleEmail>>;
       company?: { name: string; domain: string };
     }
-    interface CompanyRow { id: string; domain: string; name: string }
-    interface LeadScoreRow { personId: string; score: number; orgId: string }
+    interface CompanyRow {
+      id: string;
+      domain: string;
+      name: string;
+    }
+    interface LeadScoreRow {
+      personId: string;
+      score: number;
+      orgId: string;
+    }
 
     const allCompanies: CompanyRow[] = [
       { id: "cA1", domain: "a1.com", name: "Acorp1" },
@@ -1095,9 +1173,30 @@ describe("pipeline-graph (supervisor routing)", () => {
       { id: "cB1", domain: "b1.com", name: "Bcorp1" },
     ];
     const allPeople: PersonRow[] = [
-      { id: "pA1", companyId: "cA1", firstName: "Anna", lastName: "Aye", title: "VP", emails: [eligibleEmail("email_pA1", "anna@a1.com")] },
-      { id: "pA2", companyId: "cA2", firstName: "Aaron", lastName: "Bee", title: "VP", emails: [eligibleEmail("email_pA2", "aaron@a2.com")] },
-      { id: "pB1", companyId: "cB1", firstName: "Bella", lastName: "Cee", title: "VP", emails: [eligibleEmail("email_pB1", "bella@b1.com")] },
+      {
+        id: "pA1",
+        companyId: "cA1",
+        firstName: "Anna",
+        lastName: "Aye",
+        title: "VP",
+        emails: [eligibleEmail("email_pA1", "anna@a1.com")],
+      },
+      {
+        id: "pA2",
+        companyId: "cA2",
+        firstName: "Aaron",
+        lastName: "Bee",
+        title: "VP",
+        emails: [eligibleEmail("email_pA2", "aaron@a2.com")],
+      },
+      {
+        id: "pB1",
+        companyId: "cB1",
+        firstName: "Bella",
+        lastName: "Cee",
+        title: "VP",
+        emails: [eligibleEmail("email_pB1", "bella@b1.com")],
+      },
     ];
     const allScores: LeadScoreRow[] = [
       { personId: "pA1", score: 90, orgId },
@@ -1106,7 +1205,9 @@ describe("pipeline-graph (supervisor routing)", () => {
     ];
 
     // Helper to extract the `id.in` (or `personId.in`) filter from a query.
-    const idsFromWhere = (w: { id?: { in?: string[] }; personId?: { in?: string[] } } | undefined): string[] | null => {
+    const idsFromWhere = (
+      w: { id?: { in?: string[] }; personId?: { in?: string[] } } | undefined,
+    ): string[] | null => {
       if (!w) return null;
       if (w.id?.in) return w.id.in;
       if (w.personId?.in) return w.personId.in;
@@ -1117,27 +1218,42 @@ describe("pipeline-graph (supervisor routing)", () => {
       company: {
         findMany: async ({ where }: { where: { id?: { in?: string[] } } }) => {
           const ids = idsFromWhere(where);
-          return ids === null ? allCompanies : allCompanies.filter((c) => ids.includes(c.id));
+          return ids === null
+            ? allCompanies
+            : allCompanies.filter((c) => ids.includes(c.id));
         },
         findFirst: async () => allCompanies[0],
       },
       person: {
         findMany: async ({ where }: { where: { id?: { in?: string[] } } }) => {
           const ids = idsFromWhere(where);
-          const rows = ids === null ? allPeople : allPeople.filter((p) => ids.includes(p.id));
+          const rows =
+            ids === null
+              ? allPeople
+              : allPeople.filter((p) => ids.includes(p.id));
           // outreach node selects `company: { name, domain }` — synthesise it
           return rows.map((p) => ({
             ...p,
             company: allCompanies.find((c) => c.id === p.companyId)
-              ? { name: allCompanies.find((c) => c.id === p.companyId)!.name, domain: allCompanies.find((c) => c.id === p.companyId)!.domain }
+              ? {
+                  name: allCompanies.find((c) => c.id === p.companyId)!.name,
+                  domain: allCompanies.find((c) => c.id === p.companyId)!
+                    .domain,
+                }
               : { name: "?", domain: "?" },
           }));
         },
       },
       leadScore: {
-        findMany: async ({ where }: { where: { personId?: { in?: string[] } } }) => {
+        findMany: async ({
+          where,
+        }: {
+          where: { personId?: { in?: string[] } };
+        }) => {
           const ids = idsFromWhere(where);
-          return ids === null ? allScores : allScores.filter((s) => ids.includes(s.personId));
+          return ids === null
+            ? allScores
+            : allScores.filter((s) => ids.includes(s.personId));
         },
       },
       agent: { findFirst: async () => ({ id: "agent_sdr" }) },
@@ -1149,22 +1265,43 @@ describe("pipeline-graph (supervisor routing)", () => {
     // calls with distinct outputs.
     let runLabel: "A" | "B" = "A";
     const isoLeads = {
-      runSourcingStage: async () => runLabel === "A"
-        ? { companies: 2, people: 2, companyIds: ["cA1", "cA2"], personIds: ["pA1", "pA2"] }
-        : { companies: 1, people: 1, companyIds: ["cB1"], personIds: ["pB1"] },
-      runEnrichmentStage: async (_org: string, _icp: string, scoped?: string[]) => ({
+      runSourcingStage: async () =>
+        runLabel === "A"
+          ? {
+              companies: 2,
+              people: 2,
+              companyIds: ["cA1", "cA2"],
+              personIds: ["pA1", "pA2"],
+            }
+          : {
+              companies: 1,
+              people: 1,
+              companyIds: ["cB1"],
+              personIds: ["pB1"],
+            },
+      runEnrichmentStage: async (
+        _org: string,
+        _icp: string,
+        scoped?: string[],
+      ) => ({
         merged: 0,
         enriched: scoped?.length ?? 0,
         personIds: scoped ?? [],
       }),
-      runScoringStage: async (_org: string, _icp: string, scoped?: string[]) => ({
+      runScoringStage: async (
+        _org: string,
+        _icp: string,
+        scoped?: string[],
+      ) => ({
         scored: scoped?.length ?? 0,
         personIds: scoped ?? [],
       }),
     } as unknown as Parameters<typeof buildPipelineGraph>[0]["leads"];
 
     const isolatedDeps = { ...deps, prisma: sharedPrisma, leads: isoLeads };
-    const graph = buildPipelineGraph(isolatedDeps).compile({ checkpointer: new MemorySaver() });
+    const graph = buildPipelineGraph(isolatedDeps).compile({
+      checkpointer: new MemorySaver(),
+    });
 
     runLabel = "A";
     const a = await graph.invoke(
@@ -1221,7 +1358,10 @@ describe("pipeline-graph (supervisor routing)", () => {
     const graph = buildPipelineGraph(sentinelDeps).compile({ checkpointer });
     const config = { configurable: { thread_id: "t_outreach_no_requery" } };
 
-    await graph.invoke({ orgId, runId: "t_outreach_no_requery", icpProfileIds: [icpId] }, config);
+    await graph.invoke(
+      { orgId, runId: "t_outreach_no_requery", icpProfileIds: [icpId] },
+      config,
+    );
     // Scoring node legitimately calls leadScore.findMany once — capture the
     // baseline, then ensure outreach adds zero further calls.
     const beforeOutreach = leadScoreCalls;
@@ -1252,7 +1392,10 @@ describe("pipeline-graph (supervisor routing)", () => {
     const graph = buildPipelineGraph(emptyDeps).compile({ checkpointer });
     const config = { configurable: { thread_id: "t_no_approve" } };
 
-    await graph.invoke({ orgId, runId: "t_no_approve", icpProfileIds: [icpId] }, config);
+    await graph.invoke(
+      { orgId, runId: "t_no_approve", icpProfileIds: [icpId] },
+      config,
+    );
     const result = await graph.invoke(
       new Command({ resume: { approved: true, approvedBy: "alice@acme.io" } }),
       config,

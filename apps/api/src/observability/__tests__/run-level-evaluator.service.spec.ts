@@ -13,7 +13,11 @@ type GraphRunRow = {
   readonly langsmithRootRunId?: string | null;
 };
 
-type FakeLeadScore = { readonly orgId: string; readonly score: number; readonly updatedAt: Date };
+type FakeLeadScore = {
+  readonly orgId: string;
+  readonly score: number;
+  readonly updatedAt: Date;
+};
 type FakeEvidenceEvent = {
   readonly orgId: string;
   readonly runId: string | null;
@@ -23,6 +27,8 @@ type FakeArtifact = {
   readonly orgId: string;
   readonly graphRunId: string | null;
   readonly status: OutreachArtifactStatus;
+  readonly reviewerNote?: string | null;
+  readonly reviewedAt?: Date | null;
 };
 
 interface Fixtures {
@@ -30,6 +36,61 @@ interface Fixtures {
   readonly leadScores: readonly FakeLeadScore[];
   readonly evidenceEvents: readonly FakeEvidenceEvent[];
   readonly artifacts: readonly FakeArtifact[];
+}
+
+function artifactMatchesWhere(
+  artifact: FakeArtifact,
+  where: Prisma.OutreachArtifactWhereInput,
+): boolean {
+  if (where.status) {
+    if (typeof where.status === "string" && artifact.status !== where.status) {
+      return false;
+    }
+    if (
+      typeof where.status === "object" &&
+      where.status.in &&
+      !where.status.in.includes(artifact.status)
+    ) {
+      return false;
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(where, "reviewerNote")) {
+    if (where.reviewerNote === null && artifact.reviewerNote != null)
+      return false;
+    if (
+      where.reviewerNote &&
+      typeof where.reviewerNote === "object" &&
+      where.reviewerNote.startsWith &&
+      !artifact.reviewerNote?.startsWith(where.reviewerNote.startsWith)
+    ) {
+      return false;
+    }
+  }
+  if (
+    where.reviewedAt &&
+    typeof where.reviewedAt === "object" &&
+    "not" in where.reviewedAt &&
+    where.reviewedAt.not === null &&
+    artifact.reviewedAt == null
+  ) {
+    return false;
+  }
+  const or = Array.isArray(where.OR) ? where.OR : where.OR ? [where.OR] : [];
+  if (
+    or.length > 0 &&
+    !or.some((branch) => artifactMatchesWhere(artifact, branch))
+  ) {
+    return false;
+  }
+  const not = Array.isArray(where.NOT)
+    ? where.NOT
+    : where.NOT
+      ? [where.NOT]
+      : [];
+  if (not.some((branch) => artifactMatchesWhere(artifact, branch))) {
+    return false;
+  }
+  return true;
 }
 
 function makePrisma(fx: Fixtures) {
@@ -45,7 +106,10 @@ function makePrisma(fx: Fixtures) {
       update: async (args: Prisma.GraphRunUpdateArgs) => {
         const id = (args.where as { id?: string }).id ?? "";
         const data = args.data as { langsmithRootRunId?: string | null };
-        updates.push({ id, langsmithRootRunId: data.langsmithRootRunId ?? null });
+        updates.push({
+          id,
+          langsmithRootRunId: data.langsmithRootRunId ?? null,
+        });
         return { id };
       },
       _updates: updates,
@@ -55,15 +119,20 @@ function makePrisma(fx: Fixtures) {
         const where = args.where ?? {};
         const orgId =
           typeof (where as { orgId?: unknown }).orgId === "string"
-            ? ((where as { orgId: string }).orgId)
+            ? (where as { orgId: string }).orgId
             : "";
         const scoreFilter = (where as { score?: { gte?: number } }).score;
         const gte = scoreFilter?.gte ?? -Infinity;
-        const updatedAt = (where as { updatedAt?: { gte?: Date; lte?: Date } }).updatedAt;
+        const updatedAt = (where as { updatedAt?: { gte?: Date; lte?: Date } })
+          .updatedAt;
         const since = updatedAt?.gte ?? new Date(0);
         const until = updatedAt?.lte ?? new Date("9999-01-01");
         return fx.leadScores.filter(
-          (s) => s.orgId === orgId && s.score >= gte && s.updatedAt >= since && s.updatedAt <= until,
+          (s) =>
+            s.orgId === orgId &&
+            s.score >= gte &&
+            s.updatedAt >= since &&
+            s.updatedAt <= until,
         ).length;
       },
     },
@@ -85,13 +154,13 @@ function makePrisma(fx: Fixtures) {
       count: async (args: Prisma.OutreachArtifactCountArgs) => {
         const where = args.where ?? {};
         const orgId = (where as { orgId?: string }).orgId ?? "";
-        const graphRunId = (where as { graphRunId?: string | null }).graphRunId ?? null;
-        const status = (where as { status?: OutreachArtifactStatus }).status;
+        const graphRunId =
+          (where as { graphRunId?: string | null }).graphRunId ?? null;
         return fx.artifacts.filter(
           (a) =>
             a.orgId === orgId &&
             a.graphRunId === graphRunId &&
-            (status ? a.status === status : true),
+            artifactMatchesWhere(a, where),
         ).length;
       },
     },
@@ -100,23 +169,35 @@ function makePrisma(fx: Fixtures) {
 
 function makeLangSmith(): {
   langsmith: LangSmithService;
-  feedbacks: Array<{ key: string; score?: number; value?: unknown; comment?: string }>;
+  feedbacks: Array<{
+    key: string;
+    score?: number;
+    value?: unknown;
+    comment?: string;
+  }>;
 } {
-  const feedbacks: Array<{ key: string; score?: number; value?: unknown; comment?: string }> = [];
+  const feedbacks: Array<{
+    key: string;
+    score?: number;
+    value?: unknown;
+    comment?: string;
+  }> = [];
   const langsmith = {
-    createFeedback: vi.fn(async (input: {
-      key: string;
-      score?: number;
-      value?: string | number | boolean;
-      comment?: string;
-    }) => {
-      feedbacks.push({
-        key: input.key,
-        score: input.score,
-        value: input.value,
-        comment: input.comment,
-      });
-    }),
+    createFeedback: vi.fn(
+      async (input: {
+        key: string;
+        score?: number;
+        value?: string | number | boolean;
+        comment?: string;
+      }) => {
+        feedbacks.push({
+          key: input.key,
+          score: input.score,
+          value: input.value,
+          comment: input.comment,
+        });
+      },
+    ),
   } as unknown as LangSmithService;
   return { langsmith, feedbacks };
 }
@@ -134,7 +215,13 @@ describe("RunLevelEvaluatorService", () => {
   it("COMPLETED run with 10 qualified leads, 5 approved, 5 sent → high composite + posts feedback", async () => {
     const fx: Fixtures = {
       graphRuns: [
-        { id: RUN, orgId: ORG, status: GraphRunStatus.COMPLETED, startedAt: START, completedAt: END },
+        {
+          id: RUN,
+          orgId: ORG,
+          status: GraphRunStatus.COMPLETED,
+          startedAt: START,
+          completedAt: END,
+        },
       ],
       leadScores: Array.from({ length: 10 }).map(() => ({
         orgId: ORG,
@@ -156,7 +243,9 @@ describe("RunLevelEvaluatorService", () => {
     const { langsmith, feedbacks } = makeLangSmith();
 
     const svc = new RunLevelEvaluatorService(
-      prisma as unknown as ConstructorParameters<typeof RunLevelEvaluatorService>[0],
+      prisma as unknown as ConstructorParameters<
+        typeof RunLevelEvaluatorService
+      >[0],
       langsmith,
     );
     svc.recordLangSmithRunId(RUN, "ls_root_run_id");
@@ -184,7 +273,13 @@ describe("RunLevelEvaluatorService", () => {
   it("FAILED run with zero outputs → low composite, verdict=fail", async () => {
     const fx: Fixtures = {
       graphRuns: [
-        { id: RUN, orgId: ORG, status: GraphRunStatus.FAILED, startedAt: START, completedAt: END },
+        {
+          id: RUN,
+          orgId: ORG,
+          status: GraphRunStatus.FAILED,
+          startedAt: START,
+          completedAt: END,
+        },
       ],
       leadScores: [],
       evidenceEvents: [],
@@ -194,7 +289,9 @@ describe("RunLevelEvaluatorService", () => {
     const { langsmith } = makeLangSmith();
 
     const svc = new RunLevelEvaluatorService(
-      prisma as unknown as ConstructorParameters<typeof RunLevelEvaluatorService>[0],
+      prisma as unknown as ConstructorParameters<
+        typeof RunLevelEvaluatorService
+      >[0],
       langsmith,
     );
     svc.recordLangSmithRunId(RUN, "ls_root");
@@ -210,6 +307,121 @@ describe("RunLevelEvaluatorService", () => {
     // Composite = (0 + 0 + 0 + 1) / 4 = 0.25 → fail
     expect(score!.composite_score).toBeCloseTo(0.25, 5);
     expect(score!.verdict).toBe("fail");
+  });
+
+  it("separates dispatch failures from rejection and lowers the send-rate score", async () => {
+    const fx: Fixtures = {
+      graphRuns: [
+        {
+          id: RUN,
+          orgId: ORG,
+          status: GraphRunStatus.COMPLETED,
+          startedAt: START,
+          completedAt: END,
+        },
+      ],
+      leadScores: [],
+      evidenceEvents: [{ orgId: ORG, runId: RUN, kind: "message.sent" }],
+      artifacts: [
+        {
+          orgId: ORG,
+          graphRunId: RUN,
+          status: OutreachArtifactStatus.SENT,
+          reviewedAt: START,
+        },
+        {
+          orgId: ORG,
+          graphRunId: RUN,
+          status: OutreachArtifactStatus.FAILED,
+          reviewedAt: START,
+        },
+        {
+          orgId: ORG,
+          graphRunId: RUN,
+          status: OutreachArtifactStatus.REJECTED,
+          reviewerNote: "off tone",
+          reviewedAt: START,
+        },
+      ],
+    };
+    const prisma = makePrisma(fx);
+    const { langsmith, feedbacks } = makeLangSmith();
+    const svc = new RunLevelEvaluatorService(
+      prisma as unknown as ConstructorParameters<
+        typeof RunLevelEvaluatorService
+      >[0],
+      langsmith,
+    );
+    svc.recordLangSmithRunId(RUN, "ls_root");
+
+    const score = await svc.evaluateGraphRun(RUN);
+
+    expect(score?.counts).toMatchObject({
+      approved_artifacts: 2,
+      rejected_artifacts: 1,
+      failed_artifacts: 1,
+      total_artifacts: 3,
+    });
+    expect(score?.subScores.messages_reached_send).toBeCloseTo(0.5);
+    expect(score?.subScores.approval_drop_off_rate).toBeCloseTo(2 / 3);
+    expect(
+      feedbacks.find((feedback) => feedback.key === "run_dispatch_failures")
+        ?.value,
+    ).toBe(1);
+  });
+
+  it("counts post-approval suppression as approved and excludes pre-review suppression", async () => {
+    const fx: Fixtures = {
+      graphRuns: [
+        {
+          id: RUN,
+          orgId: ORG,
+          status: GraphRunStatus.COMPLETED,
+          startedAt: START,
+          completedAt: END,
+        },
+      ],
+      leadScores: [],
+      evidenceEvents: [],
+      artifacts: [
+        {
+          orgId: ORG,
+          graphRunId: RUN,
+          status: OutreachArtifactStatus.SUPPRESSED,
+          reviewedAt: START,
+        },
+        {
+          orgId: ORG,
+          graphRunId: RUN,
+          status: OutreachArtifactStatus.SUPPRESSED,
+          reviewedAt: null,
+        },
+        {
+          orgId: ORG,
+          graphRunId: RUN,
+          status: OutreachArtifactStatus.REJECTED,
+          reviewerNote: "off tone",
+          reviewedAt: START,
+        },
+      ],
+    };
+    const prisma = makePrisma(fx);
+    const { langsmith } = makeLangSmith();
+    const svc = new RunLevelEvaluatorService(
+      prisma as unknown as ConstructorParameters<
+        typeof RunLevelEvaluatorService
+      >[0],
+      langsmith,
+    );
+
+    const score = await svc.evaluateGraphRun(RUN);
+
+    expect(score?.counts).toMatchObject({
+      approved_artifacts: 1,
+      rejected_artifacts: 1,
+      total_artifacts: 3,
+    });
+    expect(score?.subScores.approval_drop_off_rate).toBeCloseTo(0.5);
   });
 
   it("AWAITING_APPROVAL run → pipeline_completed sub-score is 0.5", async () => {
@@ -231,7 +443,9 @@ describe("RunLevelEvaluatorService", () => {
     const { langsmith } = makeLangSmith();
 
     const svc = new RunLevelEvaluatorService(
-      prisma as unknown as ConstructorParameters<typeof RunLevelEvaluatorService>[0],
+      prisma as unknown as ConstructorParameters<
+        typeof RunLevelEvaluatorService
+      >[0],
       langsmith,
     );
     svc.recordLangSmithRunId(RUN, "ls_root");
@@ -245,9 +459,21 @@ describe("RunLevelEvaluatorService", () => {
   it("no LangSmith root run id → evaluation runs, feedback is not posted (no throw)", async () => {
     const fx: Fixtures = {
       graphRuns: [
-        { id: RUN, orgId: ORG, status: GraphRunStatus.COMPLETED, startedAt: START, completedAt: END },
+        {
+          id: RUN,
+          orgId: ORG,
+          status: GraphRunStatus.COMPLETED,
+          startedAt: START,
+          completedAt: END,
+        },
       ],
-      leadScores: [{ orgId: ORG, score: 90, updatedAt: new Date(START.getTime() + 60_000) }],
+      leadScores: [
+        {
+          orgId: ORG,
+          score: 90,
+          updatedAt: new Date(START.getTime() + 60_000),
+        },
+      ],
       evidenceEvents: [],
       artifacts: [],
     };
@@ -255,7 +481,9 @@ describe("RunLevelEvaluatorService", () => {
     const { langsmith, feedbacks } = makeLangSmith();
 
     const svc = new RunLevelEvaluatorService(
-      prisma as unknown as ConstructorParameters<typeof RunLevelEvaluatorService>[0],
+      prisma as unknown as ConstructorParameters<
+        typeof RunLevelEvaluatorService
+      >[0],
       langsmith,
     );
     // intentionally do NOT call recordLangSmithRunId
@@ -275,7 +503,13 @@ describe("RunLevelEvaluatorService", () => {
     // mean = (1 + 0.4 + 1.0 + 0.75) / 4 = 0.7875
     const fx: Fixtures = {
       graphRuns: [
-        { id: RUN, orgId: ORG, status: GraphRunStatus.COMPLETED, startedAt: START, completedAt: END },
+        {
+          id: RUN,
+          orgId: ORG,
+          status: GraphRunStatus.COMPLETED,
+          startedAt: START,
+          completedAt: END,
+        },
       ],
       leadScores: Array.from({ length: 2 }).map(() => ({
         orgId: ORG,
@@ -293,14 +527,20 @@ describe("RunLevelEvaluatorService", () => {
           graphRunId: RUN,
           status: OutreachArtifactStatus.APPROVED,
         })),
-        { orgId: ORG, graphRunId: RUN, status: OutreachArtifactStatus.REJECTED },
+        {
+          orgId: ORG,
+          graphRunId: RUN,
+          status: OutreachArtifactStatus.REJECTED,
+        },
       ],
     };
     const prisma = makePrisma(fx);
     const { langsmith } = makeLangSmith();
 
     const svc = new RunLevelEvaluatorService(
-      prisma as unknown as ConstructorParameters<typeof RunLevelEvaluatorService>[0],
+      prisma as unknown as ConstructorParameters<
+        typeof RunLevelEvaluatorService
+      >[0],
       langsmith,
     );
     svc.recordLangSmithRunId(RUN, "ls_root");
@@ -321,7 +561,13 @@ describe("RunLevelEvaluatorService", () => {
   it("recordLangSmithRunId persists to GraphRun.langsmithRootRunId (write-through)", async () => {
     const fx: Fixtures = {
       graphRuns: [
-        { id: RUN, orgId: ORG, status: GraphRunStatus.COMPLETED, startedAt: START, completedAt: END },
+        {
+          id: RUN,
+          orgId: ORG,
+          status: GraphRunStatus.COMPLETED,
+          startedAt: START,
+          completedAt: END,
+        },
       ],
       leadScores: [],
       evidenceEvents: [],
@@ -331,7 +577,9 @@ describe("RunLevelEvaluatorService", () => {
     const { langsmith } = makeLangSmith();
 
     const svc = new RunLevelEvaluatorService(
-      prisma as unknown as ConstructorParameters<typeof RunLevelEvaluatorService>[0],
+      prisma as unknown as ConstructorParameters<
+        typeof RunLevelEvaluatorService
+      >[0],
       langsmith,
     );
     svc.recordLangSmithRunId(RUN, "ls_root_run_id");
@@ -339,8 +587,14 @@ describe("RunLevelEvaluatorService", () => {
     // Fire-and-forget — let the microtask flush.
     await new Promise((r) => setImmediate(r));
 
-    const updates = (prisma.graphRun as unknown as { _updates: Array<{ id: string; langsmithRootRunId: string | null }> })._updates;
-    expect(updates).toEqual([{ id: RUN, langsmithRootRunId: "ls_root_run_id" }]);
+    const updates = (
+      prisma.graphRun as unknown as {
+        _updates: Array<{ id: string; langsmithRootRunId: string | null }>;
+      }
+    )._updates;
+    expect(updates).toEqual([
+      { id: RUN, langsmithRootRunId: "ls_root_run_id" },
+    ]);
   });
 
   it("postFeedback falls back to GraphRun.langsmithRootRunId when the in-memory cache is empty (cross-pod resume)", async () => {
@@ -366,7 +620,9 @@ describe("RunLevelEvaluatorService", () => {
     const { langsmith, feedbacks } = makeLangSmith();
 
     const svc = new RunLevelEvaluatorService(
-      prisma as unknown as ConstructorParameters<typeof RunLevelEvaluatorService>[0],
+      prisma as unknown as ConstructorParameters<
+        typeof RunLevelEvaluatorService
+      >[0],
       langsmith,
     );
     // Intentionally do NOT call recordLangSmithRunId — cache is cold.
@@ -390,7 +646,9 @@ describe("RunLevelEvaluatorService", () => {
     const { langsmith } = makeLangSmith();
 
     const svc = new RunLevelEvaluatorService(
-      prisma as unknown as ConstructorParameters<typeof RunLevelEvaluatorService>[0],
+      prisma as unknown as ConstructorParameters<
+        typeof RunLevelEvaluatorService
+      >[0],
       langsmith,
     );
 

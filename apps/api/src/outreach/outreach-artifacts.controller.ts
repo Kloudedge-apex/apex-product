@@ -12,9 +12,19 @@ import {
 } from "@nestjs/common";
 import { Request } from "express";
 import { OutreachArtifactStatus } from "@prisma/client";
+import {
+  ApiExtraModels,
+  ApiOkResponse,
+  ApiQuery,
+  getSchemaPath,
+} from "@nestjs/swagger";
 import { OrgId } from "../common/org-context.decorator";
 import { AdminOrManagerGuard } from "../common/admin-or-manager.guard";
 import { OutreachArtifactsService } from "./outreach-artifacts.service";
+import {
+  OutreachArtifactPageResponseDto,
+  OutreachArtifactResponseDto,
+} from "./outreach-artifact-response.dto";
 
 interface ApproveBody {
   /**
@@ -32,26 +42,45 @@ interface RejectBody {
   reviewerNote?: string;
 }
 
+@ApiExtraModels(
+  OutreachArtifactResponseDto,
+  OutreachArtifactPageResponseDto,
+)
 @Controller()
 export class OutreachArtifactsController {
   constructor(private readonly artifacts: OutreachArtifactsService) {}
 
   @Get("graph/runs/:id/outreach-artifacts")
+  @ApiOkResponse({ type: [OutreachArtifactResponseDto] })
   listForGraphRun(
     @OrgId() orgId: string | undefined,
     @Param("id") graphRunId: string,
-  ) {
+  ): Promise<OutreachArtifactResponseDto[]> {
     if (!orgId) throw new BadRequestException("orgId required");
     return this.artifacts.listForGraphRun(orgId, graphRunId);
   }
 
   @Get("outreach-artifacts")
+  @ApiQuery({ name: "status", required: false, enum: OutreachArtifactStatus })
+  @ApiOkResponse({
+    schema: {
+      oneOf: [
+        {
+          type: "array",
+          items: { $ref: getSchemaPath(OutreachArtifactResponseDto) },
+        },
+        { $ref: getSchemaPath(OutreachArtifactPageResponseDto) },
+      ],
+    },
+  })
   list(
     @OrgId() orgId: string | undefined,
     @Query("status") status?: string,
     @Query("page") pageRaw?: string,
     @Query("limit") limitRaw?: string,
-  ) {
+  ): Promise<
+    OutreachArtifactResponseDto[] | OutreachArtifactPageResponseDto
+  > {
     if (!orgId) throw new BadRequestException("orgId required");
     const parsed = status ? parseStatus(status) : undefined;
     // Backwards compatible: legacy callers receive the historical bare array.
@@ -60,7 +89,11 @@ export class OutreachArtifactsController {
     if (pageRaw !== undefined || limitRaw !== undefined) {
       const page = parsePositiveInt(pageRaw, 1, 10_000);
       const limit = parsePositiveInt(limitRaw, 20, 100);
-      return this.artifacts.listPageForOrg(orgId, { status: parsed, page, limit });
+      return this.artifacts.listPageForOrg(orgId, {
+        status: parsed,
+        page,
+        limit,
+      });
     }
     return this.artifacts.listForOrg(orgId, { status: parsed });
   }
@@ -81,7 +114,11 @@ export class OutreachArtifactsController {
   }
 
   @Get("outreach-artifacts/:id")
-  get(@OrgId() orgId: string | undefined, @Param("id") id: string) {
+  @ApiOkResponse({ type: OutreachArtifactResponseDto })
+  get(
+    @OrgId() orgId: string | undefined,
+    @Param("id") id: string,
+  ): Promise<OutreachArtifactResponseDto> {
     if (!orgId) throw new BadRequestException("orgId required");
     return this.artifacts.get(orgId, id);
   }
@@ -143,7 +180,11 @@ function parseStatus(value: string): OutreachArtifactStatus {
   return normalized as OutreachArtifactStatus;
 }
 
-function parsePositiveInt(value: string | undefined, fallback: number, max: number): number {
+function parsePositiveInt(
+  value: string | undefined,
+  fallback: number,
+  max: number,
+): number {
   if (value === undefined) return fallback;
   const parsed = Number.parseInt(value, 10);
   if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > max) {

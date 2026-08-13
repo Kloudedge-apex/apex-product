@@ -53,8 +53,13 @@ export class EvidenceLedgerService {
       // observable — record it on the active span so a write-failure spike is
       // alertable in tracing rather than silently looking healthy (a logger.warn
       // alone is easy to miss when the stage still reports COMPLETE).
-      active?.recordException(err instanceof Error ? err : new Error(String(err)));
-      active?.setStatus({ code: SpanStatusCode.ERROR, message: "evidence_event_append_failed" });
+      active?.recordException(
+        err instanceof Error ? err : new Error(String(err)),
+      );
+      active?.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: "evidence_event_append_failed",
+      });
       this.logger.warn(
         `Failed to append EvidenceEvent kind=${input.kind} refType=${input.refType} refId=${input.refId}: ${
           err instanceof Error ? err.message : String(err)
@@ -115,7 +120,12 @@ export class EvidenceLedgerService {
     readonly date: string;
     readonly summary?: string;
     readonly confidence: number;
-    readonly fields?: Partial<Omit<SignalRecordedPayload, "kind" | "source" | "date" | "summary" | "confidence">>;
+    readonly fields?: Partial<
+      Omit<
+        SignalRecordedPayload,
+        "kind" | "source" | "date" | "summary" | "confidence"
+      >
+    >;
   }): Promise<void> {
     // Fail-closed on the citation invariant AT THE WRITER: no signal is ever
     // persisted without a real source + date. The contract no longer depends on
@@ -207,7 +217,10 @@ export class EvidenceLedgerService {
       kind: EVIDENCE_EVENT_KIND.qaPass,
       refType: "person",
       refId: input.personId,
-      payload: { kind: EVIDENCE_EVENT_KIND.qaPass, duration_ms: input.durationMs },
+      payload: {
+        kind: EVIDENCE_EVENT_KIND.qaPass,
+        duration_ms: input.durationMs,
+      },
     });
   }
 
@@ -290,19 +303,7 @@ export class EvidenceLedgerService {
     readonly orgId: string;
     readonly runId?: string | null;
     readonly artifactId: string;
-    // Keep in sync with ArtifactPersistedPayload.status (the full Prisma
-    // OutreachArtifactStatus) — callers pass `artifact.status` straight off
-    // the row, so a missing member here is a compile error at the call site.
-    readonly status:
-      | "DRAFT"
-      | "PENDING_REVIEW"
-      | "APPROVED"
-      | "REJECTED"
-      | "SENT"
-      | "SUPPRESSED"
-      | "SENDING"
-      | "SIMULATED"
-      | "DELIVERY_UNKNOWN";
+    readonly status: import("@prisma/client").OutreachArtifactStatus;
     readonly channel: "EMAIL" | "LINKEDIN" | "HUBSPOT_NOTE";
   }): Promise<void> {
     return this.append({
@@ -340,10 +341,7 @@ export class EvidenceLedgerService {
     const refType: "outreach_artifact" | "outreach_tool_call" =
       input.refType ?? "outreach_artifact";
     const refId =
-      input.refId ??
-      input.artifactId ??
-      input.sendReceiptId ??
-      "unknown";
+      input.refId ?? input.artifactId ?? input.sendReceiptId ?? "unknown";
     return this.append({
       orgId: input.orgId,
       runId: input.runId ?? null,
@@ -352,11 +350,15 @@ export class EvidenceLedgerService {
       refId,
       payload: {
         kind: EVIDENCE_EVENT_KIND.messageSent,
-        ...(input.artifactId ? { artifact_id: input.artifactId } : { artifact_id: null }),
+        ...(input.artifactId
+          ? { artifact_id: input.artifactId }
+          : { artifact_id: null }),
         channel: input.channel,
         ...(input.recipientRef ? { recipient_ref: input.recipientRef } : {}),
         ...(input.subject ? { subject: input.subject } : {}),
-        ...(input.sendReceiptId ? { send_receipt_id: input.sendReceiptId } : {}),
+        ...(input.sendReceiptId
+          ? { send_receipt_id: input.sendReceiptId }
+          : {}),
         ...(input.provider ? { provider: input.provider } : {}),
       },
     });
@@ -384,7 +386,9 @@ export class EvidenceLedgerService {
         entity_type: input.entityType,
         entity_id: input.entityId,
         operation: input.operation,
-        ...(input.orgIdExternal ? { org_id_external: input.orgIdExternal } : {}),
+        ...(input.orgIdExternal
+          ? { org_id_external: input.orgIdExternal }
+          : {}),
         ...(input.fieldsChanged && input.fieldsChanged.length > 0
           ? { fields_changed: input.fieldsChanged }
           : {}),

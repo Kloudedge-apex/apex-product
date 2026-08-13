@@ -3,7 +3,7 @@ import { OutreachArtifactStatus, Prisma } from "@prisma/client";
 /**
  * States that retain the one real-reply slot for an inbound message.
  *
- * REJECTED, SUPPRESSED, and SIMULATED are deliberately absent: none can
+ * REJECTED, FAILED, SUPPRESSED, and SIMULATED are deliberately absent: none can
  * reach a live provider, so a separately reviewed replacement may be
  * created. SENT and DELIVERY_UNKNOWN remain blocking because another send
  * could duplicate a delivery that happened (or may have happened).
@@ -34,9 +34,13 @@ export async function acquireReplySingleFlightLock(
   threadScope: string | readonly string[],
   sourceMessageId: string | null,
 ): Promise<void> {
-  const threadScopes = [...new Set(
-    (Array.isArray(threadScope) ? threadScope : [threadScope]).filter(Boolean),
-  )].sort();
+  const threadScopes = [
+    ...new Set(
+      (Array.isArray(threadScope) ? threadScope : [threadScope]).filter(
+        Boolean,
+      ),
+    ),
+  ].sort();
 
   // Always acquire every available identity in lexical order. Modern Gmail
   // replies have both a Conversation id and provider thread id; locking both

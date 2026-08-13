@@ -1,12 +1,17 @@
 import { Controller, Get, Query, BadRequestException } from "@nestjs/common";
 import { OrgId } from "../common/org-context.decorator";
-import { PolicyEventsService, type PolicyDecision } from "./policy-events.service";
+import {
+  PolicyEventsService,
+  type PolicyDecision,
+} from "./policy-events.service";
 
 const ALLOWED_DECISIONS: ReadonlySet<PolicyDecision> = new Set([
   "allowed",
   "blocked",
   "dry_run",
   "delivery_unknown",
+  "failed",
+  "reconciliation_required",
 ]);
 
 @Controller("policy-events")

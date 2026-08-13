@@ -27,8 +27,7 @@ function baseProdEnv(): NodeJS.ProcessEnv {
     GOOGLE_CLIENT_SECRET: "gmail-client-secret",
     GOOGLE_REDIRECT_URI:
       "https://api.workforceos.xyz/api/integrations/gmail/callback",
-    GMAIL_PUBSUB_TOPIC:
-      "projects/workforce-prod/topics/gmail-inbound",
+    GMAIL_PUBSUB_TOPIC: "projects/workforce-prod/topics/gmail-inbound",
     GMAIL_PUSH_AUDIENCE:
       "https://api.workforceos.xyz/api/integrations/gmail/push",
     GMAIL_PUSH_PUBLISHER_SA:
@@ -57,7 +56,9 @@ describe("validateEnv", () => {
     const env = baseProdEnv();
     delete env.ENCRYPTION_KEY;
     const { issues } = validateEnv(env);
-    expect(issues.some((i) => i.includes("ENCRYPTION_KEY is required"))).toBe(true);
+    expect(issues.some((i) => i.includes("ENCRYPTION_KEY is required"))).toBe(
+      true,
+    );
   });
 
   it("fails when ENCRYPTION_KEY length is wrong in production", () => {
@@ -71,7 +72,7 @@ describe("validateEnv", () => {
     const env = baseProdEnv();
     env.NODE_ENV = "development";
     const { issues } = validateEnv(env);
-    expect(issues.some((i) => i.includes("must be \"production\""))).toBe(true);
+    expect(issues.some((i) => i.includes('must be "production"'))).toBe(true);
   });
 
   it("fails when ADMIN_API_KEY is missing in production", () => {
@@ -126,7 +127,11 @@ describe("validateEnv", () => {
     const env = baseProdEnv();
     delete env.OPENAI_API_KEY;
     const { issues } = validateEnv(env);
-    expect(issues.some((i) => i.includes("OPENAI_API_KEY / AZURE_OPENAI_KEY / ANTHROPIC_API_KEY"))).toBe(true);
+    expect(
+      issues.some((i) =>
+        i.includes("OPENAI_API_KEY / AZURE_OPENAI_KEY / ANTHROPIC_API_KEY"),
+      ),
+    ).toBe(true);
   });
 
   it("fails when GOOGLE_CLIENT_ID is missing", () => {
@@ -273,7 +278,11 @@ describe("validateEnv", () => {
     const env = baseProdEnv();
     env.OPENAI_API_KEY = "";
     const { issues } = validateEnv(env);
-    expect(issues.some((i) => i.includes("OPENAI_API_KEY / AZURE_OPENAI_KEY / ANTHROPIC_API_KEY"))).toBe(true);
+    expect(
+      issues.some((i) =>
+        i.includes("OPENAI_API_KEY / AZURE_OPENAI_KEY / ANTHROPIC_API_KEY"),
+      ),
+    ).toBe(true);
   });
 
   describe("outreach wildcard guard (GL8c)", () => {
@@ -325,6 +334,42 @@ describe("validateEnv", () => {
       } as NodeJS.ProcessEnv;
       const { issues } = validateEnv(env);
       expect(wildcardIssue(issues)).toBe(false);
+    });
+  });
+
+  describe("first-class FAILED write rollout gate", () => {
+    it("keeps the optional flag disabled by default", () => {
+      const { issues } = validateEnv(baseProdEnv());
+      expect(issues).toEqual([]);
+    });
+
+    it("rejects an invalid boolean value", () => {
+      const env = baseProdEnv();
+      env.OUTREACH_FAILED_STATUS_WRITES_ENABLED = "yes";
+      const { issues } = validateEnv(env);
+      expect(
+        issues.some((issue) => issue.includes("must be exactly true or false")),
+      ).toBe(true);
+    });
+
+    it("requires the exact reader-drain and inventory attestation", () => {
+      const env = baseProdEnv();
+      env.OUTREACH_FAILED_STATUS_WRITES_ENABLED = "true";
+      const { issues } = validateEnv(env);
+      expect(
+        issues.some((issue) =>
+          issue.includes("readers-drained-legacy-inventory-reviewed-v1"),
+        ),
+      ).toBe(true);
+    });
+
+    it("accepts the fully attested enablement", () => {
+      const env = baseProdEnv();
+      env.OUTREACH_FAILED_STATUS_WRITES_ENABLED = "true";
+      env.OUTREACH_FAILED_STATUS_WRITES_ACK =
+        "readers-drained-legacy-inventory-reviewed-v1";
+      const { issues } = validateEnv(env);
+      expect(issues).toEqual([]);
     });
   });
 

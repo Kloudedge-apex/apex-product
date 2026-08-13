@@ -8,16 +8,16 @@ verified before acting.
 
 **Infra constants (do not improvise):**
 
-| Thing | Value |
-|---|---|
-| Resource group | `Ledgr-prod` |
-| API Container App | `apex-gtm-api` |
-| Worker Container App | `apex-gtm-worker` |
-| ACR / repo | `ledgracr` / `apex-api` |
-| BullMQ queues | `graph-runs` (pipeline runs), `outreach-send` (post-approval delivery) |
-| Tenant-zero org id | `cmpe63k370000ap01vsiehbj2` |
-| Allowlisted send orgs | `OUTREACH_LIVE_FOR_ORGS` env on `apex-gtm-worker` (currently tenant-zero only) |
-| Prod DB access | `ledgracr`/pgclient ACI workflow (see memory: prod-schema-snapshot-workflow). All writes go through the DB-safety workflow: dry-run + diff + explicit approval. |
+| Thing                 | Value                                                                                                                                                           |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Resource group        | `Ledgr-prod`                                                                                                                                                    |
+| API Container App     | `apex-gtm-api`                                                                                                                                                  |
+| Worker Container App  | `apex-gtm-worker`                                                                                                                                               |
+| ACR / repo            | `ledgracr` / `apex-api`                                                                                                                                         |
+| BullMQ queues         | `graph-runs` (pipeline runs), `outreach-send` (post-approval delivery)                                                                                          |
+| Tenant-zero org id    | `cmpe63k370000ap01vsiehbj2`                                                                                                                                     |
+| Allowlisted send orgs | `OUTREACH_LIVE_FOR_ORGS` env on `apex-gtm-worker` (currently tenant-zero only)                                                                                  |
+| Prod DB access        | `ledgracr`/pgclient ACI workflow (see memory: prod-schema-snapshot-workflow). All writes go through the DB-safety workflow: dry-run + diff + explicit approval. |
 
 Resolve the API ingress FQDN whenever a command below needs it:
 
@@ -93,14 +93,14 @@ private snapshot used by `scripts/deploy-prod.sh`.
 
 ## (0) RELEASE ADMISSION AND SCHEMA ORDER
 
-The current guarded-SDR candidate is a production **NO-GO** until all seven
+The current guarded-SDR candidate is a production **NO-GO** until all eight
 review-only SQL files are rehearsed and then applied with separate operator
 approval. Codex did not apply them. Use the invocation, writer-pause,
 duplicate-inventory, retry, and postcondition instructions inside each file.
 
 The blocking `Migration Rehearsal (blocking)` CI job is a hermetic candidate
 check, not the staging rehearsal named by the production receipt. It applies
-the exact seven committed SQL blobs, in reviewed order, to a fresh PostgreSQL
+the exact eight committed SQL blobs, in reviewed order, to a fresh PostgreSQL
 16 + pgvector service populated with two reserved synthetic tenants. It proves
 the synthetic identity reconciliation/cutover invariants, fixed-index and
 schema postconditions, and a custom-format backup/restore fingerprint. Its
@@ -182,7 +182,7 @@ external file and this source-pinned digest.
 `scripts/verify-migration-release-receipt.sh` rejects undeclared fields, copies
 the supplied trust file once, matches those exact bytes to the reviewed digest,
 and verifies the detached signature against the claimed approver. The reviewed
-digest and all seven migration bytes are read from the exact candidate commit
+digest and all eight migration bytes are read from the exact candidate commit
 with replacement objects disabled, never from mutable working-tree files. The
 verifier enforces their order and writer-pause requirements. The receipt,
 signature, and pinned allowed-signers trust root are mandatory inputs to
@@ -192,6 +192,52 @@ reads a confirmation from stdin. Once externally admitted, the
 `workforce-os-production` release environment must execute
 `scripts/deploy-prod.sh` directly (not through `bash`) so its privileged
 bootstrap shebang applies, using:
+
+### Two-phase activation for first-class `FAILED` writes
+
+PostgreSQL enum expansion is not enough to make an old Prisma reader safe.
+The first release therefore separates compatible-reader deployment from new
+enum writes. Do not collapse these phases:
+
+1. Apply and verify
+   `2026-08-13_outreach-artifact-failed-expand.sql` through the signed migration
+   process. Retain a hash of the read-only `auto-failed:` inventory query in
+   that migration. Historical marker rows with `failedAt IS NULL` remain
+   unclassified; the application does not reinterpret them as failures or
+   human rejections. Any historical backfill is a later, separately approved
+   data change.
+2. Deploy the enum-aware console BFF/UI and verify its immutable active digest.
+   Then deploy the backend compatibility image with
+   `OUTREACH_FAILED_STATUS_WRITES_ENABLED=false` (or absent) and
+   `OUTREACH_FAILED_STATUS_WRITES_ACK` absent. The backend controller rolls the
+   API reader first and the worker second. In this phase, the new worker writes
+   the legacy-compatible `REJECTED` marker plus first-class `failureReason` and
+   `failedAt`; compatible readers present only those provenance-bearing rows as
+   effective `FAILED`. Public reads present unattested historical marker rows
+   as response-only `RECONCILIATION_REQUIRED`, never as a reviewer rejection
+   or dispatch failure.
+3. Prove all old API and BFF revisions are drained, both active backend roles
+   use the compatibility digest, the console is on its compatible digest, the
+   release-config verifiers pass, and no unreviewed historical marker has been
+   promoted. Capture those immutable revisions as the rollback baseline.
+4. Only through the protected configuration authority, set these values on the
+   worker (never the API):
+
+   ```text
+   OUTREACH_FAILED_STATUS_WRITES_ENABLED=true
+   OUTREACH_FAILED_STATUS_WRITES_ACK=readers-drained-legacy-inventory-reviewed-v1
+   ```
+
+   Re-run the backend release-config verifier, worker health check, FAILED list
+   smoke, and dashboard/policy-event smoke before admitting traffic. A missing
+   or different acknowledgement keeps writes on the compatibility form and is
+   rejected by production environment validation.
+
+After phase 4, rollback must first disable the FAILED write gate and may restore
+only the captured enum-aware compatibility revisions. Never restore a pre-enum
+API/BFF after any `FAILED` row exists unless a separately approved data
+downgrade has removed every such value. `scripts/deploy-prod.sh` does not enable
+this gate and does not substitute for console-drain evidence.
 
 ```bash
 scripts/deploy-prod.sh \
@@ -301,7 +347,7 @@ credential or prove that its principal cannot write either production
 Container App before asserting exclusive authority. Azure OIDC federation and
 an RBAC audit must still prove that its service principal is the exclusive
 `Microsoft.App/containerApps/write` identity for both apps. The allowed-signers
-source pin is still `UNCONFIGURED`, and all seven migrations still require
+source pin is still `UNCONFIGURED`, and all eight migrations still require
 staging rehearsal, separate production approval, apply, and signed receipt
 evidence. Therefore the authority attestation must remain unset until every
 external control and migration prerequisite is verified. Re-audit after any
@@ -327,9 +373,10 @@ Required dependency order:
 2. `docs/migrations/2026-06-01_outreach-artifact-unique.sql`
 3. `docs/migrations/2026-08-12_conversation-store-expand.sql`
 4. `docs/migrations/2026-08-12_outreach-delivery-unknown-expand.sql`
-5. `docs/migrations/2026-08-12_conversation-reply-single-flight-expand.sql`
-6. `docs/migrations/2026-08-12_graph-run-activity-expand.sql`
-7. `docs/migrations/2026-08-12_graph-run-lifecycle-expand.sql`
+5. `docs/migrations/2026-08-13_outreach-artifact-failed-expand.sql`
+6. `docs/migrations/2026-08-12_conversation-reply-single-flight-expand.sql`
+7. `docs/migrations/2026-08-12_graph-run-activity-expand.sql`
+8. `docs/migrations/2026-08-12_graph-run-lifecycle-expand.sql`
 
 The Clerk identity migration is intentionally fail-closed: it sets every
 legacy `User.membershipActive` value to `false`. Keep identity writers paused
@@ -358,6 +405,9 @@ restore the old blanket-active default.
 Do not deploy code that writes a new column, table, or enum value before its
 schema prerequisite. The Clerk identity, artifact, reply-single-flight, and
 graph-lifecycle index operations require the documented writer pauses. The
+FAILED expand migration is schema-only; deploy it before FAILED writers, then
+drain legacy workers before considering any separately approved marker
+backfill.
 concurrent index files must not run inside a transaction-wrapping migration
 runner.
 
@@ -406,11 +456,11 @@ both guarded-SDR revisions because cadence scheduling is deferred.
 
 Three switches, in escalation order. Pick by intent:
 
-| You want | Use | Reversible without data loss? |
-|---|---|---|
-| Pause sending; resume later, nothing lost | KS-2 (`OUTREACH_WORKER_ENABLED=false`) | Yes — APPROVED rows + jobs queue up untouched |
-| Guarantee no real email leaves, even if worker misconfig/compromise | KS-1 (clear `OUTREACH_LIVE_FOR_ORGS`) | No — approvals processed during the freeze terminate as `SIMULATED` and never auto-resend |
-| Worker is misbehaving beyond env flips (crash-loop, runaway behavior) | KS-3 (stop the app) | Yes — BullMQ redelivers; reconcile sweep recovers strays on restart |
+| You want                                                              | Use                                    | Reversible without data loss?                                                             |
+| --------------------------------------------------------------------- | -------------------------------------- | ----------------------------------------------------------------------------------------- |
+| Pause sending; resume later, nothing lost                             | KS-2 (`OUTREACH_WORKER_ENABLED=false`) | Yes — APPROVED rows + jobs queue up untouched                                             |
+| Guarantee no real email leaves, even if worker misconfig/compromise   | KS-1 (clear `OUTREACH_LIVE_FOR_ORGS`)  | No — approvals processed during the freeze terminate as `SIMULATED` and never auto-resend |
+| Worker is misbehaving beyond env flips (crash-loop, runaway behavior) | KS-3 (stop the app)                    | Yes — BullMQ redelivers; reconcile sweep recovers strays on restart                       |
 
 Every `az containerapp update`/`stop` rolls a new revision/restarts replicas;
 in-flight jobs are interrupted, BullMQ marks them stalled and redelivers, and
@@ -450,6 +500,7 @@ az containerapp update -n apex-gtm-api    -g Ledgr-prod --remove-env-vars OUTREA
 ```
 
 **Expected effect:**
+
 - Worker log per artifact: `Org <orgId> not in OUTREACH_LIVE_FOR_ORGS — forcing mock send for artifact <id>`.
 - Every APPROVED artifact processed while cleared goes terminal `SIMULATED`. No external call is made.
 - This is a one-way valve for queued approvals: `SIMULATED` is terminal, the
@@ -493,6 +544,7 @@ az containerapp update -n apex-gtm-worker -g Ledgr-prod \
 ```
 
 **Expected effect:**
+
 - Worker boot log: `SendOutreachWorker disabled (set OUTREACH_WORKER_ENABLED=true to enable)`.
 - No consumer on `outreach-send`; APPROVED rows and their jobs accumulate
   untouched. Nothing goes terminal. True pause.
@@ -526,6 +578,7 @@ az containerapp stop -n apex-gtm-worker -g Ledgr-prod
 ```
 
 **Expected effect:**
+
 - Everything the worker process does stops: outreach sends, graph/pipeline
   runs, Gmail watch renewal sweep, reconcile sweeps.
 - Jobs active at the moment of the kill are redelivered by BullMQ on restart;
@@ -557,44 +610,57 @@ All SQL below is read-only and runs through the pgclient ACI. Table names are
 Prisma defaults (no `@@map`): `"OutreachArtifact"`, `"Integration"`,
 `"OutreachSuppression"`, `"GraphRun"` — quote them.
 
-### 1. Auto-failed rows — `REJECTED` with `reviewerNote` prefix `auto-failed:`
+### 1. Terminal dispatch failures — `FAILED` plus legacy `auto-failed:` rows
 
 Code: `send-outreach.worker.ts` `markTerminalFailure()` — fires when BullMQ
-exhausts retries (3 attempts, exponential backoff from 5s). There is no FAILED
-enum value yet, so worker-side failures reuse `REJECTED` with the
-`auto-failed: <reason>` marker to distinguish them from human rejections.
-This applies only when the artifact is safely back in `APPROVED` after a
-proved no-attempt or provider-rejected response. An unresolved `SENDING` claim
-becomes `DELIVERY_UNKNOWN` instead.
+exhausts retries (3 attempts, exponential backoff from 5s). New workers write
+`FAILED` with `failureReason` and `failedAt`, preserving the original human
+approval fields. During the expand-first rolling deployment, readers also
+recognize the compatibility `REJECTED` plus `auto-failed: <reason>`
+representation, but only when `failedAt IS NOT NULL`. A marker row with
+`failedAt IS NULL` is historical, unattested inventory: investigate it, but do
+not classify or backfill it as a failure without a separately approved data
+review.
+This applies only when the artifact is safely back in `APPROVED` after a proved
+no-attempt or provider-rejected response. An unresolved `SENDING` claim becomes
+`DELIVERY_UNKNOWN` instead.
 
 ```sql
-SELECT id, "orgId", "recipientRef", "reviewerNote", "reviewedAt"
+SELECT id, "orgId", "recipientRef", status, "failureReason", "failedAt",
+       CASE
+         WHEN status = 'FAILED' THEN 'first-class-failure'
+         WHEN "failedAt" IS NOT NULL THEN 'compatibility-failure'
+         ELSE 'historical-unattested-marker'
+       END AS "failureClassification",
+       "reviewerNote", "reviewedAt", "reviewedBy"
 FROM "OutreachArtifact"
-WHERE status = 'REJECTED' AND "reviewerNote" LIKE 'auto-failed:%'
-ORDER BY "reviewedAt" DESC;
+WHERE status = 'FAILED'
+   OR (status = 'REJECTED' AND "reviewerNote" LIKE 'auto-failed:%')
+ORDER BY COALESCE("failedAt", "updatedAt") DESC;
 ```
 
 Common reasons (verbatim from the code paths that throw):
+
 - `live send required for org <orgId> but dispatch fell back to mock mode (provider=...) — no usable credential; refusing to record SENT`
   → the GL2 guard: an allowlisted org had no usable credential. Go to triage #4.
 - `Org <orgId> is missing physicalAddress; cannot send live email outreach until configured (CAN-SPAM §7704(a)(5)).`
   → set the org's physical address (PATCH /api/orgs, admin-gated), then regenerate.
-- Provider 4xx/5xx from Gmail → check worker logs around the `reviewedAt` timestamp.
+- Provider 4xx/5xx from Gmail → check worker logs around `failedAt` (or
+  `updatedAt` on a legacy row).
 
-**Recovery:** fix the root cause first. An auto-failed row CANNOT be
-re-approved — `approve()` only accepts `PENDING_REVIEW`
-(`outreach-artifacts.service.ts`). Re-run the pipeline to produce a fresh
-artifact, or (exceptional, DB-safety workflow required) flip the row back to
-`APPROVED` by hand and let the reconcile sweep re-enqueue it.
+**Recovery:** fix the root cause first. A failed row CANNOT be re-approved —
+`approve()` only accepts `PENDING_REVIEW` (`outreach-artifacts.service.ts`).
+Re-run the pipeline to produce a separate fresh artifact and review it. Never
+mutate the terminal row back to `APPROVED` or retry it in place.
 
 ### 2. Policy-skip rows — `SUPPRESSED` with `reviewerNote` prefix `policy-skip:`
 
 `SUPPRESSED` has two distinct producers; tell them apart by `reviewerNote`:
 
-| `reviewerNote` | Producer | Action |
-|---|---|---|
-| starts `policy-skip:` | GL8b recipient cooldown — org real-SENT to this recipient within 14 days. Note text: `policy-skip: recipient contacted within 14-day cooldown (last SENT <iso> via artifact <id>)` | None. Working as designed. |
-| NULL | Suppression list hit (unsubscribed / bounced / manually suppressed recipient) | None — compliance. Never override. |
+| `reviewerNote`        | Producer                                                                                                                                                                           | Action                             |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- |
+| starts `policy-skip:` | GL8b recipient cooldown — org real-SENT to this recipient within 14 days. Note text: `policy-skip: recipient contacted within 14-day cooldown (last SENT <iso> via artifact <id>)` | None. Working as designed.         |
+| NULL                  | Suppression list hit (unsubscribed / bounced / manually suppressed recipient)                                                                                                      | None — compliance. Never override. |
 
 ```sql
 SELECT id, "recipientRef", "reviewerNote", "updatedAt"
@@ -643,19 +709,20 @@ ops fix.
 Code: GL1 in `apps/api/src/integrations/integrations.service.ts`
 `refreshTokenIfNeeded()` / `markRefreshFailedPermanently()`. Behavior matrix:
 
-| Failure | Log line (logger `IntegrationsService`) | Effect |
-|---|---|---|
+| Failure                                                                                                 | Log line (logger `IntegrationsService`)                                                                                                                | Effect                                                                                                                                                                |
+| ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Permanent — provider returns `invalid_grant` (revoked consent, expired refresh token, changed password) | ERROR: `[Integration:gmail] OAuth refresh PERMANENTLY rejected (invalid_grant) for org <orgId> — marking integration ERROR; user must reconnect gmail` | Row flips `CONNECTED` → `ERROR` with `lastErrorAt` + `lastErrorMessage` = `OAuth token refresh failed: invalid_grant. Reconnect required.` Dashboard shows reconnect. |
-| Transient — non-`invalid_grant` HTTP error | WARN: `[Integration:gmail] token refresh HTTP <status> (<code>) — keeping existing creds` | Status unchanged; sends continue on the existing token (may 401 if it really is dead → dispatch fails → BullMQ retries). |
-| Transport error (network/circuit breaker) | WARN: `[Integration:gmail] token refresh transport error — keeping existing creds: <msg>` | Same as transient. |
-| Refresh OK but DB write failed | WARN: `[Integration:gmail] token refresh DB write failed; using in-memory creds: <msg>` | Send proceeds with fresh in-memory token; next process refreshes again. |
-| Credentials undecryptable | WARN: `[Integration:gmail] decrypt failed: <msg>` | `refreshTokenIfNeeded` returns null → worker skips the integration. |
+| Transient — non-`invalid_grant` HTTP error                                                              | WARN: `[Integration:gmail] token refresh HTTP <status> (<code>) — keeping existing creds`                                                              | Status unchanged; sends continue on the existing token (may 401 if it really is dead → dispatch fails → BullMQ retries).                                              |
+| Transport error (network/circuit breaker)                                                               | WARN: `[Integration:gmail] token refresh transport error — keeping existing creds: <msg>`                                                              | Same as transient.                                                                                                                                                    |
+| Refresh OK but DB write failed                                                                          | WARN: `[Integration:gmail] token refresh DB write failed; using in-memory creds: <msg>`                                                                | Send proceeds with fresh in-memory token; next process refreshes again.                                                                                               |
+| Credentials undecryptable                                                                               | WARN: `[Integration:gmail] decrypt failed: <msg>`                                                                                                      | `refreshTokenIfNeeded` returns null → worker skips the integration.                                                                                                   |
 
 **Downstream symptom chain for an allowlisted org:** integration unusable →
 `loadIntegrations` yields an empty map → send tool falls back to mock → GL2
 guard throws (`live send required ... refusing to record SENT`) → 3 BullMQ
-retries → terminal `auto-failed:` row (triage #1). The send path never lies
-about delivery.
+retries → terminal `FAILED` row (or the provenance-bearing `auto-failed:`
+representation while the compatibility writer phase is active; triage #1).
+The send path never lies about delivery.
 
 Detection:
 
@@ -689,6 +756,7 @@ ORDER BY "updatedAt" DESC;
 ```
 
 **Action:**
+
 1. `curl -fsS "https://${API_FQDN}/api/health/worker"` — if 503 with zero
    consumers on `outreach-send`, fix the worker (env gate? crash-loop? KS-2/KS-3
    left engaged?).
@@ -896,8 +964,11 @@ FROM "OutreachArtifact" WHERE id = '<artifact-id>';
 ```
 
 Required: `status='SENT'`, `sentAt` set, `sendReceiptId` = Gmail message id.
+
 - `SIMULATED` instead → the org was NOT allowlisted in the worker's env. Fix the allowlist, regenerate, retry.
-- `REJECTED auto-failed: live send required ... mock mode` → credential problem; back to Step 1.
+- `FAILED` with `failureReason` containing `live send required ... mock mode`
+  (or the compatibility `REJECTED auto-failed:` form with `failedAt` set) →
+  credential problem; back to Step 1.
 - `DELIVERY_UNKNOWN` → do not approve or retry this artifact. Follow failure
   triage #5 and reconcile the provider's Sent mailbox/API first.
 
@@ -955,7 +1026,7 @@ spans are present, and inline evaluator feedback fired on the LLM runs
 **Step 9 — post-smoke sweep**
 
 - `curl -fsS -H "Authorization: Bearer $METRICS_AUTH_TOKEN" "https://${API_FQDN}/api/metrics" | grep 'bullmq_queue_depth{queue="outreach-send"'` → `waiting` and `active` back to 0.
-- Triage #1 query → no new `auto-failed:` rows.
+- Triage #1 query → no new `FAILED` or legacy `auto-failed:` rows.
 - `/api/health/worker` → 200.
 - Log the smoke result (artifact id, Gmail message id, LangSmith run id,
   timestamps) in the go-live log doc for the day.

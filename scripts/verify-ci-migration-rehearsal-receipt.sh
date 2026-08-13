@@ -14,6 +14,7 @@ MIGRATIONS=(
   "docs/migrations/2026-06-01_outreach-artifact-unique.sql"
   "docs/migrations/2026-08-12_conversation-store-expand.sql"
   "docs/migrations/2026-08-12_outreach-delivery-unknown-expand.sql"
+  "docs/migrations/2026-08-13_outreach-artifact-failed-expand.sql"
   "docs/migrations/2026-08-12_conversation-reply-single-flight-expand.sql"
   "docs/migrations/2026-08-12_graph-run-activity-expand.sql"
   "docs/migrations/2026-08-12_graph-run-lifecycle-expand.sql"
@@ -130,7 +131,7 @@ if ! jq -e \
     migrationPostconditionsPassed: true,
     tenantIsolationPassed: true
   }
-  and (.migrations | type == "array" and length == 7)
+  and (.migrations | type == "array" and length == 8)
   and all(.migrations[];
     (keys == ["applied", "path", "postconditionsPassed", "sha256"])
     and .applied == true
@@ -215,4 +216,4 @@ for index in "${!MIGRATIONS[@]}"; do
   fi
 done
 
-echo "Synthetic CI migration receipt verified for ${EXPECTED_COMMIT} (non-authoritative; seven committed migrations)"
+echo "Synthetic CI migration receipt verified for ${EXPECTED_COMMIT} (non-authoritative; eight committed migrations)"

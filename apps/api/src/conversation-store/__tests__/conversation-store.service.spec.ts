@@ -90,6 +90,8 @@ function artifactRow(overrides: Record<string, unknown> = {}) {
     reviewerNote: null,
     reviewedBy: "user_1",
     reviewedAt: CREATED_AT,
+    failureReason: null,
+    failedAt: null,
     sentAt: null,
     sendReceiptId: null,
     createdAt: CREATED_AT,
@@ -166,9 +168,7 @@ describe("ConversationStoreService", () => {
 
   beforeEach(() => {
     ({ prisma, tx } = makePrisma());
-    service = new ConversationStoreService(
-      prisma as unknown as PrismaService,
-    );
+    service = new ConversationStoreService(prisma as unknown as PrismaService);
     tx.integration.findFirst.mockResolvedValue({ id: "gmail_1" });
     tx.emailCandidate.findMany.mockResolvedValue([]);
   });
@@ -469,10 +469,7 @@ describe("ConversationStoreService", () => {
           id: "artifact_1",
           orgId: "org_1",
           status: {
-            in: [
-              OutreachArtifactStatus.SENDING,
-              OutreachArtifactStatus.SENT,
-            ],
+            in: [OutreachArtifactStatus.SENDING, OutreachArtifactStatus.SENT],
           },
         }),
         data: {
