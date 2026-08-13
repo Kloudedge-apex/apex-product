@@ -129,6 +129,23 @@ describe("IntegrationsService.findOne (IDOR scoping)", () => {
     });
   });
 
+  it("uses the same credential-free projection after OAuth finalization", async () => {
+    prisma.integration.findFirst.mockResolvedValue({
+      id: "int_1",
+      provider: "gmail",
+      status: "CONNECTED",
+      scopes: [],
+    });
+
+    await service.findByProvider("org_a", "gmail");
+
+    const callArg = prisma.integration.findFirst.mock.calls[0][0];
+    expect(callArg.where).toEqual({ orgId: "org_a", provider: "gmail" });
+    expect(callArg.select).not.toHaveProperty("credentials");
+    expect(callArg.select).not.toHaveProperty("encryptedCredentials");
+    expect(callArg.select).not.toHaveProperty("lastHistoryId");
+  });
+
   it("throws NotFoundException when the integration belongs to a different org", async () => {
     prisma.integration.findFirst.mockResolvedValue(null);
 

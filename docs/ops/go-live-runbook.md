@@ -98,6 +98,31 @@ review-only SQL files are rehearsed and then applied with separate operator
 approval. Codex did not apply them. Use the invocation, writer-pause,
 duplicate-inventory, retry, and postcondition instructions inside each file.
 
+The blocking `Migration Rehearsal (blocking)` CI job is a hermetic candidate
+check, not the staging rehearsal named by the production receipt. It applies
+the exact seven committed SQL blobs, in reviewed order, to a fresh PostgreSQL
+16 + pgvector service populated with two reserved synthetic tenants. It proves
+the synthetic identity reconciliation/cutover invariants, fixed-index and
+schema postconditions, and a custom-format backup/restore fingerprint. Its
+strict receipt is always `environment: ci-synthetic` and
+`authority: non-authoritative`; it has no staging or production evidence
+fields and cannot satisfy `stagingRehearsalEvidenceHash`, production apply, or
+rollback evidence. The controller rejects remote hosts, database names outside
+the `workforce_rehearsal_*` namespace, nonempty targets, recovery replicas,
+and CI runs without committed sources and native pgvector. Run it only in the
+dedicated CI service or an explicitly acknowledged disposable local database:
+
+```bash
+WORKFORCE_MIGRATION_REHEARSAL_ACK=ci-synthetic-only \
+DATABASE_URL=postgresql://<local-test-user>@127.0.0.1:5432/workforce_rehearsal_<test> \
+scripts/rehearse-migration-candidate.sh \
+  <full-candidate-sha> <new-outside-repo-receipt.json>
+```
+
+Do not point this command at staging or production, and do not promote or
+rename its artifact as operator evidence. The separate staging rehearsal and
+signed production receipt remain mandatory.
+
 After the authorized production apply, create a sanitized receipt conforming to
 `docs/ops/production-migration-receipt.schema.json`. Store it outside the Git
 working tree and include only hashes, operator/approver identifiers, the change

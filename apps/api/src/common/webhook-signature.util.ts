@@ -135,6 +135,127 @@ export function verifyHubspotWebhookSignature(opts: {
  */
 const STATE_TTL_MS = 10 * 60 * 1000;
 
+const OAUTH_ATTEMPT_STATE_VERSION = 1;
+const OAUTH_ATTEMPT_ID_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+const OAUTH_PROVIDER_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/;
+
+interface OAuthAttemptStatePayload {
+  readonly v: number;
+  readonly a: string;
+  readonly p: string;
+  readonly e: number;
+}
+
+export interface VerifiedOAuthAttemptState {
+  readonly attemptId: string;
+  readonly provider: string;
+  readonly expiresAtMs: number;
+}
+
+/**
+ * Signs the opaque pointer used by the durable OAuth-attempt flow.
+ *
+ * Tenant and actor authority deliberately do not travel in the browser. They
+ * remain bound to `attemptId` in the server-side attempt record. The provider
+ * callback can therefore prove that the pointer was issued by us, but it
+ * cannot choose or alter the tenant or actor that may finalize it.
+ */
+export function signOAuthAttemptState(input: {
+  readonly attemptId: string;
+  readonly provider: string;
+  readonly expiresAtMs: number;
+}): string {
+  if (!OAUTH_ATTEMPT_ID_PATTERN.test(input.attemptId)) {
+    throw new Error("OAuth attempt id is invalid");
+  }
+  if (!OAUTH_PROVIDER_PATTERN.test(input.provider)) {
+    throw new Error("OAuth provider is invalid");
+  }
+  if (!Number.isSafeInteger(input.expiresAtMs) || input.expiresAtMs <= Date.now()) {
+    throw new Error("OAuth attempt expiry is invalid");
+  }
+
+  const payload: OAuthAttemptStatePayload = {
+    v: OAUTH_ATTEMPT_STATE_VERSION,
+    a: input.attemptId,
+    p: input.provider,
+    e: input.expiresAtMs,
+  };
+  const encodedPayload = Buffer.from(JSON.stringify(payload), "utf8").toString(
+    "base64url",
+  );
+  const signature = crypto
+    .createHmac("sha256", requireOAuthStateSecret())
+    .update(encodedPayload)
+    .digest("base64url");
+  return `${encodedPayload}.${signature}`;
+}
+
+export function verifyOAuthAttemptState(
+  state: string,
+): VerifiedOAuthAttemptState {
+  if (typeof state !== "string" || state.length === 0 || state.length > 2048) {
+    throw new Error("Invalid OAuth state format");
+  }
+  const parts = state.split(".");
+  if (parts.length !== 2) {
+    throw new Error("Invalid OAuth state format");
+  }
+  const [encodedPayload, encodedSignature] = parts;
+
+  let payloadBytes: Buffer;
+  let signature: Buffer;
+  try {
+    payloadBytes = Buffer.from(encodedPayload, "base64url");
+    signature = Buffer.from(encodedSignature, "base64url");
+  } catch {
+    throw new Error("Invalid OAuth state encoding");
+  }
+  if (
+    payloadBytes.toString("base64url") !== encodedPayload ||
+    signature.toString("base64url") !== encodedSignature
+  ) {
+    throw new Error("Invalid OAuth state encoding");
+  }
+
+  const expected = crypto
+    .createHmac("sha256", requireOAuthStateSecret())
+    .update(encodedPayload)
+    .digest();
+  if (!timingSafeEqualBuffers(signature, expected)) {
+    throw new Error("OAuth state signature mismatch");
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payloadBytes.toString("utf8"));
+  } catch {
+    throw new Error("Invalid OAuth state payload");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Invalid OAuth state payload");
+  }
+  const payload = parsed as Partial<OAuthAttemptStatePayload>;
+  if (
+    payload.v !== OAUTH_ATTEMPT_STATE_VERSION ||
+    typeof payload.a !== "string" ||
+    !OAUTH_ATTEMPT_ID_PATTERN.test(payload.a) ||
+    typeof payload.p !== "string" ||
+    !OAUTH_PROVIDER_PATTERN.test(payload.p) ||
+    typeof payload.e !== "number" ||
+    !Number.isSafeInteger(payload.e) ||
+    payload.e <= Date.now()
+  ) {
+    throw new Error("OAuth state expired or invalid");
+  }
+
+  return {
+    attemptId: payload.a,
+    provider: payload.p,
+    expiresAtMs: payload.e,
+  };
+}
+
 export function signOAuthState(orgId: string): string {
   const secret = requireOAuthStateSecret();
   const expMs = Date.now() + STATE_TTL_MS;
@@ -175,7 +296,7 @@ export function verifyOAuthState(state: string): { orgId: string } {
 
 function requireOAuthStateSecret(): string {
   const secret = process.env.OAUTH_STATE_SECRET;
-  if (!secret || secret.length < 32) {
+  if (!secret || secret !== secret.trim() || secret.length < 32) {
     throw new Error(
       "OAUTH_STATE_SECRET must be set (>=32 chars) to sign OAuth state parameters",
     );

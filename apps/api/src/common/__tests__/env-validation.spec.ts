@@ -35,6 +35,8 @@ function baseProdEnv(): NodeJS.ProcessEnv {
       "gmail-push@workforce-prod.iam.gserviceaccount.com",
     METRICS_AUTH_TOKEN: "metrics-test-token",
     API_PUBLIC_URL: "https://api.workforceos.xyz",
+    OAUTH_STATE_SECRET: "s".repeat(32),
+    FRONTEND_URL: "https://workforceos.xyz",
   } as NodeJS.ProcessEnv;
 }
 
@@ -173,6 +175,60 @@ describe("validateEnv", () => {
   ])("fails for invalid production API_PUBLIC_URL %s", (value, message) => {
     const env = baseProdEnv();
     env.API_PUBLIC_URL = value;
+    const { issues } = validateEnv(env);
+    expect(issues.some((issue) => issue.includes(message))).toBe(true);
+  });
+
+  it.each([undefined, "", "   "])(
+    "requires a nonblank OAUTH_STATE_SECRET in production (%s)",
+    (value) => {
+      const env = baseProdEnv();
+      if (value === undefined) delete env.OAUTH_STATE_SECRET;
+      else env.OAUTH_STATE_SECRET = value;
+      const { issues } = validateEnv(env);
+      expect(issues).toContain(
+        "OAUTH_STATE_SECRET is required when NODE_ENV=production",
+      );
+    },
+  );
+
+  it.each(["short", ` ${"s".repeat(32)}`, `${"s".repeat(32)} `])(
+    "rejects weak or noncanonical OAUTH_STATE_SECRET (%s)",
+    (value) => {
+      const env = baseProdEnv();
+      env.OAUTH_STATE_SECRET = value;
+      const { issues } = validateEnv(env);
+      expect(
+        issues.some((issue) =>
+          issue.includes("OAUTH_STATE_SECRET must be at least 32 characters"),
+        ),
+      ).toBe(true);
+    },
+  );
+
+  it.each([undefined, "", "   "])(
+    "requires a nonblank FRONTEND_URL in production (%s)",
+    (value) => {
+      const env = baseProdEnv();
+      if (value === undefined) delete env.FRONTEND_URL;
+      else env.FRONTEND_URL = value;
+      const { issues } = validateEnv(env);
+      expect(issues).toContain(
+        "FRONTEND_URL is required when NODE_ENV=production",
+      );
+    },
+  );
+
+  it.each([
+    ["http://workforceos.xyz", "must use https"],
+    ["https://localhost", "public DNS hostname"],
+    ["https://127.0.0.1", "public DNS hostname"],
+    ["https://workforceos.xyz/settings", "path must be empty"],
+    ["https://workforceos.xyz?next=/settings", "must not contain"],
+    ["https://workforceos.xyz/", "canonical origin"],
+  ])("rejects noncanonical production FRONTEND_URL %s", (value, message) => {
+    const env = baseProdEnv();
+    env.FRONTEND_URL = value;
     const { issues } = validateEnv(env);
     expect(issues.some((issue) => issue.includes(message))).toBe(true);
   });

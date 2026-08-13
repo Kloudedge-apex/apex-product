@@ -1,6 +1,7 @@
 import { GUARDS_METADATA } from "@nestjs/common/constants";
 import { describe, expect, it } from "vitest";
 import { AdminOrManagerGuard } from "../../common/admin-or-manager.guard";
+import { SKIP_ORG_GUARD } from "../../common/org-scope.guard";
 import { IntegrationsController } from "../integrations.controller";
 
 function guardsOn(method: keyof IntegrationsController): unknown[] {
@@ -13,6 +14,7 @@ describe("IntegrationsController management authorization", () => {
     "create",
     "remove",
     "gmailAuthUrl",
+    "finalizeGmail",
     "outlookAuthUrl",
     "hubspotAuthUrl",
     "simulateConnect",
@@ -21,6 +23,15 @@ describe("IntegrationsController management authorization", () => {
     "testByProvider",
   ] as const)("attaches AdminOrManagerGuard to %s", (method) => {
     expect(guardsOn(method)).toContain(AdminOrManagerGuard);
+  });
+
+  it("keeps Gmail finalization behind the global identity lifecycle guard", () => {
+    expect(
+      Reflect.getMetadata(
+        SKIP_ORG_GUARD,
+        IntegrationsController.prototype.finalizeGmail,
+      ),
+    ).not.toBe(true);
   });
 
   it.each(["findAll", "getCatalog", "checkHealth"] as const)(

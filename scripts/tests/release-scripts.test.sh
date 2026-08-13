@@ -1572,6 +1572,7 @@ EOF
     jobs: [
       {name: "API Tests (blocking)", status: "completed", conclusion: "success"},
       {name: "Lint, Type Check & Build", status: "completed", conclusion: "success"},
+      {name: "Migration Rehearsal (blocking)", status: "completed", conclusion: "success"},
       {name: "Production Image Contract", status: "completed", conclusion: "success"}
     ]
   }' >"${harness}/run.json"
@@ -1591,6 +1592,33 @@ EOF
     RUN_VIEW_JSON="${harness}/failed-run.json" \
     "${harness}/scripts/verify-github-release-ci.sh" "${commit}" >/dev/null 2>&1; then
     fail "GitHub CI verifier accepted a failed required job"
+  fi
+  pass
+
+  jq 'del(.jobs[] | select(.name == "Migration Rehearsal (blocking)"))' \
+    "${harness}/run.json" >"${harness}/missing-migration-rehearsal.json"
+  if env PATH="${harness}/bin:${PATH}" RUN_LIST_JSON="${harness}/runs.json" \
+    RUN_VIEW_JSON="${harness}/missing-migration-rehearsal.json" \
+    "${harness}/scripts/verify-github-release-ci.sh" "${commit}" >/dev/null 2>&1; then
+    fail "GitHub CI verifier accepted a missing migration rehearsal job"
+  fi
+  pass
+
+  jq '(.jobs[] | select(.name == "Migration Rehearsal (blocking)").conclusion) = "failure"' \
+    "${harness}/run.json" >"${harness}/failed-migration-rehearsal.json"
+  if env PATH="${harness}/bin:${PATH}" RUN_LIST_JSON="${harness}/runs.json" \
+    RUN_VIEW_JSON="${harness}/failed-migration-rehearsal.json" \
+    "${harness}/scripts/verify-github-release-ci.sh" "${commit}" >/dev/null 2>&1; then
+    fail "GitHub CI verifier accepted a failed migration rehearsal job"
+  fi
+  pass
+
+  jq '.jobs += [.jobs[] | select(.name == "Migration Rehearsal (blocking)")]' \
+    "${harness}/run.json" >"${harness}/duplicate-migration-rehearsal.json"
+  if env PATH="${harness}/bin:${PATH}" RUN_LIST_JSON="${harness}/runs.json" \
+    RUN_VIEW_JSON="${harness}/duplicate-migration-rehearsal.json" \
+    "${harness}/scripts/verify-github-release-ci.sh" "${commit}" >/dev/null 2>&1; then
+    fail "GitHub CI verifier accepted duplicate migration rehearsal jobs"
   fi
   pass
 }
@@ -1865,6 +1893,7 @@ write_containerapp_fixture() {
               {name: "SCHEDULER_ENABLED", value: "false"},
               {name: "CORS_ALLOWED_ORIGINS", value: "https://workforceos.xyz"},
               {name: "API_PUBLIC_URL", value: "https://api.workforceos.xyz"},
+              {name: "FRONTEND_URL", value: "https://workforceos.xyz"},
               {name: "OUTREACH_LIVE_FOR_ORGS", value: "org-owned-smoke"},
               {name: "OUTREACH_ALLOW_WILDCARD", value: "false"},
               {name: "CLERK_JWKS_URL", value: "https://clerk.workforceos.xyz/.well-known/jwks.json"},
@@ -1884,6 +1913,7 @@ write_containerapp_fixture() {
               {name: "ADMIN_API_KEY", secretRef: "admin-api-key"},
               {name: "GOOGLE_CLIENT_SECRET", secretRef: "google-client-secret"},
               {name: "METRICS_AUTH_TOKEN", secretRef: "metrics-auth-token"},
+              {name: "OAUTH_STATE_SECRET", secretRef: "oauth-state-secret"},
               {name: "AZURE_OPENAI_KEY", secretRef: "azure-openai-key"}
             ],
             probes: [
@@ -1960,6 +1990,68 @@ EOF
     API_REVISION_FILE="${harness}/api-revision.json" WORKER_REVISION_FILE="${harness}/worker-revision.json" \
     "${harness}/scripts/verify-containerapp-release-config.sh" \
     "${api_image}" "${worker_image}" >/dev/null
+  pass
+
+  jq '.properties.template.containers[0].env |= map(select(.name != "FRONTEND_URL"))' \
+    "${harness}/api.json" >"${harness}/api-missing-frontend-url.json"
+  if env PATH="${harness}/bin:${PATH}" \
+    API_JSON_FILE="${harness}/api-missing-frontend-url.json" \
+    WORKER_JSON_FILE="${harness}/worker.json" \
+    API_REVISION_FILE="${harness}/api-revision.json" WORKER_REVISION_FILE="${harness}/worker-revision.json" \
+    "${harness}/scripts/verify-containerapp-release-config.sh" \
+    "${api_image}" "${worker_image}" >/dev/null 2>&1; then
+    fail "Container App verifier accepted API without FRONTEND_URL"
+  fi
+  pass
+
+  jq '.properties.template.containers[0].env |= map(select(.name != "FRONTEND_URL"))' \
+    "${harness}/worker.json" >"${harness}/worker-missing-frontend-url.json"
+  if env PATH="${harness}/bin:${PATH}" \
+    API_JSON_FILE="${harness}/api.json" \
+    WORKER_JSON_FILE="${harness}/worker-missing-frontend-url.json" \
+    API_REVISION_FILE="${harness}/api-revision.json" WORKER_REVISION_FILE="${harness}/worker-revision.json" \
+    "${harness}/scripts/verify-containerapp-release-config.sh" \
+    "${api_image}" "${worker_image}" >/dev/null 2>&1; then
+    fail "Container App verifier accepted worker without FRONTEND_URL"
+  fi
+  pass
+
+  jq '(.properties.template.containers[0].env[] | select(.name == "FRONTEND_URL").value) = "https://wrong.example.com"' \
+    "${harness}/api.json" >"${harness}/api-wrong-frontend-url.json"
+  jq '(.properties.template.containers[0].env[] | select(.name == "FRONTEND_URL").value) = "https://wrong.example.com"' \
+    "${harness}/worker.json" >"${harness}/worker-wrong-frontend-url.json"
+  if env PATH="${harness}/bin:${PATH}" \
+    API_JSON_FILE="${harness}/api-wrong-frontend-url.json" \
+    WORKER_JSON_FILE="${harness}/worker-wrong-frontend-url.json" \
+    API_REVISION_FILE="${harness}/api-revision.json" WORKER_REVISION_FILE="${harness}/worker-revision.json" \
+    "${harness}/scripts/verify-containerapp-release-config.sh" \
+    "${api_image}" "${worker_image}" >/dev/null 2>&1; then
+    fail "Container App verifier accepted FRONTEND_URL outside the pinned browser party"
+  fi
+  pass
+
+  jq '.properties.template.containers[0].env |= map(select(.name != "OAUTH_STATE_SECRET"))' \
+    "${harness}/api.json" >"${harness}/api-missing-oauth-state-secret.json"
+  if env PATH="${harness}/bin:${PATH}" \
+    API_JSON_FILE="${harness}/api-missing-oauth-state-secret.json" \
+    WORKER_JSON_FILE="${harness}/worker.json" \
+    API_REVISION_FILE="${harness}/api-revision.json" WORKER_REVISION_FILE="${harness}/worker-revision.json" \
+    "${harness}/scripts/verify-containerapp-release-config.sh" \
+    "${api_image}" "${worker_image}" >/dev/null 2>&1; then
+    fail "Container App verifier accepted API without OAUTH_STATE_SECRET"
+  fi
+  pass
+
+  jq '.properties.template.containers[0].env |= map(select(.name != "OAUTH_STATE_SECRET"))' \
+    "${harness}/worker.json" >"${harness}/worker-missing-oauth-state-secret.json"
+  if env PATH="${harness}/bin:${PATH}" \
+    API_JSON_FILE="${harness}/api.json" \
+    WORKER_JSON_FILE="${harness}/worker-missing-oauth-state-secret.json" \
+    API_REVISION_FILE="${harness}/api-revision.json" WORKER_REVISION_FILE="${harness}/worker-revision.json" \
+    "${harness}/scripts/verify-containerapp-release-config.sh" \
+    "${api_image}" "${worker_image}" >/dev/null 2>&1; then
+    fail "Container App verifier accepted worker without OAUTH_STATE_SECRET"
+  fi
   pass
 
   pin_copy="${harness}/production-clerk-auth.saved"

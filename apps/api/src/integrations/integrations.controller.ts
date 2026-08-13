@@ -9,18 +9,20 @@ import {
   Res,
   Logger,
   UseGuards,
+  ForbiddenException,
 } from "@nestjs/common";
 import { Response } from "express";
 import { IntegrationsService } from "./integrations.service";
 import { GmailService } from "./gmail/gmail.service";
-import { OrgId } from "../common/org-context.decorator";
+import { ClerkUserId, OrgId } from "../common/org-context.decorator";
 import { SkipOrgGuard } from "../common/org-scope.guard";
-import { verifyOAuthState } from "../common/webhook-signature.util";
 import {
   CreateIntegrationDto,
   ConnectIntegrationDto,
+  FinalizeGmailOAuthDto,
 } from "../common/dto/integrations.dto";
 import { AdminOrManagerGuard } from "../common/admin-or-manager.guard";
+import { OAuthAttemptService } from "./oauth-attempt.service";
 
 @Controller("integrations")
 export class IntegrationsController {
@@ -29,6 +31,7 @@ export class IntegrationsController {
   constructor(
     private readonly integrationsService: IntegrationsService,
     private readonly gmailService: GmailService,
+    private readonly oauthAttempts: OAuthAttemptService,
   ) {}
 
   @Get()
@@ -64,33 +67,50 @@ export class IntegrationsController {
 
   @Get("gmail/auth-url")
   @UseGuards(AdminOrManagerGuard)
-  gmailAuthUrl(@OrgId() orgId: string) {
-    return { authUrl: this.integrationsService.getOAuthUrl("gmail", orgId) };
+  async gmailAuthUrl(
+    @OrgId() orgId: string,
+    @ClerkUserId() clerkUserId: string | undefined,
+  ) {
+    if (!clerkUserId) {
+      throw new ForbiddenException("A Clerk user is required for Gmail OAuth");
+    }
+    const attempt = await this.oauthAttempts.start({
+      orgId,
+      clerkUserId,
+      provider: "gmail",
+    });
+    return {
+      authUrl: this.integrationsService.getOAuthUrl("gmail", attempt.state),
+    };
   }
 
   @Get("outlook/auth-url")
   @UseGuards(AdminOrManagerGuard)
   outlookAuthUrl(@OrgId() orgId: string) {
-    return { authUrl: this.integrationsService.getOAuthUrl("outlook", orgId) };
+    void orgId;
+    return { authUrl: this.integrationsService.getOAuthUrl("outlook", "") };
   }
 
   @Get("hubspot/auth-url")
   @UseGuards(AdminOrManagerGuard)
   hubspotAuthUrl(@OrgId() orgId: string) {
-    return { authUrl: this.integrationsService.getOAuthUrl("hubspot", orgId) };
+    void orgId;
+    return { authUrl: this.integrationsService.getOAuthUrl("hubspot", "") };
   }
 
-  // ── OAuth callbacks: no JWT (browser redirect from provider), but the
-  //    `state` parameter is HMAC-signed so the orgId can be trusted.
+  // ── OAuth callbacks: no JWT (browser redirect from provider). A callback
+  //    can only park an encrypted code against an opaque, actor-bound attempt.
+  //    It cannot read or mutate Integration rows.
 
   @Get("gmail/callback")
   @SkipOrgGuard()
   gmailCallback(
     @Query("code") code: string,
     @Query("state") state: string,
+    @Query("error") error: string | undefined,
     @Res() res: Response,
   ) {
-    return this.handleProviderCallback("gmail", code, state, res);
+    return this.handleProviderCallback("gmail", code, state, error, res);
   }
 
   @Get("outlook/callback")
@@ -98,9 +118,10 @@ export class IntegrationsController {
   outlookCallback(
     @Query("code") code: string,
     @Query("state") state: string,
+    @Query("error") error: string | undefined,
     @Res() res: Response,
   ) {
-    return this.handleProviderCallback("outlook", code, state, res);
+    return this.handleProviderCallback("outlook", code, state, error, res);
   }
 
   @Get("hubspot/callback")
@@ -108,9 +129,33 @@ export class IntegrationsController {
   hubspotCallback(
     @Query("code") code: string,
     @Query("state") state: string,
+    @Query("error") error: string | undefined,
     @Res() res: Response,
   ) {
-    return this.handleProviderCallback("hubspot", code, state, res);
+    return this.handleProviderCallback("hubspot", code, state, error, res);
+  }
+
+  @Post("gmail/finalize")
+  @UseGuards(AdminOrManagerGuard)
+  async finalizeGmail(
+    @OrgId() orgId: string,
+    @ClerkUserId() clerkUserId: string | undefined,
+    @Body() body: FinalizeGmailOAuthDto,
+  ) {
+    if (!clerkUserId) {
+      throw new ForbiddenException("A Clerk user is required for Gmail OAuth");
+    }
+    const code = await this.oauthAttempts.consumeAuthorizationCode({
+      attemptId: body.attemptId,
+      orgId,
+      clerkUserId,
+      provider: "gmail",
+    });
+
+    // The one-time attempt is consumed before provider or Integration work.
+    // A retry can never invoke canonical Gmail activation a second time.
+    await this.gmailService.handleCallback(code, orgId);
+    return this.integrationsService.findByProvider(orgId, "gmail");
   }
 
   @Get(":id/health")
@@ -164,47 +209,49 @@ export class IntegrationsController {
     provider: string,
     code: string,
     state: string,
+    error: string | undefined,
     res: Response,
   ) {
-    const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3000";
-    const returnPath = "/dashboard/integrations";
-    let orgId: string;
-    try {
-      ({ orgId } = verifyOAuthState(state));
-    } catch (err) {
-      this.logger.warn(
-        `OAuth state verification failed for ${provider}: ${
-          err instanceof Error ? err.message : "unknown"
-        }`,
-      );
+    const frontendUrl =
+      process.env.FRONTEND_URL?.trim() || "http://localhost:3000";
+    const returnPath = "/settings/integrations";
+    if (provider !== "gmail") {
       return res.redirect(
-        `${frontendUrl}${returnPath}?error=${provider}_state`,
+        `${frontendUrl}${returnPath}?error=${encodeURIComponent(
+          `${provider}_unavailable`,
+        )}&provider=${encodeURIComponent(provider)}`,
+      );
+    }
+    if (error) {
+      return res.redirect(
+        `${frontendUrl}${returnPath}?error=${encodeURIComponent(
+          `${provider}_denied`,
+        )}&provider=${encodeURIComponent(provider)}`,
       );
     }
 
     try {
-      // Gmail owns extra callback invariants that the provider-neutral token
-      // exchange cannot establish: resolving the authenticated mailbox and
-      // registering users.watch so replies and DSNs can be routed back to the
-      // correct tenant. GmailModule exports GmailService, so the controller can
-      // delegate directly without making either service depend on the other.
-      if (provider === "gmail") {
-        await this.gmailService.handleCallback(code, orgId);
-      } else {
-        await this.integrationsService.handleOAuthCallback(
-          provider,
-          code,
-          orgId,
-        );
-      }
-      return res.redirect(`${frontendUrl}${returnPath}?connected=${provider}`);
+      const parked = await this.oauthAttempts.parkAuthorizationCode({
+        state,
+        expectedProvider: provider,
+        code,
+      });
+      return res.redirect(
+        `${frontendUrl}${returnPath}?oauth_attempt=${encodeURIComponent(
+          parked.attemptId,
+        )}&provider=${encodeURIComponent(parked.provider)}`,
+      );
     } catch (err) {
       this.logger.warn(
         `OAuth callback failed for ${provider}: ${
           err instanceof Error ? err.message : "unknown"
         }`,
       );
-      return res.redirect(`${frontendUrl}${returnPath}?error=${provider}`);
+      return res.redirect(
+        `${frontendUrl}${returnPath}?error=${encodeURIComponent(
+          `${provider}_oauth`,
+        )}&provider=${encodeURIComponent(provider)}`,
+      );
     }
   }
 }

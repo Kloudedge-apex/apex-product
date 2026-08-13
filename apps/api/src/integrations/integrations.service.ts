@@ -7,7 +7,6 @@ import {
 import { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { encryptCredentials, decryptCredentials } from "./crypto.util";
-import { signOAuthState } from "../common/webhook-signature.util";
 import { fetchWithRetry, withCircuitBreaker } from "../common/http-retry.util";
 import { gmailWatchFreshnessFloor } from "./gmail/gmail-watch-freshness";
 
@@ -104,6 +103,16 @@ export class IntegrationsService {
   async findOne(id: string, orgId: string) {
     const integration = await this.prisma.integration.findFirst({
       where: { id, orgId, provider: "gmail" },
+      select: PUBLIC_INTEGRATION_SELECT,
+    });
+    if (!integration) throw new NotFoundException("Integration not found");
+    return integration;
+  }
+
+  async findByProvider(orgId: string, provider: string) {
+    this.assertGmailProvider(provider);
+    const integration = await this.prisma.integration.findFirst({
+      where: { orgId, provider: "gmail" },
       select: PUBLIC_INTEGRATION_SELECT,
     });
     if (!integration) throw new NotFoundException("Integration not found");
@@ -471,15 +480,13 @@ export class IntegrationsService {
     }
   }
 
-  /** Returns a provider's OAuth consent URL with a signed `state`. */
-  getOAuthUrl(provider: string, orgId: string): string {
+  /** Returns a provider's OAuth consent URL with a server-issued opaque state. */
+  getOAuthUrl(provider: string, state: string): string {
     this.assertGmailProvider(provider);
     const config = OAUTH_CONFIGS[provider];
     if (!config) {
       throw new NotFoundException(`OAuth not supported for provider: ${provider}`);
     }
-
-    const state = signOAuthState(orgId);
 
     if (!config.clientId) {
       // Mock flow for environments without real OAuth credentials.

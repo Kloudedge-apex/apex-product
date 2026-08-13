@@ -21,6 +21,7 @@ import { SkipOrgGuard } from "../common/org-scope.guard";
 import { CreateOrgDto, UpdateOrgDto } from "../common/dto/orgs.dto";
 import { verifyClerkToken } from "../common/jwt.util";
 import {
+  ADMIN_OR_MANAGER_ROLES,
   findAuthorizedOrgUser,
   OWNER_ONLY_ROLES,
   OWNER_OR_ADMIN_ROLES,
@@ -86,6 +87,57 @@ export class OrgsController {
       clerkOrgId,
       clerkOrgRole,
     });
+  }
+
+  /**
+   * Returns the server-authoritative UI capabilities for the active tenant.
+   * These booleans deliberately mirror the role gates on the corresponding
+   * write routes, including the signed Clerk-role veto for stale privilege.
+   */
+  @Get("me/capabilities")
+  async getCapabilities(
+    @OrgId() orgId: string,
+    @Req() req: Request,
+  ): Promise<{
+    canReviewArtifacts: boolean;
+    canManageMailbox: boolean;
+    canManageOrg: boolean;
+    canManageSuppressions: boolean;
+  }> {
+    const clerkUserId = readClerkUserId(req);
+    if (!clerkUserId) {
+      throw new UnauthorizedException("Missing authenticated user context");
+    }
+
+    const clerkOrgRole = readSignedClerkOrgRole(req);
+    const ownerOrAdmin = await findAuthorizedOrgUser(this.prisma, {
+      clerkUserId,
+      orgId,
+      clerkOrgRole,
+      allowedRoles: OWNER_OR_ADMIN_ROLES,
+    });
+    if (ownerOrAdmin) {
+      return {
+        canReviewArtifacts: true,
+        canManageMailbox: true,
+        canManageOrg: true,
+        canManageSuppressions: true,
+      };
+    }
+
+    const adminOrManager = await findAuthorizedOrgUser(this.prisma, {
+      clerkUserId,
+      orgId,
+      clerkOrgRole,
+      allowedRoles: ADMIN_OR_MANAGER_ROLES,
+    });
+    const canAdministerWork = adminOrManager !== null;
+    return {
+      canReviewArtifacts: canAdministerWork,
+      canManageMailbox: canAdministerWork,
+      canManageOrg: false,
+      canManageSuppressions: false,
+    };
   }
 
   /**

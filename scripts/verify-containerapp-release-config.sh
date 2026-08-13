@@ -263,6 +263,29 @@ for ENV_NAME in "${SHARED_NON_SECRET_ENV_NAMES[@]}"; do
   require_env_value_parity "${ENV_NAME}"
 done
 
+FRONTEND_URL_VALUE="$(env_value "${API_JSON}" FRONTEND_URL)"
+if [[ ! "${FRONTEND_URL_VALUE}" =~ ^https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?$ ]]; then
+  echo "ERROR: FRONTEND_URL is not a canonical public HTTPS origin" >&2
+  exit 1
+fi
+FRONTEND_AUTHORITY="${FRONTEND_URL_VALUE#https://}"
+FRONTEND_HOST="${FRONTEND_AUTHORITY%%:*}"
+FRONTEND_HOST_LOWER="$(printf '%s' "${FRONTEND_HOST}" | tr '[:upper:]' '[:lower:]')"
+case "${FRONTEND_HOST_LOWER}" in
+  localhost|*.localhost|*.arpa|*.corp|*.example|*.home|*.internal|*.invalid|*.lan|*.local|*.onion|*.test)
+    echo "ERROR: FRONTEND_URL is not public" >&2
+    exit 1
+    ;;
+esac
+if [[ "${FRONTEND_HOST_LOWER}" =~ ^[0-9]+(\.[0-9]+){3}$ ]]; then
+  echo "ERROR: FRONTEND_URL must use a public DNS hostname, not an IP address" >&2
+  exit 1
+fi
+if [[ "${FRONTEND_HOST_LOWER}" != *.* ]]; then
+  echo "ERROR: FRONTEND_URL host is not a fully qualified public DNS name" >&2
+  exit 1
+fi
+
 for DISABLED_ENV in OUTREACH_ALLOW_WILDCARD ALLOW_DEV_ORG_HEADER ENCRYPTION_KEY_DEV_FALLBACK; do
   require_unset_or_false \
     "$(env_value "${API_JSON}" "${DISABLED_ENV}")" \
@@ -383,6 +406,10 @@ require_value \
   "${WORKER_CLERK_AUTH_SHA256}" \
   "${PINNED_CLERK_AUTH_SHA256}" \
   "worker Clerk auth trust tuple"
+require_value \
+  "${FRONTEND_URL_VALUE}" \
+  "${API_CLERK_PARTIES}" \
+  "FRONTEND_URL and sole pinned Clerk browser party"
 
 API_TIMEOUT="$(env_value "${API_JSON}" HEALTH_CHECK_TIMEOUT_MS)"
 WORKER_TIMEOUT="$(env_value "${WORKER_JSON}" HEALTH_CHECK_TIMEOUT_MS)"
@@ -403,6 +430,7 @@ REQUIRED_SHARED_SECRET_ENV_NAMES=(
   ADMIN_API_KEY
   GOOGLE_CLIENT_SECRET
   METRICS_AUTH_TOKEN
+  OAUTH_STATE_SECRET
 )
 for SECRET_NAME in "${REQUIRED_SHARED_SECRET_ENV_NAMES[@]}"; do
   require_secret_ref_name_parity "${SECRET_NAME}" "true"
@@ -427,7 +455,6 @@ fi
 # one, both must wire it through the same secretRef name. This also rejects an
 # inline value without ever reading or printing the backing secret.
 OPTIONAL_SHARED_SECRET_ENV_NAMES=(
-  OAUTH_STATE_SECRET
   UNSUBSCRIBE_HMAC_SECRET
   MICROSOFT_CLIENT_SECRET
   HUBSPOT_CLIENT_SECRET

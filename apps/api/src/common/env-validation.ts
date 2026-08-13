@@ -1,4 +1,5 @@
 import * as crypto from "crypto";
+import { isIP } from "node:net";
 import { Logger } from "@nestjs/common";
 import { isWorkerEnabled } from "../runtime/worker.service";
 import { resolveApiPublicOrigin } from "../outreach/unsubscribe-token.util";
@@ -100,6 +101,7 @@ export function validateEnv(
     }
 
     validateProductionGmailConfiguration(env, apiPublicOrigin, issues);
+    validateProductionOAuthConfiguration(env, issues);
 
     // The remaining required credentials are needed by both the api and the
     // worker. Anything role-specific remains warned-not-thrown so a partial
@@ -147,6 +149,94 @@ export function validateEnv(
   }
 
   return { issues, encryptionKeyFingerprint };
+}
+
+function validateProductionOAuthConfiguration(
+  env: NodeJS.ProcessEnv,
+  issues: string[],
+): void {
+  const stateSecret = env.OAUTH_STATE_SECRET;
+  if (!stateSecret?.trim()) {
+    issues.push("OAUTH_STATE_SECRET is required when NODE_ENV=production");
+  } else if (stateSecret !== stateSecret.trim() || stateSecret.length < 32) {
+    issues.push(
+      "OAUTH_STATE_SECRET must be at least 32 characters with no surrounding whitespace in production",
+    );
+  }
+
+  const frontendUrl = env.FRONTEND_URL?.trim();
+  if (!frontendUrl) {
+    issues.push("FRONTEND_URL is required when NODE_ENV=production");
+    return;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(frontendUrl);
+  } catch {
+    issues.push("FRONTEND_URL must be a valid absolute URL");
+    return;
+  }
+
+  if (parsed.protocol !== "https:") {
+    issues.push("FRONTEND_URL must use https in production");
+  }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    issues.push(
+      "FRONTEND_URL must not contain credentials, a query, or a fragment",
+    );
+  }
+  if (parsed.pathname !== "/") {
+    issues.push("FRONTEND_URL path must be empty");
+  }
+  if (frontendUrl !== parsed.origin) {
+    issues.push(
+      "FRONTEND_URL must be a canonical origin without a trailing slash",
+    );
+  }
+  if (isNonPublicHostname(parsed.hostname)) {
+    issues.push("FRONTEND_URL must use a public DNS hostname in production");
+  }
+}
+
+function isNonPublicHostname(hostname: string): boolean {
+  const normalized = hostname
+    .toLowerCase()
+    .replace(/\.$/, "")
+    .replace(/^\[|\]$/g, "");
+  if (!normalized || isIP(normalized) !== 0 || !normalized.includes(".")) {
+    return true;
+  }
+
+  const reservedSuffixes = [
+    "arpa",
+    "corp",
+    "example",
+    "home",
+    "internal",
+    "invalid",
+    "lan",
+    "local",
+    "localhost",
+    "onion",
+    "test",
+  ];
+  if (
+    reservedSuffixes.some(
+      (suffix) =>
+        normalized === suffix || normalized.endsWith(`.${suffix}`),
+    )
+  ) {
+    return true;
+  }
+
+  if (normalized.length > 253) return true;
+  return normalized.split(".").some(
+    (label) =>
+      label.length === 0 ||
+      label.length > 63 ||
+      !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label),
+  );
 }
 
 function validateProductionGmailConfiguration(

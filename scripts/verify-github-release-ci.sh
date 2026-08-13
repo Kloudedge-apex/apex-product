@@ -71,6 +71,7 @@ fi
 for REQUIRED_JOB in \
   "API Tests (blocking)" \
   "Lint, Type Check & Build" \
+  "Migration Rehearsal (blocking)" \
   "Production Image Contract"; do
   if ! jq -e --arg job "${REQUIRED_JOB}" '
     [ .jobs[] | select(.name == $job and .status == "completed" and .conclusion == "success") ]
