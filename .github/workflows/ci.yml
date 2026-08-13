@@ -4,8 +4,8 @@
 # its external GitHub environment, OIDC federation, RBAC, signer pin, and
 # migration evidence are provisioned. This CI workflow does NOT deploy: it
 # blocks the ship path by requiring pushes to master and release/**, and PRs
-# targeting either, to pass lint/type-check/build, the API test suite, and the
-# hermetic synthetic migration rehearsal.
+# targeting either, to pass lint/type-check/build, the API test suite, the
+# hermetic synthetic migration rehearsal, and an exact-image API/worker boot.
 
 name: CI
 
@@ -123,6 +123,15 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
+      redis:
+        image: redis:7.4.6-alpine@sha256:3b73847e72874be07e6657b129a94761662b79bc0f679273757d4218573b2a98
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
 
     steps:
       - name: Checkout complete candidate history
@@ -168,6 +177,32 @@ jobs:
           "${RUNNER_TEMP}/ci-migration-rehearsal-receipt.json"
           "${{ github.sha }}"
 
+      - name: Build exact production runtime candidate
+        env:
+          IMAGE: workforce-os-api:runtime-ci-${{ github.sha }}
+        run: >-
+          docker build
+          --build-arg VCS_REF=${{ github.sha }}
+          --file apps/api/Dockerfile
+          --tag "${IMAGE}"
+          .
+
+      - name: Rehearse API and worker production runtime
+        env:
+          DATABASE_URL: postgresql://workforce_rehearsal:synthetic_ci_only@127.0.0.1:5432/workforce_rehearsal_ci
+          REDIS_URL: redis://127.0.0.1:6379/15
+          IMAGE: workforce-os-api:runtime-ci-${{ github.sha }}
+          WORKFORCE_RUNTIME_REHEARSAL_ACK: ci-synthetic-only
+        run: >-
+          bash scripts/rehearse-runtime-candidate.sh
+          "${IMAGE}"
+          "${{ github.sha }}"
+          "${RUNNER_TEMP}/ci-migration-rehearsal-receipt.json"
+          "${RUNNER_TEMP}/ci-runtime-rehearsal-receipt.json"
+
+      - name: Run production runtime rehearsal adversary tests
+        run: bash scripts/tests/runtime-rehearsal.test.sh "${{ github.sha }}"
+
       - name: Run migration rehearsal adversary tests
         env:
           MIGRATION_REHEARSAL_DATABASE_ADMIN_URL: postgresql://workforce_rehearsal:synthetic_ci_only@127.0.0.1:5432/postgres
@@ -182,6 +217,14 @@ jobs:
         with:
           name: ci-migration-rehearsal-${{ github.sha }}
           path: ${{ runner.temp }}/ci-migration-rehearsal-receipt.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload sanitized non-authoritative runtime receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-runtime-rehearsal-${{ github.sha }}
+          path: ${{ runner.temp }}/ci-runtime-rehearsal-receipt.json
           if-no-files-found: error
           retention-days: 14
 
