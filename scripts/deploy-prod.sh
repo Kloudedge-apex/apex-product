@@ -382,6 +382,7 @@ require_snapshot_regular_file "scripts/verify-migration-release-receipt.sh" true
 require_snapshot_regular_file "scripts/verify-registry-api-image.sh" true
 require_snapshot_regular_file "scripts/verify-api-image.sh" true
 require_snapshot_regular_file "scripts/verify-containerapp-release-config.sh" true
+require_snapshot_regular_file "docs/ops/production-clerk-auth.sha256" false
 
 release_git_command() {
   require_snapshot_regular_file "scripts/run-release-git.sh" true || return 1

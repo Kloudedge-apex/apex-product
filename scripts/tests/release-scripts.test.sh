@@ -162,9 +162,12 @@ make_deploy_harness() {
   HARNESS="$(cd "${HARNESS}" && pwd -P)"
   TEMP_DIRS+=("${HARNESS}")
   mkdir -p "${HARNESS}/bin" "${HARNESS}/repo/scripts" \
+    "${HARNESS}/repo/docs/ops" \
     "${HARNESS}/repo/.git/objects"
   cp "${REPO_ROOT}/scripts/deploy-prod.sh" "${HARNESS}/repo/scripts/"
   cp "${REPO_ROOT}/scripts/run-release-git.sh" "${HARNESS}/repo/scripts/"
+  cp "${REPO_ROOT}/docs/ops/production-clerk-auth.sha256" \
+    "${HARNESS}/repo/docs/ops/"
 
   cat >"${HARNESS}/repo/scripts/verify-registry-api-image.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -233,7 +236,7 @@ while [[ "${1:-}" == "-c" &&
   shift 2
 done
 if [[ "$*" == *" archive --format=tar ${FAKE_COMMIT}"* ]]; then
-  tar -C "${FAKE_REPO_ROOT}" -cf - scripts
+  tar -C "${FAKE_REPO_ROOT}" -cf - scripts docs/ops
   exit 0
 fi
 if [[ "$*" == *" init --bare --template="* ]]; then
@@ -1117,7 +1120,7 @@ test_bootstrap_archive_attribute_isolation() {
   local harness candidate_commit hostile_attr_commit output_file
   harness="$(mktemp -d)"
   TEMP_DIRS+=("${harness}")
-  mkdir -p "${harness}/repo/scripts"
+  mkdir -p "${harness}/repo/scripts" "${harness}/repo/docs/ops"
   cp "${REPO_ROOT}/scripts/deploy-prod.sh" \
     "${REPO_ROOT}/scripts/run-release-git.sh" \
     "${REPO_ROOT}/scripts/verify-github-release-ci.sh" \
@@ -1126,6 +1129,8 @@ test_bootstrap_archive_attribute_isolation() {
     "${REPO_ROOT}/scripts/verify-api-image.sh" \
     "${REPO_ROOT}/scripts/verify-containerapp-release-config.sh" \
     "${harness}/repo/scripts/"
+  cp "${REPO_ROOT}/docs/ops/production-clerk-auth.sha256" \
+    "${harness}/repo/docs/ops/"
   chmod +x \
     "${harness}/repo/scripts/deploy-prod.sh" \
     "${harness}/repo/scripts/verify-github-release-ci.sh" \
@@ -1137,7 +1142,7 @@ test_bootstrap_archive_attribute_isolation() {
   git -C "${harness}/repo" config user.name "Release Test"
   git -C "${harness}/repo" config user.email "release-test@example.invalid"
   git -C "${harness}/repo" checkout -q -b attribute-test
-  git -C "${harness}/repo" add scripts
+  git -C "${harness}/repo" add scripts docs/ops
   git -C "${harness}/repo" commit -q -m "candidate"
   candidate_commit="$(git -C "${harness}/repo" rev-parse HEAD)"
 
@@ -1560,6 +1565,10 @@ write_containerapp_fixture() {
               {name: "API_PUBLIC_URL", value: "https://api.workforceos.xyz"},
               {name: "OUTREACH_LIVE_FOR_ORGS", value: "org-owned-smoke"},
               {name: "OUTREACH_ALLOW_WILDCARD", value: "false"},
+              {name: "CLERK_JWKS_URL", value: "https://clerk.workforceos.xyz/.well-known/jwks.json"},
+              {name: "CLERK_ISSUER", value: "https://clerk.workforceos.xyz"},
+              {name: "CLERK_DOMAIN", value: ""},
+              {name: "CLERK_AUDIENCE", value: ""},
               {name: "CLERK_AUTHORIZED_PARTIES", value: "https://workforceos.xyz"},
               {name: "GOOGLE_CLIENT_ID", value: "gmail-client-id.apps.googleusercontent.com"},
               {name: "GOOGLE_REDIRECT_URI", value: "https://api.workforceos.xyz/api/integrations/gmail/callback"},
@@ -1590,11 +1599,25 @@ write_containerapp_fixture() {
 }
 
 test_containerapp_config_verifier() {
-  local harness api_image worker_image
+  local harness api_image worker_image pin_path pin_copy test_vector
   harness="$(mktemp -d)"
   TEMP_DIRS+=("${harness}")
-  mkdir -p "${harness}/bin" "${harness}/scripts"
+  mkdir -p "${harness}/bin" "${harness}/scripts" "${harness}/docs/ops"
   cp "${REPO_ROOT}/scripts/verify-containerapp-release-config.sh" "${harness}/scripts/"
+  cp "${REPO_ROOT}/docs/ops/production-clerk-auth.sha256" "${harness}/docs/ops/"
+  pin_path="${harness}/docs/ops/production-clerk-auth.sha256"
+  test_vector="$({
+    printf '%s\0' 'workforce-os-clerk-auth.v1'
+    printf '%s\0' \
+      'CLERK_JWKS_URL=https://clerk.workforceos.xyz/.well-known/jwks.json' \
+      'CLERK_ISSUER=https://clerk.workforceos.xyz' \
+      'CLERK_DOMAIN=' \
+      'CLERK_AUDIENCE=' \
+      'CLERK_AUTHORIZED_PARTIES=https://workforceos.xyz'
+  } | openssl dgst -sha256 -r | awk '{ print $1 }')"
+  [[ "${test_vector}" == "5eddc3f498e16df540776fa025bef86f741fae6815abfb9dd80652026b8956ad" ]] ||
+    fail "Clerk auth trust-tuple test vector drifted"
+  pass
   api_image="ledgracr.azurecr.io/apex-api@sha256:$(printf '7%.0s' {1..64})"
   worker_image="ledgracr.azurecr.io/apex-api@sha256:$(printf '8%.0s' {1..64})"
   write_containerapp_fixture "${harness}/api.json" api "${api_image}" "api--1"
@@ -1636,6 +1659,59 @@ EOF
     "${harness}/scripts/verify-containerapp-release-config.sh" \
     "${api_image}" "${worker_image}" >/dev/null
   pass
+
+  pin_copy="${harness}/production-clerk-auth.saved"
+  cp "${pin_path}" "${pin_copy}"
+  printf '%s\n' UNCONFIGURED >"${pin_path}"
+  if env PATH="${harness}/bin:${PATH}" \
+    API_JSON_FILE="${harness}/api.json" WORKER_JSON_FILE="${harness}/worker.json" \
+    API_REVISION_FILE="${harness}/api-revision.json" \
+    WORKER_REVISION_FILE="${harness}/worker-revision.json" \
+    "${harness}/scripts/verify-containerapp-release-config.sh" \
+    "${api_image}" "${worker_image}" >/dev/null 2>&1; then
+    fail "Container App verifier accepted an unconfigured Clerk auth pin"
+  fi
+  cp "${pin_copy}" "${pin_path}"
+  pass
+
+  rm -f -- "${pin_path}"
+  ln -s "${pin_copy}" "${pin_path}"
+  if env PATH="${harness}/bin:${PATH}" \
+    API_JSON_FILE="${harness}/api.json" WORKER_JSON_FILE="${harness}/worker.json" \
+    API_REVISION_FILE="${harness}/api-revision.json" \
+    WORKER_REVISION_FILE="${harness}/worker-revision.json" \
+    "${harness}/scripts/verify-containerapp-release-config.sh" \
+    "${api_image}" "${worker_image}" >/dev/null 2>&1; then
+    fail "Container App verifier accepted a symlinked Clerk auth pin"
+  fi
+  rm -f -- "${pin_path}"
+  cp "${pin_copy}" "${pin_path}"
+  pass
+
+  while IFS='|' read -r clerk_name clerk_value; do
+    jq --arg name "${clerk_name}" --arg value "${clerk_value}" \
+      '(.properties.template.containers[0].env[] | select(.name == $name).value) = $value' \
+      "${harness}/api.json" >"${harness}/api-clerk-drift.json"
+    jq --arg name "${clerk_name}" --arg value "${clerk_value}" \
+      '(.properties.template.containers[0].env[] | select(.name == $name).value) = $value' \
+      "${harness}/worker.json" >"${harness}/worker-clerk-drift.json"
+    if env PATH="${harness}/bin:${PATH}" \
+      API_JSON_FILE="${harness}/api-clerk-drift.json" \
+      WORKER_JSON_FILE="${harness}/worker-clerk-drift.json" \
+      API_REVISION_FILE="${harness}/api-revision.json" \
+      WORKER_REVISION_FILE="${harness}/worker-revision.json" \
+      "${harness}/scripts/verify-containerapp-release-config.sh" \
+      "${api_image}" "${worker_image}" >/dev/null 2>&1; then
+      fail "Container App verifier accepted coordinated ${clerk_name} trust drift"
+    fi
+    pass
+  done <<'EOF'
+CLERK_JWKS_URL|https://attacker.example/.well-known/jwks.json
+CLERK_ISSUER|https://attacker.example
+CLERK_DOMAIN|attacker.example
+CLERK_AUDIENCE|unexpected-audience
+CLERK_AUTHORIZED_PARTIES|https://attacker.example
+EOF
 
   jq '(.properties.template.containers[0].env[] | select(.name == "GOOGLE_REDIRECT_URI").value) = "https://wrong.example/api/integrations/gmail/callback"' \
     "${harness}/api.json" >"${harness}/api-wrong-google-redirect.json"

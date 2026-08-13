@@ -22,12 +22,30 @@ if [[ -n "${EXPECTED_API_IMAGE}" || -n "${EXPECTED_WORKER_IMAGE}" ]]; then
   fi
 fi
 
-for REQUIRED_COMMAND in az jq; do
+for REQUIRED_COMMAND in az jq openssl realpath; do
   if ! command -v "${REQUIRED_COMMAND}" >/dev/null 2>&1; then
     echo "ERROR: required command is unavailable: ${REQUIRED_COMMAND}" >&2
     exit 1
   fi
 done
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
+CLERK_AUTH_PIN_PATH="docs/ops/production-clerk-auth.sha256"
+CLERK_AUTH_PIN_ABS="${REPO_ROOT}/${CLERK_AUTH_PIN_PATH}"
+CLERK_AUTH_PIN_REAL="$(realpath "${CLERK_AUTH_PIN_ABS}" 2>/dev/null || true)"
+if [[ ! -f "${CLERK_AUTH_PIN_ABS}" ||
+  -L "${CLERK_AUTH_PIN_ABS}" ||
+  "${CLERK_AUTH_PIN_REAL}" != "${CLERK_AUTH_PIN_ABS}" ]]; then
+  echo "ERROR: reviewed production Clerk auth pin is missing or unsafe" >&2
+  exit 1
+fi
+PINNED_CLERK_AUTH_SHA256="$(awk '!/^[[:space:]]*#/ && NF { print }' \
+  "${CLERK_AUTH_PIN_ABS}")"
+if [[ ! "${PINNED_CLERK_AUTH_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "ERROR: production Clerk auth tuple is not configured in reviewed source" >&2
+  exit 1
+fi
 
 API_JSON="$(az containerapp show --name "${API_APP}" --resource-group "${RESOURCE_GROUP}" --output json)"
 WORKER_JSON="$(az containerapp show --name "${WORKER_APP}" --resource-group "${RESOURCE_GROUP}" --output json)"
@@ -48,6 +66,23 @@ env_value() {
       else error("missing, duplicate, or secret-backed value")
       end
   ' <<<"${json}"
+}
+
+clerk_auth_tuple_sha256() {
+  local json=$1
+  local name value
+  {
+    printf '%s\0' 'workforce-os-clerk-auth.v1'
+    for name in \
+      CLERK_JWKS_URL \
+      CLERK_ISSUER \
+      CLERK_DOMAIN \
+      CLERK_AUDIENCE \
+      CLERK_AUTHORIZED_PARTIES; do
+      value="$(env_value "${json}" "${name}")" || return 1
+      printf '%s=%s\0' "${name}" "${value}"
+    done
+  } | openssl dgst -sha256 -r | awk '{ print $1 }'
 }
 
 secret_ref() {
@@ -332,6 +367,22 @@ require_value \
   "$(env_value "${WORKER_JSON}" CLERK_AUTHORIZED_PARTIES)" \
   "${API_CLERK_PARTIES}" \
   "CLERK_AUTHORIZED_PARTIES parity"
+if ! API_CLERK_AUTH_SHA256="$(clerk_auth_tuple_sha256 "${API_JSON}")"; then
+  echo "ERROR: API Clerk auth tuple is missing, duplicate, or secret-backed" >&2
+  exit 1
+fi
+if ! WORKER_CLERK_AUTH_SHA256="$(clerk_auth_tuple_sha256 "${WORKER_JSON}")"; then
+  echo "ERROR: worker Clerk auth tuple is missing, duplicate, or secret-backed" >&2
+  exit 1
+fi
+require_value \
+  "${API_CLERK_AUTH_SHA256}" \
+  "${PINNED_CLERK_AUTH_SHA256}" \
+  "API Clerk auth trust tuple"
+require_value \
+  "${WORKER_CLERK_AUTH_SHA256}" \
+  "${PINNED_CLERK_AUTH_SHA256}" \
+  "worker Clerk auth trust tuple"
 
 API_TIMEOUT="$(env_value "${API_JSON}" HEALTH_CHECK_TIMEOUT_MS)"
 WORKER_TIMEOUT="$(env_value "${WORKER_JSON}" HEALTH_CHECK_TIMEOUT_MS)"

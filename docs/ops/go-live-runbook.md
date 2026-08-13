@@ -29,17 +29,23 @@ API_FQDN=$(az containerapp show -n apex-gtm-api -g Ledgr-prod \
 ### Authentication claim contract
 
 Before an API or console-BFF revision receives traffic, verify its non-secret
-Clerk claim configuration is present and consistent:
+Clerk claim configuration is present, consistent, and equal to the reviewed
+NUL-framed trust tuple pinned in `docs/ops/production-clerk-auth.sha256` in
+both canonical repositories:
 
-- `CLERK_ISSUER` is the exact trusted Clerk issuer origin. If omitted, the
-  verifier derives it from `CLERK_DOMAIN`, the publishable-key domain, or the
-  origin of `CLERK_JWKS_URL`.
+- `CLERK_JWKS_URL` is exactly
+  `https://clerk.workforceos.xyz/.well-known/jwks.json` and `CLERK_ISSUER` is
+  exactly `https://clerk.workforceos.xyz`. Clerk's public OpenID discovery
+  document must report that same pair.
+- `CLERK_DOMAIN` is empty so a domain fallback cannot silently replace the
+  reviewed issuer.
 - `CLERK_AUTHORIZED_PARTIES` is required in production on both the API and BFF.
-  It is a comma-separated list of exact browser origins accepted in the JWT
-  `azp` claim. Do not use wildcards, paths, or preview-domain patterns.
-- `CLERK_AUDIENCE` is optional. Configure it only after confirming that the
-  current Clerk session token carries that audience; setting an invented value
-  intentionally rejects every session.
+  Its exact value is `https://workforceos.xyz`, the sole canonical browser
+  application accepted in the JWT `azp` claim. Do not add the separate `www`
+  surface, wildcards, paths, or preview-domain patterns.
+- `CLERK_AUDIENCE` is empty. A later audience can be admitted only after
+  confirming the current Clerk session token carries it and reviewing the new
+  tuple pin in both repositories.
 - `DEV_TRUST_X_ORG_ID` must remain false on the BFF. The code also ignores it
   whenever `NODE_ENV=production`. `ALLOW_DEV_ORG_HEADER` remains non-production
   only on the API.
@@ -48,6 +54,40 @@ The verifiers require RS256, an exact JWKS `kid`, nonempty `sub`, `exp`, `iat`,
 the trusted issuer, an active `nbf` when present, and an authorized `azp` in
 production. A revision that cannot validate those claims rejects the request;
 it must not fall back to client-supplied tenant headers.
+
+The API/worker release verifier hashes the exact five runtime values, including
+empty fields, and compares both roles to the reviewed pin. API/worker parity
+alone is insufficient: coordinated drift to a different Clerk tenant must
+also fail. Missing and explicit-empty `CLERK_DOMAIN`/`CLERK_AUDIENCE` are
+equivalent because the runtime treats both as absent; every nonempty byte,
+authorized-party order, comma, and whitespace character is otherwise hashed
+exactly.
+
+### First-release Clerk configuration normalization
+
+The legacy Container Apps do not satisfy this tuple. Both release controllers
+verify the existing environment before they build an artifact or mutate an
+image, so the first release intentionally stops until a separately authorized
+provider configuration change has normalized all three roles.
+
+That change must use the future protected OIDC release authority, not a local
+user session, and must target the following non-secret values on
+`apex-gtm-api`, `apex-gtm-worker`, and `nikxius-web`:
+
+- `CLERK_JWKS_URL=https://clerk.workforceos.xyz/.well-known/jwks.json`
+- `CLERK_ISSUER=https://clerk.workforceos.xyz`
+- `CLERK_DOMAIN` absent or explicitly empty
+- `CLERK_AUDIENCE` absent or explicitly empty
+- `CLERK_AUTHORIZED_PARTIES=https://workforceos.xyz`
+
+Capture the prior revisions and sanitized non-secret configuration evidence,
+apply the API and worker values as one coordinated change, apply the same tuple
+to the console, and run both repository verifiers against the active immutable
+image digests before admitting a release. Restore the captured revisions if
+authentication smoke checks fail. Do not weaken or bypass the preflight to make
+the legacy configuration pass. Direct backend-verifier runs from a mutable
+checkout are diagnostic only; release evidence comes from the exact-commit
+private snapshot used by `scripts/deploy-prod.sh`.
 
 ---
 
