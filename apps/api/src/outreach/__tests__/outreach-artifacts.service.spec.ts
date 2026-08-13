@@ -52,6 +52,18 @@ function approvablePayload(overrides: Record<string, unknown> = {}) {
     to: "dest@example.com",
     subject: "Hi",
     body: "Body",
+    bodyContentType: "text",
+    personId: "person_1",
+    recipient_provenance: {
+      candidateId: "email_1",
+      email: "dest@example.com",
+      source: "PATTERN_GUESS",
+      verified: true,
+      verificationResult: "VALID",
+      confidence: 0.9,
+      verifiedAt: "2026-05-21T12:00:00.000Z",
+      selectionBasis: "VERIFIED_VALID",
+    },
     qaIssues: [],
     brief_facts: [
       {
@@ -110,6 +122,22 @@ function mockPrisma() {
       count: vi.fn(),
       update: vi.fn(),
     },
+    person: {
+      findFirst: vi.fn().mockResolvedValue({
+        emails: [
+          {
+            id: "email_1",
+            email: "dest@example.com",
+            source: "PATTERN_GUESS",
+            verified: true,
+            verificationResult: "VALID",
+            confidence: 0.9,
+            verifiedAt: new Date("2026-05-21T12:00:00.000Z"),
+            createdAt: new Date("2026-05-20T12:00:00.000Z"),
+          },
+        ],
+      }),
+    },
     $transaction: vi.fn(),
   };
   prisma.$transaction.mockImplementation(
@@ -124,6 +152,7 @@ function mockPrisma() {
       count: ReturnType<typeof vi.fn>;
       update: ReturnType<typeof vi.fn>;
     };
+    person: { findFirst: ReturnType<typeof vi.fn> };
     $transaction: ReturnType<typeof vi.fn>;
   };
 }
@@ -198,6 +227,27 @@ describe("OutreachArtifactsService.recordDryRun", () => {
     const callArg = prisma.outreachArtifact.create.mock.calls[0][0];
     expect(callArg.data.payload).toEqual({ weirdShape: { nested: true } });
     expect(callArg.data.subject).toBeNull();
+  });
+
+  it("does not reuse a same-recipient artifact for a different person", async () => {
+    prisma.outreachArtifact.findFirst.mockResolvedValue(artifactRow());
+
+    await expect(
+      service.recordDryRun({
+        orgId: "org_1",
+        graphRunId: "graph_1",
+        toolName: "send_email",
+        toolArgs: {
+          to: "dest@example.com",
+          subject: "Hi",
+          body: "Body",
+          personId: "person_2",
+        },
+      }),
+    ).rejects.toThrow(
+      "Recipient dest@example.com is already bound to a different person",
+    );
+    expect(prisma.outreachArtifact.create).not.toHaveBeenCalled();
   });
 });
 
@@ -326,6 +376,29 @@ describe("OutreachArtifactsService.approve / reject", () => {
 
     await expect(service.approve("org_1", "art_1", "user_x")).rejects.toThrow(
       "reviewed content does not match the send payload",
+    );
+    expect(prisma.outreachArtifact.update).not.toHaveBeenCalled();
+  });
+
+  it("refuses approval when the snapshotted recipient is no longer eligible", async () => {
+    prisma.outreachArtifact.findUnique.mockResolvedValue(artifactRow());
+    prisma.person.findFirst.mockResolvedValue({
+      emails: [
+        {
+          id: "email_1",
+          email: "dest@example.com",
+          source: "PATTERN_GUESS",
+          verified: false,
+          verificationResult: "INVALID",
+          confidence: 0.05,
+          verifiedAt: null,
+          createdAt: new Date("2026-05-20T12:00:00.000Z"),
+        },
+      ],
+    });
+
+    await expect(service.approve("org_1", "art_1", "user_x")).rejects.toThrow(
+      "exact recipient snapshot is no longer current and eligible",
     );
     expect(prisma.outreachArtifact.update).not.toHaveBeenCalled();
   });

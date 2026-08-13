@@ -16,7 +16,10 @@ import { PrismaService } from "../prisma/prisma.service";
 import { EvidenceLedgerService } from "../observability/evidence-ledger.service";
 import { LangSmithService } from "../observability/langsmith.service";
 import { OutreachSendQueueService } from "./outreach-send-queue.service";
-import { assertArtifactDispatchEligible } from "./outreach-artifact-eligibility";
+import {
+  assertArtifactDispatchEligible,
+  assertArtifactRecipientCurrent,
+} from "./outreach-artifact-eligibility";
 
 /** Dataset name for the regression set of rejected SDR drafts. */
 const BAD_SDR_DRAFTS_DATASET = "apex-bad-sdr-drafts";
@@ -111,6 +114,15 @@ export class OutreachArtifactsService {
         },
       });
       if (existing) {
+        const requestedPersonId = personIdFromPayload(input.toolArgs);
+        if (
+          requestedPersonId &&
+          personIdFromPayload(existing.payload) !== requestedPersonId
+        ) {
+          throw new ConflictException(
+            `Recipient ${recipientRef} is already bound to a different person in graph run ${input.graphRunId}`,
+          );
+        }
         this.logger.log(
           `OutreachArtifact already exists for graphRun=${input.graphRunId} recipient=${recipientRef} tool=${input.toolName}; returning existing id=${existing.id}`,
         );
@@ -343,6 +355,7 @@ export class OutreachArtifactsService {
         }
         if (decision === OutreachArtifactStatus.APPROVED) {
           assertArtifactDispatchEligible(artifact);
+          await assertArtifactRecipientCurrent(tx, artifact);
         }
 
         return tx.outreachArtifact.update({
@@ -415,4 +428,14 @@ function extractFromArgs(
     };
   }
   return { subject: null, bodyText: null, bodyHtml: null, recipientRef: null };
+}
+
+function personIdFromPayload(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+  const personId = (payload as Record<string, unknown>).personId;
+  return typeof personId === "string" && personId.trim().length > 0
+    ? personId.trim()
+    : null;
 }

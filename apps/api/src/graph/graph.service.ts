@@ -426,6 +426,42 @@ export class GraphService {
         return;
       }
 
+      const failedStages = Object.entries(result.stageStatuses ?? {})
+        .filter(([, status]) => status === "FAILED")
+        .map(([stage]) => stage)
+        .sort();
+      if (failedStages.length > 0) {
+        const failedOutreach = (result.outreachResults ?? []).filter(
+          (outcome) => outcome.status === "failed",
+        ).length;
+        const error = `pipeline_failed:${failedStages.join(",")}${
+          failedOutreach > 0 ? ` (outreach_failures=${failedOutreach})` : ""
+        }`;
+        const transition = await this.prisma.graphRun.updateMany({
+          where: {
+            id: runId,
+            status: GraphRunStatus.RUNNING,
+            dispatchGeneration,
+          },
+          data: {
+            status: GraphRunStatus.FAILED,
+            currentNode: null,
+            completedAt: new Date(),
+            error,
+            state: this.snapshotPublicState(result),
+          },
+        });
+        if (transition.count !== 1) {
+          this.logger.warn(
+            `Graph ${runId} dispatch ${dispatchGeneration} was superseded before failure transition`,
+          );
+          return;
+        }
+        this.logger.warn(`Graph ${runId} failed: ${error}`);
+        this.fireRunLevelEvaluator(runId);
+        return;
+      }
+
       // Graph ran to completion
       const transition = await this.prisma.graphRun.updateMany({
         where: {
@@ -569,16 +605,34 @@ export class GraphService {
 
   private snapshotPublicState(state: PipelineState): object {
     // Drop noisy fields; keep what the UI needs for the run dashboard.
+    // Count generated drafts independently of their current lifecycle status.
+    // A retry may find the same artifact after it was approved, rejected, sent,
+    // or suppressed; those are no longer "queued", but the draft still exists.
+    const outreachGenerated = new Set(
+      (state.outreachResults ?? [])
+        .map((outcome) => outcome.agentRunId)
+        .filter((artifactId): artifactId is string => !!artifactId),
+    ).size;
+    const outreachFailures = (state.outreachResults ?? [])
+      .filter((outcome) => outcome.status === "failed")
+      .map((outcome) => ({
+        personId: outcome.personId,
+        error: outcome.error ?? "unknown",
+      }));
+
     return {
       orgId: state.orgId,
       icpProfileIds: state.icpProfileIds,
       stagesCompleted: state.stagesCompleted,
+      stageStatuses: state.stageStatuses ?? {},
       counts: {
         companies: state.sourcedCompanies?.length ?? 0,
         people: state.enrichedPeople?.length ?? 0,
         scored: state.scoredLeads?.length ?? 0,
-        outreach: state.outreachResults?.length ?? 0,
+        outreach: outreachGenerated,
+        outreachFailed: outreachFailures.length,
       },
+      outreachFailures,
       approved: state.approved,
       approvedBy: state.approvedBy,
       messages: (state.messages ?? []).slice(-50),

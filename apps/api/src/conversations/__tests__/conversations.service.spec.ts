@@ -496,7 +496,8 @@ describe("ConversationsService", () => {
           payload: {
             to: "buyer@example.com",
             subject: "Re: Pilot discussion",
-            body: "<p>Thanks &lt;team&gt;.</p>\n<p>Tuesday works for us.</p>",
+            body: "Thanks <team>.\n\nTuesday works for us.",
+            bodyContentType: "text",
             provider: "gmail",
             threadId: "gmail-thread-1",
             conversationId: "conversation_1",
@@ -671,6 +672,10 @@ describe("ConversationsService", () => {
           bodyText: "Thanks <team>.\n\nTuesday works.",
           bodyHtml: "<p>Thanks &lt;team&gt;.</p>\n<p>Tuesday works.</p>",
           payload: expect.objectContaining({
+            to: "buyer@example.com",
+            subject: "Re: Pilot discussion",
+            body: "Thanks <team>.\n\nTuesday works.",
+            bodyContentType: "text",
             provider: "gmail",
             threadId: "gmail-thread-1",
             inReplyTo: "<rfc-message-1@example.com>",

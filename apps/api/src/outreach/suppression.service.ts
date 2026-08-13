@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   Logger,
   NotFoundException,
@@ -143,19 +144,26 @@ export class SuppressionService {
   }
 
   /**
-   * Admin unsuppress — removes the row so future sends to this recipient
-   * may proceed. Operator-only path; the public /u/:token endpoint never
-   * deletes. Returns false when the row does not exist OR belongs to a
-   * different org (no enumeration leak).
+   * Admin unsuppress — removes only a MANUAL row so future sends to this
+   * recipient may proceed. Recipient opt-outs, complaints, and provider
+   * bounces stay fail-closed until a durable re-consent/reverification
+   * workflow exists. The public /u/:token endpoint never deletes. Returns
+   * false when the row does not exist OR belongs to a different org (no
+   * enumeration leak).
    */
   async unsuppress(orgId: string, suppressionId: string): Promise<boolean> {
     const row = await this.prisma.$transaction(async (tx) => {
       await acquireOrgSendReservationLock(tx, orgId);
       const persisted = await tx.outreachSuppression.findUnique({
         where: { id: suppressionId },
-        select: { id: true, orgId: true, recipientRef: true },
+        select: { id: true, orgId: true, recipientRef: true, reason: true },
       });
       if (!persisted || persisted.orgId !== orgId) return null;
+      if (persisted.reason !== OutreachSuppressionReason.MANUAL) {
+        throw new ConflictException(
+          `Suppression ${suppressionId} cannot be removed because ${persisted.reason} requires a durable re-consent or reverification workflow`,
+        );
+      }
       await tx.outreachSuppression.delete({ where: { id: suppressionId } });
       return persisted;
     });
@@ -498,10 +506,19 @@ export class SuppressionService {
           const incomingIsLegacyReplyStop =
             input.reason === OutreachSuppressionReason.MANUAL &&
             input.source === "gmail_reply";
-          if (isLegacyReplyStop && !incomingIsLegacyReplyStop) {
-            // A later unsubscribe/bounce/complaint/manual action is stronger
-            // than the historical reply-stop marker. Upgrade in place so an
-            // idempotent legacy row can never mask a genuine legal suppression.
+          const incomingIsProtected =
+            input.reason !== OutreachSuppressionReason.MANUAL;
+          const existingIsRemovableManual =
+            existing.reason === OutreachSuppressionReason.MANUAL;
+          if (
+            (isLegacyReplyStop && !incomingIsLegacyReplyStop) ||
+            (existingIsRemovableManual && incomingIsProtected)
+          ) {
+            // Protected recipient actions must replace every removable MANUAL
+            // marker, including admin_manual. Otherwise a later admin delete
+            // could erase an unsubscribe/bounce/complaint merely because the
+            // recipient happened to be manually suppressed first. A non-legacy
+            // MANUAL action still replaces the historical gmail_reply marker.
             await tx.outreachSuppression.update({
               where: { id: existing.id },
               data: {
@@ -512,9 +529,10 @@ export class SuppressionService {
             });
             return { created: false, upgraded: true as const };
           }
-          // Once a row is a real suppression, keep its first legal source as
-          // canonical on subsequent duplicate events. The legacy reply-stop
-          // upgrade above is the sole exception.
+          // Once a row carries a protected reason, keep its first legal source
+          // canonical on subsequent duplicate events. Removable MANUAL rows
+          // are promoted above whenever stronger recipient/provider evidence
+          // arrives.
           return { created: false };
         }
         await tx.outreachSuppression.create({

@@ -128,6 +128,8 @@ describe("SendEmailTool — provider/mode stamping (GL2)", () => {
     const result = await tool.execute(
       {
         ...PARAMS,
+        body: "Thanks <team>.\n\nTuesday works.",
+        bodyContentType: "text",
         provider: "gmail",
         threadId: "thread_1",
         inReplyTo: "<message-1@example.com>",
@@ -146,6 +148,56 @@ describe("SendEmailTool — provider/mode stamping (GL2)", () => {
     const decoded = Buffer.from(raw, "base64url").toString("utf8");
     expect(decoded).toContain("In-Reply-To: <message-1@example.com>");
     expect(decoded).toContain("References: <message-1@example.com>");
+    expect(decoded).toContain("Content-Type: text/plain; charset=utf-8");
+    expect(decoded).toContain("\r\n\r\nThanks <team>.\n\nTuesday works.");
+  });
+
+  it("sends reviewed plain text through Outlook without interpreting it as HTML", async () => {
+    let requestBody: Record<string, unknown> | null = null;
+    globalThis.fetch = (async (_url, init) => {
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return mockResponse(202, {});
+    }) as typeof fetch;
+
+    const result = await new SendEmailTool().execute(
+      {
+        ...PARAMS,
+        body: "Thanks <team>.\n\nTuesday works.",
+        bodyContentType: "text",
+      },
+      buildContext(
+        new Map([["outlook", creds("outlook", "real-token")]]),
+      ),
+    );
+
+    expect(result.success).toBe(true);
+    expect(requestBody).toMatchObject({
+      message: {
+        body: {
+          contentType: "Text",
+          content: "Thanks <team>.\n\nTuesday works.",
+        },
+      },
+    });
+  });
+
+  it("infers plain text for legacy artifacts that predate bodyContentType", async () => {
+    let raw = "";
+    globalThis.fetch = (async (_url, init) => {
+      const request = JSON.parse(String(init?.body)) as { raw?: string };
+      raw = request.raw ?? "";
+      return mockResponse(200, { id: "gmail_legacy_text" });
+    }) as typeof fetch;
+
+    const result = await new SendEmailTool().execute(
+      { ...PARAMS, body: "First line\n\nSecond line" },
+      buildContext(new Map([["gmail", creds("gmail", "real-token")]])),
+    );
+
+    expect(result.success).toBe(true);
+    const decoded = Buffer.from(raw, "base64url").toString("utf8");
+    expect(decoded).toContain("Content-Type: text/plain; charset=utf-8");
+    expect(decoded).toContain("\r\n\r\nFirst line\n\nSecond line");
   });
 
   it("advertises only the public HTTPS one-click URL in Gmail unsubscribe headers", async () => {
@@ -223,6 +275,28 @@ describe("SendEmailTool — provider/mode stamping (GL2)", () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain("invalid line breaks");
+    expect(getEmailDispatchOutcome(result)).toBe(
+      EMAIL_DISPATCH_OUTCOME.NOT_ATTEMPTED,
+    );
+    expect(called).toBe(false);
+  });
+
+  it("rejects an unknown body content type before making a provider request", async () => {
+    let called = false;
+    globalThis.fetch = (async () => {
+      called = true;
+      return mockResponse(200, { id: "should_not_send" });
+    }) as typeof fetch;
+
+    const result = await new SendEmailTool().execute(
+      { ...PARAMS, bodyContentType: "markdown" },
+      buildContext(
+        new Map([["gmail", creds("gmail", "real-token")]]),
+      ),
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe("bodyContentType must be text or html");
     expect(getEmailDispatchOutcome(result)).toBe(
       EMAIL_DISPATCH_OUTCOME.NOT_ATTEMPTED,
     );

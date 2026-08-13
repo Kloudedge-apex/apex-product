@@ -3,7 +3,16 @@ import {
   OutreachArtifact,
   OutreachArtifactPurpose,
   OutreachChannel,
+  Prisma,
 } from "@prisma/client";
+import {
+  inferEmailBodyContentType,
+  isEmailBodyContentType,
+} from "../runtime/tools/email-body-content-type";
+import {
+  normalizeOutreachEmail,
+  selectOutreachRecipient,
+} from "../graph/outreach-recipient";
 
 /**
  * Last trusted validation before an artifact may enter or remain on the send
@@ -48,6 +57,24 @@ export function assertArtifactDispatchEligible(
   ) {
     throw new BadRequestException(
       "Artifact cannot be approved because the reviewed content does not match the send payload",
+    );
+  }
+
+  const explicitBodyContentType = payload.bodyContentType;
+  if (
+    explicitBodyContentType !== undefined &&
+    !isEmailBodyContentType(explicitBodyContentType)
+  ) {
+    throw new BadRequestException(
+      "Artifact cannot be approved because its email body format is invalid",
+    );
+  }
+  const bodyContentType = isEmailBodyContentType(explicitBodyContentType)
+    ? explicitBodyContentType
+    : inferEmailBodyContentType(body);
+  if (bodyContentType !== "text") {
+    throw new BadRequestException(
+      "Artifact cannot be approved because this release only dispatches reviewer-bound plain-text bodies",
     );
   }
 
@@ -114,6 +141,72 @@ export function assertArtifactDispatchEligible(
       "Artifact cannot be approved without citing a fresh, non-mock signal",
     );
   }
+}
+
+type RecipientEligibilityStore = Pick<Prisma.TransactionClient, "person">;
+
+/**
+ * Revalidate the exact person/candidate snapshot at approval and immediately
+ * before dispatch. This prevents a reviewed artifact from silently following
+ * an identity merge, a newly preferred address, or a candidate that became
+ * INVALID while the graph was paused.
+ */
+export async function assertArtifactRecipientCurrent(
+  store: RecipientEligibilityStore,
+  artifact: OutreachArtifact,
+): Promise<void> {
+  if (artifact.purpose !== OutreachArtifactPurpose.OUTBOUND) return;
+
+  const payload = asRecord(artifact.payload);
+  const provenance = asRecord(payload?.recipient_provenance);
+  const personId = nonBlankString(payload?.personId);
+  const candidateId = nonBlankString(provenance?.candidateId);
+  const provenanceEmail = normalizeOutreachEmail(
+    nonBlankString(provenance?.email) ?? "",
+  );
+  if (!payload || !provenance || !personId || !candidateId || !provenanceEmail) {
+    throw recipientReconciliationError();
+  }
+
+  const person = await store.person.findFirst({
+    where: { id: personId, company: { orgId: artifact.orgId } },
+    select: {
+      emails: {
+        select: {
+          id: true,
+          email: true,
+          source: true,
+          verified: true,
+          verificationResult: true,
+          confidence: true,
+          verifiedAt: true,
+          createdAt: true,
+        },
+      },
+    },
+  });
+  const current = person ? selectOutreachRecipient(person.emails) : null;
+  const artifactEmail = normalizeOutreachEmail(artifact.recipientRef ?? "");
+  if (
+    !current ||
+    current.candidateId !== candidateId ||
+    current.email !== provenanceEmail ||
+    current.email !== artifactEmail ||
+    current.source !== provenance.source ||
+    current.verified !== provenance.verified ||
+    current.verificationResult !== provenance.verificationResult ||
+    current.confidence !== provenance.confidence ||
+    current.verifiedAt !== provenance.verifiedAt ||
+    current.selectionBasis !== provenance.selectionBasis
+  ) {
+    throw recipientReconciliationError();
+  }
+}
+
+function recipientReconciliationError(): BadRequestException {
+  return new BadRequestException(
+    "Artifact cannot be approved or dispatched because its exact recipient snapshot is no longer current and eligible",
+  );
 }
 
 interface ReviewerFact {

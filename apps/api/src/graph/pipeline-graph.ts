@@ -1,4 +1,5 @@
 import { Logger } from "@nestjs/common";
+import type { OutreachArtifactStatus } from "@prisma/client";
 import {
   StateGraph,
   START,
@@ -30,9 +31,25 @@ import {
 import { buildResearchNode } from "./nodes/research/research.node";
 import type { SignalExtractionService } from "./nodes/research/signal-extraction.service";
 import { tierForScore } from "../common/qualification.constants";
+import {
+  normalizeOutreachEmail,
+  sameSelectedOutreachRecipient,
+  selectOutreachRecipient,
+} from "./outreach-recipient";
 
 const MAX_OUTREACH = 10;
+const PERSON_SNAPSHOT_BATCH_SIZE = 200;
 const log = new Logger("PipelineGraph");
+
+function personIdFromArtifactPayload(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+  const personId = (payload as Record<string, unknown>).personId;
+  return typeof personId === "string" && personId.trim().length > 0
+    ? personId.trim()
+    : null;
+}
 
 interface Deps {
   leads: LeadsService;
@@ -98,6 +115,14 @@ function upstreamFailed(
   upstream: StageName,
 ): boolean {
   return state.stageStatuses?.[upstream] === "FAILED";
+}
+
+function outcomeStatusForArtifact(
+  status: OutreachArtifactStatus | undefined,
+): "queued" | "sent" | "persisted" {
+  if (status === "PENDING_REVIEW") return "queued";
+  if (status === "SENT") return "sent";
+  return "persisted";
 }
 
 /**
@@ -276,34 +301,62 @@ export function buildPipelineGraph(deps: Deps) {
         }
 
         // per-run only: do NOT cross-pollinate org-wide leads here.
-        // Snapshot only the people THIS run sourced/enriched.
+        // Snapshot every person THIS run sourced/enriched. Keep each `IN`
+        // predicate bounded without truncating the run-level state: scoring
+        // still covers the full ID set, so outreach needs a recipient snapshot
+        // for that same set.
         const personIdList = [...runPersonIds];
-        const people = personIdList.length > 0
-          ? await deps.prisma.person.findMany({
-              where: {
-                company: { orgId: state.orgId },
-                id: { in: personIdList },
+        const fetchPeople = (ids: string[]) =>
+          deps.prisma.person.findMany({
+            where: {
+              company: { orgId: state.orgId },
+              id: { in: ids },
+            },
+            select: {
+              id: true,
+              companyId: true,
+              firstName: true,
+              lastName: true,
+              title: true,
+              emails: {
+                select: {
+                  id: true,
+                  email: true,
+                  source: true,
+                  verified: true,
+                  verificationResult: true,
+                  confidence: true,
+                  verifiedAt: true,
+                  createdAt: true,
+                },
               },
-              select: {
-                id: true,
-                companyId: true,
-                firstName: true,
-                lastName: true,
-                title: true,
-                emails: { select: { email: true }, take: 1 },
-              },
-              take: 200,
-            })
-          : [];
+            },
+            orderBy: { id: "asc" },
+          });
+        type SnapshotPerson = Awaited<ReturnType<typeof fetchPeople>>[number];
+        const people: SnapshotPerson[] = [];
+        for (
+          let offset = 0;
+          offset < personIdList.length;
+          offset += PERSON_SNAPSHOT_BATCH_SIZE
+        ) {
+          const ids = personIdList.slice(offset, offset + PERSON_SNAPSHOT_BATCH_SIZE);
+          people.push(...(await fetchPeople(ids)));
+        }
+        people.sort((a, b) => a.id.localeCompare(b.id));
 
-        const enrichedPeople = people.map((p) => ({
-          id: p.id,
-          companyId: p.companyId,
-          firstName: p.firstName,
-          lastName: p.lastName,
-          title: p.title ?? undefined,
-          email: p.emails[0]?.email,
-        }));
+        const enrichedPeople = people.map((p) => {
+          const recipient = selectOutreachRecipient(p.emails);
+          return {
+            id: p.id,
+            companyId: p.companyId,
+            firstName: p.firstName,
+            lastName: p.lastName,
+            title: p.title ?? undefined,
+            email: recipient?.email,
+            recipient: recipient ?? undefined,
+          };
+        });
         update.enrichedPeople = enrichedPeople;
         update.enrichedPersonIds = personIdList;
         update.stagesCompleted = [STAGE.ENRICHMENT];
@@ -398,7 +451,7 @@ export function buildPipelineGraph(deps: Deps) {
         const scores = scoredIdList.length > 0
           ? await deps.prisma.leadScore.findMany({
               where: { orgId: state.orgId, personId: { in: scoredIdList } },
-              orderBy: { score: "desc" },
+              orderBy: [{ score: "desc" }, { personId: "asc" }],
               take: 100,
               select: { personId: true, score: true },
             })
@@ -544,22 +597,87 @@ export function buildPipelineGraph(deps: Deps) {
             firstName: true,
             lastName: true,
             title: true,
-            emails: { select: { email: true }, take: 1 },
+            emails: {
+              select: {
+                id: true,
+                email: true,
+                source: true,
+                verified: true,
+                verificationResult: true,
+                confidence: true,
+                verifiedAt: true,
+                createdAt: true,
+              },
+            },
             company: { select: { name: true, domain: true } },
           },
         });
 
         const outreachResults: PipelineState["outreachResults"] = [];
-        for (const person of people) {
-          const email = person.emails[0]?.email;
-          if (!email) {
+        const peopleById = new Map(people.map((person) => [person.id, person]));
+        const enrichedById = new Map(
+          state.enrichedPeople.map((person) => [person.id, person]),
+        );
+        const claimedRecipients = new Map<string, string>();
+
+        // Preserve the score-ranked target order rather than relying on
+        // unspecified Prisma row order. Missing/cross-org rows remain visible
+        // as failures instead of silently shrinking the denominator.
+        for (const target of targets) {
+          const person = peopleById.get(target.personId);
+          if (!person) {
             outreachResults.push({
-              personId: person.id,
+              personId: target.personId,
               status: "failed",
-              error: "no_email",
+              error: "person_not_found_or_cross_org",
             });
             continue;
           }
+
+          // The enrichment stage chooses and snapshots one eligible candidate.
+          // Outreach must use that exact address so a DB ordering/change between
+          // approval and drafting cannot silently redirect the message.
+          const enrichedPerson = enrichedById.get(person.id);
+          let recipient = enrichedPerson?.recipient;
+          const legacyEmail = enrichedPerson?.email;
+          const currentRecipient = selectOutreachRecipient(person.emails);
+          if (
+            recipient &&
+            (!currentRecipient ||
+              !sameSelectedOutreachRecipient(recipient, currentRecipient))
+          ) {
+            outreachResults.push({
+              personId: person.id,
+              status: "failed",
+              error: "recipient_snapshot_requires_reconciliation",
+            });
+            continue;
+          }
+          if (!recipient && legacyEmail !== undefined) {
+            const normalizedLegacyEmail = normalizeOutreachEmail(legacyEmail);
+            if (
+              !normalizedLegacyEmail ||
+              !currentRecipient ||
+              currentRecipient.email !== normalizedLegacyEmail
+            ) {
+              outreachResults.push({
+                personId: person.id,
+                status: "failed",
+                error: "legacy_recipient_requires_reconciliation",
+              });
+              continue;
+            }
+            recipient = currentRecipient;
+          }
+          if (!recipient) {
+            outreachResults.push({
+              personId: person.id,
+              status: "failed",
+              error: "no_eligible_email",
+            });
+            continue;
+          }
+          const email = recipient.email;
 
           // Skip-if-exists: if a prior partial run already drafted an artifact
           // for this recipient on this graphRun, do not re-run the subgraph
@@ -572,19 +690,65 @@ export function buildPipelineGraph(deps: Deps) {
               where: {
                 orgId: state.orgId,
                 graphRunId: graphRun.id,
+                toolName: "send_email",
                 recipientRef: email,
               },
-              select: { id: true },
+              select: { id: true, status: true, payload: true },
             });
             if (existingArtifact) {
+              const payloadPersonId = personIdFromArtifactPayload(
+                existingArtifact.payload,
+              );
+              if (payloadPersonId !== person.id) {
+                outreachResults.push({
+                  personId: person.id,
+                  status: "failed",
+                  error: payloadPersonId
+                    ? "recipient_already_targeted_in_run"
+                    : "existing_artifact_requires_reconciliation",
+                  recipient,
+                });
+                continue;
+              }
+              const claimedByPersonId = claimedRecipients.get(email);
+              if (claimedByPersonId) {
+                outreachResults.push({
+                  personId: person.id,
+                  status: "failed",
+                  error:
+                    claimedByPersonId === person.id
+                      ? "duplicate_target_in_run"
+                      : "recipient_already_targeted_in_run",
+                  recipient,
+                });
+                continue;
+              }
+              claimedRecipients.set(email, person.id);
               outreachResults.push({
                 personId: person.id,
                 agentRunId: existingArtifact.id,
-                status: "queued",
+                status: outcomeStatusForArtifact(existingArtifact.status),
+                artifactStatus: existingArtifact.status,
+                recipient,
               });
               continue;
             }
           }
+
+          const claimedByPersonId = claimedRecipients.get(email);
+          if (claimedByPersonId) {
+            outreachResults.push({
+              personId: person.id,
+              status: "failed",
+              error:
+                claimedByPersonId === person.id
+                  ? "duplicate_target_in_run"
+                  : "recipient_already_targeted_in_run",
+              recipient,
+            });
+            continue;
+          }
+          claimedRecipients.set(email, person.id);
 
           const lead: SdrLeadInput = {
             orgId: state.orgId,
@@ -596,6 +760,7 @@ export function buildPipelineGraph(deps: Deps) {
             title: person.title,
             companyName: person.company.name,
             companyDomain: person.company.domain,
+            recipientProvenance: recipient,
           };
           try {
             const result = await runSdrOutreachSubgraph(
@@ -612,37 +777,56 @@ export function buildPipelineGraph(deps: Deps) {
               },
               lead,
             );
+            const artifactStatus = result.artifactId
+              ? (result.artifactStatus ?? "PENDING_REVIEW")
+              : undefined;
             outreachResults.push({
               personId: person.id,
               agentRunId: result.artifactId ?? undefined,
-              status: result.artifactId ? "queued" : "failed",
+              status: result.artifactId
+                ? outcomeStatusForArtifact(artifactStatus)
+                : "failed",
+              ...(artifactStatus ? { artifactStatus } : {}),
               error: result.artifactId ? undefined : `qa_failed: ${result.qaIssues.join(",")}`,
+              recipient,
             });
           } catch (err) {
             outreachResults.push({
               personId: person.id,
               status: "failed",
               error: err instanceof Error ? err.message : "unknown",
+              recipient,
             });
           }
         }
 
-        const queued = outreachResults.filter((r) => r.status === "queued").length;
+        const artifactsById = new Map(
+          outreachResults
+            .filter((result) => !!result.agentRunId)
+            .map((result) => [result.agentRunId!, result]),
+        );
+        const persistedResults = [...artifactsById.values()];
+        const generated = artifactsById.size;
+        const pendingReview = persistedResults.filter(
+          (result) => result.artifactStatus === "PENDING_REVIEW",
+        ).length;
+        const sent = persistedResults.filter(
+          (result) => result.artifactStatus === "SENT",
+        ).length;
+        const otherPersisted = generated - pendingReview - sent;
         // PARTIAL if at least one artifact landed but not all targets
-        // produced one; COMPLETE if every target got an artifact. Zero
-        // artifacts from a non-empty target set is still COMPLETE for the
-        // dry-run design — failures are recorded per-lead in outreachResults
-        // (status="failed") and surfaced to the human reviewer, not the
-        // run-level status.
+        // produced one; COMPLETE if every target got a persisted artifact;
+        // FAILED if a non-empty target set produced none.
         const outreachStatus: StageStatus =
-          queued === targets.length ? "COMPLETE" : queued > 0 ? "PARTIAL" : "COMPLETE";
+          generated === targets.length ? "COMPLETE" : generated > 0 ? "PARTIAL" : "FAILED";
         return {
           outreachResults,
           stagesCompleted: [STAGE.OUTREACH],
           ...stageStatus(STAGE.OUTREACH, outreachStatus),
           ...nowMsg(
             NODE.OUTREACH,
-            `drafted ${queued}/${targets.length} reviewable artifact(s) — no external sends`,
+            `artifacts present for ${generated}/${targets.length} target(s): ${pendingReview} pending review, ${sent} sent, ${otherPersisted} other persisted — no external send attempted`,
+            outreachStatus === "FAILED" ? "error" : "info",
           ),
         };
       },

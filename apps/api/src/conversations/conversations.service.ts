@@ -572,7 +572,12 @@ export class ConversationsService {
     const payload: Record<string, unknown> = {
       to: input.contactEmail,
       subject: input.subject,
-      body: plainTextToHtml(body),
+      // Keep the provider-bound body byte-for-byte aligned with the plain-text
+      // field shown to the reviewer. The optional HTML rendering is persisted
+      // separately below; approval and dispatch intentionally bind to
+      // payload.body/bodyText so a reviewer never approves different content.
+      body,
+      bodyContentType: "text",
       provider: "gmail",
       threadId: input.providerThreadId,
       conversationId: input.conversationId,

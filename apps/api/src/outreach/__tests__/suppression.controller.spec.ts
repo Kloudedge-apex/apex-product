@@ -2,7 +2,9 @@ import "reflect-metadata";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
+  NotFoundException,
   RequestMethod,
   UnauthorizedException,
 } from "@nestjs/common";
@@ -70,7 +72,7 @@ function mockReq(
   } as unknown as Request;
 }
 
-describe("SuppressionController POST / (GL6b manual suppression)", () => {
+describe("SuppressionController", () => {
   let service: ServiceMock;
   let prisma: PrismaService;
   let controller: SuppressionController;
@@ -229,6 +231,58 @@ describe("SuppressionController POST / (GL6b manual suppression)", () => {
         controller.create("org_1", mockReq(), body),
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(service.suppress).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("DELETE /:id (manual unsuppression only)", () => {
+    it("registers a DELETE route for a single suppression id", () => {
+      const handler = SuppressionController.prototype.unsuppress as object;
+      expect(Reflect.getMetadata(METHOD_METADATA, handler)).toBe(RequestMethod.DELETE);
+      expect(Reflect.getMetadata(PATH_METADATA, handler)).toBe(":id");
+    });
+
+    it("keeps the OWNER/ADMIN guard in front of the service", async () => {
+      controller = new SuppressionController(
+        service as unknown as SuppressionService,
+        mockPrisma({ id: "user_member", role: "MEMBER", orgId: "org_1" }),
+      );
+
+      await expect(
+        controller.unsuppress(
+          "org_1",
+          "sup_1",
+          mockReq("clerk_member", "org:member"),
+        ),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(service.unsuppress).not.toHaveBeenCalled();
+    });
+
+    it("allows an authorized admin to remove a MANUAL row", async () => {
+      await expect(
+        controller.unsuppress("org_1", "sup_manual", mockReq()),
+      ).resolves.toBeUndefined();
+
+      expect(service.unsuppress).toHaveBeenCalledWith("org_1", "sup_manual");
+    });
+
+    it("preserves the service's protected-reason conflict", async () => {
+      service.unsuppress.mockRejectedValue(
+        new ConflictException(
+          "Suppression sup_optout cannot be removed because USER_UNSUBSCRIBED requires a durable re-consent or reverification workflow",
+        ),
+      );
+
+      await expect(
+        controller.unsuppress("org_1", "sup_optout", mockReq()),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it("keeps missing and cross-org rows indistinguishable", async () => {
+      service.unsuppress.mockResolvedValue(false);
+
+      await expect(
+        controller.unsuppress("org_1", "sup_missing", mockReq()),
+      ).rejects.toBeInstanceOf(NotFoundException);
     });
   });
 });

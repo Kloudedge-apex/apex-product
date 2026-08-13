@@ -7,6 +7,11 @@ import {
   withCircuitBreaker,
 } from "../../common/http-retry.util";
 import { buildUnsubscribeUrl } from "../../outreach/unsubscribe-token.util";
+import {
+  inferEmailBodyContentType,
+  isEmailBodyContentType,
+  type EmailBodyContentType,
+} from "./email-body-content-type";
 
 /**
  * Build CAN-SPAM / RFC 8058 List-Unsubscribe headers for outbound. Audit
@@ -28,14 +33,15 @@ function buildUnsubscribeHeaders(orgId: string | undefined, recipient: string) {
  *
  * No-op when senderOrg is undefined (direct-executor path) or when the
  * physical address is null (worker enforces the gate before reaching here
- * for live sends — see send-outreach.worker). Detects whether the body is
- * HTML by looking for any common HTML tag; falls back to plain text.
+ * for live sends — see send-outreach.worker). The caller passes the resolved
+ * body format so the footer and provider MIME type can never disagree.
  */
 function appendComplianceFooter(
   body: string,
   orgId: string | undefined,
   recipient: string,
   senderOrg: ToolContext["senderOrg"],
+  contentType: EmailBodyContentType,
 ): string {
   if (!senderOrg || !senderOrg.physicalAddress || !orgId) return body;
 
@@ -43,7 +49,7 @@ function appendComplianceFooter(
   const addressLine = [senderOrg.physicalAddress, senderOrg.country].filter(Boolean).join(", ");
   const unsubUrl = buildUnsubscribeUrl(orgId, recipient);
 
-  const looksLikeHtml = /<\/?(html|body|p|div|br|a|span|table|h[1-6])\b/i.test(body);
+  const looksLikeHtml = contentType === "html";
   if (looksLikeHtml) {
     const footer =
       `<hr style="margin-top:24px;border:none;border-top:1px solid #ddd"/>` +
@@ -106,6 +112,11 @@ export class SendEmailTool implements Tool {
     to: { type: "string", description: "Recipient email address", required: true },
     subject: { type: "string", description: "Email subject line", required: true },
     body: { type: "string", description: "Email body (plain text or HTML)", required: true },
+    bodyContentType: {
+      type: "string",
+      description: "Optional body format: text or html (inferred for legacy callers)",
+      required: false,
+    },
     from: { type: "string", description: "Sender email address (optional, uses default)", required: false },
     provider: {
       type: "string",
@@ -130,6 +141,7 @@ export class SendEmailTool implements Tool {
     const to = params.to as string;
     const subject = params.subject as string;
     const body = params.body as string;
+    const bodyContentType = params.bodyContentType;
     const preferredProvider =
       params.provider === "gmail" || params.provider === "outlook"
         ? params.provider
@@ -153,6 +165,19 @@ export class SendEmailTool implements Tool {
         error: "to, subject, and body are required",
       };
     }
+    if (bodyContentType !== undefined && !isEmailBodyContentType(bodyContentType)) {
+      return {
+        success: false,
+        data: {
+          sent: false,
+          dispatchOutcome: EMAIL_DISPATCH_OUTCOME.NOT_ATTEMPTED,
+        },
+        error: "bodyContentType must be text or html",
+      };
+    }
+    const resolvedBodyContentType = isEmailBodyContentType(bodyContentType)
+      ? bodyContentType
+      : inferEmailBodyContentType(body);
     if (
       hasHeaderBreak(to) ||
       hasHeaderBreak(subject) ||
@@ -177,7 +202,13 @@ export class SendEmailTool implements Tool {
     // user-visible compliance footer (postal address + unsubscribe link) to
     // the body before dispatch. Mock and direct-executor paths leave this
     // alone — they never produce live sends.
-    const composedBody = appendComplianceFooter(body, context.orgId, to, context.senderOrg);
+    const composedBody = appendComplianceFooter(
+      body,
+      context.orgId,
+      to,
+      context.senderOrg,
+      resolvedBodyContentType,
+    );
 
     if (
       preferredProvider !== "gmail" &&
@@ -185,7 +216,14 @@ export class SendEmailTool implements Tool {
       outlookCreds?.accessToken &&
       !outlookCreds.accessToken.startsWith("mock_")
     ) {
-      const result = await this.sendViaGraph(to, subject, composedBody, outlookCreds.accessToken, unsubscribeHeaders);
+      const result = await this.sendViaGraph(
+        to,
+        subject,
+        composedBody,
+        outlookCreds.accessToken,
+        unsubscribeHeaders,
+        resolvedBodyContentType,
+      );
       if (result.success) {
         this.emitMessageSent(context, {
           to,
@@ -205,6 +243,7 @@ export class SendEmailTool implements Tool {
         gmailCreds.accessToken,
         unsubscribeHeaders,
         { threadId, inReplyTo },
+        resolvedBodyContentType,
       );
       if (result.success) {
         this.emitMessageSent(context, {
@@ -257,11 +296,15 @@ export class SendEmailTool implements Tool {
     body: string,
     accessToken: string,
     unsubscribe: { listUnsubscribe: string; listUnsubscribePost: string } | null,
+    bodyContentType: EmailBodyContentType,
   ): Promise<ToolResult> {
     try {
       const message: Record<string, unknown> = {
         subject,
-        body: { contentType: "HTML", content: body },
+        body: {
+          contentType: bodyContentType === "text" ? "Text" : "HTML",
+          content: body,
+        },
         toRecipients: [{ emailAddress: { address: to } }],
       };
       if (unsubscribe) {
@@ -333,12 +376,13 @@ export class SendEmailTool implements Tool {
     accessToken: string,
     unsubscribe: { listUnsubscribe: string; listUnsubscribePost: string } | null,
     reply: { threadId?: string; inReplyTo?: string },
+    bodyContentType: EmailBodyContentType,
   ): Promise<ToolResult> {
     try {
       const headers: string[] = [
         `To: ${to}`,
         `Subject: ${subject}`,
-        "Content-Type: text/html; charset=utf-8",
+        `Content-Type: ${bodyContentType === "text" ? "text/plain" : "text/html"}; charset=utf-8`,
       ];
       if (unsubscribe) {
         headers.push(`List-Unsubscribe: ${unsubscribe.listUnsubscribe}`);

@@ -121,4 +121,88 @@ describe("GraphService dispatch-generation lifecycle fence", () => {
 
     expect(evidenceLedger.approvalRequested).not.toHaveBeenCalled();
   });
+
+  it("persists terminal FAILED when a completed graph state contains a failed stage", async () => {
+    graphMocks.invoke.mockResolvedValueOnce({
+      ...completedResult(),
+      stageStatuses: { outreach: "FAILED" },
+      outreachResults: [
+        {
+          personId: "p1",
+          agentRunId: "artifact_1",
+          status: "queued",
+        },
+        { personId: "p2", status: "failed", error: "no_eligible_email" },
+        // A nominal queued outcome without a persisted artifact is not a
+        // generated draft and must not inflate the public count.
+        { personId: "p3", status: "queued" },
+      ],
+    });
+    const { service, prisma, evaluator } = makeHarness(1);
+
+    await service.processGraphRun("run_1", completedResult(), 11);
+
+    expect(prisma.graphRun.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "run_1",
+        status: GraphRunStatus.RUNNING,
+        dispatchGeneration: 11,
+      },
+      data: expect.objectContaining({
+        status: GraphRunStatus.FAILED,
+        error: "pipeline_failed:outreach (outreach_failures=1)",
+        state: expect.objectContaining({
+          stageStatuses: { outreach: "FAILED" },
+          counts: expect.objectContaining({ outreach: 1, outreachFailed: 1 }),
+          outreachFailures: [
+            { personId: "p2", error: "no_eligible_email" },
+          ],
+        }),
+      }),
+    });
+    expect(evaluator.evaluateGraphRun).toHaveBeenCalledWith("run_1");
+  });
+
+  it("completes a partial outreach run while reporting only persisted drafts", async () => {
+    graphMocks.invoke.mockResolvedValueOnce({
+      ...completedResult(),
+      stageStatuses: { outreach: "PARTIAL" },
+      outreachResults: [
+        {
+          personId: "p1",
+          agentRunId: "artifact_1",
+          status: "queued",
+        },
+        { personId: "p2", status: "failed", error: "draft_failed" },
+        {
+          personId: "p3",
+          agentRunId: "artifact_rejected",
+          status: "persisted",
+          artifactStatus: "REJECTED",
+        },
+        {
+          personId: "p4",
+          agentRunId: "artifact_1",
+          status: "queued",
+        },
+      ],
+    });
+    const { service, prisma } = makeHarness(1);
+
+    await service.processGraphRun("run_1", completedResult(), 12);
+
+    expect(prisma.graphRun.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "run_1",
+        status: GraphRunStatus.RUNNING,
+        dispatchGeneration: 12,
+      },
+      data: expect.objectContaining({
+        status: GraphRunStatus.COMPLETED,
+        state: expect.objectContaining({
+          counts: expect.objectContaining({ outreach: 2, outreachFailed: 1 }),
+        }),
+      }),
+    });
+  });
 });

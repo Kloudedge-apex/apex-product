@@ -40,6 +40,18 @@ function artifactRow(overrides: Partial<OutreachArtifact> = {}): OutreachArtifac
       to: "dest@example.com",
       subject: "Hi",
       body: "Body",
+      bodyContentType: "text",
+      personId: "person_1",
+      recipient_provenance: {
+        candidateId: "email_1",
+        email: "dest@example.com",
+        source: "PATTERN_GUESS",
+        verified: true,
+        verificationResult: "VALID",
+        confidence: 0.9,
+        verifiedAt: "2026-05-24T12:00:00.000Z",
+        selectionBasis: "VERIFIED_VALID",
+      },
       qaIssues: [],
       brief_facts: [
         {
@@ -98,6 +110,22 @@ function mockPrisma() {
     conversationMessage: {
       findFirst: vi.fn().mockResolvedValue(null),
     },
+    person: {
+      findFirst: vi.fn().mockResolvedValue({
+        emails: [
+          {
+            id: "email_1",
+            email: "dest@example.com",
+            source: "PATTERN_GUESS",
+            verified: true,
+            verificationResult: "VALID",
+            confidence: 0.9,
+            verifiedAt: new Date("2026-05-24T12:00:00.000Z"),
+            createdAt: new Date("2026-05-23T12:00:00.000Z"),
+          },
+        ],
+      }),
+    },
     // CAN-SPAM postal-address fetch added by audit P0 #2. Default to an
     // org with a configured physicalAddress so existing happy-path tests
     // proceed without modification.
@@ -127,6 +155,7 @@ function mockPrisma() {
     };
     conversation: { findFirst: ReturnType<typeof vi.fn> };
     conversationMessage: { findFirst: ReturnType<typeof vi.fn> };
+    person: { findFirst: ReturnType<typeof vi.fn> };
     org: { findUnique: ReturnType<typeof vi.fn> };
   };
   prisma.$transaction.mockImplementation(
@@ -294,6 +323,43 @@ describe("SendOutreachWorker.processArtifact", () => {
           provider: "gmail",
         }),
       );
+    } finally {
+      delete process.env.OUTREACH_LIVE_FOR_ORGS;
+    }
+  });
+
+  it("releases the claim without dispatch when the exact recipient became invalid", async () => {
+    process.env.OUTREACH_LIVE_FOR_ORGS = "org_1";
+    try {
+      prisma.outreachArtifact.findUnique.mockResolvedValue(artifactRow());
+      prisma.person.findFirst.mockResolvedValue({
+        emails: [
+          {
+            id: "email_1",
+            email: "dest@example.com",
+            source: "PATTERN_GUESS",
+            verified: false,
+            verificationResult: "INVALID",
+            confidence: 0.05,
+            verifiedAt: null,
+            createdAt: new Date("2026-05-23T12:00:00.000Z"),
+          },
+        ],
+      });
+      const sendSpy = vi.spyOn(SendEmailTool.prototype, "execute");
+
+      await expect(worker.processArtifact("art_1", "org_1")).rejects.toThrow(
+        "exact recipient snapshot is no longer current and eligible",
+      );
+
+      expect(sendSpy).not.toHaveBeenCalled();
+      expect(prisma.outreachArtifact.updateMany).toHaveBeenLastCalledWith({
+        where: {
+          id: "art_1",
+          status: OutreachArtifactStatus.SENDING,
+        },
+        data: { status: OutreachArtifactStatus.APPROVED },
+      });
     } finally {
       delete process.env.OUTREACH_LIVE_FOR_ORGS;
     }

@@ -42,9 +42,10 @@ import { SuppressionService } from "./suppression.service";
  *
  * ALL endpoints require an active tenant-scoped OWNER or ADMIN database role,
  * plus a matching signed Clerk org_role for Clerk-bound tenants. The rows
- * contain recipient email addresses (PII), and unsuppressing re-enables
- * outbound to a recipient who explicitly opted out — a regulatory action a
- * regular member must not be able to take.
+ * contain recipient email addresses (PII), and removing a manual suppression
+ * re-enables outbound. Even OWNER/ADMIN callers cannot remove unsubscribe,
+ * complaint, or bounce rows without a durable re-consent/reverification
+ * workflow.
  *
  * Audit P0 #3 follow-up.
  */

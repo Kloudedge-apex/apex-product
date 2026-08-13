@@ -17,6 +17,17 @@ describe("pipeline-graph (supervisor routing)", () => {
   let callLog: string[];
   let deps: Parameters<typeof buildPipelineGraph>[0];
 
+  const eligibleEmail = (id: string, email: string) => ({
+    id,
+    email,
+    source: "PATTERN_GUESS" as const,
+    verified: true,
+    verificationResult: "VALID" as const,
+    confidence: 0.9,
+    verifiedAt: new Date("2026-05-25T00:00:00.000Z"),
+    createdAt: new Date("2026-05-24T00:00:00.000Z"),
+  });
+
   beforeEach(() => {
     callLog = [];
     let artifactCounter = 0;
@@ -65,7 +76,7 @@ describe("pipeline-graph (supervisor routing)", () => {
               firstName: "Alice",
               lastName: "Smith",
               title: "VP Sales",
-              emails: [{ email: "alice@acme.io" }],
+              emails: [eligibleEmail("email_p1", "alice@acme.io")],
               company: { name: "Acme", domain: "acme.io" },
             },
           ],
@@ -188,7 +199,658 @@ describe("pipeline-graph (supervisor routing)", () => {
     expect(callLog.filter((c) => c.startsWith("artifact:")).length).toBeGreaterThan(0);
     expect(result.outreachResults?.[0]?.status).toBe("queued");
     expect(result.outreachResults?.[0]?.agentRunId).toMatch(/^art_/);
+    expect(result.outreachResults?.[0]?.recipient).toMatchObject({
+      candidateId: "email_p1",
+      email: "alice@acme.io",
+      selectionBasis: "VERIFIED_VALID",
+    });
+    expect(result.stageStatuses?.[STAGE.OUTREACH]).toBe("PARTIAL");
     expect(result.stagesCompleted).toContain(STAGE.OUTREACH);
+  });
+
+  it("marks outreach FAILED when every qualified target fails to produce an artifact", async () => {
+    const failDeps = {
+      ...deps,
+      prisma: {
+        ...deps.prisma,
+        person: {
+          ...(deps.prisma as unknown as { person: object }).person,
+          findMany: async () => [
+            {
+              id: "p1",
+              companyId: "c1",
+              firstName: "Alice",
+              lastName: "Smith",
+              title: "VP Sales",
+              // An unverified pattern guess is deliberately ineligible.
+              emails: [
+                {
+                  ...eligibleEmail("guess_p1", "alice@acme.io"),
+                  verified: false,
+                  verificationResult: "UNKNOWN" as const,
+                },
+              ],
+              company: { name: "Acme", domain: "acme.io" },
+            },
+          ],
+        },
+      } as unknown as Parameters<typeof buildPipelineGraph>[0]["prisma"],
+    };
+
+    const graph = buildPipelineGraph(failDeps).compile({
+      checkpointer: new MemorySaver(),
+    });
+    const config = { configurable: { thread_id: "t_outreach_all_failed" } };
+
+    await graph.invoke(
+      { orgId, runId: "t_outreach_all_failed", icpProfileIds: [icpId] },
+      config,
+    );
+    const result = await graph.invoke(
+      new Command({ resume: { approved: true, approvedBy: "alice@acme.io" } }),
+      config,
+    );
+
+    expect(result.stageStatuses?.[STAGE.OUTREACH]).toBe("FAILED");
+    expect(result.outreachResults).toEqual([
+      { personId: "p1", status: "failed", error: "no_eligible_email" },
+      {
+        personId: "p2",
+        status: "failed",
+        error: "person_not_found_or_cross_org",
+      },
+    ]);
+    expect(callLog.filter((entry) => entry.startsWith("artifact:"))).toHaveLength(0);
+  });
+
+  it("persists the exact selected recipient and its provenance on the draft", async () => {
+    const recordedArgs: Array<Record<string, unknown>> = [];
+    const provenanceDeps = {
+      ...deps,
+      prisma: {
+        ...deps.prisma,
+        person: {
+          ...(deps.prisma as unknown as { person: object }).person,
+          findMany: async () => [
+            {
+              id: "p1",
+              companyId: "c1",
+              firstName: "Alice",
+              lastName: "Smith",
+              title: "VP Sales",
+              emails: [
+                {
+                  ...eligibleEmail("source_p1", "source@acme.io"),
+                  source: "TEAM_PAGE" as const,
+                  verified: false,
+                  verificationResult: "UNKNOWN" as const,
+                  confidence: 0.99,
+                },
+                {
+                  ...eligibleEmail("verified_p1", "verified@acme.io"),
+                  confidence: 0.6,
+                },
+              ],
+              company: { name: "Acme", domain: "acme.io" },
+            },
+          ],
+        },
+      } as unknown as Parameters<typeof buildPipelineGraph>[0]["prisma"],
+      outreachArtifacts: {
+        recordDryRun: async (input: { toolArgs: Record<string, unknown> }) => {
+          recordedArgs.push(input.toolArgs);
+          return { id: "artifact_verified" };
+        },
+      } as unknown as Parameters<typeof buildPipelineGraph>[0]["outreachArtifacts"],
+    };
+
+    const graph = buildPipelineGraph(provenanceDeps).compile({
+      checkpointer: new MemorySaver(),
+    });
+    const config = { configurable: { thread_id: "t_recipient_provenance" } };
+
+    await graph.invoke(
+      { orgId, runId: "t_recipient_provenance", icpProfileIds: [icpId] },
+      config,
+    );
+    await graph.invoke(
+      new Command({ resume: { approved: true, approvedBy: "alice@acme.io" } }),
+      config,
+    );
+
+    expect(recordedArgs).toHaveLength(1);
+    expect(recordedArgs[0]).toMatchObject({
+      to: "verified@acme.io",
+      bodyContentType: "text",
+      recipient_provenance: {
+        candidateId: "verified_p1",
+        email: "verified@acme.io",
+        selectionBasis: "VERIFIED_VALID",
+      },
+    });
+  });
+
+  it("recovers a legacy email-only checkpoint only when deterministic selection matches", async () => {
+    const recordedArgs: Array<Record<string, unknown>> = [];
+    const legacyDeps = {
+      ...deps,
+      prisma: {
+        ...deps.prisma,
+        person: {
+          ...(deps.prisma as unknown as { person: object }).person,
+          findMany: async () => [
+            {
+              id: "p1",
+              companyId: "c1",
+              firstName: "Alice",
+              lastName: "Smith",
+              title: "VP Sales",
+              emails: [eligibleEmail("current_p1", "alice@acme.io")],
+              company: { name: "Acme", domain: "acme.io" },
+            },
+          ],
+        },
+      } as unknown as Parameters<typeof buildPipelineGraph>[0]["prisma"],
+      outreachArtifacts: {
+        recordDryRun: async (input: { toolArgs: Record<string, unknown> }) => {
+          recordedArgs.push(input.toolArgs);
+          return { id: "artifact_legacy", status: "PENDING_REVIEW" };
+        },
+      } as unknown as Parameters<typeof buildPipelineGraph>[0]["outreachArtifacts"],
+    };
+    const graph = buildPipelineGraph(legacyDeps).compile({
+      checkpointer: new MemorySaver(),
+    });
+    const config = { configurable: { thread_id: "t_legacy_recipient_match" } };
+
+    const paused = await graph.invoke(
+      {
+        orgId,
+        runId: "t_legacy_recipient_match",
+        icpProfileIds: [icpId],
+        stagesCompleted: [STAGE.SOURCING, STAGE.ENRICHMENT, STAGE.SCORING, STAGE.RESEARCH],
+        enrichedPeople: [
+          {
+            id: "p1",
+            companyId: "c1",
+            firstName: "Alice",
+            lastName: "Smith",
+            email: "  ALICE@ACME.IO ",
+          },
+        ],
+        enrichedPersonIds: ["p1"],
+        scoredLeads: [{ personId: "p1", score: 90, tier: "A" }],
+      },
+      config,
+    );
+    expect(isInterrupted(paused)).toBe(true);
+
+    const result = await graph.invoke(
+      new Command({ resume: { approved: true, approvedBy: "alice@acme.io" } }),
+      config,
+    );
+
+    expect(recordedArgs).toHaveLength(1);
+    expect(recordedArgs[0]).toMatchObject({
+      to: "alice@acme.io",
+      recipient_provenance: {
+        candidateId: "current_p1",
+        email: "alice@acme.io",
+      },
+    });
+    expect(result.outreachResults).toEqual([
+      expect.objectContaining({
+        personId: "p1",
+        agentRunId: "artifact_legacy",
+        status: "queued",
+        artifactStatus: "PENDING_REVIEW",
+      }),
+    ]);
+  });
+
+  it("never redirects a legacy email-only checkpoint when deterministic selection changes", async () => {
+    let artifactCalls = 0;
+    const legacyDeps = {
+      ...deps,
+      prisma: {
+        ...deps.prisma,
+        person: {
+          ...(deps.prisma as unknown as { person: object }).person,
+          findMany: async () => [
+            {
+              id: "p1",
+              companyId: "c1",
+              firstName: "Alice",
+              lastName: "Smith",
+              title: "VP Sales",
+              emails: [eligibleEmail("new_p1", "new-address@acme.io")],
+              company: { name: "Acme", domain: "acme.io" },
+            },
+          ],
+        },
+      } as unknown as Parameters<typeof buildPipelineGraph>[0]["prisma"],
+      outreachArtifacts: {
+        recordDryRun: async () => {
+          artifactCalls += 1;
+          return { id: "must_not_exist" };
+        },
+      } as unknown as Parameters<typeof buildPipelineGraph>[0]["outreachArtifacts"],
+    };
+    const graph = buildPipelineGraph(legacyDeps).compile({
+      checkpointer: new MemorySaver(),
+    });
+    const config = { configurable: { thread_id: "t_legacy_recipient_changed" } };
+
+    await graph.invoke(
+      {
+        orgId,
+        runId: "t_legacy_recipient_changed",
+        icpProfileIds: [icpId],
+        stagesCompleted: [STAGE.SOURCING, STAGE.ENRICHMENT, STAGE.SCORING, STAGE.RESEARCH],
+        enrichedPeople: [
+          {
+            id: "p1",
+            companyId: "c1",
+            firstName: "Alice",
+            lastName: "Smith",
+            email: "old-address@acme.io",
+          },
+        ],
+        enrichedPersonIds: ["p1"],
+        scoredLeads: [{ personId: "p1", score: 90, tier: "A" }],
+      },
+      config,
+    );
+    const result = await graph.invoke(
+      new Command({ resume: { approved: true, approvedBy: "alice@acme.io" } }),
+      config,
+    );
+
+    expect(artifactCalls).toBe(0);
+    expect(result.outreachResults).toEqual([
+      {
+        personId: "p1",
+        status: "failed",
+        error: "legacy_recipient_requires_reconciliation",
+      },
+    ]);
+    expect(result.stageStatuses?.[STAGE.OUTREACH]).toBe("FAILED");
+  });
+
+  it.each([
+    ["REJECTED", "persisted", "0 sent, 1 other persisted"],
+    ["SENT", "sent", "1 sent, 0 other persisted"],
+  ] as const)(
+    "reports an existing %s artifact truthfully while preserving the generated count",
+    async (artifactStatus, outcomeStatus, messageFragment) => {
+      let recordCalls = 0;
+      const existingDeps = {
+        ...deps,
+        prisma: {
+          ...deps.prisma,
+          leadScore: {
+            ...(deps.prisma as unknown as { leadScore: object }).leadScore,
+            findMany: async () => [{ personId: "p1", score: 90 }],
+          },
+          outreachArtifact: {
+            findFirst: async () => ({
+              id: `artifact_${artifactStatus}`,
+              status: artifactStatus,
+              payload: { personId: "p1" },
+            }),
+          },
+        } as unknown as Parameters<typeof buildPipelineGraph>[0]["prisma"],
+        outreachArtifacts: {
+          recordDryRun: async () => {
+            recordCalls += 1;
+            return { id: "must_not_exist" };
+          },
+        } as unknown as Parameters<typeof buildPipelineGraph>[0]["outreachArtifacts"],
+      };
+      const graph = buildPipelineGraph(existingDeps).compile({
+        checkpointer: new MemorySaver(),
+      });
+      const threadId = `t_existing_${artifactStatus.toLowerCase()}`;
+      const config = { configurable: { thread_id: threadId } };
+
+      await graph.invoke({ orgId, runId: threadId, icpProfileIds: [icpId] }, config);
+      const result = await graph.invoke(
+        new Command({ resume: { approved: true, approvedBy: "alice@acme.io" } }),
+        config,
+      );
+
+      expect(recordCalls).toBe(0);
+      expect(result.outreachResults).toEqual([
+        expect.objectContaining({
+          personId: "p1",
+          agentRunId: `artifact_${artifactStatus}`,
+          status: outcomeStatus,
+          artifactStatus,
+        }),
+      ]);
+      expect(result.stageStatuses?.[STAGE.OUTREACH]).toBe("COMPLETE");
+      const outreachMessage = [...result.messages].reverse().find(
+        (message) => message.node === NODE.OUTREACH,
+      );
+      expect(outreachMessage?.text).toContain(messageFragment);
+      expect(outreachMessage?.text).not.toContain("reviewable");
+    },
+  );
+
+  it("fails closed when a structured recipient snapshot becomes invalid before resume", async () => {
+    let personRead = 0;
+    let artifactCalls = 0;
+    const staleDeps = {
+      ...deps,
+      prisma: {
+        ...deps.prisma,
+        leadScore: {
+          ...(deps.prisma as unknown as { leadScore: object }).leadScore,
+          findMany: async () => [{ personId: "p1", score: 90 }],
+        },
+        person: {
+          ...(deps.prisma as unknown as { person: object }).person,
+          findMany: async () => {
+            personRead += 1;
+            return [
+              {
+                id: "p1",
+                companyId: "c1",
+                firstName: "Alice",
+                lastName: "Smith",
+                title: "VP Sales",
+                emails: [
+                  personRead === 1
+                    ? eligibleEmail("email_p1", "alice@acme.io")
+                    : {
+                        ...eligibleEmail("email_p1", "alice@acme.io"),
+                        verified: false,
+                        verificationResult: "INVALID" as const,
+                        verifiedAt: null,
+                      },
+                ],
+                company: { name: "Acme", domain: "acme.io" },
+              },
+            ];
+          },
+        },
+      } as unknown as Parameters<typeof buildPipelineGraph>[0]["prisma"],
+      outreachArtifacts: {
+        recordDryRun: async () => {
+          artifactCalls += 1;
+          return { id: "must_not_exist" };
+        },
+      } as unknown as Parameters<typeof buildPipelineGraph>[0]["outreachArtifacts"],
+    };
+    const graph = buildPipelineGraph(staleDeps).compile({
+      checkpointer: new MemorySaver(),
+    });
+    const config = { configurable: { thread_id: "t_stale_recipient" } };
+
+    await graph.invoke(
+      { orgId, runId: "t_stale_recipient", icpProfileIds: [icpId] },
+      config,
+    );
+    const result = await graph.invoke(
+      new Command({ resume: { approved: true, approvedBy: "alice@acme.io" } }),
+      config,
+    );
+
+    expect(artifactCalls).toBe(0);
+    expect(result.outreachResults).toEqual([
+      {
+        personId: "p1",
+        status: "failed",
+        error: "recipient_snapshot_requires_reconciliation",
+      },
+    ]);
+    expect(result.stageStatuses?.[STAGE.OUTREACH]).toBe("FAILED");
+  });
+
+  it("creates one artifact and reports partial coverage when two people share an address", async () => {
+    let artifactCalls = 0;
+    const sharedAddressDeps = {
+      ...deps,
+      prisma: {
+        ...deps.prisma,
+        person: {
+          ...(deps.prisma as unknown as { person: object }).person,
+          findMany: async () => [
+            {
+              id: "p1",
+              companyId: "c1",
+              firstName: "Alice",
+              lastName: "Smith",
+              title: "VP Sales",
+              emails: [eligibleEmail("email_p1", "shared@acme.io")],
+              company: { name: "Acme", domain: "acme.io" },
+            },
+            {
+              id: "p2",
+              companyId: "c1",
+              firstName: "Bob",
+              lastName: "Jones",
+              title: "Director Sales",
+              emails: [eligibleEmail("email_p2", "shared@acme.io")],
+              company: { name: "Acme", domain: "acme.io" },
+            },
+          ],
+        },
+      } as unknown as Parameters<typeof buildPipelineGraph>[0]["prisma"],
+      outreachArtifacts: {
+        recordDryRun: async () => {
+          artifactCalls += 1;
+          return {
+            id: "artifact_shared",
+            status: "PENDING_REVIEW",
+          };
+        },
+      } as unknown as Parameters<typeof buildPipelineGraph>[0]["outreachArtifacts"],
+    };
+    const graph = buildPipelineGraph(sharedAddressDeps).compile({
+      checkpointer: new MemorySaver(),
+    });
+    const config = { configurable: { thread_id: "t_shared_recipient" } };
+
+    await graph.invoke(
+      { orgId, runId: "t_shared_recipient", icpProfileIds: [icpId] },
+      config,
+    );
+    const result = await graph.invoke(
+      new Command({ resume: { approved: true, approvedBy: "alice@acme.io" } }),
+      config,
+    );
+
+    expect(artifactCalls).toBe(1);
+    expect(result.outreachResults).toEqual([
+      expect.objectContaining({
+        personId: "p1",
+        agentRunId: "artifact_shared",
+      }),
+      expect.objectContaining({
+        personId: "p2",
+        status: "failed",
+        error: "recipient_already_targeted_in_run",
+      }),
+    ]);
+    expect(result.stageStatuses?.[STAGE.OUTREACH]).toBe("PARTIAL");
+    const outreachMessage = [...result.messages].reverse().find(
+      (message) => message.node === NODE.OUTREACH,
+    );
+    expect(outreachMessage?.text).toContain("artifacts present for 1/2 target(s)");
+  });
+
+  it("counts an existing shared-address artifact for its rightful person", async () => {
+    let artifactCalls = 0;
+    const existingSharedDeps = {
+      ...deps,
+      prisma: {
+        ...deps.prisma,
+        person: {
+          ...(deps.prisma as unknown as { person: object }).person,
+          findMany: async () => [
+            {
+              id: "p1",
+              companyId: "c1",
+              firstName: "Alice",
+              lastName: "Smith",
+              title: "VP Sales",
+              emails: [eligibleEmail("email_p1", "shared@acme.io")],
+              company: { name: "Acme", domain: "acme.io" },
+            },
+            {
+              id: "p2",
+              companyId: "c1",
+              firstName: "Bob",
+              lastName: "Jones",
+              title: "Director Sales",
+              emails: [eligibleEmail("email_p2", "shared@acme.io")],
+              company: { name: "Acme", domain: "acme.io" },
+            },
+          ],
+        },
+        outreachArtifact: {
+          findFirst: async () => ({
+            id: "artifact_for_p2",
+            status: "PENDING_REVIEW",
+            payload: { personId: "p2" },
+          }),
+        },
+      } as unknown as Parameters<typeof buildPipelineGraph>[0]["prisma"],
+      outreachArtifacts: {
+        recordDryRun: async () => {
+          artifactCalls += 1;
+          return { id: "must_not_exist" };
+        },
+      } as unknown as Parameters<typeof buildPipelineGraph>[0]["outreachArtifacts"],
+    };
+    const graph = buildPipelineGraph(existingSharedDeps).compile({
+      checkpointer: new MemorySaver(),
+    });
+    const config = { configurable: { thread_id: "t_existing_shared_recipient" } };
+
+    await graph.invoke(
+      { orgId, runId: "t_existing_shared_recipient", icpProfileIds: [icpId] },
+      config,
+    );
+    const result = await graph.invoke(
+      new Command({ resume: { approved: true, approvedBy: "alice@acme.io" } }),
+      config,
+    );
+
+    expect(artifactCalls).toBe(0);
+    expect(result.outreachResults).toEqual([
+      expect.objectContaining({
+        personId: "p1",
+        status: "failed",
+        error: "recipient_already_targeted_in_run",
+      }),
+      expect.objectContaining({
+        personId: "p2",
+        agentRunId: "artifact_for_p2",
+        status: "queued",
+      }),
+    ]);
+    expect(result.stageStatuses?.[STAGE.OUTREACH]).toBe("PARTIAL");
+  });
+
+  it("retains recipient snapshots beyond 200 people for score-ranked outreach", async () => {
+    const personIds = Array.from(
+      { length: 201 },
+      (_, index) => `p${String(index + 1).padStart(3, "0")}`,
+    );
+    const snapshotBatches: string[][] = [];
+    const recordedArgs: Array<Record<string, unknown>> = [];
+    const pagedDeps = {
+      ...deps,
+      leads: {
+        runSourcingStage: async () => ({
+          companies: 1,
+          people: personIds.length,
+          companyIds: ["c1"],
+          personIds,
+        }),
+        runEnrichmentStage: async () => ({
+          merged: 0,
+          enriched: personIds.length,
+          personIds,
+        }),
+        runScoringStage: async () => ({
+          scored: personIds.length,
+          personIds,
+        }),
+      } as unknown as Parameters<typeof buildPipelineGraph>[0]["leads"],
+      prisma: {
+        ...deps.prisma,
+        person: {
+          ...(deps.prisma as unknown as { person: object }).person,
+          findMany: async (args: {
+            where: { id?: { in?: string[] } };
+            select?: { emails?: unknown };
+          }) => {
+            const ids = args.where.id?.in ?? [];
+            if (args.select?.emails) snapshotBatches.push([...ids]);
+            return ids.map((id) => ({
+              id,
+              companyId: "c1",
+              firstName: "Alice",
+              lastName: "Smith",
+              title: "VP Sales",
+              emails: [eligibleEmail(`email_${id}`, `${id}@acme.io`)],
+              company: { name: "Acme", domain: "acme.io" },
+            }));
+          },
+        },
+        leadScore: {
+          ...(deps.prisma as unknown as { leadScore: object }).leadScore,
+          // The only qualified lead is deliberately in snapshot batch two.
+          findMany: async () => [{ personId: "p201", score: 90 }],
+        },
+      } as unknown as Parameters<typeof buildPipelineGraph>[0]["prisma"],
+      outreachArtifacts: {
+        recordDryRun: async (input: { toolArgs: Record<string, unknown> }) => {
+          recordedArgs.push(input.toolArgs);
+          return { id: "artifact_p201" };
+        },
+      } as unknown as Parameters<typeof buildPipelineGraph>[0]["outreachArtifacts"],
+    };
+
+    const graph = buildPipelineGraph(pagedDeps).compile({
+      checkpointer: new MemorySaver(),
+    });
+    const config = { configurable: { thread_id: "t_recipient_page_two" } };
+
+    const paused = await graph.invoke(
+      { orgId, runId: "t_recipient_page_two", icpProfileIds: [icpId] },
+      config,
+    );
+    expect(snapshotBatches.map((batch) => batch.length)).toEqual([200, 1]);
+    expect(paused.enrichedPeople).toHaveLength(201);
+    expect(paused.scoredLeads).toEqual([
+      { personId: "p201", score: 90, tier: "A" },
+    ]);
+
+    const result = await graph.invoke(
+      new Command({ resume: { approved: true, approvedBy: "alice@acme.io" } }),
+      config,
+    );
+
+    expect(recordedArgs).toHaveLength(1);
+    expect(recordedArgs[0]).toMatchObject({
+      to: "p201@acme.io",
+      recipient_provenance: {
+        candidateId: "email_p201",
+        email: "p201@acme.io",
+      },
+    });
+    expect(result.outreachResults).toEqual([
+      expect.objectContaining({
+        personId: "p201",
+        agentRunId: "artifact_p201",
+        status: "queued",
+      }),
+    ]);
+    expect(result.stageStatuses?.[STAGE.OUTREACH]).toBe("COMPLETE");
   });
 
   it("skips outreach when rejected", async () => {
@@ -421,7 +1083,7 @@ describe("pipeline-graph (supervisor routing)", () => {
       firstName: string;
       lastName: string;
       title: string | null;
-      emails: Array<{ email: string }>;
+      emails: Array<ReturnType<typeof eligibleEmail>>;
       company?: { name: string; domain: string };
     }
     interface CompanyRow { id: string; domain: string; name: string }
@@ -433,9 +1095,9 @@ describe("pipeline-graph (supervisor routing)", () => {
       { id: "cB1", domain: "b1.com", name: "Bcorp1" },
     ];
     const allPeople: PersonRow[] = [
-      { id: "pA1", companyId: "cA1", firstName: "Anna", lastName: "Aye", title: "VP", emails: [{ email: "anna@a1.com" }] },
-      { id: "pA2", companyId: "cA2", firstName: "Aaron", lastName: "Bee", title: "VP", emails: [{ email: "aaron@a2.com" }] },
-      { id: "pB1", companyId: "cB1", firstName: "Bella", lastName: "Cee", title: "VP", emails: [{ email: "bella@b1.com" }] },
+      { id: "pA1", companyId: "cA1", firstName: "Anna", lastName: "Aye", title: "VP", emails: [eligibleEmail("email_pA1", "anna@a1.com")] },
+      { id: "pA2", companyId: "cA2", firstName: "Aaron", lastName: "Bee", title: "VP", emails: [eligibleEmail("email_pA2", "aaron@a2.com")] },
+      { id: "pB1", companyId: "cB1", firstName: "Bella", lastName: "Cee", title: "VP", emails: [eligibleEmail("email_pB1", "bella@b1.com")] },
     ];
     const allScores: LeadScoreRow[] = [
       { personId: "pA1", score: 90, orgId },

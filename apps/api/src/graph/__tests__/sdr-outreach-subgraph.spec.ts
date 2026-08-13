@@ -85,7 +85,7 @@ function mockDeps(
   } = {},
 ): SubgraphDeps & { _recorded: ReturnType<typeof vi.fn> } {
   const recordDryRun = overrides.recordDryRun
-    ?? vi.fn().mockResolvedValue({ id: "art_test" });
+    ?? vi.fn().mockResolvedValue({ id: "art_test", status: "PENDING_REVIEW" });
   return {
     prisma: {
       company: {
@@ -301,6 +301,7 @@ describe("SDR outreach subgraph", () => {
     const result = await runSdrOutreachSubgraph(deps, lead());
 
     expect(result.artifactId).toBe("art_test");
+    expect(result.artifactStatus).toBe("PENDING_REVIEW");
     expect(result.qaIssues).toEqual([]);
     expect(result.draftAttempts).toBe(1);
     expect(deps._recorded).toHaveBeenCalledWith(

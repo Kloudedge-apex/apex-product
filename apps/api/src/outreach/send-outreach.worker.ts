@@ -44,7 +44,10 @@ import {
   conversationReplyThreadScope,
   providerReplyThreadScope,
 } from "./reply-single-flight";
-import { assertArtifactDispatchEligible } from "./outreach-artifact-eligibility";
+import {
+  assertArtifactDispatchEligible,
+  assertArtifactRecipientCurrent,
+} from "./outreach-artifact-eligibility";
 import { gmailWatchFreshnessFloor } from "../integrations/gmail/gmail-watch-freshness";
 import { senderIdentityReadiness } from "./sender-identity.util";
 
@@ -450,6 +453,7 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
       // A failure releases the claim through the normal provable-no-send path.
       if (artifact.channel === OutreachChannel.EMAIL) {
         assertArtifactDispatchEligible(artifact);
+        await assertArtifactRecipientCurrent(this.prisma, artifact);
       }
       result = await this.dispatch(artifact, liveAllowed);
     } catch (err) {

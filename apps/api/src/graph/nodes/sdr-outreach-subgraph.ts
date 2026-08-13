@@ -14,6 +14,7 @@
  */
 import { Logger } from "@nestjs/common";
 import { Annotation, StateGraph, START, END } from "@langchain/langgraph";
+import type { OutreachArtifactStatus } from "@prisma/client";
 import type { PrismaService } from "../../prisma/prisma.service";
 import type { LLMService } from "../../runtime/llm.service";
 import type { OutreachArtifactsService } from "../../outreach/outreach-artifacts.service";
@@ -22,6 +23,7 @@ import type { RunLevelEvaluatorService } from "../../observability/run-level-eva
 import { withNodeSpan } from "../../observability/graph-tracing";
 import { isMocked } from "../../runtime/tools/mock-metadata";
 import { isFresh } from "./research/freshness";
+import type { SelectedOutreachRecipient } from "../outreach-recipient";
 
 const log = new Logger("SdrOutreachSubgraph");
 
@@ -75,17 +77,20 @@ export interface SdrLeadInput {
   readonly title?: string | null;
   readonly companyName: string;
   readonly companyDomain: string;
+  readonly recipientProvenance?: SelectedOutreachRecipient;
 }
 
 export interface SdrLeadResult {
   readonly personId: string;
   readonly artifactId: string | null;
+  readonly artifactStatus: OutreachArtifactStatus | null;
   readonly subject: string;
   readonly body: string;
   readonly qaIssues: readonly string[];
   readonly draftAttempts: number;
   readonly refusal: DrafterRefusal | null;
   readonly groundednessSelfCheck: GroundednessSelfCheck | null;
+  readonly recipientProvenance?: SelectedOutreachRecipient;
 }
 
 export interface DrafterRefusal {
@@ -193,6 +198,10 @@ const SdrStateAnnotation = Annotation.Root({
     default: () => [],
   }),
   artifactId: Annotation<string | null>({
+    reducer: (_p, n) => n,
+    default: () => null,
+  }),
+  artifactStatus: Annotation<OutreachArtifactStatus | null>({
     reducer: (_p, n) => n,
     default: () => null,
   }),
@@ -635,9 +644,13 @@ export function buildSdrOutreachSubgraph(deps: SubgraphDeps) {
           to: state.lead.email,
           subject: state.subject,
           body: state.body,
+          bodyContentType: "text",
           personId: state.lead.personId,
           qaIssues: state.qaIssues,
           draftAttempts: state.draftAttempts,
+          ...(state.lead.recipientProvenance
+            ? { recipient_provenance: state.lead.recipientProvenance }
+            : {}),
           // Grounding surface: the cited fact_ids and unsupported_claims the model
           // declared, plus the structured brief facts the drafter actually saw.
           // Approvers see these alongside the draft so they can spot-check.
@@ -659,7 +672,10 @@ export function buildSdrOutreachSubgraph(deps: SubgraphDeps) {
           toolArgs,
         });
 
-        return { artifactId: artifact?.id ?? null };
+        return {
+          artifactId: artifact?.id ?? null,
+          artifactStatus: artifact?.status ?? null,
+        };
       },
     );
   };
@@ -706,12 +722,14 @@ export async function runSdrOutreachSubgraph(
   return {
     personId: lead.personId,
     artifactId: final.artifactId,
+    artifactStatus: final.artifactStatus,
     subject: final.subject,
     body: final.body,
     qaIssues: final.qaIssues,
     draftAttempts: final.draftAttempts,
     refusal: final.refusal,
     groundednessSelfCheck: final.groundednessSelfCheck,
+    recipientProvenance: lead.recipientProvenance,
   };
 }
 

@@ -25,6 +25,17 @@ describe("pipeline-graph parentRunId propagation (audit P0 #12)", () => {
   let chatCalls: Array<{ messages: ChatMessage[]; options?: ChatOptions }>;
   let deps: Parameters<typeof buildPipelineGraph>[0];
 
+  const eligibleEmail = (id: string, email: string) => ({
+    id,
+    email,
+    source: "PATTERN_GUESS" as const,
+    verified: true,
+    verificationResult: "VALID" as const,
+    confidence: 0.9,
+    verifiedAt: new Date("2026-05-25T00:00:00.000Z"),
+    createdAt: new Date("2026-05-24T00:00:00.000Z"),
+  });
+
   beforeEach(() => {
     chatCalls = [];
     let artifactCounter = 0;
@@ -82,7 +93,7 @@ describe("pipeline-graph parentRunId propagation (audit P0 #12)", () => {
               firstName: "Alice",
               lastName: "Smith",
               title: "VP Sales",
-              emails: [{ email: "alice@acme.io" }],
+              emails: [eligibleEmail("email_p1", "alice@acme.io")],
               company: { name: "Acme", domain: "acme.io" },
             },
           ],

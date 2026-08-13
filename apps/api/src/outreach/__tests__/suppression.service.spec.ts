@@ -1,3 +1,4 @@
+import { ConflictException } from "@nestjs/common";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { OutreachSuppressionReason } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
@@ -150,6 +151,7 @@ describe("SuppressionService legacy Gmail reply-stop compatibility", () => {
       id: "sup_1",
       orgId: "org_1",
       recipientRef: "prospect@example.com",
+      reason: OutreachSuppressionReason.MANUAL,
     });
     prisma.outreachSuppression.delete.mockResolvedValue({ id: "sup_1" });
 
@@ -158,10 +160,89 @@ describe("SuppressionService legacy Gmail reply-stop compatibility", () => {
     expect(prisma.outreachSuppression.delete).toHaveBeenCalledWith({
       where: { id: "sup_1" },
     });
+    expect(prisma.outreachSuppression.findUnique).toHaveBeenCalledWith({
+      where: { id: "sup_1" },
+      select: {
+        id: true,
+        orgId: true,
+        recipientRef: true,
+        reason: true,
+      },
+    });
     expect(prisma.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
       prisma.outreachSuppression.delete.mock.invocationCallOrder[0],
     );
   });
+
+  it.each([
+    OutreachSuppressionReason.USER_UNSUBSCRIBED,
+    OutreachSuppressionReason.COMPLAINED,
+    OutreachSuppressionReason.BOUNCED,
+  ])("refuses to remove a %s suppression under the org lock", async (reason) => {
+    prisma.outreachSuppression.findUnique.mockResolvedValue({
+      id: "sup_protected",
+      orgId: "org_1",
+      recipientRef: "prospect@example.com",
+      reason,
+    });
+
+    await expect(
+      service.unsuppress("org_1", "sup_protected"),
+    ).rejects.toEqual(
+      new ConflictException(
+        `Suppression sup_protected cannot be removed because ${reason} requires a durable re-consent or reverification workflow`,
+      ),
+    );
+
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
+    expect(prisma.outreachSuppression.delete).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    OutreachSuppressionReason.USER_UNSUBSCRIBED,
+    OutreachSuppressionReason.COMPLAINED,
+    OutreachSuppressionReason.BOUNCED,
+  ])(
+    "upgrades an existing admin MANUAL row to %s so it cannot later be removed",
+    async (reason) => {
+      prisma.outreachSuppression.findUnique
+        .mockResolvedValueOnce({
+          id: "sup_manual",
+          reason: OutreachSuppressionReason.MANUAL,
+          source: "admin_manual",
+        })
+        .mockResolvedValueOnce({
+          id: "sup_manual",
+          orgId: "org_1",
+          recipientRef: "prospect@example.com",
+          reason,
+        });
+      prisma.outreachSuppression.update.mockResolvedValue({ id: "sup_manual" });
+
+      await expect(
+        service.suppress({
+          orgId: "org_1",
+          recipientRef: "prospect@example.com",
+          reason,
+          source: "provider_or_recipient_event",
+          metadata: { eventId: "evt_protected" },
+        }),
+      ).resolves.toEqual({ created: false, upgraded: true });
+
+      expect(prisma.outreachSuppression.update).toHaveBeenCalledWith({
+        where: { id: "sup_manual" },
+        data: {
+          reason,
+          source: "provider_or_recipient_event",
+          metadata: { eventId: "evt_protected" },
+        },
+      });
+      await expect(
+        service.unsuppress("org_1", "sup_manual"),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(prisma.outreachSuppression.delete).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([
     {

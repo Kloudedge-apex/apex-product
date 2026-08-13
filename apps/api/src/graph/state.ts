@@ -1,4 +1,6 @@
 import { Annotation } from "@langchain/langgraph";
+import type { OutreachArtifactStatus } from "@prisma/client";
+import type { SelectedOutreachRecipient } from "./outreach-recipient";
 
 /**
  * Public pipeline state — what nodes read and write, and what the UI sees.
@@ -37,7 +39,15 @@ export const PipelineStateAnnotation = Annotation.Root({
     default: () => [],
   }),
   enrichedPeople: Annotation<
-    Array<{ id: string; companyId: string; firstName: string; lastName: string; title?: string; email?: string }>
+    Array<{
+      id: string;
+      companyId: string;
+      firstName: string;
+      lastName: string;
+      title?: string;
+      email?: string;
+      recipient?: SelectedOutreachRecipient;
+    }>
   >({
     reducer: (_prev, next) => next,
     default: () => [],
@@ -55,7 +65,14 @@ export const PipelineStateAnnotation = Annotation.Root({
     default: () => [],
   }),
   outreachResults: Annotation<
-    Array<{ personId: string; agentRunId?: string; status: "queued" | "sent" | "failed"; error?: string }>
+    Array<{
+      personId: string;
+      agentRunId?: string;
+      status: "queued" | "sent" | "persisted" | "failed";
+      artifactStatus?: OutreachArtifactStatus;
+      error?: string;
+      recipient?: SelectedOutreachRecipient;
+    }>
   >({
     reducer: (_prev, next) => next,
     default: () => [],
@@ -139,8 +156,10 @@ export type StageName = (typeof STAGE)[keyof typeof STAGE];
  *              (e.g. enrichment yielded leads for some ICPs but not others).
  *              Downstream may still proceed; the supervisor does not gate on
  *              this.
- *  - FAILED:   stage produced zero usable output AND that is fatal. The node
- *              must additionally THROW so the worker flips GraphRun.status
- *              to FAILED. Downstream nodes also gate on this defensively.
+ *  - FAILED:   stage produced zero usable output AND that is fatal. Early
+ *              stages throw to stop execution immediately; a terminal stage
+ *              may return its explicit per-item failures. GraphService maps
+ *              either form to GraphRun.status=FAILED. Downstream nodes also
+ *              gate on this defensively.
  */
 export type StageStatus = "RUNNING" | "COMPLETE" | "PARTIAL" | "FAILED";
