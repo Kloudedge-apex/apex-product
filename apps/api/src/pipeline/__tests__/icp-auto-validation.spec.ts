@@ -123,24 +123,18 @@ describe("IcpAutoService.generateForOrg — JSON validation retry", () => {
     expect(chatMock).toHaveBeenCalledTimes(2);
   });
 
-  // SKIP: pre-existing latent failure surfaced after the SSRF guard added in
-  // audit P0 #17/#18. The fixture below ("productSummary: 'x', industry: 'y'")
-  // is now rejected by the IcpAutoService schema validator as too-short — the
-  // test was passing before because the validator was added later and the
-  // fixture was never updated. Not in scope for go-live; replace with a
-  // realistic fixture in a follow-up.
-  it.skip("succeeds without retry when the first response is valid JSON wrapped in a markdown fence", async () => {
+  it("succeeds without retry when the first response is valid JSON wrapped in a markdown fence", async () => {
     const fenced =
       "```json\n" +
       JSON.stringify({
-        productSummary: "x",
-        industry: "y",
-        targetTitles: ["CTO"],
-        targetIndustries: [],
-        targetGeos: [],
-        intentKeywords: [],
-        minEmployees: null,
-        maxEmployees: null,
+        productSummary: "Sales automation for B2B software revenue teams",
+        industry: "B2B software — sales automation",
+        targetTitles: ["VP of Sales", "Head of Revenue Operations"],
+        targetIndustries: ["B2B SaaS"],
+        targetGeos: ["United States"],
+        intentKeywords: ["outbound sales automation"],
+        minEmployees: 50,
+        maxEmployees: 500,
       }) +
       "\n```";
     const { llm, chatMock } = makeLlm([fenced]);

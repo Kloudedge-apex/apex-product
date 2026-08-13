@@ -41,7 +41,7 @@ export interface OperationalKpi {
   readonly windowDays: number;
   readonly graph_runs_total: number;
   readonly graph_runs_failed: number;
-  readonly graph_error_rate: number;
+  readonly graph_error_rate: number | null;
   readonly durations_ms: {
     readonly lead_sourced: Percentiles;
     readonly lead_scored: Percentiles;
@@ -87,7 +87,7 @@ export interface GuaranteeDefenseKpi {
   readonly windowDays: number;
   readonly rejected_artifacts: number;
   readonly reviewed_artifacts: number;
-  readonly rejection_rate: number;
+  readonly rejection_rate: number | null;
 }
 
 export interface Variant {
@@ -199,7 +199,7 @@ export class KpiCalculatorService {
         }),
       ]);
 
-    const errorRate = graphRunsTotal > 0 ? graphRunsFailed / graphRunsTotal : 0;
+    const errorRate = graphRunsTotal > 0 ? graphRunsFailed / graphRunsTotal : null;
 
     return {
       windowDays: window.windowDays,
@@ -321,7 +321,7 @@ export class KpiCalculatorService {
       }),
     ]);
 
-    const rate = reviewed > 0 ? rejected / reviewed : 0;
+    const rate = reviewed > 0 ? rejected / reviewed : null;
 
     return {
       windowDays: window.windowDays,

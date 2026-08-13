@@ -123,6 +123,37 @@ Do not point this command at staging or production, and do not promote or
 rename its artifact as operator evidence. The separate staging rehearsal and
 signed production receipt remain mandatory.
 
+After that receipt passes exact-source verification, the same blocking CI job
+builds the candidate production image and runs
+`scripts/rehearse-runtime-candidate.sh`. This second hermetic gate starts that
+image twice, using the default production command: first as the worker with all
+three BullMQ consumer gates enabled, then as the API with those local consumer
+gates disabled. Both roles connect only to the guarded
+`workforce_rehearsal_*` PostgreSQL fixture and an empty, credential-free
+loopback Redis database. Before boot, the controller proves that the database still contains
+exactly the two reserved synthetic tenants and refreshes only the synthetic
+RUNNING graph's activity clock so orphan recovery cannot enqueue provider
+work during the test.
+
+The runtime gate requires liveness and PostgreSQL/Redis readiness from both
+roles, fleet-visible consumers for `agent-runs`, `graph-runs`, and
+`outreach-send`, HTTP 401 from an unauthenticated tenant route, and bounded
+SIGTERM shutdown without a forced-kill exit. It rejects remote database or
+Redis hosts, non-rehearsal database names, credentials other than the fixed CI
+PostgreSQL identity, Redis credentials, and an image whose OCI revision label
+does not equal the candidate commit. Provider credentials are synthetic,
+scheduling and live outreach are disabled, and no cloud mutation occurs.
+
+The resulting receipt conforms to
+`docs/ops/ci-runtime-rehearsal-receipt.schema.json`. It contains only the
+candidate SHA, local image ID/revision, the migration-receipt hash, dependency
+and role booleans, consumer counts, the denial status, and clean-shutdown
+results. Like the migration receipt, it is always
+`environment: ci-synthetic`, `authority: non-authoritative`. It does not prove
+the later registry digest, staging configuration, OAuth, provider delivery,
+DNS, browser behavior, or any production rollout and must never be promoted as
+that evidence.
+
 After the authorized production apply, create a sanitized receipt conforming to
 `docs/ops/production-migration-receipt.schema.json`. Store it outside the Git
 working tree and include only hashes, operator/approver identifiers, the change

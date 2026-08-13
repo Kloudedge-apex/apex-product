@@ -22,7 +22,80 @@ type OutreachArtifactRow = {
   readonly updatedAt: Date;
 };
 
+function ratePrisma({
+  graphRunCounts = [0, 0],
+  outreachArtifactCounts = [0, 0],
+}: {
+  readonly graphRunCounts?: readonly number[];
+  readonly outreachArtifactCounts?: readonly number[];
+} = {}): KpiPrismaClient {
+  const remainingGraphRunCounts = [...graphRunCounts];
+  const remainingOutreachArtifactCounts = [...outreachArtifactCounts];
+
+  return {
+    evidenceEvent: { findMany: async () => [] },
+    graphRun: {
+      count: async () => remainingGraphRunCounts.shift() ?? 0,
+    },
+    outreachArtifact: {
+      count: async () => remainingOutreachArtifactCounts.shift() ?? 0,
+    },
+    leadScore: {
+      findMany: async () => [],
+      count: async () => 0,
+    },
+  };
+}
+
 describe("KpiCalculatorService", () => {
+  it("returns a null graph error rate when no graph runs were measured", async () => {
+    const svc = new KpiCalculatorService(
+      ratePrisma({ graphRunCounts: [0, 0] }),
+    );
+
+    const operational = await svc.operational("org_a", { windowDays: 7 });
+
+    expect(operational.graph_runs_total).toBe(0);
+    expect(operational.graph_runs_failed).toBe(0);
+    expect(operational.graph_error_rate).toBeNull();
+  });
+
+  it("computes the graph error rate when graph runs were measured", async () => {
+    const svc = new KpiCalculatorService(
+      ratePrisma({ graphRunCounts: [4, 1] }),
+    );
+
+    const operational = await svc.operational("org_a", { windowDays: 7 });
+
+    expect(operational.graph_runs_total).toBe(4);
+    expect(operational.graph_runs_failed).toBe(1);
+    expect(operational.graph_error_rate).toBeCloseTo(0.25);
+  });
+
+  it("returns a null rejection rate when no artifacts were reviewed", async () => {
+    const svc = new KpiCalculatorService(
+      ratePrisma({ outreachArtifactCounts: [0, 0] }),
+    );
+
+    const guarantee = await svc.guaranteeDefense("org_a", { windowDays: 7 });
+
+    expect(guarantee.rejected_artifacts).toBe(0);
+    expect(guarantee.reviewed_artifacts).toBe(0);
+    expect(guarantee.rejection_rate).toBeNull();
+  });
+
+  it("computes the rejection rate when artifacts were reviewed", async () => {
+    const svc = new KpiCalculatorService(
+      ratePrisma({ outreachArtifactCounts: [1, 4] }),
+    );
+
+    const guarantee = await svc.guaranteeDefense("org_a", { windowDays: 7 });
+
+    expect(guarantee.rejected_artifacts).toBe(1);
+    expect(guarantee.reviewed_artifacts).toBe(4);
+    expect(guarantee.rejection_rate).toBeCloseTo(0.25);
+  });
+
   it("isolates orgId across KPI queries (commercial + guaranteeDefense)", async () => {
     const now = new Date();
     const evidence: EvidenceRow[] = [

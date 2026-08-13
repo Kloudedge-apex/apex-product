@@ -1,7 +1,6 @@
 import {
   Controller,
   Post,
-  Get,
   Param,
   NotFoundException,
 } from "@nestjs/common";
@@ -40,10 +39,5 @@ export class RuntimeController {
     });
     if (!owned) throw new NotFoundException("Run not found");
     return this.runtime.cancelRun(runId);
-  }
-
-  @Get("queue/stats")
-  getQueueStats() {
-    return this.runtime.getQueueStats();
   }
 }
