@@ -104,7 +104,10 @@ export class GmailController {
     }
 
     try {
-      await this.gmailService.handlePushNotification({ emailAddress, historyId });
+      await this.gmailService.handlePushNotification({
+        emailAddress,
+        historyId,
+      });
     } catch (err) {
       // Return a retryable failure. Acknowledging before durable message
       // materialization would permanently lose the reply because Pub/Sub
@@ -136,6 +139,7 @@ export class GmailController {
    * renewing watches before the 7-day expiration.
    */
   @Post("watch")
+  @UseGuards(AdminOrManagerGuard)
   @HttpCode(HttpStatus.OK)
   async registerWatch(@OrgId() orgId: string) {
     const result = await this.gmailService.registerWatch(orgId);
@@ -143,6 +147,7 @@ export class GmailController {
   }
 
   @Get("messages")
+  @UseGuards(AdminOrManagerGuard)
   listMessages(
     @OrgId() orgId: string,
     @Query("maxResults") maxResults?: string,
@@ -157,6 +162,7 @@ export class GmailController {
   }
 
   @Get("search")
+  @UseGuards(AdminOrManagerGuard)
   searchMessages(
     @OrgId() orgId: string,
     @Query("q") query: string,
@@ -170,11 +176,13 @@ export class GmailController {
   }
 
   @Get("messages/:messageId")
+  @UseGuards(AdminOrManagerGuard)
   getMessage(@OrgId() orgId: string, @Param("messageId") messageId: string) {
     return this.gmailService.getMessage(orgId, messageId);
   }
 
   @Get("threads/:threadId")
+  @UseGuards(AdminOrManagerGuard)
   getThread(@OrgId() orgId: string, @Param("threadId") threadId: string) {
     return this.gmailService.getThread(orgId, threadId);
   }

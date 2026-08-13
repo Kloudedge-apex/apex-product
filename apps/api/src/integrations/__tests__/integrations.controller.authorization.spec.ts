@@ -1,0 +1,32 @@
+import { GUARDS_METADATA } from "@nestjs/common/constants";
+import { describe, expect, it } from "vitest";
+import { AdminOrManagerGuard } from "../../common/admin-or-manager.guard";
+import { IntegrationsController } from "../integrations.controller";
+
+function guardsOn(method: keyof IntegrationsController): unknown[] {
+  const handler = IntegrationsController.prototype[method];
+  return Reflect.getMetadata(GUARDS_METADATA, handler) ?? [];
+}
+
+describe("IntegrationsController management authorization", () => {
+  it.each([
+    "create",
+    "remove",
+    "gmailAuthUrl",
+    "outlookAuthUrl",
+    "hubspotAuthUrl",
+    "simulateConnect",
+    "connectApiKey",
+    "disconnectByProvider",
+    "testByProvider",
+  ] as const)("attaches AdminOrManagerGuard to %s", (method) => {
+    expect(guardsOn(method)).toContain(AdminOrManagerGuard);
+  });
+
+  it.each(["findAll", "getCatalog", "checkHealth"] as const)(
+    "keeps read-only status method %s available to authenticated org members",
+    (method) => {
+      expect(guardsOn(method)).not.toContain(AdminOrManagerGuard);
+    },
+  );
+});

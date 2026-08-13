@@ -8,6 +8,7 @@ import {
   Query,
   Res,
   Logger,
+  UseGuards,
 } from "@nestjs/common";
 import { Response } from "express";
 import { IntegrationsService } from "./integrations.service";
@@ -19,6 +20,7 @@ import {
   CreateIntegrationDto,
   ConnectIntegrationDto,
 } from "../common/dto/integrations.dto";
+import { AdminOrManagerGuard } from "../common/admin-or-manager.guard";
 
 @Controller("integrations")
 export class IntegrationsController {
@@ -35,11 +37,13 @@ export class IntegrationsController {
   }
 
   @Post()
+  @UseGuards(AdminOrManagerGuard)
   create(@OrgId() orgId: string, @Body() body: CreateIntegrationDto) {
     return this.integrationsService.create(orgId, body);
   }
 
   @Delete(":id")
+  @UseGuards(AdminOrManagerGuard)
   remove(@OrgId() orgId: string, @Param("id") id: string) {
     return this.integrationsService.disconnect(id, orgId);
   }
@@ -59,16 +63,19 @@ export class IntegrationsController {
   // perform `window.location.href = authUrl` after a Bearer-authenticated XHR.
 
   @Get("gmail/auth-url")
+  @UseGuards(AdminOrManagerGuard)
   gmailAuthUrl(@OrgId() orgId: string) {
     return { authUrl: this.integrationsService.getOAuthUrl("gmail", orgId) };
   }
 
   @Get("outlook/auth-url")
+  @UseGuards(AdminOrManagerGuard)
   outlookAuthUrl(@OrgId() orgId: string) {
     return { authUrl: this.integrationsService.getOAuthUrl("outlook", orgId) };
   }
 
   @Get("hubspot/auth-url")
+  @UseGuards(AdminOrManagerGuard)
   hubspotAuthUrl(@OrgId() orgId: string) {
     return { authUrl: this.integrationsService.getOAuthUrl("hubspot", orgId) };
   }
@@ -113,6 +120,7 @@ export class IntegrationsController {
 
   /** Dev/demo helper — disabled in production by the service. */
   @Post("connect")
+  @UseGuards(AdminOrManagerGuard)
   simulateConnect(@OrgId() orgId: string, @Body() body: ConnectIntegrationDto) {
     return this.integrationsService.simulateConnect(orgId, body.provider);
   }
@@ -122,15 +130,21 @@ export class IntegrationsController {
    * OAuth providers should use `/:provider/auth-url` instead.
    */
   @Post(":provider/connect")
+  @UseGuards(AdminOrManagerGuard)
   connectApiKey(
     @OrgId() orgId: string,
     @Param("provider") provider: string,
     @Body() body: { apiKey?: string },
   ) {
-    return this.integrationsService.connectApiKey(orgId, provider, body.apiKey ?? "");
+    return this.integrationsService.connectApiKey(
+      orgId,
+      provider,
+      body.apiKey ?? "",
+    );
   }
 
   @Post(":provider/disconnect")
+  @UseGuards(AdminOrManagerGuard)
   disconnectByProvider(
     @OrgId() orgId: string,
     @Param("provider") provider: string,
@@ -139,10 +153,8 @@ export class IntegrationsController {
   }
 
   @Post(":provider/test")
-  testByProvider(
-    @OrgId() orgId: string,
-    @Param("provider") provider: string,
-  ) {
+  @UseGuards(AdminOrManagerGuard)
+  testByProvider(@OrgId() orgId: string, @Param("provider") provider: string) {
     return this.integrationsService.testByProvider(orgId, provider);
   }
 
@@ -165,7 +177,9 @@ export class IntegrationsController {
           err instanceof Error ? err.message : "unknown"
         }`,
       );
-      return res.redirect(`${frontendUrl}${returnPath}?error=${provider}_state`);
+      return res.redirect(
+        `${frontendUrl}${returnPath}?error=${provider}_state`,
+      );
     }
 
     try {
@@ -177,7 +191,11 @@ export class IntegrationsController {
       if (provider === "gmail") {
         await this.gmailService.handleCallback(code, orgId);
       } else {
-        await this.integrationsService.handleOAuthCallback(provider, code, orgId);
+        await this.integrationsService.handleOAuthCallback(
+          provider,
+          code,
+          orgId,
+        );
       }
       return res.redirect(`${frontendUrl}${returnPath}?connected=${provider}`);
     } catch (err) {
