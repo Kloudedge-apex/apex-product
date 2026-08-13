@@ -1251,6 +1251,282 @@ test_no_mutable_bitbucket_deploy_path() {
   pass
 }
 
+test_production_release_workflow_verifier() {
+  local harness verifier workflow fixture intermediate
+  harness="$(mktemp -d)"
+  TEMP_DIRS+=("${harness}")
+  verifier="${REPO_ROOT}/scripts/verify-production-release-workflow.sh"
+  workflow="${REPO_ROOT}/.github/workflows/release-production.yml"
+
+  if [[ ! -x "${verifier}" ]]; then
+    fail "production release workflow verifier is not executable"
+  fi
+  "${verifier}" "${workflow}" >/dev/null
+  pass
+
+  fixture="${harness}/automatic-trigger.yml"
+  awk '{
+    print
+    if ($0 == "on:") print "  push:"
+  }' "${workflow}" >"${fixture}"
+  if "${verifier}" "${fixture}" >/dev/null 2>&1; then
+    fail "workflow verifier accepted an automatic production trigger"
+  fi
+  pass
+
+  fixture="${harness}/pre-audit-step.yml"
+  awk '{
+    print
+    if ($0 == "    steps:") {
+      print "      - name: Unreviewed pre-audit write"
+      print "        run: echo unreviewed"
+    }
+  }' "${workflow}" >"${fixture}"
+  if "${verifier}" "${fixture}" >/dev/null 2>&1; then
+    fail "workflow verifier accepted an added pre-audit run step"
+  fi
+  pass
+
+  fixture="${harness}/job-container.yml"
+  awk '{
+    print
+    if ($0 == "    runs-on: ubuntu-24.04") print "    container: ubuntu:latest"
+  }' "${workflow}" >"${fixture}"
+  if "${verifier}" "${fixture}" >/dev/null 2>&1; then
+    fail "workflow verifier accepted an unreviewed job container"
+  fi
+  pass
+
+  fixture="${harness}/job-strategy.yml"
+  awk '{
+    print
+    if ($0 == "    runs-on: ubuntu-24.04") print "    strategy: { fail-fast: false }"
+  }' "${workflow}" >"${fixture}"
+  if "${verifier}" "${fixture}" >/dev/null 2>&1; then
+    fail "workflow verifier accepted an unreviewed job strategy"
+  fi
+  pass
+
+  fixture="${harness}/yaml-anchor.yml"
+  sed 's/^    name: Protected production release$/    name: \&release_job Protected production release/' \
+    "${workflow}" >"${fixture}"
+  if "${verifier}" "${fixture}" >/dev/null 2>&1; then
+    fail "workflow verifier accepted a YAML anchor"
+  fi
+  pass
+
+  fixture="${harness}/shell-override.yml"
+  awk '{
+    print
+    if ($0 == "      - name: Validate manual release admission") print "        shell: sh"
+  }' "${workflow}" >"${fixture}"
+  if "${verifier}" "${fixture}" >/dev/null 2>&1; then
+    fail "workflow verifier accepted a shell override"
+  fi
+  pass
+
+  fixture="${harness}/skipped-azure-identity.yml"
+  awk '{
+    print
+    if ($0 == "      - name: Verify Azure production identity") {
+      print "        if: ${{ false }}"
+    }
+  }' "${workflow}" >"${fixture}"
+  if "${verifier}" "${fixture}" >/dev/null 2>&1; then
+    fail "workflow verifier accepted a conditional Azure identity check"
+  fi
+  pass
+
+  fixture="${harness}/ignored-azure-identity-failure.yml"
+  awk '{
+    print
+    if ($0 == "      - name: Verify Azure production identity") {
+      print "        continue-on-error: true"
+    }
+  }' "${workflow}" >"${fixture}"
+  if "${verifier}" "${fixture}" >/dev/null 2>&1; then
+    fail "workflow verifier accepted continue-on-error for Azure identity"
+  fi
+  pass
+
+  fixture="${harness}/mutable-checkout.yml"
+  sed 's#actions/checkout@11d5960a326750d5838078e36cf38b85af677262#actions/checkout@v4#' \
+    "${workflow}" >"${fixture}"
+  if "${verifier}" "${fixture}" >/dev/null 2>&1; then
+    fail "workflow verifier accepted a mutable action reference"
+  fi
+  pass
+
+  fixture="${harness}/downgraded-permissions.yml"
+  sed 's/^  contents: write$/  contents: read/' "${workflow}" >"${fixture}"
+  if "${verifier}" "${fixture}" >/dev/null 2>&1; then
+    fail "workflow verifier accepted downgraded release permissions"
+  fi
+  pass
+
+  fixture="${harness}/admin-bypass.yml"
+  sed 's/\.can_admins_bypass == false/.can_admins_bypass == true/' \
+    "${workflow}" >"${fixture}"
+  if "${verifier}" "${fixture}" >/dev/null 2>&1; then
+    fail "workflow verifier accepted administrator environment bypass"
+  fi
+  pass
+
+  fixture="${harness}/self-review.yml"
+  sed 's/\.prevent_self_review == true/.prevent_self_review == false/' \
+    "${workflow}" >"${fixture}"
+  if "${verifier}" "${fixture}" >/dev/null 2>&1; then
+    fail "workflow verifier accepted self-approval in the production environment"
+  fi
+  pass
+
+  fixture="${harness}/repository-variable-fallback.yml"
+  sed 's#environments/workforce-os-production/variables/${name}#actions/variables/${name}#' \
+    "${workflow}" >"${fixture}"
+  if "${verifier}" "${fixture}" >/dev/null 2>&1; then
+    fail "workflow verifier accepted repository-scoped OIDC variables"
+  fi
+  pass
+
+  fixture="${harness}/repository-secret-fallback.yml"
+  sed 's#environments/workforce-os-production/secrets/${name}#actions/secrets/${name}#' \
+    "${workflow}" >"${fixture}"
+  if "${verifier}" "${fixture}" >/dev/null 2>&1; then
+    fail "workflow verifier accepted repository-scoped migration evidence secrets"
+  fi
+  pass
+
+  fixture="${harness}/job-scoped-github-token.yml"
+  awk '
+    !changed && /^          GH_TOKEN:/ {
+      sub(/^          /, "      ")
+      changed = 1
+    }
+    { print }
+  ' "${workflow}" >"${fixture}"
+  if "${verifier}" "${fixture}" >/dev/null 2>&1; then
+    fail "workflow verifier accepted a job-scoped GitHub token"
+  fi
+  pass
+
+  fixture="${harness}/release-ref-workflow.yml"
+  sed 's#if \[\[ "${GITHUB_REF}" != "refs/heads/master"#if [[ "${GITHUB_REF}" != "refs/heads/release/go-live-*"#' \
+    "${workflow}" >"${fixture}"
+  if "${verifier}" "${fixture}" >/dev/null 2>&1; then
+    fail "workflow verifier accepted privileged workflow execution from a release ref"
+  fi
+  pass
+
+  fixture="${harness}/unchecked-remote-master.yml"
+  sed 's#repos/${GITHUB_REPOSITORY}/git/ref/heads/master#repos/${GITHUB_REPOSITORY}/commits/${WORKFLOW_SHA}#' \
+    "${workflow}" >"${fixture}"
+  if "${verifier}" "${fixture}" >/dev/null 2>&1; then
+    fail "workflow verifier accepted trusted source without a remote master-head check"
+  fi
+  pass
+
+  fixture="${harness}/unprotected-release-branch.yml"
+  sed 's/and \.protected == true/and .protected == false/' \
+    "${workflow}" >"${fixture}"
+  if "${verifier}" "${fixture}" >/dev/null 2>&1; then
+    fail "workflow verifier accepted an unprotected production candidate branch"
+  fi
+  pass
+
+  fixture="${harness}/fallback-vars-context.yml"
+  sed 's#${{ steps.production_environment.outputs.azure_client_id }}#${{ vars.AZURE_CLIENT_ID }}#' \
+    "${workflow}" >"${fixture}"
+  if "${verifier}" "${fixture}" >/dev/null 2>&1; then
+    fail "workflow verifier accepted fallback vars context for the OIDC identity"
+  fi
+  pass
+
+  fixture="${harness}/missing-environment-output.yml"
+  sed '/printf '\''azure_client_id=%s\\n'\'' "${azure_client_id}" >>"${GITHUB_OUTPUT}"/d' \
+    "${workflow}" >"${fixture}"
+  if "${verifier}" "${fixture}" >/dev/null 2>&1; then
+    fail "workflow verifier accepted an unaudited OIDC output path"
+  fi
+  pass
+
+  fixture="${harness}/detached-release-head.yml"
+  sed '/git checkout --force -B "${RELEASE_BRANCH}" "${RELEASE_SHA}"/d' \
+    "${workflow}" >"${fixture}"
+  if "${verifier}" "${fixture}" >/dev/null 2>&1; then
+    fail "workflow verifier accepted a detached release checkout"
+  fi
+  pass
+
+  fixture="${harness}/first-signer-pin-only.yml"
+  sed 's/{ print }/{ print $1; exit }/' \
+    "${workflow}" >"${fixture}"
+  if "${verifier}" "${fixture}" >/dev/null 2>&1; then
+    fail "workflow verifier accepted a first-line-only signer pin parser"
+  fi
+  pass
+
+  fixture="${harness}/candidate-controlled-verifier.yml"
+  sed 's#release-control/scripts/verify-production-release-workflow.sh#candidate/scripts/verify-production-release-workflow.sh#' \
+    "${workflow}" >"${fixture}"
+  if "${verifier}" "${fixture}" >/dev/null 2>&1; then
+    fail "workflow verifier accepted the candidate branch as privileged control source"
+  fi
+  pass
+
+  fixture="${harness}/missing-release-ci.yml"
+  sed '/run: release-control\/scripts\/verify-github-release-ci.sh "${RELEASE_SHA}"/d' \
+    "${workflow}" >"${fixture}"
+  if "${verifier}" "${fixture}" >/dev/null 2>&1; then
+    fail "workflow verifier accepted Azure access before exact-commit CI admission"
+  fi
+  pass
+
+  fixture="${harness}/hardcoded-authority.yml"
+  sed 's#^          ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED:.*$#          ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED: true#' \
+    "${workflow}" >"${fixture}"
+  if "${verifier}" "${fixture}" >/dev/null 2>&1; then
+    fail "workflow verifier accepted hardcoded exclusive mutation authority"
+  fi
+  pass
+
+  intermediate="${harness}/authority-input-added.yml"
+  fixture="${harness}/input-authority.yml"
+  awk '{
+    print
+    if ($0 == "    inputs:") print "      authority: { required: true, type: boolean }"
+  }' "${workflow}" >"${intermediate}"
+  sed 's#${{ steps.production_environment.outputs.exclusive_mutation_authority }}#${{ inputs.authority }}#' \
+    "${intermediate}" >"${fixture}"
+  if "${verifier}" "${fixture}" >/dev/null 2>&1; then
+    fail "workflow verifier accepted dispatch-controlled mutation authority"
+  fi
+  pass
+
+  fixture="${harness}/unsafe-migration-evidence.yml"
+  sed 's#${{ secrets.PRODUCTION_MIGRATION_RECEIPT_B64 }}#${{ inputs.release_sha }}#' \
+    "${workflow}" >"${fixture}"
+  if "${verifier}" "${fixture}" >/dev/null 2>&1; then
+    fail "workflow verifier accepted migration evidence from a dispatch input"
+  fi
+  pass
+
+  fixture="${harness}/inherited-migration-evidence.yml"
+  sed '/unset MIGRATION_RECEIPT_B64 MIGRATION_SIGNATURE_B64 MIGRATION_ALLOWED_SIGNERS_B64/d' \
+    "${workflow}" >"${fixture}"
+  if "${verifier}" "${fixture}" >/dev/null 2>&1; then
+    fail "workflow verifier accepted inherited base64 migration evidence"
+  fi
+  pass
+
+  fixture="${harness}/shell-wrapped-controller.yml"
+  sed 's#^          scripts/deploy-prod.sh \\#          bash scripts/deploy-prod.sh \\#' \
+    "${workflow}" >"${fixture}"
+  if "${verifier}" "${fixture}" >/dev/null 2>&1; then
+    fail "workflow verifier accepted a shell-wrapped release controller"
+  fi
+  pass
+}
+
 test_github_ci_verifier() {
   local harness commit
   harness="$(mktemp -d)"
@@ -1945,6 +2221,7 @@ test_release_lease_real_git_protocol
 test_bootstrap_archive_attribute_isolation
 test_snapshot_helper_symlink_rejection
 test_no_mutable_bitbucket_deploy_path
+test_production_release_workflow_verifier
 test_github_ci_verifier
 test_migration_receipt_verifier
 test_containerapp_config_verifier

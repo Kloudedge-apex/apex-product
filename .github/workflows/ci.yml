@@ -1,10 +1,10 @@
 # Apex CI — gates on the path to prod (audit B7).
 #
-# Prod ships from release/go-live-* via manual `az acr build` +
-# `az containerapp update` (see scripts/deploy-prod.sh). This workflow does
-# NOT deploy — it blocks the ship path: pushes to master and release/**, and
-# PRs targeting either, must pass lint/type-check/build AND the API test
-# suite before an image may be built from that commit.
+# The source-controlled manual production workflow remains fail-closed until
+# its external GitHub environment, OIDC federation, RBAC, signer pin, and
+# migration evidence are provisioned. This CI workflow does NOT deploy: it
+# blocks the ship path by requiring pushes to master and release/**, and PRs
+# targeting either, to pass lint/type-check/build and the API test suite.
 
 name: CI
 
@@ -38,6 +38,9 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
+
+      - name: Verify protected production release workflow
+        run: scripts/verify-production-release-workflow.sh
 
       - name: Install pnpm
         uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0

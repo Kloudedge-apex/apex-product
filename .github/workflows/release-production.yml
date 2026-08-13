@@ -1,0 +1,330 @@
+name: Protected production release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_branch:
+        description: "Protected release/go-live-* branch to deploy"
+        required: true
+        type: string
+      release_sha:
+        description: "Exact 40-character SHA at the selected release branch head"
+        required: true
+        type: string
+      confirmation:
+        description: "Type DEPLOY WORKFORCE OS PRODUCTION"
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+  deployments: read
+  id-token: write
+
+concurrency:
+  group: workforce-os-production
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Protected production release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    environment: workforce-os-production
+
+    steps:
+      - name: Validate manual release admission
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_SHA: ${{ github.sha }}
+          RELEASE_BRANCH: ${{ inputs.release_branch }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          REF_PROTECTED: ${{ github.ref_protected }}
+        run: |
+          set -Eeuo pipefail
+          if [[ "${EVENT_NAME}" != "workflow_dispatch" ]]; then
+            echo "ERROR: production release must be manually dispatched" >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_REF}" != "refs/heads/master" || "${REF_PROTECTED}" != "true" ]]; then
+            echo "ERROR: privileged production workflow must run from protected master" >&2
+            exit 1
+          fi
+          if [[ ! "${WORKFLOW_SHA}" =~ ^[0-9a-f]{40}$ || ! "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "ERROR: workflow and release SHAs must be full lowercase Git commit IDs" >&2
+            exit 1
+          fi
+          if [[ ! "${RELEASE_BRANCH}" =~ ^release/go-live-[A-Za-z0-9._/-]+$ ||
+            "${RELEASE_BRANCH}" == *".."* || "${RELEASE_BRANCH}" == */ ]]; then
+            echo "ERROR: production candidate must be a canonical release/go-live-* branch" >&2
+            exit 1
+          fi
+          if [[ "${CONFIRMATION}" != "DEPLOY WORKFORCE OS PRODUCTION" ]]; then
+            echo "ERROR: production release confirmation phrase does not match" >&2
+            exit 1
+          fi
+
+      - name: Verify protected production environment
+        id: production_environment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_SHA: ${{ github.sha }}
+          RELEASE_BRANCH: ${{ inputs.release_branch }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -Eeuo pipefail
+          repository_json="$(gh api \
+            --method GET \
+            "repos/${GITHUB_REPOSITORY}")"
+          jq -e '.default_branch == "master"' >/dev/null <<<"${repository_json}"
+
+          master_ref_json="$(gh api \
+            --method GET \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/master")"
+          jq -e '
+            .ref == "refs/heads/master"
+            and .object.type == "commit"
+            and (.object.sha | test("^[0-9a-f]{40}$"))
+          ' >/dev/null <<<"${master_ref_json}"
+          remote_master_sha="$(jq -er '.object.sha' <<<"${master_ref_json}")"
+          if [[ "${remote_master_sha}" != "${WORKFLOW_SHA}" ]]; then
+            echo "ERROR: protected master no longer points to the executing workflow SHA" >&2
+            exit 1
+          fi
+
+          release_branch_path="$(jq -rn --arg branch "${RELEASE_BRANCH}" '$branch | @uri')"
+          release_branch_json="$(gh api \
+            --method GET \
+            "repos/${GITHUB_REPOSITORY}/branches/${release_branch_path}")"
+          jq -e \
+            --arg branch "${RELEASE_BRANCH}" \
+            --arg sha "${RELEASE_SHA}" '
+              .name == $branch
+              and .protected == true
+              and .commit.sha == $sha
+            ' >/dev/null <<<"${release_branch_json}"
+
+          environment_json="$(gh api \
+            --method GET \
+            "repos/${GITHUB_REPOSITORY}/environments/workforce-os-production")"
+          jq -e '
+            .name == "workforce-os-production"
+            and .can_admins_bypass == false
+            and (.protection_rules | type == "array")
+            and any(
+              .protection_rules[]?;
+              .type == "required_reviewers"
+              and .prevent_self_review == true
+              and (.reviewers | type == "array" and length > 0)
+            )
+            and .deployment_branch_policy.protected_branches == true
+            and .deployment_branch_policy.custom_branch_policies == false
+          ' >/dev/null <<<"${environment_json}"
+
+          read_environment_variable() {
+            local name=$1
+            local variable_json
+            variable_json="$(gh api \
+              --method GET \
+              "repos/${GITHUB_REPOSITORY}/environments/workforce-os-production/variables/${name}")"
+            jq -e --arg name "${name}" '
+              .name == $name
+              and (.value | type == "string" and length > 0)
+            ' >/dev/null <<<"${variable_json}"
+            jq -er '.value' <<<"${variable_json}"
+          }
+          azure_client_id="$(read_environment_variable "AZURE_CLIENT_ID")"
+          azure_tenant_id="$(read_environment_variable "AZURE_TENANT_ID")"
+          azure_subscription_id="$(read_environment_variable "AZURE_SUBSCRIPTION_ID")"
+          exclusive_mutation_authority="$(read_environment_variable \
+            "ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED")"
+
+          uuid_pattern='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+          for value in \
+            "${azure_client_id}" \
+            "${azure_tenant_id}" \
+            "${azure_subscription_id}"; do
+            if [[ ! "${value}" =~ ${uuid_pattern} ]]; then
+              echo "ERROR: protected production OIDC identity variables are incomplete" >&2
+              exit 1
+            fi
+          done
+          if [[ "${exclusive_mutation_authority}" != "true" ]]; then
+            echo "ERROR: protected environment has no exclusive Container Apps authority attestation" >&2
+            exit 1
+          fi
+
+          verify_environment_secret() {
+            local name=$1
+            local secret_json
+            secret_json="$(gh api \
+              --method GET \
+              "repos/${GITHUB_REPOSITORY}/environments/workforce-os-production/secrets/${name}")"
+            jq -e --arg name "${name}" '.name == $name' >/dev/null <<<"${secret_json}"
+          }
+          verify_environment_secret "PRODUCTION_MIGRATION_RECEIPT_B64"
+          verify_environment_secret "PRODUCTION_MIGRATION_SIGNATURE_B64"
+          verify_environment_secret "PRODUCTION_MIGRATION_ALLOWED_SIGNERS_B64"
+
+          printf 'azure_client_id=%s\n' "${azure_client_id}" >>"${GITHUB_OUTPUT}"
+          printf 'azure_tenant_id=%s\n' "${azure_tenant_id}" >>"${GITHUB_OUTPUT}"
+          printf 'azure_subscription_id=%s\n' "${azure_subscription_id}" >>"${GITHUB_OUTPUT}"
+          printf 'exclusive_mutation_authority=%s\n' \
+            "${exclusive_mutation_authority}" >>"${GITHUB_OUTPUT}"
+
+      - name: Checkout trusted master workflow source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          path: release-control
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify trusted master workflow source
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+          if [[ "$(git -C release-control rev-parse HEAD)" != "${WORKFLOW_SHA}" ]]; then
+            echo "ERROR: trusted workflow source does not match protected master" >&2
+            exit 1
+          fi
+          if [[ -n "$(git -C release-control status --porcelain --untracked-files=all)" ]]; then
+            echo "ERROR: trusted workflow source checkout is not clean" >&2
+            exit 1
+          fi
+          release-control/scripts/verify-production-release-workflow.sh \
+            release-control/.github/workflows/release-production.yml
+
+      - name: Verify exact release CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: release-control/scripts/verify-github-release-ci.sh "${RELEASE_SHA}"
+
+      - name: Checkout exact release candidate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.release_sha }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Materialize exact release candidate
+        working-directory: candidate
+        env:
+          RELEASE_BRANCH: ${{ inputs.release_branch }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -Eeuo pipefail
+          git checkout --force -B "${RELEASE_BRANCH}" "${RELEASE_SHA}"
+          if [[ "$(git rev-parse HEAD)" != "${RELEASE_SHA}" ]]; then
+            echo "ERROR: checked-out release source does not match the admitted SHA" >&2
+            exit 1
+          fi
+          if [[ "$(git branch --show-current)" != "${RELEASE_BRANCH}" ]]; then
+            echo "ERROR: exact release source is not materialized on the selected local branch" >&2
+            exit 1
+          fi
+          if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
+            echo "ERROR: exact release checkout is not clean" >&2
+            exit 1
+          fi
+
+      - name: Verify reviewed migration signer pin
+        working-directory: candidate
+        run: |
+          set -Eeuo pipefail
+          pin_path="docs/ops/production-migration-allowed-signers.sha256"
+          if [[ ! -f "${pin_path}" || -L "${pin_path}" ]]; then
+            echo "ERROR: reviewed migration signer pin is not a regular file" >&2
+            exit 1
+          fi
+          signer_pin="$(awk '!/^[[:space:]]*#/ && NF { print }' "${pin_path}")"
+          if [[ ! "${signer_pin}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "ERROR: production migration allowed-signers pin must contain exactly one reviewed digest" >&2
+            exit 1
+          fi
+
+      - name: Authenticate to Azure with protected OIDC identity
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5
+        with:
+          client-id: ${{ steps.production_environment.outputs.azure_client_id }}
+          tenant-id: ${{ steps.production_environment.outputs.azure_tenant_id }}
+          subscription-id: ${{ steps.production_environment.outputs.azure_subscription_id }}
+
+      - name: Verify Azure production identity
+        env:
+          AZURE_CLIENT_ID: ${{ steps.production_environment.outputs.azure_client_id }}
+          AZURE_TENANT_ID: ${{ steps.production_environment.outputs.azure_tenant_id }}
+          AZURE_SUBSCRIPTION_ID: ${{ steps.production_environment.outputs.azure_subscription_id }}
+        run: |
+          set -Eeuo pipefail
+          account_json="$(az account show --output json)"
+          jq -e \
+            --arg client "${AZURE_CLIENT_ID}" \
+            --arg tenant "${AZURE_TENANT_ID}" \
+            --arg subscription "${AZURE_SUBSCRIPTION_ID}" '
+              (.id | ascii_downcase) == ($subscription | ascii_downcase)
+              and (.tenantId | ascii_downcase) == ($tenant | ascii_downcase)
+              and .user.type == "servicePrincipal"
+              and (.user.name | ascii_downcase) == ($client | ascii_downcase)
+            ' >/dev/null <<<"${account_json}"
+
+      - name: Decode protected migration evidence and release
+        working-directory: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED: ${{ steps.production_environment.outputs.exclusive_mutation_authority }}
+          MIGRATION_RECEIPT_B64: ${{ secrets.PRODUCTION_MIGRATION_RECEIPT_B64 }}
+          MIGRATION_SIGNATURE_B64: ${{ secrets.PRODUCTION_MIGRATION_SIGNATURE_B64 }}
+          MIGRATION_ALLOWED_SIGNERS_B64: ${{ secrets.PRODUCTION_MIGRATION_ALLOWED_SIGNERS_B64 }}
+        run: |
+          set -Eeuo pipefail
+          receipt_b64="${MIGRATION_RECEIPT_B64}"
+          signature_b64="${MIGRATION_SIGNATURE_B64}"
+          allowed_signers_b64="${MIGRATION_ALLOWED_SIGNERS_B64}"
+          unset MIGRATION_RECEIPT_B64 MIGRATION_SIGNATURE_B64 MIGRATION_ALLOWED_SIGNERS_B64
+          if [[ -z "${RUNNER_TEMP:-}" || "${RUNNER_TEMP}" != /* || ! -d "${RUNNER_TEMP}" || -L "${RUNNER_TEMP}" ]]; then
+            echo "ERROR: RUNNER_TEMP is not a trusted absolute directory" >&2
+            exit 1
+          fi
+          if [[ -z "${receipt_b64}" || -z "${signature_b64}" || -z "${allowed_signers_b64}" ]]; then
+            echo "ERROR: protected migration evidence secrets are incomplete" >&2
+            exit 1
+          fi
+
+          umask 077
+          evidence_dir="$(mktemp -d "${RUNNER_TEMP}/workforce-os-production-evidence.XXXXXX")"
+          receipt_file="${evidence_dir}/receipt.json"
+          signature_file="${evidence_dir}/receipt.json.sig"
+          allowed_signers_file="${evidence_dir}/allowed-signers"
+          cleanup_evidence() {
+            local status=$?
+            trap - EXIT HUP INT TERM
+            set +e
+            rm -f -- "${receipt_file}" "${signature_file}" "${allowed_signers_file}"
+            rmdir -- "${evidence_dir}"
+            exit "${status}"
+          }
+          trap cleanup_evidence EXIT
+          trap 'exit 129' HUP
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+
+          printf '%s' "${receipt_b64}" | base64 --decode >"${receipt_file}"
+          printf '%s' "${signature_b64}" | base64 --decode >"${signature_file}"
+          printf '%s' "${allowed_signers_b64}" | base64 --decode >"${allowed_signers_file}"
+          chmod 600 "${receipt_file}" "${signature_file}" "${allowed_signers_file}"
+          if [[ ! -s "${receipt_file}" || ! -s "${signature_file}" || ! -s "${allowed_signers_file}" ]]; then
+            echo "ERROR: decoded migration evidence is empty" >&2
+            exit 1
+          fi
+
+          scripts/deploy-prod.sh \
+            --migration-receipt "${receipt_file}" \
+            --migration-signature "${signature_file}" \
+            --migration-allowed-signers "${allowed_signers_file}" \
+            --yes

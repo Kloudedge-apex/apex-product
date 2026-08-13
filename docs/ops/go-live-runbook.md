@@ -132,8 +132,9 @@ verifier enforces their order and writer-pause requirements. The receipt,
 signature, and pinned allowed-signers trust root are mandatory inputs to
 `scripts/deploy-prod.sh`. The protected controller is deliberately
 noninteractive and requires the explicit `--yes` acknowledgement; it never
-reads a confirmation from stdin. The future admitted release environment must
-execute `scripts/deploy-prod.sh` directly (not through `bash`) so its privileged
+reads a confirmation from stdin. Once externally admitted, the
+`workforce-os-production` release environment must execute
+`scripts/deploy-prod.sh` directly (not through `bash`) so its privileged
 bootstrap shebang applies, using:
 
 ```bash
@@ -202,12 +203,54 @@ with `Microsoft.App/containerApps/write` on both production apps and confirms
 interactive users cannot write them. The Git lease serializes attempts by that
 principal, and the controller re-reads both apps immediately before the first
 write, immediately before each later or compensating write, and after every
-write. No protected deploy workflow/environment currently exists, and the
-private-repository branch-protection API needed to establish that admission
-boundary is plan-blocked. Therefore the attestation must remain unset and the
-current release remains NO-GO until those controls exist and the exclusive-RBAC
-audit is recorded. Re-audit after any role-assignment, group-membership,
-federation, or break-glass change.
+write. A manual-only, fail-closed workflow source now exists at
+`.github/workflows/release-production.yml` on the review branch, with its source
+contract enforced by `scripts/verify-production-release-workflow.sh`. Source
+presence is not operational admission. The static verifier is a CI and review
+defense; it is not the runtime authority. Protected `master` plus the approved
+`workforce-os-production` environment form that runtime boundary. The
+privileged workflow must first be
+merged to the protected default `master` branch and dispatched with `master` as
+the workflow ref. Never dispatch the privileged workflow from the candidate
+branch. Its three inputs are the protected `release/go-live-*` branch, that
+branch's exact 40-character head SHA, and the literal confirmation
+`DEPLOY WORKFORCE OS PRODUCTION`.
+
+Before checkout or OIDC, the workflow fails closed unless the repository API
+reports `master` as the default branch, remote `master` still equals the
+executing workflow SHA, and the selected release branch is protected and still
+equals the requested SHA. It then audits the exact
+`workforce-os-production` environment API resources: administrator bypass must
+be disabled, non-self reviewers must be required, only protected branches may
+deploy, and the named OIDC/authority variables and migration-evidence secrets
+must exist in that environment. The audited UUIDs and exact `true` authority
+value become step outputs; the workflow deliberately never consumes the
+fallback `${{ vars.* }}` context. Trusted workflow and exact-CI helpers run only
+from the separately checked-out `master` source. The candidate is checked out
+to a different directory, materialized on the selected local release branch,
+and only then supplies the signer pin and release controller.
+
+At this review point, the external GitHub `master` and
+`release/go-live-2026-06-01` refs are unprotected, so the workflow cannot be
+admitted and production remains **NO-GO**. The environment protections above
+must also be provisioned. A `protected: true` branch response alone is not
+sufficient evidence: the retained ruleset review must require pull-request
+approval and the exact CI checks, enforce the rule for administrators, dismiss
+stale approval, and forbid force-push and deletion.
+
+The repository also currently contains a legacy repository-scoped
+`AZURE_CREDENTIALS` secret. No current workflow consumes it, and its value was
+not read, but the authority of its principal is unverified. Revoke/rotate that
+credential or prove that its principal cannot write either production
+Container App before asserting exclusive authority. Azure OIDC federation and
+an RBAC audit must still prove that its service principal is the exclusive
+`Microsoft.App/containerApps/write` identity for both apps. The allowed-signers
+source pin is still `UNCONFIGURED`, and all six migrations still require
+staging rehearsal, separate production approval, apply, and signed receipt
+evidence. Therefore the authority attestation must remain unset until every
+external control and migration prerequisite is verified. Re-audit after any
+branch-protection, environment, role-assignment, group-membership, federation,
+or break-glass change.
 
 `scripts/verify-containerapp-release-config.sh` requires
 `REQUIRE_PRODUCTION_ENV=true` on both roles, enforces the intentional worker-gate
