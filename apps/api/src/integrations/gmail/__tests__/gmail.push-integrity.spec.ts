@@ -116,7 +116,10 @@ function connectedIntegration() {
         scope: "https://www.googleapis.com/auth/gmail.send",
       }),
     ),
-    credentials: { accountEmail: "owner@example.com" },
+    credentials: {
+      accountEmail: "owner@example.com",
+      watchExpiration: String(Date.now() + 7 * 24 * 60 * 60 * 1000),
+    },
     lastHistoryId: "100",
     lastSyncAt: new Date(),
   };
@@ -369,6 +372,40 @@ describe("GmailService durable push handling", () => {
     expect(suppression.suppress).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["auto-archived", ["UNREAD"]],
+    ["spam-classified", ["SPAM", "UNREAD"]],
+    ["otherwise non-INBOX", ["IMPORTANT"]],
+  ])(
+    "routes a correlated %s reply through the idempotent conversation stop boundary",
+    async (_caseName, labelIds) => {
+      connect();
+      pushOne(
+        messageResponse({
+          id: "msg_reply_non_inbox",
+          from: '"Pat Prospect" <Prospect@Acme.com>',
+          labelIds,
+        }),
+      );
+
+      await service.handlePushNotification({
+        emailAddress: "owner@example.com",
+        historyId: "200",
+      });
+
+      expect(store.recordInboundGmailMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          orgId: "org_1",
+          integrationId: "int_1",
+          providerMessageId: "msg_reply_non_inbox",
+          providerThreadId: "thread_1",
+          senderEmail: "prospect@acme.com",
+        }),
+      );
+      expect(suppression.suppress).not.toHaveBeenCalled();
+    },
+  );
+
   it("ignores self/SENT messages before conversation materialization", async () => {
     connect();
     pushOne(
@@ -422,7 +459,7 @@ describe("GmailService durable push handling", () => {
     );
   });
 
-  it("keeps DSNs on the legal bounce-suppression path", async () => {
+  it("suppresses a DSN only after correlating it to org-owned SENT truth", async () => {
     connect();
     pushOne(
       messageResponse({
@@ -437,6 +474,18 @@ describe("GmailService durable push handling", () => {
       emailAddress: "owner@example.com",
       historyId: "200",
     });
+    expect(prisma.outreachArtifact.findFirst).toHaveBeenCalledWith({
+      where: {
+        orgId: "org_1",
+        channel: "EMAIL",
+        status: "SENT",
+        recipientRef: {
+          equals: "prospect@acme.com",
+          mode: "insensitive",
+        },
+      },
+      select: { id: true },
+    });
     expect(suppression.suppress).toHaveBeenCalledWith(
       expect.objectContaining({
         recipientRef: "prospect@acme.com",
@@ -444,6 +493,30 @@ describe("GmailService durable push handling", () => {
         source: "gmail_dsn",
       }),
     );
+    expect(store.recordInboundGmailMessage).not.toHaveBeenCalled();
+  });
+
+  it("ignores an uncorrelated DSN on the normal history path", async () => {
+    connect();
+    prisma.outreachArtifact.findFirst.mockResolvedValue(null);
+    pushOne(
+      messageResponse({
+        from: "Mail Delivery <mailer-daemon@googlemail.com>",
+        subject: "Delivery Status Notification (Failure)",
+        labelIds: ["SPAM"],
+        extraHeaders: [
+          { name: "X-Failed-Recipients", value: "unrelated@example.net" },
+        ],
+      }),
+    );
+
+    await service.handlePushNotification({
+      emailAddress: "owner@example.com",
+      historyId: "200",
+    });
+
+    expect(prisma.outreachArtifact.findFirst).toHaveBeenCalledOnce();
+    expect(suppression.suppress).not.toHaveBeenCalled();
     expect(store.recordInboundGmailMessage).not.toHaveBeenCalled();
   });
 

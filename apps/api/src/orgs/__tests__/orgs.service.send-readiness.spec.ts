@@ -12,7 +12,7 @@ import { OrgsService, SendReadiness } from "../orgs.service";
  *   senderNameSet      ← Org.senderName non-empty after trim
  *   countrySet         ← Org.country is uppercase, assigned ISO-3166 alpha-2
  *   mailboxConnected   ← CONNECTED Gmail row has credentials, identity,
- *                        cursor, and a recent successful watch renewal
+ *                        cursor, and an unexpired provider watch
  *   dailyCapRemaining  ← GL8a cap (OUTREACH_DAILY_CAP_PER_ORG, default 40)
  *                        minus confirmed/in-flight/unknown capacity, clamped
  *                        at 0
@@ -22,7 +22,7 @@ const ORG_ID = "org_readiness_test";
 
 interface MockPrisma {
   user: { findUnique: ReturnType<typeof vi.fn> };
-  integration: { count: ReturnType<typeof vi.fn> };
+  integration: { findFirst: ReturnType<typeof vi.fn> };
   outreachArtifact: { count: ReturnType<typeof vi.fn> };
 }
 
@@ -33,7 +33,17 @@ function buildService(opts?: { mailboxCount?: number; sentToday?: number }): {
   const prisma: MockPrisma = {
     user: { findUnique: vi.fn() },
     integration: {
-      count: vi.fn().mockResolvedValue(opts?.mailboxCount ?? 0),
+      findFirst: vi.fn().mockResolvedValue(
+        (opts?.mailboxCount ?? 0) > 0
+          ? {
+              credentials: {
+                watchExpiration: String(
+                  Date.now() + 7 * 24 * 60 * 60 * 1000,
+                ),
+              },
+            }
+          : null,
+      ),
     },
     outreachArtifact: {
       count: vi.fn().mockResolvedValue(opts?.sentToday ?? 0),
@@ -173,11 +183,12 @@ describe("OrgsService.computeSendReadiness", () => {
       const readiness = await service.computeSendReadiness(orgRow());
 
       expect(readiness.mailboxConnected).toBe(false);
-      expect(prisma.integration.count).toHaveBeenCalledWith({
+      expect(prisma.integration.findFirst).toHaveBeenCalledWith({
         where: expect.objectContaining({
           status: "CONNECTED",
           lastHistoryId: { not: null },
         }),
+        select: { credentials: true },
       });
     });
 
@@ -191,8 +202,8 @@ describe("OrgsService.computeSendReadiness", () => {
       const { service, prisma } = buildService({ mailboxCount: 1 });
       await service.computeSendReadiness(orgRow());
 
-      expect(prisma.integration.count).toHaveBeenCalledTimes(1);
-      expect(prisma.integration.count).toHaveBeenCalledWith({
+      expect(prisma.integration.findFirst).toHaveBeenCalledTimes(1);
+      expect(prisma.integration.findFirst).toHaveBeenCalledWith({
         where: {
           orgId: ORG_ID,
           status: "CONNECTED",
@@ -203,9 +214,24 @@ describe("OrgsService.computeSendReadiness", () => {
           },
           encryptedCredentials: { not: null },
           lastHistoryId: { not: null },
-          lastSyncAt: { gte: expect.any(Date) },
         },
+        select: { credentials: true },
       });
+    });
+
+    it.each([
+      ["missing", {}],
+      ["invalid", { watchExpiration: "not-a-timestamp" }],
+      ["expired", { watchExpiration: "1780000000000" }],
+    ])("fails closed for a %s provider watch expiration", async (_name, credentials) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-08-13T12:00:00.000Z"));
+      const { service, prisma } = buildService({ mailboxCount: 1 });
+      prisma.integration.findFirst.mockResolvedValue({ credentials });
+
+      const readiness = await service.computeSendReadiness(orgRow());
+
+      expect(readiness.mailboxConnected).toBe(false);
     });
   });
 
@@ -304,7 +330,7 @@ describe("OrgsService.findByClerkUser (GET /orgs/me payload)", () => {
     const result = await service.findByClerkUser("user_clerk_missing");
 
     expect(result).toBeNull();
-    expect(prisma.integration.count).not.toHaveBeenCalled();
+    expect(prisma.integration.findFirst).not.toHaveBeenCalled();
     expect(prisma.outreachArtifact.count).not.toHaveBeenCalled();
   });
 
@@ -318,7 +344,7 @@ describe("OrgsService.findByClerkUser (GET /orgs/me payload)", () => {
     await expect(
       service.findByClerkUser("user_clerk_removed"),
     ).resolves.toBeNull();
-    expect(prisma.integration.count).not.toHaveBeenCalled();
+    expect(prisma.integration.findFirst).not.toHaveBeenCalled();
     expect(prisma.outreachArtifact.count).not.toHaveBeenCalled();
   });
 });

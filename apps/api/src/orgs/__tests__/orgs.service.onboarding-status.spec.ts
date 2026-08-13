@@ -61,7 +61,17 @@ function buildService(options?: {
       findFirst: vi.fn().mockResolvedValue((options?.icps ?? [usableIcp()])[0] ?? null),
     },
     integration: {
-      count: vi.fn().mockResolvedValue(options?.mailboxCount ?? 1),
+      findFirst: vi.fn().mockResolvedValue(
+        (options?.mailboxCount ?? 1) > 0
+          ? {
+              credentials: {
+                watchExpiration: String(
+                  Date.now() + 7 * 24 * 60 * 60 * 1000,
+                ),
+              },
+            }
+          : null,
+      ),
     },
     outreachArtifact: {
       count: vi.fn().mockResolvedValue(options?.sentToday ?? 0),
@@ -124,7 +134,7 @@ describe("OrgsService.getOnboardingStatus", () => {
         orderBy: { updatedAt: "desc" },
       }),
     );
-    expect(prisma.integration.count).toHaveBeenCalledWith({
+    expect(prisma.integration.findFirst).toHaveBeenCalledWith({
       where: {
         orgId: ORG_ID,
         status: "CONNECTED",
@@ -135,8 +145,8 @@ describe("OrgsService.getOnboardingStatus", () => {
         },
         encryptedCredentials: { not: null },
         lastHistoryId: { not: null },
-        lastSyncAt: { gte: expect.any(Date) },
       },
+      select: { credentials: true },
     });
   });
 

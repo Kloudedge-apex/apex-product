@@ -48,7 +48,7 @@ import {
   assertArtifactDispatchEligible,
   assertArtifactRecipientCurrent,
 } from "./outreach-artifact-eligibility";
-import { gmailWatchFreshnessFloor } from "../integrations/gmail/gmail-watch-freshness";
+import { isGmailWatchFresh } from "../integrations/gmail/gmail-watch-freshness";
 import { senderIdentityReadiness } from "./sender-identity.util";
 
 export { isLiveSendAllowedForOrg } from "./outreach-allowlist.util";
@@ -1168,11 +1168,15 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
             string_contains: "@",
           },
           lastHistoryId: { not: null },
-          lastSyncAt: { gte: gmailWatchFreshnessFloor() },
         },
       });
       for (const record of records) {
-        if (record.provider !== "gmail") continue;
+        if (
+          record.provider !== "gmail" ||
+          !isGmailWatchFresh(record.credentials)
+        ) {
+          continue;
+        }
         try {
           const decrypted = await this.integrations.refreshTokenIfNeeded(
             orgId,

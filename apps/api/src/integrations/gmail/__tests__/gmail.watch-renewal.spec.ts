@@ -85,7 +85,10 @@ function connectedIntegrationRow(orgId: string) {
     provider: "gmail",
     status: "CONNECTED",
     encryptedCredentials: encrypt(JSON.stringify(tokens)),
-    credentials: { accountEmail: `${orgId}@example.com` },
+    credentials: {
+      accountEmail: `${orgId}@example.com`,
+      watchExpiration: String(Date.now() + 7 * DAY_MS),
+    },
     lastHistoryId: "900",
     lastSyncAt: new Date(),
   };
@@ -192,8 +195,6 @@ describe("GmailService watch auto-renewal (GL7)", () => {
         userId: "me",
         requestBody: {
           topicName: "projects/example/topics/gmail-inbound",
-          labelIds: ["INBOX"],
-          labelFilterBehavior: "INCLUDE",
         },
       });
       expect(result).toEqual({ renewed: 2, failed: 0 });
@@ -203,7 +204,12 @@ describe("GmailService watch auto-renewal (GL7)", () => {
       setConnectedIntegrations(["org_bad", "org_good"]);
       watchFn
         .mockRejectedValueOnce(new Error("invalid_grant: token revoked"))
-        .mockResolvedValueOnce({ data: { historyId: "2000" } });
+        .mockResolvedValueOnce({
+          data: {
+            historyId: "2000",
+            expiration: String(Date.now() + 7 * DAY_MS),
+          },
+        });
 
       const result = await service.renewWatchesForConnectedIntegrations();
 
@@ -303,11 +309,35 @@ describe("GmailService watch auto-renewal (GL7)", () => {
           status: "CONNECTED",
         },
         data: {
+          credentials: {
+            accountEmail: "org_1@example.com",
+            watchExpiration: expect.any(String),
+          },
           lastSyncAt: expect.any(Date),
           lastErrorAt: null,
           lastErrorMessage: null,
         },
       });
     });
+
+    it.each([undefined, "not-a-timestamp", "1"])(
+      "does not mark renewal successful for invalid provider expiration %s",
+      async (expiration) => {
+        setConnectedIntegrations(["org_1"]);
+        watchFn.mockResolvedValue({
+          data: { historyId: "1000", expiration },
+        });
+
+        await expect(service.registerWatch("org_1")).rejects.toThrow(
+          "no valid future expiration",
+        );
+
+        expect(mockPrisma.integration.updateMany).not.toHaveBeenCalledWith(
+          expect.objectContaining({
+            data: expect.objectContaining({ lastSyncAt: expect.any(Date) }),
+          }),
+        );
+      },
+    );
   });
 });

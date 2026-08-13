@@ -215,7 +215,10 @@ function createConnectedIntegration() {
     provider: "gmail",
     status: "CONNECTED",
     encryptedCredentials: encrypt(JSON.stringify(tokens)),
-    credentials: { accountEmail: "owner@example.com" },
+    credentials: {
+      accountEmail: "owner@example.com",
+      watchExpiration: String(Date.now() + 7 * 24 * 60 * 60 * 1000),
+    },
     lastHistoryId: "1000",
     lastSyncAt: new Date(),
   };
@@ -233,7 +236,10 @@ describe("GmailService", () => {
       data: { emailAddress: "owner@example.com" },
     });
     watchFn.mockReset().mockResolvedValue({
-      data: { historyId: "12345", expiration: "1234567890" },
+      data: {
+        historyId: "12345",
+        expiration: String(Date.now() + 7 * 24 * 60 * 60 * 1000),
+      },
     });
     mockPrisma = createMockPrisma();
     mockConfig = createMockConfig();
@@ -278,8 +284,6 @@ describe("GmailService", () => {
         userId: "me",
         requestBody: {
           topicName: "projects/example/topics/gmail-inbound",
-          labelIds: ["INBOX"],
-          labelFilterBehavior: "INCLUDE",
         },
       });
       const writes = callbackWrites();
@@ -294,7 +298,10 @@ describe("GmailService", () => {
       );
       expect(writes[1].update).toEqual(
         expect.objectContaining({
-          credentials: { accountEmail: "owner@example.com" },
+          credentials: {
+            accountEmail: "owner@example.com",
+            watchExpiration: expect.any(String),
+          },
           status: "CONNECTED",
           lastHistoryId: "12345",
           lastErrorAt: null,
@@ -341,7 +348,10 @@ describe("GmailService", () => {
       expect(callbackWrites()).toHaveLength(1);
       expect(callbackWrites()[0].update).toEqual(
         expect.objectContaining({
-          credentials: { accountEmail: "mock+org_1@local.invalid" },
+          credentials: {
+            accountEmail: "mock+org_1@local.invalid",
+            watchExpiration: expect.any(String),
+          },
           status: "CONNECTED",
           lastHistoryId: expect.stringMatching(/^mock-history-/),
           lastSyncAt: expect.any(Date),
@@ -431,7 +441,11 @@ describe("GmailService", () => {
     });
 
     it("stores ERROR and rejects when users.watch returns no historyId", async () => {
-      watchFn.mockResolvedValue({ data: { expiration: "1234567890" } });
+      watchFn.mockResolvedValue({
+        data: {
+          expiration: String(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        },
+      });
 
       await expect(
         service.handleCallback("auth_code_123", "org_1"),
@@ -443,6 +457,29 @@ describe("GmailService", () => {
           status: "ERROR",
           lastHistoryId: null,
           lastErrorMessage: "gmail.users.watch returned no initial historyId",
+        }),
+      );
+      expect(writes.some((write) => write.update.status === "CONNECTED")).toBe(
+        false,
+      );
+    });
+
+    it("stores ERROR and rejects when users.watch omits a valid future expiration", async () => {
+      watchFn.mockResolvedValue({
+        data: { historyId: "12345", expiration: "1234567890" },
+      });
+
+      await expect(
+        service.handleCallback("auth_code_123", "org_1"),
+      ).rejects.toThrow("no valid future expiration");
+
+      const writes = callbackWrites();
+      expect(writes.at(-1)?.update).toEqual(
+        expect.objectContaining({
+          status: "ERROR",
+          lastHistoryId: null,
+          lastErrorMessage:
+            "gmail.users.watch returned no valid future expiration",
         }),
       );
       expect(writes.some((write) => write.update.status === "CONNECTED")).toBe(
@@ -471,15 +508,15 @@ describe("GmailService", () => {
       await expect(service.listMessages("org_1")).rejects.toThrow(UnauthorizedException);
     });
 
-    it("rejects provider access when the last successful watch renewal is stale", async () => {
+    it("rejects provider access when the provider watch is expired", async () => {
       const stale = createConnectedIntegration();
-      stale.lastSyncAt = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+      stale.credentials.watchExpiration = "1";
       (
         mockPrisma.integration.findUnique as ReturnType<typeof vi.fn>
       ).mockResolvedValue(stale);
 
       await expect(service.listMessages("org_1")).rejects.toThrow(
-        "not initialized or recently renewed",
+        "not initialized or active",
       );
     });
   });

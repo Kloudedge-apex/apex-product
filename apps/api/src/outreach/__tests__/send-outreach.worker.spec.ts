@@ -935,7 +935,6 @@ describe("SendOutreachWorker.processArtifact", () => {
             string_contains: "@",
           },
           lastHistoryId: { not: null },
-          lastSyncAt: { gte: expect.any(Date) },
         },
       });
     } finally {
@@ -949,6 +948,42 @@ describe("SendOutreachWorker.processArtifact", () => {
       prisma.outreachArtifact.findUnique.mockResolvedValue(artifactRow());
       prisma.integration.findMany.mockResolvedValue([
         { provider: "outlook" },
+      ]);
+      const refresh = integrations.refreshTokenIfNeeded as ReturnType<
+        typeof vi.fn
+      >;
+      vi.spyOn(SendEmailTool.prototype, "execute").mockResolvedValueOnce({
+        success: true,
+        data: {
+          sent: false,
+          mock: true,
+          provider: "mock",
+          messageId: "mock_1",
+        },
+      });
+
+      await expect(worker.processArtifact("art_1", "org_1")).rejects.toThrow(
+        /mock mode/,
+      );
+
+      expect(refresh).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.OUTREACH_LIVE_FOR_ORGS;
+    }
+  });
+
+  it("does not expose Gmail credentials when the provider watch is expired", async () => {
+    process.env.OUTREACH_LIVE_FOR_ORGS = "org_1";
+    try {
+      prisma.outreachArtifact.findUnique.mockResolvedValue(artifactRow());
+      prisma.integration.findMany.mockResolvedValue([
+        {
+          provider: "gmail",
+          credentials: {
+            accountEmail: "sender@example.com",
+            watchExpiration: "1",
+          },
+        },
       ]);
       const refresh = integrations.refreshTokenIfNeeded as ReturnType<
         typeof vi.fn

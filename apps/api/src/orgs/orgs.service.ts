@@ -17,7 +17,7 @@ import {
 } from "../outreach/send-outreach.worker";
 import { isIP } from "node:net";
 import { buildTrialOrgSlug } from "../common/trial-org.util";
-import { gmailWatchFreshnessFloor } from "../integrations/gmail/gmail-watch-freshness";
+import { isGmailWatchFresh } from "../integrations/gmail/gmail-watch-freshness";
 import { senderIdentityReadiness } from "../outreach/sender-identity.util";
 import { hasRequiredClerkOrgSession } from "../common/org-role-authority";
 import { withProvisionableClerkUser } from "../common/clerk-user-provisioning";
@@ -310,9 +310,8 @@ export class OrgsService {
     country: string | null;
   }): Promise<SendReadiness> {
     const senderIdentity = senderIdentityReadiness(org);
-    const watchFreshnessFloor = gmailWatchFreshnessFloor();
-    const [mailboxCount, capacityUsedToday] = await Promise.all([
-      this.prisma.integration.count({
+    const [mailbox, capacityUsedToday] = await Promise.all([
+      this.prisma.integration.findFirst({
         where: {
           orgId: org.id,
           status: "CONNECTED",
@@ -328,8 +327,8 @@ export class OrgsService {
           },
           encryptedCredentials: { not: null },
           lastHistoryId: { not: null },
-          lastSyncAt: { gte: watchFreshnessFloor },
         },
+        select: { credentials: true },
       }),
       // Exactly the same conservative capacity-risk rows as the worker:
       // confirmed SENT, fresh SENDING, and today's DELIVERY_UNKNOWN.
@@ -346,7 +345,8 @@ export class OrgsService {
       physicalAddressSet: senderIdentity.physicalAddressSet,
       senderNameSet: senderIdentity.senderNameSet,
       countrySet: senderIdentity.countrySet,
-      mailboxConnected: mailboxCount > 0,
+      mailboxConnected:
+        mailbox !== null && isGmailWatchFresh(mailbox.credentials),
       dailyCapRemaining: Math.max(
         0,
         getDailySendCapPerOrg() - capacityUsedToday,

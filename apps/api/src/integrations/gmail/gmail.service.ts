@@ -17,6 +17,7 @@ import {
   OutreachArtifactStatus,
   OutreachChannel,
   OutreachSuppressionReason,
+  Prisma,
 } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { isWorkerEnabled } from "../../runtime/worker.service";
@@ -26,7 +27,11 @@ import { encrypt, decrypt } from "../crypto.util";
 import {
   buildUnsubscribeUrl,
 } from "../../outreach/unsubscribe-token.util";
-import { isGmailWatchFresh } from "./gmail-watch-freshness";
+import {
+  isGmailWatchFresh,
+  normalizeGmailWatchExpiration,
+  withGmailWatchExpiration,
+} from "./gmail-watch-freshness";
 
 interface GmailTokens {
   access_token: string;
@@ -411,6 +416,16 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
           integration.id,
           emailAddress,
           message,
+          {
+            // Gmail filters and mailbox rules can archive or classify a real
+            // reply before history processing reads its current labels. The
+            // conversation store remains the persistence boundary: only a
+            // thread correlated to org-owned outbound is materialized.
+            allowArchived: true,
+            // A mailbox DSN is not trusted merely because it resembles one.
+            // It may suppress only a recipient with org-owned SENT truth.
+            requireSentArtifactForDsn: true,
+          },
         );
       } catch (err) {
         failedMessageIds.push(messageId);
@@ -729,7 +744,7 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
       });
       if (!sentArtifact) {
         this.logger.debug(
-          "gmail.history ignored unrelated DSN during recovery",
+          "gmail.history ignored DSN without org-owned SENT correlation",
           {
             orgId,
             messageId: message.id,
@@ -829,6 +844,7 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
         accountEmail: `mock+${safeOrgId}@local.invalid`,
         status: IntegrationStatus.CONNECTED,
         lastHistoryId: `mock-history-${now}`,
+        watchExpiration: String(now + 7 * 24 * 60 * 60 * 1000),
         errorMessage: null,
       });
       return;
@@ -927,8 +943,6 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
         userId: "me",
         requestBody: {
           topicName: this.pushPubsubTopic,
-          labelIds: ["INBOX"],
-          labelFilterBehavior: "INCLUDE",
         },
       });
       watchData = watchResponse.data;
@@ -962,6 +976,23 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
+    const watchExpiration = normalizeGmailWatchExpiration(
+      watchData.expiration,
+    );
+    if (!watchExpiration) {
+      await this.persistCallbackState({
+        orgId,
+        encryptedCredentials: encryptedCreds,
+        accountEmail,
+        status: IntegrationStatus.ERROR,
+        lastHistoryId: null,
+        errorMessage: "gmail.users.watch returned no valid future expiration",
+      });
+      throw new ServiceUnavailableException(
+        "Gmail inbound watch returned no valid future expiration",
+      );
+    }
+
     // This is the only callback write allowed to activate Gmail. Identity and
     // the durable initial cursor are committed together, so readers can never
     // observe CONNECTED without both readiness proofs.
@@ -972,6 +1003,7 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
         accountEmail,
         status: IntegrationStatus.CONNECTED,
         lastHistoryId: initialHistoryId,
+        watchExpiration,
         errorMessage: null,
       });
     } catch (err) {
@@ -1001,12 +1033,18 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
     accountEmail: string;
     status: IntegrationStatus;
     lastHistoryId: string | null;
+    watchExpiration?: string | null;
     errorMessage: string | null;
   }): Promise<void> {
     const errorMessage = input.errorMessage?.slice(0, 1000) ?? null;
     const now = new Date();
     const state = {
-      credentials: { accountEmail: input.accountEmail },
+      credentials: (input.watchExpiration
+        ? withGmailWatchExpiration(
+            { accountEmail: input.accountEmail },
+            input.watchExpiration,
+          )
+        : { accountEmail: input.accountEmail }) as Prisma.InputJsonValue,
       encryptedCredentials: input.encryptedCredentials,
       status: input.status,
       scopes: GMAIL_SCOPES,
@@ -1084,44 +1122,67 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
       userId: "me",
       requestBody: {
         topicName: this.pushPubsubTopic,
-        labelIds: ["INBOX"],
-        labelFilterBehavior: "INCLUDE",
       },
     });
+    const historyId = (response.data.historyId ?? "").trim();
+    if (!historyId) {
+      throw new Error("gmail.users.watch returned no historyId");
+    }
+    const watchExpiration = normalizeGmailWatchExpiration(
+      response.data.expiration,
+    );
+    if (!watchExpiration) {
+      throw new Error(
+        "gmail.users.watch returned no valid future expiration",
+      );
+    }
     this.logger.log("gmail.users.watch registered", {
       orgId,
-      historyId: response.data.historyId,
-      expiration: response.data.expiration,
+      historyId,
+      expiration: watchExpiration,
     });
-    if (response.data.historyId) {
-      // Establish the initial cursor exactly once. Renewal must not overwrite
-      // a cursor that may still have unprocessed pages between it and the new
-      // watch response.
-      await this.prisma.integration.updateMany({
-        where: {
-          orgId,
-          provider: "gmail",
-          status: "CONNECTED",
-          lastHistoryId: null,
-        },
-        data: { lastHistoryId: response.data.historyId },
-      });
-    }
+    // Establish the initial cursor exactly once. Renewal must not overwrite a
+    // cursor that may still have unprocessed pages between it and the new
+    // watch response.
     await this.prisma.integration.updateMany({
+      where: {
+        orgId,
+        provider: "gmail",
+        status: "CONNECTED",
+        lastHistoryId: null,
+      },
+      data: { lastHistoryId: historyId },
+    });
+
+    const integration = await this.prisma.integration.findUnique({
+      where: { orgId_provider: { orgId, provider: "gmail" } },
+      select: { credentials: true },
+    });
+    if (!integration) {
+      throw new Error("Gmail integration disappeared during watch renewal");
+    }
+    const updated = await this.prisma.integration.updateMany({
       where: {
         orgId,
         provider: "gmail",
         status: "CONNECTED",
       },
       data: {
+        credentials: withGmailWatchExpiration(
+          integration.credentials,
+          watchExpiration,
+        ) as Prisma.InputJsonValue,
         lastSyncAt: new Date(),
         lastErrorAt: null,
         lastErrorMessage: null,
       },
     });
+    if (updated.count !== 1) {
+      throw new Error("Gmail integration is not connected during watch renewal");
+    }
     return {
-      historyId: response.data.historyId ?? undefined,
-      expiration: response.data.expiration ?? undefined,
+      historyId,
+      expiration: watchExpiration,
     };
   }
 
@@ -1425,10 +1486,10 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
     if (
       !options.allowStaleWatch &&
       (!(integration.lastHistoryId ?? "").trim() ||
-        !isGmailWatchFresh(integration.lastSyncAt))
+        !isGmailWatchFresh(credentials))
     ) {
       throw new UnauthorizedException(
-        "Gmail inbound watch is not initialized or recently renewed",
+        "Gmail inbound watch is not initialized or active",
       );
     }
 

@@ -46,6 +46,23 @@ function fakePrisma(events: unknown[], intentSignals: string[] = []) {
 }
 
 describe("assembleResearchBrief grounding (refusal-first)", () => {
+  it("scopes person facts through the lead organization", async () => {
+    const prisma = fakePrisma([]);
+
+    await assembleResearchBrief(prisma, lead());
+
+    expect(prisma.person.findFirst).toHaveBeenCalledWith({
+      where: { id: "p1", company: { orgId: "org_1" } },
+      select: {
+        title: true,
+        seniority: true,
+        department: true,
+        location: true,
+        bio: true,
+      },
+    });
+  });
+
   it("refuses when the only signal is stale", async () => {
     const prisma = fakePrisma([
       {

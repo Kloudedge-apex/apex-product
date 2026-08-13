@@ -799,7 +799,10 @@ export async function assembleResearchBrief(
 
   // Person facts (P-series).
   const person = await prisma.person.findFirst({
-    where: { id: lead.personId },
+    // Person is a legacy global-id model with no orgId column. Scope through
+    // its Company relation so a corrupt/replayed lead cannot ground outreach
+    // with another tenant's profile or bio.
+    where: { id: lead.personId, company: { orgId: lead.orgId } },
     select: { title: true, seniority: true, department: true, location: true, bio: true },
   });
   const personBits: string[] = [`${lead.firstName} ${lead.lastName}`];

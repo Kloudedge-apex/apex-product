@@ -155,7 +155,13 @@ function buildController() {
     },
     org: { findUnique: orgFindUnique, create: orgCreate },
     user: { findUnique: userFindUnique },
-    integration: { count: vi.fn().mockResolvedValue(1) },
+    integration: {
+      findFirst: vi.fn().mockResolvedValue({
+        credentials: {
+          watchExpiration: String(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        },
+      }),
+    },
     outreachArtifact: { count: vi.fn().mockResolvedValue(0) },
   };
   transaction.mockImplementation(

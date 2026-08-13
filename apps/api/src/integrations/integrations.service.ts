@@ -8,7 +8,11 @@ import { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { encryptCredentials, decryptCredentials } from "./crypto.util";
 import { fetchWithRetry, withCircuitBreaker } from "../common/http-retry.util";
-import { gmailWatchFreshnessFloor } from "./gmail/gmail-watch-freshness";
+import {
+  gmailWatchExpiration,
+  isGmailWatchFresh,
+  withGmailWatchExpiration,
+} from "./gmail/gmail-watch-freshness";
 
 interface OAuthConfig {
   clientId?: string;
@@ -146,10 +150,9 @@ export class IntegrationsService {
           string_contains: "@",
         },
         lastHistoryId: { not: null },
-        lastSyncAt: { gte: gmailWatchFreshnessFloor() },
       },
     });
-    if (!integration) return null;
+    if (!integration || !isGmailWatchFresh(integration.credentials)) return null;
 
     try {
       return this.decryptIntegrationRow(integration, provider);
@@ -311,10 +314,9 @@ export class IntegrationsService {
           string_contains: "@",
         },
         lastHistoryId: { not: null },
-        lastSyncAt: { gte: gmailWatchFreshnessFloor() },
       },
     });
-    if (!integration) return null;
+    if (!integration || !isGmailWatchFresh(integration.credentials)) return null;
 
     let creds: Record<string, unknown>;
     try {
@@ -414,9 +416,13 @@ export class IntegrationsService {
 
     const encrypted = encryptCredentials(newCreds);
     const accountEmail = this.extractAccountEmail(integration.credentials);
-    const credentialsJson = (
-      accountEmail ? { encrypted, accountEmail } : { encrypted }
-    ) as unknown as Prisma.InputJsonValue;
+    const watchExpiration = gmailWatchExpiration(integration.credentials);
+    const baseCredentials = accountEmail
+      ? { encrypted, accountEmail }
+      : { encrypted };
+    const credentialsJson = (watchExpiration
+      ? withGmailWatchExpiration(baseCredentials, watchExpiration)
+      : baseCredentials) as unknown as Prisma.InputJsonValue;
     try {
       await this.prisma.integration.update({
         where: { orgId_provider: { orgId, provider } },

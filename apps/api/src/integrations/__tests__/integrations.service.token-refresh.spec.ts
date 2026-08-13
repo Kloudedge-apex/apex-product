@@ -80,14 +80,30 @@ interface RowOverrides {
 }
 
 function connectedRow(overrides: RowOverrides = {}) {
+  const credentials =
+    overrides.credentials &&
+    typeof overrides.credentials === "object" &&
+    !Array.isArray(overrides.credentials)
+      ? {
+          ...(overrides.credentials as Record<string, unknown>),
+          watchExpiration: String(
+            Date.now() + 7 * 24 * 60 * 60 * 1000,
+          ),
+        }
+      : {
+          encrypted: "",
+          watchExpiration: String(
+            Date.now() + 7 * 24 * 60 * 60 * 1000,
+          ),
+        };
   return {
     id: "int_1",
     orgId: "org_a",
     provider: "gmail",
     status: "CONNECTED",
-    credentials: { encrypted: "" },
     encryptedCredentials: null,
     ...overrides,
+    credentials,
   };
 }
 
@@ -159,6 +175,7 @@ describe("IntegrationsService GL1 — OAuth token expiry + refresh", () => {
 
       // Persisted with the new expires_at, mirrored into both shapes.
       const { data, credentialsJson, stored } = decryptUpdatePayload(prisma);
+      expect(credentialsJson.watchExpiration).toEqual(expect.any(String));
       expect(stored.access_token).toBe("fresh-access-token");
       expect(stored.expires_at).toBe(expiresAt);
       expect(data.encryptedCredentials).toBe(credentialsJson.encrypted);
@@ -285,6 +302,7 @@ describe("IntegrationsService GL1 — OAuth token expiry + refresh", () => {
       expect(result?.access_token).toBe("fresh");
       const { data, credentialsJson, stored } = decryptUpdatePayload(prisma);
       expect(credentialsJson.accountEmail).toBe("founder@tenantzero.com");
+      expect(credentialsJson.watchExpiration).toEqual(expect.any(String));
       expect(stored.access_token).toBe("fresh");
       expect(typeof stored.expires_at).toBe("number");
       expect(data.encryptedCredentials).toBe(credentialsJson.encrypted);
@@ -305,6 +323,25 @@ describe("IntegrationsService GL1 — OAuth token expiry + refresh", () => {
 
       const creds = await service.getDecryptedCredentials("org_a", "gmail");
       expect(creds?.access_token).toBe("column-access-token");
+    });
+
+    it("fails closed when provider watch expiration is absent", async () => {
+      const fresh = {
+        access_token: "fresh",
+        refresh_token: "rt",
+        expires_at: Date.now() + 3_600_000,
+      };
+      prisma.integration.findFirst.mockResolvedValue({
+        ...connectedRow(),
+        credentials: { encrypted: encryptCredentials(fresh) },
+      });
+
+      await expect(
+        service.getDecryptedCredentials("org_a", "gmail"),
+      ).resolves.toBeNull();
+      await expect(
+        service.refreshTokenIfNeeded("org_a", "gmail"),
+      ).resolves.toBeNull();
     });
   });
 

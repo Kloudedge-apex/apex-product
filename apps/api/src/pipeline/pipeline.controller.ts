@@ -59,9 +59,14 @@ export class PipelineController {
   @HttpCode(HttpStatus.ACCEPTED)
   async run(
     @OrgId() orgId: string | undefined,
-    @Body() body: { stage?: string },
+    @Body() body: { stage?: unknown } | undefined,
   ) {
     if (!orgId) throw new BadRequestException("orgId required");
+    if (body?.stage !== undefined && body.stage !== "full") {
+      throw new BadRequestException(
+        'Only the full guarded pipeline is available; stage must be exactly "full" or omitted',
+      );
+    }
 
     const currentProfile = await this.prisma.icpProfile.findFirst({
       where: { orgId },
@@ -103,7 +108,7 @@ export class PipelineController {
       skipped: graphRun
         ? []
         : profiles.map((p) => ({ icpProfileId: p.id, name: p.name, reason: skipReason ?? "unknown" })),
-      stage: body?.stage ?? "full",
+      stage: "full" as const,
     };
   }
 
