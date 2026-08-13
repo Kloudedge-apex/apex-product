@@ -36,10 +36,21 @@ function mockPrisma(
     role: "ADMIN",
     orgId: "org_1",
   },
+  clerkOrgId: string | null = "org_clerk_1",
 ) {
   return {
     user: {
-      findUnique: vi.fn().mockResolvedValue(user),
+      findFirst: vi.fn().mockImplementation(async (args: {
+        where: { orgId: string };
+      }) =>
+        user && user.orgId === args.where.orgId
+          ? {
+              id: user.id,
+              email: `${user.id}@example.test`,
+              role: user.role,
+              org: { clerkOrgId },
+            }
+          : null),
     },
   } as unknown as PrismaService;
 }
@@ -49,8 +60,14 @@ function mockPrisma(
  * :93). Pass null for an unauthenticated request (explicit `undefined` would
  * trigger the default parameter).
  */
-function mockReq(clerkUserId: string | null = "clerk_admin_1"): Request {
-  return { clerkUserId: clerkUserId ?? undefined } as unknown as Request;
+function mockReq(
+  clerkUserId: string | null = "clerk_admin_1",
+  clerkOrgRole: string = "org:admin",
+): Request {
+  return {
+    clerkUserId: clerkUserId ?? undefined,
+    clerkOrgRole,
+  } as unknown as Request;
 }
 
 describe("SuppressionController POST / (GL6b manual suppression)", () => {
@@ -111,6 +128,17 @@ describe("SuppressionController POST / (GL6b manual suppression)", () => {
       );
       await expect(
         controller.create("org_1", mockReq(), { recipientRef: "a@b.co" }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(service.suppress).not.toHaveBeenCalled();
+    });
+
+    it("lets a fresh signed MEMBER veto a stale database ADMIN", async () => {
+      await expect(
+        controller.create(
+          "org_1",
+          mockReq("clerk_admin_1", "org:member"),
+          { recipientRef: "a@b.co" },
+        ),
       ).rejects.toBeInstanceOf(ForbiddenException);
       expect(service.suppress).not.toHaveBeenCalled();
     });

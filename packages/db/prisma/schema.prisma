@@ -21,6 +21,7 @@ enum Plan {
 enum UserRole {
   OWNER
   ADMIN
+  MANAGER
   MEMBER
 }
 
@@ -182,6 +183,9 @@ enum OutreachArtifactPurpose {
 
 model Org {
   id                   String                @id @default(cuid())
+  // Immutable Clerk Organization identity. Nullable for local trial workspaces
+  // created while Clerk Organizations is disabled; never infer this from slug.
+  clerkOrgId           String?               @unique
   name                 String
   slug                 String                @unique
   website              String? // company homepage URL (e.g. "acme.com") — used for auto-ICP generation
@@ -237,20 +241,87 @@ model EvidenceEvent {
 }
 
 model User {
-  id           String   @id @default(cuid())
-  orgId        String
-  org          Org      @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  email        String   @unique
-  name         String?
-  role         UserRole @default(MEMBER)
-  clerkId      String?  @unique
-  apiKey       String?  @unique
-  passwordHash String?
-  createdAt    DateTime @default(now())
+  id                String   @id @default(cuid())
+  orgId             String
+  org               Org      @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  email             String   @unique
+  name              String?
+  role              UserRole @default(MEMBER)
+  clerkId           String?  @unique
+  // Current immutable Clerk join lifecycle. Historical lifecycle tombstones
+  // live in ClerkMembershipLifecycle so an older id can never be replayed.
+  clerkMembershipId String?  @unique
+  // Fail closed for legacy rows until the release operator reconciles them.
+  // Every application-owned create path sets this explicitly.
+  membershipActive  Boolean  @default(false)
+  apiKey            String?  @unique
+  passwordHash      String?
+  createdAt         DateTime @default(now())
 
   @@index([orgId])
   @@index([clerkId])
   @@index([apiKey])
+}
+
+// Provider-owned lifecycle cursors. These records are intentionally detached
+// from local cascading relations: deleting a local projection must never erase
+// the tombstone that rejects an old Clerk webhook replay.
+model ClerkIdentityCutover {
+  id                              Int      @id
+  minimumEventVersion             BigInt
+  ready                           Boolean  @default(false)
+  inventoryEvidenceHash           String?
+  expectedActiveOrganizationCount Int      @default(-1)
+  expectedActiveMembershipCount   Int      @default(-1)
+  expectedActiveUserCount         Int      @default(-1)
+  establishedAt                   DateTime @default(now())
+  updatedAt                       DateTime @updatedAt
+
+  @@map("clerk_identity_cutover")
+}
+
+model ClerkOrganizationLifecycle {
+  clerkOrgId   String   @id
+  eventVersion BigInt
+  eventRank    Int
+  deleted      Boolean  @default(false)
+  lastEventId  String
+  updatedAt    DateTime @updatedAt
+
+  @@map("clerk_organization_lifecycle")
+}
+
+model ClerkMembershipLifecycle {
+  clerkMembershipId String   @id
+  clerkUserId       String
+  clerkOrgId        String
+  eventVersion      BigInt
+  eventRank         Int
+  role              UserRole
+  deleted           Boolean  @default(false)
+  lastEventId       String
+  updatedAt         DateTime @updatedAt
+
+  @@index([clerkUserId])
+  @@index([clerkOrgId])
+  @@map("clerk_membership_lifecycle")
+}
+
+model ClerkUserLifecycle {
+  clerkUserId            String   @id
+  deleted                Boolean  @default(false)
+  clerkMembershipId      String?
+  clerkOrgId             String?
+  membershipEventVersion BigInt?
+  membershipEventRank    Int?
+  membershipActive       Boolean  @default(false)
+  role                   UserRole @default(MEMBER)
+  lastEventId            String
+  updatedAt              DateTime @updatedAt
+
+  @@index([clerkMembershipId])
+  @@index([clerkOrgId])
+  @@map("clerk_user_lifecycle")
 }
 
 model AgentTemplate {

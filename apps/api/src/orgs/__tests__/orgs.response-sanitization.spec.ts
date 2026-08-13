@@ -17,6 +17,7 @@ const NOW = new Date("2026-08-13T00:00:00.000Z");
 
 const fullOrgRow = {
   id: "org_1",
+  clerkOrgId: "org_clerk_secret",
   name: "Acme",
   slug: "acme",
   website: "https://acme.example",
@@ -36,6 +37,8 @@ const fullOrgRow = {
       name: "Owner",
       role: "OWNER",
       clerkId: "clerk_secret_identifier",
+      clerkMembershipId: "mem_clerk_secret",
+      membershipActive: true,
       apiKey: "api_secret",
       passwordHash: "password_hash_secret",
       createdAt: NOW,
@@ -77,6 +80,8 @@ const forbiddenResponseKeys = new Set([
   "billingId",
   "passwordHash",
   "clerkId",
+  "clerkMembershipId",
+  "clerkOrgId",
   "credentials",
   "encryptedCredentials",
   "lastHistoryId",
@@ -141,12 +146,22 @@ function buildController() {
     const select = asRecord(args.select);
     return select ? projectRecord(fullUserRow, select) : fullUserRow;
   });
+  const transaction = vi.fn();
   const prisma = {
+    $queryRaw: vi.fn().mockResolvedValue([]),
+    $transaction: transaction,
+    clerkUserLifecycle: {
+      findUnique: vi.fn().mockResolvedValue(null),
+    },
     org: { findUnique: orgFindUnique, create: orgCreate },
     user: { findUnique: userFindUnique },
     integration: { count: vi.fn().mockResolvedValue(1) },
     outreachArtifact: { count: vi.fn().mockResolvedValue(0) },
   };
+  transaction.mockImplementation(
+    async (callback: (tx: typeof prisma) => Promise<unknown>) =>
+      callback(prisma),
+  );
   const service = new OrgsService(prisma as unknown as PrismaService);
   const controller = new OrgsController(
     service,
@@ -167,6 +182,8 @@ describe("organization response sanitization", () => {
     jwtMocks.verifyClerkToken.mockResolvedValue({
       sub: "clerk_user_1",
       email: "owner@acme.example",
+      org_id: "org_clerk_secret",
+      org_role: "org:owner",
     });
   });
 
@@ -225,7 +242,9 @@ describe("organization response sanitization", () => {
     );
     const query = userFindUnique.mock.calls[0]?.[0];
     expect(query).not.toHaveProperty("include");
-    expect(collectForbiddenKeys(query?.select)).toEqual([]);
+    expect(JSON.stringify(query?.select)).not.toMatch(
+      /apiKey|passwordHash|credentials|encryptedCredentials|lastHistoryId/,
+    );
   });
 
   it("POST /orgs existing-user path returns only allowlisted user fields", async () => {
@@ -235,6 +254,8 @@ describe("organization response sanitization", () => {
       name: "Acme",
       clerkUserId: "clerk_user_1",
       email: "owner@acme.example",
+      clerkOrgId: "org_clerk_secret",
+      clerkOrgRole: "org:owner",
     });
 
     expect(collectForbiddenKeys(result)).toEqual([]);
@@ -247,11 +268,39 @@ describe("organization response sanitization", () => {
     });
     expect(userFindUnique).toHaveBeenCalledWith({
       where: { clerkId: "clerk_user_1" },
-      select: { orgId: true },
+      select: {
+        orgId: true,
+        membershipActive: true,
+        org: { select: { clerkOrgId: true } },
+      },
     });
     expect(collectForbiddenKeys(orgFindUnique.mock.calls[0]?.[0]?.select)).toEqual(
       [],
     );
+  });
+
+  it("rejects personal-session reads and bootstrap for a Clerk-bound tenant", async () => {
+    jwtMocks.verifyClerkToken.mockResolvedValueOnce({
+      sub: "clerk_user_1",
+      email: "owner@acme.example",
+    });
+    const { controller, service } = buildController();
+    const req = {
+      headers: { authorization: "Bearer personal-session-token" },
+    } as unknown as Request;
+
+    await expect(controller.findMe(req)).rejects.toMatchObject({
+      message: "Active Clerk organization session required",
+    });
+    await expect(
+      service.create({
+        name: "Acme",
+        clerkUserId: "clerk_user_1",
+        email: "owner@acme.example",
+      }),
+    ).rejects.toMatchObject({
+      message: "Active Clerk organization session required",
+    });
   });
 
   it("POST /orgs new-org path applies the same safe response projection", async () => {

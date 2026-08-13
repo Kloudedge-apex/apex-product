@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Inject,
   Injectable,
   Logger,
@@ -18,6 +19,8 @@ import { isIP } from "node:net";
 import { buildTrialOrgSlug } from "../common/trial-org.util";
 import { gmailWatchFreshnessFloor } from "../integrations/gmail/gmail-watch-freshness";
 import { senderIdentityReadiness } from "../outreach/sender-identity.util";
+import { hasRequiredClerkOrgSession } from "../common/org-role-authority";
+import { withProvisionableClerkUser } from "../common/clerk-user-provisioning";
 
 /**
  * Computed live-send truth for an org (GL5). The FE renders Dry Run / Live
@@ -163,24 +166,11 @@ export class OrgsService {
     clerkUserId: string;
     email: string;
     userName?: string;
+    clerkOrgId?: string;
+    clerkOrgRole?: string;
   }) {
     const slug =
       data.slug || buildTrialOrgSlug(data.name, data.clerkUserId);
-
-    const existingUser = await this.prisma.user.findUnique({
-      where: { clerkId: data.clerkUserId },
-      select: { orgId: true },
-    });
-    if (existingUser) {
-      const org = await this.prisma.org.findUnique({
-        where: { id: existingUser.orgId },
-        select: {
-          ...ORG_RESPONSE_SCALAR_SELECT,
-          users: { select: ORG_RESPONSE_USER_SELECT },
-        },
-      });
-      return org;
-    }
 
     // Clerk's default JWT template omits the email claim, so `data.email` is
     // often "". User.email is @unique, so reuse-of-empty-string would collide
@@ -190,47 +180,65 @@ export class OrgsService {
         ? data.email
         : `${data.clerkUserId}@no-email.workforceos.local`;
 
-    try {
-      return await this.prisma.org.create({
-        data: {
-          name: data.name,
-          slug,
-          plan: "TRIAL",
-          trialEndsAt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000),
-          users: {
-            create: {
-              email,
-              name: data.userName || data.name,
-              role: "OWNER",
-              clerkId: data.clerkUserId,
+    return withProvisionableClerkUser(
+      this.prisma,
+      data.clerkUserId,
+      async (tx) => {
+        const existingUser = await tx.user.findUnique({
+          where: { clerkId: data.clerkUserId },
+          select: {
+            orgId: true,
+            membershipActive: true,
+            org: { select: { clerkOrgId: true } },
+          },
+        });
+        if (existingUser) {
+          if (!existingUser.membershipActive) {
+            throw new ForbiddenException("Organization membership is inactive");
+          }
+          if (!hasRequiredClerkOrgSession(existingUser.org.clerkOrgId, data)) {
+            throw new ForbiddenException(
+              "Active Clerk organization session required",
+            );
+          }
+          return tx.org.findUnique({
+            where: { id: existingUser.orgId },
+            select: {
+              ...ORG_RESPONSE_SCALAR_SELECT,
+              users: { select: ORG_RESPONSE_USER_SELECT },
+            },
+          });
+        }
+
+        if (data.clerkOrgId || data.clerkOrgRole) {
+          throw new ForbiddenException(
+            "Clerk organization must be synchronized before local access",
+          );
+        }
+
+        return tx.org.create({
+          data: {
+            name: data.name,
+            slug,
+            plan: "TRIAL",
+            trialEndsAt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000),
+            users: {
+              create: {
+                email,
+                name: data.userName || data.name,
+                role: "OWNER",
+                clerkId: data.clerkUserId,
+                membershipActive: true,
+              },
             },
           },
-        },
-        select: {
-          ...ORG_RESPONSE_SCALAR_SELECT,
-          users: { select: ORG_RESPONSE_USER_SELECT },
-        },
-      });
-    } catch (err) {
-      // A protected request and POST /orgs can bootstrap concurrently. The
-      // unique User.clerkId constraint elects one winner; return that winner's
-      // workspace instead of surfacing a transient uniqueness error.
-      const racedUser = await this.prisma.user.findUnique({
-        where: { clerkId: data.clerkUserId },
-        select: { orgId: true },
-      });
-      if (racedUser) {
-        const racedOrg = await this.prisma.org.findUnique({
-          where: { id: racedUser.orgId },
           select: {
             ...ORG_RESPONSE_SCALAR_SELECT,
             users: { select: ORG_RESPONSE_USER_SELECT },
           },
         });
-        if (racedOrg) return racedOrg;
-      }
-      throw err;
-    }
+      },
+    );
   }
 
   async findOne(id: string) {
@@ -251,21 +259,43 @@ export class OrgsService {
    * paths poll. Extends the raw org row with `sendReadiness` so the FE can
    * stop inferring live-send state from env-shaped guesses (GL5).
    */
-  async findByClerkUser(clerkId: string) {
+  async findByClerkUser(
+    clerkId: string,
+    claims: { clerkOrgId?: string; clerkOrgRole?: string } = {},
+  ) {
     const user = await this.prisma.user.findUnique({
       where: { clerkId },
       select: {
+        membershipActive: true,
         org: {
           select: {
             ...ORG_RESPONSE_SCALAR_SELECT,
+            clerkOrgId: true,
             integrations: { select: ORG_RESPONSE_INTEGRATION_SELECT },
           },
         },
       },
     });
-    if (!user) return null;
-    const sendReadiness = await this.computeSendReadiness(user.org);
-    return { ...user.org, sendReadiness };
+    if (!user?.membershipActive) return null;
+    if (!hasRequiredClerkOrgSession(user.org.clerkOrgId, claims)) {
+      throw new ForbiddenException("Active Clerk organization session required");
+    }
+    const org = {
+      id: user.org.id,
+      name: user.org.name,
+      slug: user.org.slug,
+      website: user.org.website,
+      physicalAddress: user.org.physicalAddress,
+      country: user.org.country,
+      senderName: user.org.senderName,
+      plan: user.org.plan,
+      trialEndsAt: user.org.trialEndsAt,
+      createdAt: user.org.createdAt,
+      updatedAt: user.org.updatedAt,
+      integrations: user.org.integrations,
+    };
+    const sendReadiness = await this.computeSendReadiness(org);
+    return { ...org, sendReadiness };
   }
 
   /**

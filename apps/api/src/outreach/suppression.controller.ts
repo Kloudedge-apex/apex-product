@@ -18,6 +18,11 @@ import {
 import { OutreachSuppressionReason } from "@prisma/client";
 import { Request } from "express";
 import { OrgId } from "../common/org-context.decorator";
+import {
+  findAuthorizedOrgUser,
+  OWNER_OR_ADMIN_ROLES,
+  readSignedClerkOrgRole,
+} from "../common/org-role-authority";
 import { PrismaService } from "../prisma/prisma.service";
 import type {
   ArtifactManualSuppressionResult,
@@ -35,10 +40,11 @@ import { SuppressionService } from "./suppression.service";
  * (GL6b) for operators honoring an out-of-band opt-out ("please stop
  * emailing me" said on a call) before the next send fires.
  *
- * ALL endpoints require OWNER or ADMIN role: the rows contain recipient
- * email addresses (PII) and unsuppressing re-enables outbound to a
- * recipient who explicitly opted out — a regulatory action a regular member
- * must not be able to take.
+ * ALL endpoints require an active tenant-scoped OWNER or ADMIN database role,
+ * plus a matching signed Clerk org_role for Clerk-bound tenants. The rows
+ * contain recipient email addresses (PII), and unsuppressing re-enables
+ * outbound to a recipient who explicitly opted out — a regulatory action a
+ * regular member must not be able to take.
  *
  * Audit P0 #3 follow-up.
  */
@@ -192,14 +198,13 @@ export class SuppressionController {
     if (typeof clerkUserId !== "string" || clerkUserId.length === 0) {
       throw new UnauthorizedException("Missing authenticated user context");
     }
-    const user = await this.prisma.user.findUnique({
-      where: { clerkId: clerkUserId },
-      select: { id: true, role: true, orgId: true },
+    const user = await findAuthorizedOrgUser(this.prisma, {
+      clerkUserId,
+      orgId,
+      clerkOrgRole: readSignedClerkOrgRole(req),
+      allowedRoles: OWNER_OR_ADMIN_ROLES,
     });
-    if (!user || user.orgId !== orgId) {
-      throw new ForbiddenException("Cross-org access denied");
-    }
-    if (user.role !== "OWNER" && user.role !== "ADMIN") {
+    if (!user) {
       throw new ForbiddenException(`Only OWNER or ADMIN may ${actionLabel}`);
     }
     return { userId: user.id, clerkUserId };

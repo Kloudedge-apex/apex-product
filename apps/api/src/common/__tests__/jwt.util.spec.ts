@@ -80,6 +80,33 @@ describe("verifyClerkToken claim policy", () => {
     await expect(verifyClerkToken(signToken(payload))).rejects.toThrow(claim);
   });
 
+  it("rejects non-canonical subjects and incomplete organization claim tuples", async () => {
+    await expect(
+      verifyClerkToken(signToken(validClaims({ sub: " user_clerk_1 " }))),
+    ).rejects.toThrow("canonical");
+    await expect(
+      verifyClerkToken(
+        signToken(validClaims({ org_role: "org:admin" })),
+      ),
+    ).rejects.toThrow("present together");
+    await expect(
+      verifyClerkToken(signToken(validClaims({ org_id: "org_clerk_1" }))),
+    ).rejects.toThrow("present together");
+    await expect(
+      verifyClerkToken(
+        signToken(
+          validClaims({
+            org_id: "org_clerk_1",
+            org_role: "org:admin",
+          }),
+        ),
+      ),
+    ).resolves.toMatchObject({
+      org_id: "org_clerk_1",
+      org_role: "org:admin",
+    });
+  });
+
   it("rejects an expired token", async () => {
     const now = Math.floor(Date.now() / 1000);
     await expect(

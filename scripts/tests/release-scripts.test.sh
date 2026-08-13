@@ -1595,6 +1595,31 @@ EOF
   pass
 }
 
+test_migration_receipt_contract_parity() {
+  local schema_min schema_max verifier_count
+  schema_min="$(jq -er '.properties.migrations.minItems | numbers' \
+    "${REPO_ROOT}/docs/ops/production-migration-receipt.schema.json")"
+  schema_max="$(jq -er '.properties.migrations.maxItems | numbers' \
+    "${REPO_ROOT}/docs/ops/production-migration-receipt.schema.json")"
+  verifier_count="$(awk '
+    /^MIGRATIONS=\($/ { in_migrations = 1; next }
+    in_migrations && /^\)$/ { print count; exit }
+    in_migrations && /^[[:space:]]+"/ { count += 1 }
+  ' "${REPO_ROOT}/scripts/verify-migration-release-receipt.sh")"
+
+  [[ "${schema_min}" == "${schema_max}" ]] ||
+    fail "migration receipt schema minItems/maxItems disagree: ${schema_min}/${schema_max}"
+  [[ "${schema_min}" == "${verifier_count}" ]] ||
+    fail "migration receipt schema expects ${schema_min} entries but verifier inventories ${verifier_count}"
+  grep -Fq -- 'EXPECTED_MIGRATION_COUNT="${#MIGRATIONS[@]}"' \
+    "${REPO_ROOT}/scripts/verify-migration-release-receipt.sh" ||
+    fail "migration verifier count is not derived from its migration inventory"
+  grep -Fq -- 'length == $migration_count' \
+    "${REPO_ROOT}/scripts/verify-migration-release-receipt.sh" ||
+    fail "migration verifier does not enforce its derived migration count"
+  pass
+}
+
 test_migration_receipt_verifier() {
   local harness commit evidence migrations_json index path pause source_hash entry
   local -a paths pauses
@@ -1603,6 +1628,7 @@ test_migration_receipt_verifier() {
   mkdir -p "${harness}/repo/scripts"
   cp "${REPO_ROOT}/scripts/verify-migration-release-receipt.sh" "${harness}/repo/scripts/"
   paths=(
+    "docs/migrations/2026-08-13_clerk-identity-lifecycle-expand.sql"
     "docs/migrations/2026-06-01_outreach-artifact-unique.sql"
     "docs/migrations/2026-08-12_conversation-store-expand.sql"
     "docs/migrations/2026-08-12_outreach-delivery-unknown-expand.sql"
@@ -1610,7 +1636,7 @@ test_migration_receipt_verifier() {
     "docs/migrations/2026-08-12_graph-run-activity-expand.sql"
     "docs/migrations/2026-08-12_graph-run-lifecycle-expand.sql"
   )
-  pauses=("observed" "not-required" "not-required" "observed" "not-required" "observed")
+  pauses=("observed" "observed" "not-required" "not-required" "observed" "not-required" "observed")
   for path in "${paths[@]}"; do
     mkdir -p "${harness}/repo/$(dirname "${path}")"
     cp "${REPO_ROOT}/${path}" "${harness}/repo/${path}"
@@ -2223,6 +2249,7 @@ test_snapshot_helper_symlink_rejection
 test_no_mutable_bitbucket_deploy_path
 test_production_release_workflow_verifier
 test_github_ci_verifier
+test_migration_receipt_contract_parity
 test_migration_receipt_verifier
 test_containerapp_config_verifier
 

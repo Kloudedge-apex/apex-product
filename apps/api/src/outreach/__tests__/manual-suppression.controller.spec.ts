@@ -15,9 +15,13 @@ import { SuppressionService } from "../suppression.service";
 const PATH_METADATA = "path";
 const METHOD_METADATA = "method";
 
-function mockRequest(clerkUserId: string | null = "clerk_admin_1"): Request {
+function mockRequest(
+  clerkUserId: string | null = "clerk_admin_1",
+  clerkOrgRole: string = "org:admin",
+): Request {
   return {
     clerkUserId: clerkUserId ?? undefined,
+    clerkOrgRole,
   } as unknown as Request;
 }
 
@@ -27,9 +31,22 @@ function mockPrisma(
     role: "ADMIN",
     orgId: "org_1",
   },
+  clerkOrgId: string | null = "org_clerk_1",
 ): PrismaService {
   return {
-    user: { findUnique: vi.fn().mockResolvedValue(user) },
+    user: {
+      findFirst: vi.fn().mockImplementation(async (args: {
+        where: { orgId: string };
+      }) =>
+        user && user.orgId === args.where.orgId
+          ? {
+              id: user.id,
+              email: `${user.id}@example.test`,
+              role: user.role,
+              org: { clerkOrgId },
+            }
+          : null),
+    },
   } as unknown as PrismaService;
 }
 
@@ -146,6 +163,17 @@ describe("SuppressionController server-resolved manual suppression", () => {
         actor: { userId: "owner_1", clerkUserId: "clerk_owner_1" },
       }),
     );
+  });
+
+  it("lets a fresh signed MEMBER veto a stale database ADMIN", async () => {
+    await expect(
+      controller.suppressArtifactRecipient(
+        "org_1",
+        mockRequest("clerk_admin_1", "org:member"),
+        "artifact_1",
+      ),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(service.suppressArtifactRecipient).not.toHaveBeenCalled();
   });
 
   it("accepts Person ids only for the bulk route and trims them", async () => {

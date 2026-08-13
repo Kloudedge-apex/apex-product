@@ -232,8 +232,12 @@ function validatePayload(
   rawPayload: Record<string, unknown>,
   config: ClerkVerificationConfig,
 ): ClerkTokenPayload {
-  if (typeof rawPayload.sub !== "string" || rawPayload.sub.trim().length === 0) {
-    throw new Error("JWT sub claim must be a nonempty string");
+  if (
+    typeof rawPayload.sub !== "string" ||
+    rawPayload.sub.trim().length === 0 ||
+    rawPayload.sub !== rawPayload.sub.trim()
+  ) {
+    throw new Error("JWT sub claim must be a canonical nonempty string");
   }
   if (rawPayload.iss !== config.issuer) {
     throw new Error("JWT issuer is not authorized");
@@ -268,9 +272,29 @@ function validatePayload(
 
   if (
     rawPayload.org_id !== undefined &&
-    (typeof rawPayload.org_id !== "string" || rawPayload.org_id.trim().length === 0)
+    (typeof rawPayload.org_id !== "string" ||
+      rawPayload.org_id.trim().length === 0 ||
+      rawPayload.org_id !== rawPayload.org_id.trim())
   ) {
-    throw new Error("JWT org_id claim must be a nonempty string when present");
+    throw new Error(
+      "JWT org_id claim must be a canonical nonempty string when present",
+    );
+  }
+  if (
+    rawPayload.org_role !== undefined &&
+    (typeof rawPayload.org_role !== "string" ||
+      rawPayload.org_role.trim().length === 0 ||
+      rawPayload.org_role !== rawPayload.org_role.trim())
+  ) {
+    throw new Error(
+      "JWT org_role claim must be a canonical nonempty string when present",
+    );
+  }
+  if (
+    (rawPayload.org_id === undefined) !==
+    (rawPayload.org_role === undefined)
+  ) {
+    throw new Error("JWT org_id and org_role claims must be present together");
   }
 
   return rawPayload as unknown as ClerkTokenPayload;

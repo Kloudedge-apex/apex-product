@@ -6,22 +6,19 @@ import {
 } from "@nestjs/common";
 import { Request } from "express";
 import { PrismaService } from "../prisma/prisma.service";
-
-function isAdminOrManagerRole(role: string): boolean {
-  const normalized = role.trim().toUpperCase();
-  return (
-    normalized === "ORG:ADMIN" ||
-    normalized === "ORG:MANAGER" ||
-    normalized === "ADMIN" ||
-    normalized === "MANAGER"
-  );
-}
+import {
+  ADMIN_OR_MANAGER_ROLES,
+  findAuthorizedOrgUser,
+  readSignedClerkOrgRole,
+} from "./org-role-authority";
 
 /**
  * Enforces that the caller is an admin/manager in the current org.
  *
- * Prefers the signed Clerk `org_role` claim when present. Falls back to the
- * internal User.role for flows that have clerkUserId but no org_role claim.
+ * The synchronized tenant-scoped database role is required. Clerk-bound
+ * tenants additionally require a privileged signed `org_role`; unbound local
+ * tenants may rely on their database role. This closes both propagation
+ * windows without breaking local/personal workspaces.
  */
 @Injectable()
 export class AdminOrManagerGuard implements CanActivate {
@@ -31,22 +28,23 @@ export class AdminOrManagerGuard implements CanActivate {
     const request = context.switchToHttp().getRequest<Request>();
     const reqAny = request as unknown as Record<string, unknown>;
 
-    const rawOrgRole = reqAny.clerkOrgRole;
-    if (typeof rawOrgRole === "string" && rawOrgRole.length > 0) {
-      if (isAdminOrManagerRole(rawOrgRole)) return true;
-      throw new ForbiddenException("Requires admin or manager role");
-    }
-
     const clerkUserId = reqAny.clerkUserId;
-    if (typeof clerkUserId === "string" && clerkUserId.length > 0) {
-      const user = await this.prisma.user.findUnique({
-        where: { clerkId: clerkUserId },
-        select: { role: true },
+    const orgId = reqAny.orgId;
+    if (
+      typeof clerkUserId === "string" &&
+      clerkUserId.length > 0 &&
+      typeof orgId === "string" &&
+      orgId.length > 0
+    ) {
+      const user = await findAuthorizedOrgUser(this.prisma, {
+        clerkUserId,
+        orgId,
+        clerkOrgRole: readSignedClerkOrgRole(request),
+        allowedRoles: ADMIN_OR_MANAGER_ROLES,
       });
-      if (user?.role === "OWNER" || user?.role === "ADMIN") return true;
+      if (user) return true;
     }
 
     throw new ForbiddenException("Requires admin or manager role");
   }
 }
-

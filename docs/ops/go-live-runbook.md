@@ -93,7 +93,7 @@ private snapshot used by `scripts/deploy-prod.sh`.
 
 ## (0) RELEASE ADMISSION AND SCHEMA ORDER
 
-The current guarded-SDR candidate is a production **NO-GO** until all six
+The current guarded-SDR candidate is a production **NO-GO** until all seven
 review-only SQL files are rehearsed and then applied with separate operator
 approval. Codex did not apply them. Use the invocation, writer-pause,
 duplicate-inventory, retry, and postcondition instructions inside each file.
@@ -126,7 +126,7 @@ external file and this source-pinned digest.
 `scripts/verify-migration-release-receipt.sh` rejects undeclared fields, copies
 the supplied trust file once, matches those exact bytes to the reviewed digest,
 and verifies the detached signature against the claimed approver. The reviewed
-digest and all six migration bytes are read from the exact candidate commit
+digest and all seven migration bytes are read from the exact candidate commit
 with replacement objects disabled, never from mutable working-tree files. The
 verifier enforces their order and writer-pause requirements. The receipt,
 signature, and pinned allowed-signers trust root are mandatory inputs to
@@ -245,7 +245,7 @@ credential or prove that its principal cannot write either production
 Container App before asserting exclusive authority. Azure OIDC federation and
 an RBAC audit must still prove that its service principal is the exclusive
 `Microsoft.App/containerApps/write` identity for both apps. The allowed-signers
-source pin is still `UNCONFIGURED`, and all six migrations still require
+source pin is still `UNCONFIGURED`, and all seven migrations still require
 staging rehearsal, separate production approval, apply, and signed receipt
 evidence. Therefore the authority attestation must remain unset until every
 external control and migration prerequisite is verified. Re-audit after any
@@ -267,17 +267,43 @@ it.
 
 Required dependency order:
 
-1. `docs/migrations/2026-06-01_outreach-artifact-unique.sql`
-2. `docs/migrations/2026-08-12_conversation-store-expand.sql`
-3. `docs/migrations/2026-08-12_outreach-delivery-unknown-expand.sql`
-4. `docs/migrations/2026-08-12_conversation-reply-single-flight-expand.sql`
-5. `docs/migrations/2026-08-12_graph-run-activity-expand.sql`
-6. `docs/migrations/2026-08-12_graph-run-lifecycle-expand.sql`
+1. `docs/migrations/2026-08-13_clerk-identity-lifecycle-expand.sql`
+2. `docs/migrations/2026-06-01_outreach-artifact-unique.sql`
+3. `docs/migrations/2026-08-12_conversation-store-expand.sql`
+4. `docs/migrations/2026-08-12_outreach-delivery-unknown-expand.sql`
+5. `docs/migrations/2026-08-12_conversation-reply-single-flight-expand.sql`
+6. `docs/migrations/2026-08-12_graph-run-activity-expand.sql`
+7. `docs/migrations/2026-08-12_graph-run-lifecycle-expand.sql`
+
+The Clerk identity migration is intentionally fail-closed: it sets every
+legacy `User.membershipActive` value to `false`. Keep identity writers paused
+after applying it. Export the current Clerk organization and membership
+inventory through an approved operator channel, bind `clerkOrgId` and
+`clerkMembershipId` only from immutable provider ids, and explicitly reactivate
+only verified current memberships and reviewed local-workspace owners. Seed the
+matching organization, membership, and user lifecycle cursors from that same
+snapshot. Record the exact active organization, membership, and user-authority
+counts from that inventory, including explicit zeroes; omitted counts remain
+at the fail-closed `-1` sentinel. Run both zero-row invariants printed in the
+migration, then arm the one `clerk_identity_cutover` singleton with those three
+counts, the sanitized inventory evidence hash, and the verified
+provider-snapshot cutoff in Unix milliseconds as the final paused identity
+write. The arming trigger rejects count drift and any seeded cursor newer than
+that cutoff. Run the migration's final readiness query and require zero rows.
+Do not substitute the database clock for the provider watermark. Until the row
+is ready, the API returns a
+retryable failure for every authority-creating Clerk webhook; signed deletion
+events remain fail-closed. The sanitized inventory digest and invariant-output
+digest are mandatory parts of that migration's `postconditionEvidenceHash`;
+raw emails, user ids, tenant ids, or provider payloads must not enter the
+receipt or repository. Any unresolved row is a rollout stop, not a reason to
+restore the old blanket-active default.
 
 Do not deploy code that writes a new column, table, or enum value before its
-schema prerequisite. The artifact, reply-single-flight, and graph-lifecycle
-index operations require the documented writer pauses. The concurrent index
-files must not run inside a transaction-wrapping migration runner.
+schema prerequisite. The Clerk identity, artifact, reply-single-flight, and
+graph-lifecycle index operations require the documented writer pauses. The
+concurrent index files must not run inside a transaction-wrapping migration
+runner.
 
 Stop on any duplicate preflight. Never auto-delete or rewrite a `SENT` or
 `DELIVERY_UNKNOWN` row. Reconcile reply duplicates against Gmail provider

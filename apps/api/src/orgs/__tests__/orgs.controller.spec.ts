@@ -25,7 +25,7 @@ describe("OrgsController IDOR protection", () => {
     getStats: ReturnType<typeof vi.fn>;
     getOnboardingStatus: ReturnType<typeof vi.fn>;
   };
-  let prisma: { user: { findUnique: ReturnType<typeof vi.fn> } };
+  let prisma: { user: { findFirst: ReturnType<typeof vi.fn> } };
   let controller: OrgsController;
 
   beforeEach(() => {
@@ -41,7 +41,7 @@ describe("OrgsController IDOR protection", () => {
         readyForLiveSend: false,
       }),
     };
-    prisma = { user: { findUnique: vi.fn() } };
+    prisma = { user: { findFirst: vi.fn() } };
     controller = new OrgsController(
       service as unknown as OrgsService,
       prisma as unknown as PrismaService,
@@ -84,12 +84,17 @@ describe("OrgsController IDOR protection", () => {
     // orgs.controller.update-guard.spec.ts for the full role matrix); here we
     // satisfy the role gate so the IDOR check stays the behaviour under test.
     function makeOwnerReq(): Request {
-      prisma.user.findUnique.mockResolvedValue({
+      prisma.user.findFirst.mockResolvedValue({
         id: "user_internal",
+        email: "owner@acme.test",
         role: "OWNER",
-        orgId: ORG_ID,
+        org: { clerkOrgId: "org_clerk_1" },
       });
-      return { headers: {}, clerkUserId: "user_clerk_owner" } as unknown as Request;
+      return {
+        headers: {},
+        clerkUserId: "user_clerk_owner",
+        clerkOrgRole: "org:owner",
+      } as unknown as Request;
     }
 
     it("updates when :id matches the JWT orgId", async () => {

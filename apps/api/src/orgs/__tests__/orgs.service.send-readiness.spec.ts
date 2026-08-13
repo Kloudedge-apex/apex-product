@@ -269,6 +269,7 @@ describe("OrgsService.findByClerkUser (GET /orgs/me payload)", () => {
     });
     prisma.user.findUnique.mockResolvedValue({
       id: "user_internal",
+      membershipActive: true,
       org: {
         id: ORG_ID,
         name: "Nikxius",
@@ -303,6 +304,20 @@ describe("OrgsService.findByClerkUser (GET /orgs/me payload)", () => {
     const result = await service.findByClerkUser("user_clerk_missing");
 
     expect(result).toBeNull();
+    expect(prisma.integration.count).not.toHaveBeenCalled();
+    expect(prisma.outreachArtifact.count).not.toHaveBeenCalled();
+  });
+
+  it("returns null for an inactive membership without exposing the old tenant", async () => {
+    const { service, prisma } = buildService();
+    prisma.user.findUnique.mockResolvedValue({
+      membershipActive: false,
+      org: { id: ORG_ID },
+    });
+
+    await expect(
+      service.findByClerkUser("user_clerk_removed"),
+    ).resolves.toBeNull();
     expect(prisma.integration.count).not.toHaveBeenCalled();
     expect(prisma.outreachArtifact.count).not.toHaveBeenCalled();
   });

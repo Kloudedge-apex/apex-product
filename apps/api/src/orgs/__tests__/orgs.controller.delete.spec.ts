@@ -5,6 +5,13 @@ import type { Request, Response } from "express";
 import { OrgsController } from "../orgs.controller";
 import { OrgsService } from "../orgs.service";
 import { PrismaService } from "../../prisma/prisma.service";
+import { verifyClerkToken } from "../../common/jwt.util";
+
+vi.mock("../../common/jwt.util", () => ({
+  verifyClerkToken: vi.fn(),
+}));
+
+const verifyClerkTokenMock = vi.mocked(verifyClerkToken);
 
 /**
  * GDPR Art. 17 / CCPA §1798.105 erasure endpoint — DELETE /orgs/:id.
@@ -31,12 +38,13 @@ describe("OrgsController DELETE /orgs/:id (GDPR erasure)", () => {
     deleteOrg: ReturnType<typeof vi.fn>;
   };
   let prisma: {
-    user: { findUnique: ReturnType<typeof vi.fn> };
+    user: { findFirst: ReturnType<typeof vi.fn> };
   };
   let controller: OrgsController;
 
   function makeReq(overrides: {
     clerkUserId?: string | null;
+    clerkOrgRole?: string | null;
     headers?: Record<string, string | undefined>;
   } = {}): Request {
     const headers: Record<string, string> = {};
@@ -49,6 +57,11 @@ describe("OrgsController DELETE /orgs/:id (GDPR erasure)", () => {
     if (overrides.clerkUserId !== null && overrides.clerkUserId !== undefined) {
       req.clerkUserId = overrides.clerkUserId;
     }
+    const clerkOrgRole =
+      overrides.clerkOrgRole === undefined
+        ? "org:owner"
+        : overrides.clerkOrgRole;
+    if (clerkOrgRole !== null) req.clerkOrgRole = clerkOrgRole;
     return req as unknown as Request;
   }
 
@@ -81,6 +94,7 @@ describe("OrgsController DELETE /orgs/:id (GDPR erasure)", () => {
   }
 
   beforeEach(() => {
+    verifyClerkTokenMock.mockReset();
     prevSecret = process.env.ENCRYPTION_KEY;
     process.env.ENCRYPTION_KEY = SECRET;
 
@@ -99,11 +113,11 @@ describe("OrgsController DELETE /orgs/:id (GDPR erasure)", () => {
     };
     prisma = {
       user: {
-        findUnique: vi.fn().mockResolvedValue({
+        findFirst: vi.fn().mockResolvedValue({
           id: INTERNAL_USER_ID,
           email: "owner@acme.test",
           role: "OWNER",
-          orgId: ORG_ID,
+          org: { clerkOrgId: "org_clerk_1" },
         }),
       },
     };
@@ -132,9 +146,18 @@ describe("OrgsController DELETE /orgs/:id (GDPR erasure)", () => {
 
     await controller.remove(ORG_ID, ORG_ID, req, res);
 
-    expect(prisma.user.findUnique).toHaveBeenCalledWith({
-      where: { clerkId: CLERK_USER_ID },
-      select: { id: true, email: true, role: true, orgId: true },
+    expect(prisma.user.findFirst).toHaveBeenCalledWith({
+      where: {
+        clerkId: CLERK_USER_ID,
+        orgId: ORG_ID,
+        membershipActive: true,
+      },
+      select: {
+        id: true,
+        email: true,
+        role: true,
+        org: { select: { clerkOrgId: true } },
+      },
     });
     expect(service.deleteOrg).toHaveBeenCalledTimes(1);
     expect(service.deleteOrg).toHaveBeenCalledWith(ORG_ID, {
@@ -157,16 +180,16 @@ describe("OrgsController DELETE /orgs/:id (GDPR erasure)", () => {
     await expect(
       controller.remove(ORG_ID, OTHER_ORG_ID, req, res),
     ).rejects.toBeInstanceOf(ForbiddenException);
-    expect(prisma.user.findUnique).not.toHaveBeenCalled();
+    expect(prisma.user.findFirst).not.toHaveBeenCalled();
     expect(service.deleteOrg).not.toHaveBeenCalled();
   });
 
   it("non-owner (role=ADMIN) → 403", async () => {
-    prisma.user.findUnique.mockResolvedValueOnce({
+    prisma.user.findFirst.mockResolvedValueOnce({
       id: INTERNAL_USER_ID,
       email: "admin@acme.test",
       role: "ADMIN",
-      orgId: ORG_ID,
+      org: { clerkOrgId: "org_clerk_1" },
     });
     const exp = Math.floor(Date.now() / 1000) + 60;
     const token = validToken(ORG_ID, INTERNAL_USER_ID, exp);
@@ -182,8 +205,24 @@ describe("OrgsController DELETE /orgs/:id (GDPR erasure)", () => {
     expect(service.deleteOrg).not.toHaveBeenCalled();
   });
 
+  it("lets a fresh signed MEMBER veto a stale database OWNER", async () => {
+    const exp = Math.floor(Date.now() / 1000) + 60;
+    const token = validToken(ORG_ID, INTERNAL_USER_ID, exp);
+    const req = makeReq({
+      clerkUserId: CLERK_USER_ID,
+      clerkOrgRole: "org:member",
+      headers: { "x-reauth-token": token, "x-reauth-exp": String(exp) },
+    });
+
+    await expect(
+      controller.remove(ORG_ID, ORG_ID, req, makeRes()),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(prisma.user.findFirst).not.toHaveBeenCalled();
+    expect(service.deleteOrg).not.toHaveBeenCalled();
+  });
+
   it("user not found in target org → 403", async () => {
-    prisma.user.findUnique.mockResolvedValueOnce(null);
+    prisma.user.findFirst.mockResolvedValueOnce(null);
     const exp = Math.floor(Date.now() / 1000) + 60;
     const token = validToken(ORG_ID, INTERNAL_USER_ID, exp);
     const req = makeReq({
@@ -199,12 +238,7 @@ describe("OrgsController DELETE /orgs/:id (GDPR erasure)", () => {
   });
 
   it("user belongs to a different org → 403", async () => {
-    prisma.user.findUnique.mockResolvedValueOnce({
-      id: INTERNAL_USER_ID,
-      email: "x@x.test",
-      role: "OWNER",
-      orgId: "some-other-org",
-    });
+    prisma.user.findFirst.mockResolvedValueOnce(null);
     const exp = Math.floor(Date.now() / 1000) + 60;
     const token = validToken(ORG_ID, INTERNAL_USER_ID, exp);
     const req = makeReq({
@@ -231,7 +265,7 @@ describe("OrgsController DELETE /orgs/:id (GDPR erasure)", () => {
     await expect(
       controller.remove(ORG_ID, ORG_ID, req, res),
     ).rejects.toBeInstanceOf(UnauthorizedException);
-    expect(prisma.user.findUnique).not.toHaveBeenCalled();
+    expect(prisma.user.findFirst).not.toHaveBeenCalled();
     expect(service.deleteOrg).not.toHaveBeenCalled();
   });
 
@@ -358,5 +392,60 @@ describe("OrgsController DELETE /orgs/:id (GDPR erasure)", () => {
       controller.remove(ORG_ID, ORG_ID, req, res),
     ).rejects.toBeInstanceOf(UnauthorizedException);
     expect(service.deleteOrg).not.toHaveBeenCalled();
+  });
+
+  it("issues a delete challenge to a fresh signed Clerk OWNER", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    verifyClerkTokenMock.mockResolvedValue({
+      sub: CLERK_USER_ID,
+      org_id: "org_clerk_1",
+      org_role: "org:owner",
+      iss: "https://clerk.example.test",
+      exp: now + 300,
+      iat: now,
+    });
+
+    const result = await controller.issueReauthChallenge(
+      ORG_ID,
+      ORG_ID,
+      makeReq({ headers: { authorization: "Bearer fresh-token" } }),
+    );
+
+    expect(prisma.user.findFirst).toHaveBeenCalledWith({
+      where: {
+        clerkId: CLERK_USER_ID,
+        orgId: ORG_ID,
+        membershipActive: true,
+      },
+      select: {
+        id: true,
+        email: true,
+        role: true,
+        org: { select: { clerkOrgId: true } },
+      },
+    });
+    expect(result.expiresInSeconds).toBe(300);
+    expect(result.token).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("does not mint a challenge when signed MEMBER vetoes stale database OWNER", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    verifyClerkTokenMock.mockResolvedValue({
+      sub: CLERK_USER_ID,
+      org_id: "org_clerk_1",
+      org_role: "org:member",
+      iss: "https://clerk.example.test",
+      exp: now + 300,
+      iat: now,
+    });
+
+    await expect(
+      controller.issueReauthChallenge(
+        ORG_ID,
+        ORG_ID,
+        makeReq({ headers: { authorization: "Bearer fresh-token" } }),
+      ),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(prisma.user.findFirst).not.toHaveBeenCalled();
   });
 });

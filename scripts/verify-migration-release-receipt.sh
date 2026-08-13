@@ -110,6 +110,7 @@ if [[ "${ACTUAL_ALLOWED_SIGNERS_SHA256}" != "${PINNED_ALLOWED_SIGNERS_SHA256}" ]
 fi
 
 MIGRATIONS=(
+  "docs/migrations/2026-08-13_clerk-identity-lifecycle-expand.sql"
   "docs/migrations/2026-06-01_outreach-artifact-unique.sql"
   "docs/migrations/2026-08-12_conversation-store-expand.sql"
   "docs/migrations/2026-08-12_outreach-delivery-unknown-expand.sql"
@@ -117,9 +118,12 @@ MIGRATIONS=(
   "docs/migrations/2026-08-12_graph-run-activity-expand.sql"
   "docs/migrations/2026-08-12_graph-run-lifecycle-expand.sql"
 )
-WRITER_PAUSE=("observed" "not-required" "not-required" "observed" "not-required" "observed")
+WRITER_PAUSE=("observed" "observed" "not-required" "not-required" "observed" "not-required" "observed")
+EXPECTED_MIGRATION_COUNT="${#MIGRATIONS[@]}"
 
-if ! jq -e --arg commit "${EXPECTED_COMMIT}" '
+if ! jq -e \
+  --arg commit "${EXPECTED_COMMIT}" \
+  --argjson migration_count "${EXPECTED_MIGRATION_COUNT}" '
   (keys == [
     "approver",
     "candidateCommit",
@@ -148,7 +152,7 @@ if ! jq -e --arg commit "${EXPECTED_COMMIT}" '
   and (.stagingRehearsalEvidenceHash | type == "string" and test("^sha256:[0-9a-f]{64}$"))
   and (.productionApplyEvidenceHash | type == "string" and test("^sha256:[0-9a-f]{64}$"))
   and (.rollbackRehearsalEvidenceHash | type == "string" and test("^sha256:[0-9a-f]{64}$"))
-  and (.migrations | type == "array" and length == 6)
+  and (.migrations | type == "array" and length == $migration_count)
 ' >/dev/null "${RECEIPT_COPY}"; then
   echo "ERROR: migration receipt metadata is incomplete or invalid" >&2
   exit 1
@@ -209,4 +213,4 @@ for index in "${!MIGRATIONS[@]}"; do
   fi
 done
 
-echo "Signed production migration receipt verified for ${EXPECTED_COMMIT} (approver ${APPROVER}; 6 ordered migrations)"
+echo "Signed production migration receipt verified for ${EXPECTED_COMMIT} (approver ${APPROVER}; ${EXPECTED_MIGRATION_COUNT} ordered migrations)"

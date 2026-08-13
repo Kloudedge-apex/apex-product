@@ -20,6 +20,12 @@ import { OrgId } from "../common/org-context.decorator";
 import { SkipOrgGuard } from "../common/org-scope.guard";
 import { CreateOrgDto, UpdateOrgDto } from "../common/dto/orgs.dto";
 import { verifyClerkToken } from "../common/jwt.util";
+import {
+  findAuthorizedOrgUser,
+  OWNER_ONLY_ROLES,
+  OWNER_OR_ADMIN_ROLES,
+  readSignedClerkOrgRole,
+} from "../common/org-role-authority";
 
 /** Max skew (seconds) between client-supplied X-Reauth-Exp and server clock. */
 const REAUTH_MAX_WINDOW_SECONDS = 300;
@@ -49,13 +55,16 @@ export class OrgsController {
   @Post()
   @SkipOrgGuard()
   async create(@Req() req: Request, @Body() body: CreateOrgDto) {
-    const { clerkUserId, email } = await verifyAuth(req);
+    const { clerkUserId, email, clerkOrgId, clerkOrgRole } =
+      await verifyAuth(req);
     return this.orgsService.create({
       name: body.name,
       slug: body.slug,
       clerkUserId,
       email,
       userName: body.userName,
+      clerkOrgId,
+      clerkOrgRole,
     });
   }
 
@@ -72,8 +81,11 @@ export class OrgsController {
   @Get("me")
   @SkipOrgGuard()
   async findMe(@Req() req: Request) {
-    const { clerkUserId } = await verifyAuth(req);
-    return this.orgsService.findByClerkUser(clerkUserId);
+    const { clerkUserId, clerkOrgId, clerkOrgRole } = await verifyAuth(req);
+    return this.orgsService.findByClerkUser(clerkUserId, {
+      clerkOrgId,
+      clerkOrgRole,
+    });
   }
 
   /**
@@ -121,10 +133,9 @@ export class OrgsController {
    * Auth gates (defence in depth — caller has already passed OrgScopeGuard):
    *   1. The :id path param must equal the orgId derived from the verified
    *      Clerk JWT (handled by OrgScopeGuard + the explicit check below).
-   *   2. The caller must be a User row in that org with role === OWNER. We
-   *      look this up via the Clerk sub (set on `req.clerkUserId` by the
-   *      guard) — there is no @Roles decorator in the codebase, so the check
-   *      is inline.
+   *   2. The caller must have an active User row in that org with synchronized
+   *      OWNER role. A signed Clerk org_role is an additional veto and is
+   *      required for Clerk-bound tenants.
    *   3. Re-auth challenge: the client must present a short-lived HMAC token
    *      computed over `${orgId}:${userId}:${exp}` with the server-side
    *      ENCRYPTION_KEY. The frontend obtains this from a confirm-deletion
@@ -151,17 +162,13 @@ export class OrgsController {
       throw new UnauthorizedException("Missing authenticated user context");
     }
 
-    const user = await this.prisma.user.findUnique({
-      where: { clerkId: clerkUserId },
-      select: { id: true, email: true, role: true, orgId: true },
+    const user = await findAuthorizedOrgUser(this.prisma, {
+      clerkUserId,
+      orgId,
+      clerkOrgRole: readSignedClerkOrgRole(req),
+      allowedRoles: OWNER_ONLY_ROLES,
     });
     if (!user) {
-      throw new ForbiddenException("User not found in target org");
-    }
-    if (user.orgId !== orgId) {
-      throw new ForbiddenException("Cross-org access denied");
-    }
-    if (user.role !== "OWNER") {
       throw new ForbiddenException("Only the org OWNER may delete the org");
     }
 
@@ -184,9 +191,8 @@ export class OrgsController {
    *
    * Identity is enforced the same way the @Delete handler enforces it:
    *   - OrgScopeGuard already verified the JWT and attached clerkUserId
-   *   - We re-look-up the user, assert membership of the target org, AND
-   *     assert OWNER role — non-OWNERs get a 403 so the FE can hide the
-   *     button without a separate role-probe round-trip.
+   *   - We re-look-up the active tenant membership and require both the
+   *     synchronized and freshly re-verified signed roles to allow OWNER.
    *
    * Note on "freshness": Clerk session freshness is enforced upstream by
    * the FE (it triggers Clerk's step-up auth dialog before calling this).
@@ -224,17 +230,13 @@ export class OrgsController {
       );
     }
 
-    const user = await this.prisma.user.findUnique({
-      where: { clerkId: payload.sub },
-      select: { id: true, role: true, orgId: true },
+    const user = await findAuthorizedOrgUser(this.prisma, {
+      clerkUserId: payload.sub,
+      orgId,
+      clerkOrgRole: payload.org_role,
+      allowedRoles: OWNER_ONLY_ROLES,
     });
     if (!user) {
-      throw new ForbiddenException("User not found in target org");
-    }
-    if (user.orgId !== orgId) {
-      throw new ForbiddenException("Cross-org access denied");
-    }
-    if (user.role !== "OWNER") {
       throw new ForbiddenException("Only the org OWNER may mint a delete challenge");
     }
 
@@ -253,9 +255,9 @@ export class OrgsController {
   }
 
   /**
-   * Same role gate as suppression.controller.ts (commit e61b3cb): the caller
-   * must resolve to a User row in the target org with role OWNER or ADMIN.
-   * There is no @Roles decorator in the codebase, so the check is inline.
+   * Same shared role authority as suppression.controller.ts: the active,
+   * tenant-scoped database role must allow OWNER/ADMIN, and a signed Clerk
+   * org_role can veto stale privilege.
    */
   private async assertAdminOrOwner(
     req: Request,
@@ -266,14 +268,13 @@ export class OrgsController {
     if (!clerkUserId) {
       throw new UnauthorizedException("Missing authenticated user context");
     }
-    const user = await this.prisma.user.findUnique({
-      where: { clerkId: clerkUserId },
-      select: { id: true, role: true, orgId: true },
+    const user = await findAuthorizedOrgUser(this.prisma, {
+      clerkUserId,
+      orgId,
+      clerkOrgRole: readSignedClerkOrgRole(req),
+      allowedRoles: OWNER_OR_ADMIN_ROLES,
     });
-    if (!user || user.orgId !== orgId) {
-      throw new ForbiddenException("Cross-org access denied");
-    }
-    if (user.role !== "OWNER" && user.role !== "ADMIN") {
+    if (!user) {
       throw new ForbiddenException(`Only OWNER or ADMIN may ${actionLabel}`);
     }
     return { userId: user.id, clerkUserId };
@@ -282,14 +283,24 @@ export class OrgsController {
 
 async function verifyAuth(
   req: Request,
-): Promise<{ clerkUserId: string; email: string }> {
+): Promise<{
+  clerkUserId: string;
+  email: string;
+  clerkOrgId?: string;
+  clerkOrgRole?: string;
+}> {
   const authHeader = req.headers["authorization"];
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     throw new UnauthorizedException("Missing Authorization header");
   }
   try {
     const payload = await verifyClerkToken(authHeader.slice(7).trim());
-    return { clerkUserId: payload.sub, email: payload.email ?? "" };
+    return {
+      clerkUserId: payload.sub,
+      email: payload.email ?? "",
+      clerkOrgId: payload.org_id,
+      clerkOrgRole: payload.org_role,
+    };
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Invalid token";
     throw new UnauthorizedException(msg);
