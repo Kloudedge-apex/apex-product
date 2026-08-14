@@ -27,10 +27,12 @@ import { RateLimitGuard } from "./common/rate-limit.guard";
 import { ProductionBootstrapWriterFenceInterceptor } from "./ops/production-bootstrap-writer-fence.interceptor";
 
 /**
- * Guards run in registration order. `OrgScopeGuard` must run first so that
- * `request.orgId` is populated before `RateLimitGuard` reads it; otherwise
- * the rate limiter would have to key on a client-controlled header, which
- * lets any caller claim another org's quota.
+ * Guards run in registration order. `OrgScopeGuard` establishes tenant
+ * authority before the tenant-aware limiter reads `request.orgId`. The
+ * application intentionally has no pre-auth per-IP limiter: console traffic
+ * arrives through a shared BFF egress, so such a bucket would let one tenant
+ * deny service to every tenant. Volumetric ingress limiting belongs at the
+ * trusted edge; JWKS network amplification is bounded in the verifier.
  */
 @Module({
   imports: [

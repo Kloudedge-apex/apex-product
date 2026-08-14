@@ -12,8 +12,34 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConfigService } from "@nestjs/config";
 import { TeamPageScraper } from "../team-page-scraper.service";
-import type { LLMService, LLMResponse } from "../../../runtime/llm.service";
+import type {
+  ChatMessage,
+  ChatOptions,
+  LLMService,
+  LLMResponse,
+} from "../../../runtime/llm.service";
 import { circuitBreakerRegistry } from "../../../common/http-retry.util";
+
+const ssrfGuardedFetchMock = vi.hoisted(() =>
+  vi.fn(
+    async (
+      input: string | URL,
+      init: RequestInit = {},
+      opts: {
+        fetcher?: (url: URL, requestInit: RequestInit) => Promise<Response>;
+      } = {},
+    ): Promise<Response> => {
+      const url = input instanceof URL ? input : new URL(input);
+      const fetcher = opts.fetcher ?? ((next: URL, nextInit: RequestInit) => fetch(next, nextInit));
+      return fetcher(url, { ...init, redirect: "manual" });
+    },
+  ),
+);
+
+vi.mock("../../../runtime/util/ssrf-guard", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../runtime/util/ssrf-guard")>();
+  return { ...actual, ssrfGuardedFetch: ssrfGuardedFetchMock };
+});
 
 const ORIGINAL_FETCH = globalThis.fetch;
 
@@ -36,10 +62,15 @@ function makeLlm(contents: string[]): {
   chatMock: ReturnType<typeof vi.fn>;
 } {
   const queue = [...contents];
-  const chatMock = vi.fn(async (): Promise<LLMResponse> => {
-    const content = queue.shift() ?? "";
-    return { content, tokensUsed: 100, model: "gpt-4o-mini-mock", cost: 0 };
-  });
+  const chatMock = vi.fn(
+    async (
+      _messages: ChatMessage[],
+      _options?: ChatOptions,
+    ): Promise<LLMResponse> => {
+      const content = queue.shift() ?? "";
+      return { content, tokensUsed: 100, model: "gpt-4o-mini-mock", cost: 0 };
+    },
+  );
   const llm = { chat: chatMock } as unknown as LLMService;
   return { llm, chatMock };
 }
@@ -50,6 +81,7 @@ function makeConfig(): ConfigService {
 
 beforeEach(() => {
   circuitBreakerRegistry._resetForTests();
+  ssrfGuardedFetchMock.mockClear();
   // Return the prepared HTML on every URL the scraper tries.
   globalThis.fetch = vi.fn(async () =>
     new Response(teamHtml(), { status: 200, headers: { "Content-Type": "text/html" } }),
@@ -69,19 +101,23 @@ describe("TeamPageScraper.extractWithLlm — JSON validation retry", () => {
     const { llm, chatMock } = makeLlm(["completely-not-json", validResponse]);
 
     const scraper = new TeamPageScraper(makeConfig(), llm);
-    const people = await scraper.scrapeTeamPage("acme.com");
+    const people = await scraper.scrapeTeamPage("org-test", "acme.com");
 
     expect(people).toHaveLength(1);
     expect(people[0]!.firstName).toBe("Ada");
     expect(people[0]!.lastName).toBe("Lovelace");
     expect(chatMock).toHaveBeenCalledTimes(2);
+    expect(chatMock.mock.calls[0]?.[1]).toMatchObject({
+      orgId: "org-test",
+      metadata: { org_id: "org-test" },
+    });
   });
 
   it("returns [] (no throw) when both LLM attempts produce invalid JSON", async () => {
     const { llm, chatMock } = makeLlm(["garbage one", "garbage two"]);
 
     const scraper = new TeamPageScraper(makeConfig(), llm);
-    const people = await scraper.scrapeTeamPage("acme.com");
+    const people = await scraper.scrapeTeamPage("org-test", "acme.com");
 
     expect(people).toEqual([]);
     // The scraper iterates through TEAM_PATHS (10 URLs) and calls the LLM
@@ -97,10 +133,41 @@ describe("TeamPageScraper.extractWithLlm — JSON validation retry", () => {
     const { llm, chatMock } = makeLlm([validResponse]);
 
     const scraper = new TeamPageScraper(makeConfig(), llm);
-    const people = await scraper.scrapeTeamPage("acme.com");
+    const people = await scraper.scrapeTeamPage("org-test", "acme.com");
 
     expect(people).toHaveLength(1);
     expect(people[0]!.firstName).toBe("Grace");
     expect(chatMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a missing tenant attribution before fetching or calling the LLM", async () => {
+    const { llm, chatMock } = makeLlm([]);
+    const scraper = new TeamPageScraper(makeConfig(), llm);
+
+    await expect(scraper.scrapeTeamPage("", "acme.com")).rejects.toThrow(
+      "requires a non-empty orgId",
+    );
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(chatMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects an oversized team page before parsing or calling the LLM", async () => {
+    globalThis.fetch = vi.fn(async () =>
+      new Response("x".repeat(500_001), {
+        status: 200,
+        headers: { "Content-Type": "text/html" },
+      }),
+    ) as unknown as typeof fetch;
+    const { llm, chatMock } = makeLlm([]);
+    const scraper = new TeamPageScraper(makeConfig(), llm);
+
+    await expect(
+      scraper.scrapeTeamPage(
+        "org-test",
+        "acme.com",
+        "https://acme.com/team",
+      ),
+    ).resolves.toEqual([]);
+    expect(chatMock).not.toHaveBeenCalled();
   });
 });

@@ -1,8 +1,15 @@
 import { Injectable, Logger, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { LLMService } from "../../runtime/llm.service";
-import { fetchWithRetry, withCircuitBreaker } from "../../common/http-retry.util";
+import { fetchWithRetry } from "../../common/http-retry.util";
 import { chatJsonWithRetry } from "../../common/json-output.util";
+import { ssrfGuardedFetch } from "../../runtime/util/ssrf-guard";
+import {
+  drainResponseBodyWithLimit,
+  readResponseTextWithLimit,
+} from "../../common/http-body.util";
+
+const MAX_TEAM_PAGE_BYTES = 500_000;
 
 interface DiscoveredPerson {
   firstName: string;
@@ -105,9 +112,14 @@ export class TeamPageScraper {
   }
 
   async scrapeTeamPage(
+    orgId: string,
     domain: string,
     knownTeamPageUrl?: string | null,
   ): Promise<DiscoveredPerson[]> {
+    if (typeof orgId !== "string" || orgId.trim().length === 0) {
+      throw new Error("TeamPageScraper requires a non-empty orgId");
+    }
+
     const urls = knownTeamPageUrl
       ? [knownTeamPageUrl]
       : TEAM_PATHS.map((p) => `https://${domain}${p}`);
@@ -117,19 +129,29 @@ export class TeamPageScraper {
         // Hitting arbitrary tenant team-pages — keep retries modest. No
         // circuit breaker: a single bad customer site must not poison the
         // pool for every other scrape.
-        const res = await fetchWithRetry(
+        const res = await ssrfGuardedFetch(
           url,
           {
             headers: { "User-Agent": "WorkforceOS/1.0 (lead-engine)" },
             signal: AbortSignal.timeout(10000),
-            redirect: "follow",
           },
-          { provider: "team-page", maxAttempts: 3 },
+          {
+            maxRedirects: 5,
+            fetcher: (nextUrl, init, pinnedFetch) =>
+              fetchWithRetry(nextUrl, init, {
+                provider: "team-page",
+                maxAttempts: 3,
+                fetchImpl: pinnedFetch,
+              }),
+          },
         );
 
-        if (!res.ok) continue;
+        if (!res.ok) {
+          await drainResponseBodyWithLimit(res);
+          continue;
+        }
 
-        const html = await res.text();
+        const html = await readResponseTextWithLimit(res, MAX_TEAM_PAGE_BYTES);
         if (html.length < 500) continue; // too short to be a team page
 
         // Try JSON-LD first
@@ -148,7 +170,7 @@ export class TeamPageScraper {
 
         // LLM fallback for unstructured HTML
         if (this.openaiKey && html.length < 50000) {
-          const llmPeople = await this.extractWithLlm(html, url);
+          const llmPeople = await this.extractWithLlm(html, url, orgId);
           if (llmPeople.length > 0) {
             this.logger.log(`Found ${llmPeople.length} people via LLM on ${url}`);
             return llmPeople;
@@ -266,7 +288,11 @@ export class TeamPageScraper {
     return people;
   }
 
-  private async extractWithLlm(html: string, url: string): Promise<DiscoveredPerson[]> {
+  private async extractWithLlm(
+    html: string,
+    url: string,
+    orgId: string,
+  ): Promise<DiscoveredPerson[]> {
     if (!this.llm || !this.openaiKey) return [];
 
     // Truncate HTML to save tokens
@@ -306,7 +332,8 @@ export class TeamPageScraper {
           temperature: 0,
           agent: "team_page_extractor.extract",
           tags: ["pipeline", "team_page_extractor"],
-          metadata: { source_url: url },
+          orgId,
+          metadata: { source_url: url, org_id: orgId },
         },
         guard: isTeamPagePayload,
         schemaDescription:

@@ -30,6 +30,20 @@ describe("callJudge model resolution", () => {
     expect(chat.mock.calls[0][1].model).toBe("custom-judge-model");
   });
 
+  it("charges a tenant-attributed judge call to the originating org", async () => {
+    const { llm, chat } = makeLlmStub();
+    await callJudge(llm, {
+      rubricName: "toxicity",
+      systemPrompt: "s",
+      userPrompt: "u",
+      orgId: "org_test",
+    });
+    expect(chat.mock.calls[0][1]).toMatchObject({
+      orgId: "org_test",
+      metadata: { org_id: "org_test" },
+    });
+  });
+
   it("falls back to LANGSMITH_JUDGE_MODEL env when args.model is undefined", async () => {
     const prev = process.env.LANGSMITH_JUDGE_MODEL;
     process.env.LANGSMITH_JUDGE_MODEL = "judge-via-env";

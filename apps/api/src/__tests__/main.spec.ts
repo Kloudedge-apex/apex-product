@@ -11,6 +11,7 @@ import { describe, it, expect, vi } from "vitest";
 
 const { appMock, createMock } = vi.hoisted(() => {
   const app = {
+    set: vi.fn(),
     setGlobalPrefix: vi.fn(),
     use: vi.fn(),
     useGlobalPipes: vi.fn(),
@@ -75,6 +76,10 @@ describe("main.ts bootstrap", () => {
     // listen() before asserting the wiring.
     await vi.waitFor(() => expect(appMock.listen).toHaveBeenCalled());
 
+    expect(appMock.set).toHaveBeenCalledWith(
+      "trust proxy",
+      expect.any(Function),
+    );
     expect(appMock.enableShutdownHooks).toHaveBeenCalledTimes(1);
     const hooksOrder = appMock.enableShutdownHooks.mock.invocationCallOrder[0];
     const listenOrder = appMock.listen.mock.invocationCallOrder[0];

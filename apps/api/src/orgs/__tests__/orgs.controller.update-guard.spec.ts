@@ -9,8 +9,9 @@ import { UpdateOrgDto } from "../../common/dto/orgs.dto";
 /**
  * Role guard on PATCH /orgs/:id (audit B1 follow-through).
  *
- * The update route writes sender identity (CAN-SPAM §7704(a)(5) fields) and
- * `plan` — org-level settings a regular MEMBER must not be able to change.
+ * The update route writes sender identity (CAN-SPAM §7704(a)(5) fields),
+ * which a regular MEMBER must not be able to change. Billing plan is not a
+ * public org-settings field and is covered by the DTO/service tests.
  * Same OWNER/ADMIN gate as the suppression endpoints (commit e61b3cb):
  *   1. OrgScopeGuard attaches `clerkUserId` and signed `clerkOrgRole`.
  *   2. The clerk user must have an active tenant-scoped User row.

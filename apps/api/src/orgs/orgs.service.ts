@@ -7,7 +7,7 @@ import {
   NotFoundException,
   Optional,
 } from "@nestjs/common";
-import { Plan, type Prisma } from "@prisma/client";
+import type { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { EvidenceLedgerService } from "../observability/evidence-ledger.service";
 import { isLiveSendAllowedForOrg } from "../outreach/outreach-allowlist.util";
@@ -450,7 +450,6 @@ export class OrgsService {
     id: string,
     data: {
       name?: string;
-      plan?: string;
       website?: string;
       physicalAddress?: string;
       senderName?: string;
@@ -468,7 +467,6 @@ export class OrgsService {
       where: { id },
       data: {
         ...(data.name && { name: data.name }),
-        ...(data.plan && { plan: data.plan as Plan }),
         ...(website !== undefined && { website }),
         // Sender identity (CAN-SPAM §7704(a)(5)) — the send worker fail-closes
         // live email outreach until physicalAddress is set. UpdateOrgDto has

@@ -21,6 +21,7 @@
  */
 
 import { Logger } from "@nestjs/common";
+import { drainResponseBodyWithLimit } from "./http-body.util";
 
 const log = new Logger("HttpRetry");
 
@@ -67,6 +68,14 @@ export interface FetchWithRetryOptions {
    * without monkey-patching `setTimeout`.
    */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * Optional transport seam. SSRF-sensitive callers provide a DNS-pinned
+   * fetch implementation so retries cannot silently re-resolve a hostname.
+   */
+  fetchImpl?: (
+    input: string | URL,
+    init?: RequestInit,
+  ) => Promise<Response>;
 }
 
 const DEFAULTS = {
@@ -124,6 +133,7 @@ export async function fetchWithRetry(
   const baseDelayMs = opts.baseDelayMs ?? DEFAULTS.baseDelayMs;
   const maxDelayMs = opts.maxDelayMs ?? DEFAULTS.maxDelayMs;
   const sleep = opts.sleep ?? defaultSleep;
+  const fetchImpl = opts.fetchImpl ?? fetch;
   const provider = opts.provider;
 
   let lastStatus: number | null = null;
@@ -131,7 +141,7 @@ export async function fetchWithRetry(
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
-      const response = await fetch(input, init);
+      const response = await fetchImpl(input, init);
 
       if (!isRetryableStatus(response.status)) {
         return response;
@@ -139,13 +149,9 @@ export async function fetchWithRetry(
 
       lastStatus = response.status;
 
-      // Drain the body so the underlying connection can be reused.
-      // (Some runtimes leak sockets if the body is never consumed.)
-      try {
-        await response.arrayBuffer();
-      } catch {
-        // ignore — best effort
-      }
+      // Drain only a bounded prefix. Provider error bodies are untrusted and
+      // must not be buffered without limit just to make a connection reusable.
+      await drainResponseBodyWithLimit(response);
 
       if (attempt === maxAttempts - 1) {
         break;

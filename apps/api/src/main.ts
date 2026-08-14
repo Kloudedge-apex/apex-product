@@ -8,6 +8,7 @@ import helmet from "helmet";
 import { AppModule } from "./app.module";
 import { GlobalExceptionFilter } from "./common/http-exception.filter";
 import { validateEnvOrExit } from "./common/env-validation";
+import { isTrustedProxyAddress } from "./common/trusted-proxy.util";
 
 async function bootstrap() {
   const logger = new Logger("Bootstrap");
@@ -23,6 +24,11 @@ async function bootstrap() {
     // against the un-parsed body.
     rawBody: true,
   });
+
+  // Honor forwarded client addresses only when the immediate network peer is
+  // an internal/loopback ingress proxy. Controllers and audit logs may consume
+  // req.ip; application code never parses X-Forwarded-For directly.
+  app.set("trust proxy", isTrustedProxyAddress);
 
   app.setGlobalPrefix("api");
 

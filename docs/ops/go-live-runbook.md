@@ -55,6 +55,22 @@ the trusted issuer, an active `nbf` when present, and an authorized `azp` in
 production. A revision that cannot validate those claims rejects the request;
 it must not fall back to client-supplied tenant headers.
 
+### Ingress throttling contract
+
+Authenticated API requests have a bounded process-local backstop keyed only by
+the organization established from the verified token. Routes that deliberately
+skip tenant auth (health probes, signed webhooks, provider callbacks, and
+bootstrap endpoints) are not keyed by source IP inside the application:
+console-BFF and provider traffic can share one egress IP, so that design would
+let one tenant deny service to all others.
+
+Before admitting public traffic, require and capture evidence for a managed
+edge rate-limit policy covering the API ingress, especially unauthenticated and
+signed-callback routes. The edge must derive its client identity from the
+trusted ingress connection, not a raw client-supplied forwarding header, and
+must be sized/tested for shared BFF and provider egress. No production GO is
+allowed without that independently enforced multi-replica volumetric control.
+
 The API/worker release verifier hashes the exact five runtime values, including
 empty fields, and compares both roles to the reviewed pin. API/worker parity
 alone is insufficient: coordinated drift to a different Clerk tenant must
@@ -236,30 +252,35 @@ code must never create them.
 `scripts/deploy-prod.sh` is a subsequent-rollout controller only. It requires
 an already active, healthy API, worker, and console and requires the worker
 consumer gates and minimum replica count to remain enabled. It therefore must
-not be used to bootstrap from a stopped legacy worker. The separate protected
-workflow that would hold quiescence, establish the first enum-aware disabled
-API/worker/console baseline, and independently attest those three exact
-identities is not implemented or authorized. Until that bootstrap is complete,
-this release remains production **NO-GO**; a signed quiescence snapshot alone
-does not close the time-of-check/time-of-use gap.
+not be used to bootstrap from a stopped legacy worker. The guarded,
+manual-only `.github/workflows/bootstrap-production.yml` workflow now holds
+quiescence, establishes the first enum-aware disabled API/worker/console
+baseline, and independently attests those three exact identities. Its source
+presence is not operational admission: it is not authorized until it is
+merged to protected `master` and every external authority, signer, evidence,
+and outage gate in `docs/ops/initial-production-bootstrap-controller.md` has
+been independently reviewed. Until that bootstrap completes, this release
+remains production **NO-GO**; a signed quiescence snapshot alone does not close
+the time-of-check/time-of-use gap.
 
 Use this order and do not collapse the gates:
 
 1. Block API mutations, stop the legacy worker, pause all three queues, wait
    for zero active jobs, and prove the signed zero inventories listed above.
 2. Apply and verify the enum/index migration while the system remains quiesced.
-3. Through that separate protected bootstrap workflow, deploy immutable
+3. Through the separately protected bootstrap workflow, deploy immutable
    console/BFF, API, and worker revisions with
    `OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE=disabled` (or absent), no write
    acknowledgement, and an empty live-send allowlist. Do not substitute the
-   subsequent-rollout controller for this unimplemented bootstrap workflow.
+   subsequent-rollout controller for the initial-bootstrap controller, and do
+   not dispatch the bootstrap workflow before its external gates are admitted.
 4. Prove all legacy revisions inactive and capture the exact enum-aware
    console/API/worker digests and revision names in a new fresh signed receipt
    carrying
    `compatibilityAttestation: enum-aware-api-worker-console-baseline-v1`.
-5. Through a separate protected configuration workflow that is not authorized
-   by `scripts/deploy-prod.sh`, create the worker-only first-class revision while
-   the system remains quiesced:
+5. Through the protected bootstrap workflow's `activate-first-class` action,
+   which is not authorized by `scripts/deploy-prod.sh`, create the worker-only
+   first-class revision while the system remains quiesced:
 
 ```text
 OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE=first-class

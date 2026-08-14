@@ -2,6 +2,12 @@ import { Tool, ToolContext, ToolResult } from "./tool.interface";
 import { MOCK_DISCLAIMER_SUFFIX, markMocked } from "./mock-metadata";
 import { fetchWithRetry } from "../../common/http-retry.util";
 import { ssrfGuardedFetch } from "../util/ssrf-guard";
+import {
+  drainResponseBodyWithLimit,
+  readResponseTextWithLimit,
+} from "../../common/http-body.util";
+
+const MAX_SCRAPE_BYTES = 500_000;
 
 export class WebScrapeTool implements Tool {
   name = "web_scrape";
@@ -33,16 +39,21 @@ export class WebScrapeTool implements Tool {
         },
         {
           maxRedirects: 5,
-          fetcher: (nextUrl, init) =>
-            fetchWithRetry(nextUrl, init, { provider: "web-scrape", maxAttempts: 3 }),
+          fetcher: (nextUrl, init, pinnedFetch) =>
+            fetchWithRetry(nextUrl, init, {
+              provider: "web-scrape",
+              maxAttempts: 3,
+              fetchImpl: pinnedFetch,
+            }),
         },
       );
 
       if (!response.ok) {
+        await drainResponseBodyWithLimit(response);
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
 
-      const html = await response.text();
+      const html = await readResponseTextWithLimit(response, MAX_SCRAPE_BYTES);
       return { success: true, data: this.extractContent(html, url) };
     } catch (error) {
       // Return mock data on failure, but tag it so the LLM does not cite it as fact.

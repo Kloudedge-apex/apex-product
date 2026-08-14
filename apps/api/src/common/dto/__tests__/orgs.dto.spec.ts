@@ -19,13 +19,22 @@ import { UpdateOrgDto } from "../orgs.dto";
 describe("UpdateOrgDto sender identity validation", () => {
   async function validateBody(body: Record<string, unknown>) {
     const dto = plainToInstance(UpdateOrgDto, body);
-    const errors = await validate(dto);
+    const errors = await validate(dto, { whitelist: true });
     return { dto, errors };
   }
 
   it("accepts a body with no sender-identity fields (all optional)", async () => {
     const { errors } = await validateBody({ name: "Acme" });
     expect(errors).toHaveLength(0);
+  });
+
+  it("strips a caller-supplied billing plan from the public settings DTO", async () => {
+    const { dto, errors } = await validateBody({
+      name: "Acme",
+      plan: "ENTERPRISE",
+    });
+    expect(errors).toHaveLength(0);
+    expect(dto).not.toHaveProperty("plan");
   });
 
   describe("physicalAddress", () => {

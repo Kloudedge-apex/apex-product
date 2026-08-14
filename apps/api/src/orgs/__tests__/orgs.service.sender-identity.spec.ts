@@ -69,4 +69,17 @@ describe("OrgsService sender identity persistence", () => {
     expect(data).not.toHaveProperty("physicalAddress");
     expect(data).not.toHaveProperty("country");
   });
+
+  it("never persists a caller-supplied billing plan", async () => {
+    const { service, prisma } = buildService();
+    await service.update(
+      "org_test",
+      { name: "Acme", plan: "ENTERPRISE" } as unknown as Parameters<
+        OrgsService["update"]
+      >[1],
+    );
+    const data = prisma.org.update.mock.calls[0]?.[0]?.data;
+    expect(data?.name).toBe("Acme");
+    expect(data).not.toHaveProperty("plan");
+  });
 });

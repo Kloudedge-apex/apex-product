@@ -6,6 +6,8 @@
  * instance and, in production, for an explicitly authorized browser origin.
  */
 
+import { readResponseTextWithLimit } from "./http-body.util";
+
 interface JWK {
   kty: string;
   use?: string;
@@ -51,7 +53,17 @@ interface JWTHeader {
 }
 
 const JWKS_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const JWKS_FETCH_TIMEOUT_MS = 5_000;
+const JWKS_MAX_RESPONSE_BYTES = 256 * 1024;
+const UNKNOWN_KID_REFRESH_COOLDOWN_MS = 60_000;
+const UNKNOWN_KID_CACHE_TTL_MS = 60_000;
+const UNKNOWN_KID_CACHE_MAX_ENTRIES = 256;
 let cachedKeys: CachedKeys | null = null;
+let jwksFetchInFlight:
+  | { jwksUrl: string; promise: Promise<JWK[]> }
+  | null = null;
+const lastUnknownKidRefreshAt = new Map<string, number>();
+const unknownKidCache = new Map<string, number>();
 
 function isLoopbackHostname(hostname: string): boolean {
   return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
@@ -159,27 +171,97 @@ function resolveClerkVerificationConfig(): ClerkVerificationConfig {
   };
 }
 
+function hasFreshCachedKeys(jwksUrl: string, now = Date.now()): boolean {
+  return Boolean(
+    cachedKeys &&
+      cachedKeys.jwksUrl === jwksUrl &&
+      now - cachedKeys.fetchedAt < JWKS_CACHE_TTL_MS,
+  );
+}
+
+async function fetchJWKS(jwksUrl: string): Promise<JWK[]> {
+  if (jwksFetchInFlight?.jwksUrl === jwksUrl) {
+    return jwksFetchInFlight.promise;
+  }
+
+  const promise = (async (): Promise<JWK[]> => {
+    const response = await fetch(jwksUrl, {
+      signal: AbortSignal.timeout(JWKS_FETCH_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to fetch JWKS from Clerk: ${response.status}`);
+    }
+
+    const raw = await readResponseTextWithLimit(
+      response,
+      JWKS_MAX_RESPONSE_BYTES,
+    );
+    let data: Partial<JWKSResponse>;
+    try {
+      data = JSON.parse(raw) as Partial<JWKSResponse>;
+    } catch {
+      throw new Error("Clerk JWKS response was not valid JSON");
+    }
+    if (!Array.isArray(data.keys) || data.keys.length === 0) {
+      throw new Error("Clerk JWKS response did not contain any keys");
+    }
+    cachedKeys = {
+      keys: data.keys,
+      fetchedAt: Date.now(),
+      jwksUrl,
+    };
+    return data.keys;
+  })();
+  jwksFetchInFlight = { jwksUrl, promise };
+  try {
+    return await promise;
+  } finally {
+    if (jwksFetchInFlight?.promise === promise) jwksFetchInFlight = null;
+  }
+}
+
 async function getJWKS(jwksUrl: string): Promise<JWK[]> {
   const now = Date.now();
   if (
-    cachedKeys &&
-    cachedKeys.jwksUrl === jwksUrl &&
-    now - cachedKeys.fetchedAt < JWKS_CACHE_TTL_MS
+    hasFreshCachedKeys(jwksUrl, now) &&
+    cachedKeys
   ) {
     return cachedKeys.keys;
   }
 
-  const response = await fetch(jwksUrl);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch JWKS from Clerk: ${response.status}`);
-  }
+  return fetchJWKS(jwksUrl);
+}
 
-  const data = (await response.json()) as Partial<JWKSResponse>;
-  if (!Array.isArray(data.keys) || data.keys.length === 0) {
-    throw new Error("Clerk JWKS response did not contain any keys");
+function unknownKidCacheKey(jwksUrl: string, kid: string): string {
+  return `${jwksUrl}\u0000${kid}`;
+}
+
+function isUnknownKidCached(jwksUrl: string, kid: string, now: number): boolean {
+  const key = unknownKidCacheKey(jwksUrl, kid);
+  const expiresAt = unknownKidCache.get(key);
+  if (expiresAt === undefined) return false;
+  if (now >= expiresAt) {
+    unknownKidCache.delete(key);
+    return false;
   }
-  cachedKeys = { keys: data.keys, fetchedAt: now, jwksUrl };
-  return data.keys;
+  return true;
+}
+
+function rememberUnknownKid(jwksUrl: string, kid: string, now: number): void {
+  const cacheKey = unknownKidCacheKey(jwksUrl, kid);
+  const existingExpiry = unknownKidCache.get(cacheKey);
+  if (existingExpiry !== undefined && now < existingExpiry) {
+    return;
+  }
+  for (const [key, expiresAt] of unknownKidCache) {
+    if (now >= expiresAt) unknownKidCache.delete(key);
+  }
+  while (unknownKidCache.size >= UNKNOWN_KID_CACHE_MAX_ENTRIES) {
+    const oldest = unknownKidCache.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    unknownKidCache.delete(oldest);
+  }
+  unknownKidCache.set(cacheKey, now + UNKNOWN_KID_CACHE_TTL_MS);
 }
 
 function decodeJWT(token: string): { header: JWTHeader; payload: Record<string, unknown> } {
@@ -315,14 +397,29 @@ export async function verifyClerkToken(token: string): Promise<ClerkTokenPayload
   }
 
   const config = resolveClerkVerificationConfig();
+  const lookupStartedAt = Date.now();
+  const hadFreshCache = hasFreshCachedKeys(config.jwksUrl, lookupStartedAt);
   let keys = await getJWKS(config.jwksUrl);
   let jwk = findExactJwk(keys, header.kid);
-  if (!jwk) {
-    cachedKeys = null;
-    keys = await getJWKS(config.jwksUrl);
-    jwk = findExactJwk(keys, header.kid);
+  if (!jwk && hadFreshCache) {
+    const now = Date.now();
+    const lastRefresh = lastUnknownKidRefreshAt.get(config.jwksUrl) ?? 0;
+    if (
+      !isUnknownKidCached(config.jwksUrl, header.kid, now) &&
+      now - lastRefresh >= UNKNOWN_KID_REFRESH_COOLDOWN_MS
+    ) {
+      // Allow one bounded refresh for a legitimate Clerk key rotation. The
+      // timestamp is set before awaiting so concurrent attacker-controlled
+      // kids cannot each start their own outbound refresh.
+      lastUnknownKidRefreshAt.set(config.jwksUrl, now);
+      keys = await fetchJWKS(config.jwksUrl);
+      jwk = findExactJwk(keys, header.kid);
+    }
   }
-  if (!jwk) throw new Error("No matching JWK found for token kid");
+  if (!jwk) {
+    rememberUnknownKid(config.jwksUrl, header.kid, Date.now());
+    throw new Error("No matching JWK found for token kid");
+  }
 
   const cryptoKey = await jwkToCryptoKey(jwk);
   const parts = token.split(".");
@@ -342,4 +439,7 @@ export async function verifyClerkToken(token: string): Promise<ClerkTokenPayload
 /** Invalidate the JWKS cache (used after key rotation and by focused tests). */
 export function invalidateJWKSCache(): void {
   cachedKeys = null;
+  jwksFetchInFlight = null;
+  lastUnknownKidRefreshAt.clear();
+  unknownKidCache.clear();
 }

@@ -1,6 +1,7 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { fetchWithRetry, withCircuitBreaker } from "../../common/http-retry.util";
+import { ssrfGuardedFetch } from "../../runtime/util/ssrf-guard";
 import {
   isAggregatorDomain,
   isLikelyHumanName,
@@ -299,35 +300,49 @@ export class SerpDiscoveryService {
   }
 
   private async validateDomain(candidateDomain: string): Promise<string | null> {
-    try {
-      const res = await fetch(`https://${candidateDomain}`, {
-        method: 'HEAD',
-        signal: AbortSignal.timeout(5000),
-        redirect: 'follow',
-      });
-      if (res.ok) return candidateDomain;
-    } catch {
-      // Try removing common suffixes
-      const suffixes = ['-inc', '-hq', '-io', '-co', '-app', '-labs'];
-      const base = candidateDomain.replace(/\.[^.]+$/, ''); // strip TLD
-      const tld = candidateDomain.slice(base.length); // e.g. '.com'
-      for (const suffix of suffixes) {
-        if (base.endsWith(suffix)) {
-          const cleaned = base.slice(0, -suffix.length) + tld;
-          try {
-            const res2 = await fetch(`https://${cleaned}`, {
-              method: 'HEAD',
-              signal: AbortSignal.timeout(5000),
-              redirect: 'follow',
-            });
-            if (res2.ok) return cleaned;
-          } catch {
-            // continue
-          }
+    if (await this.probePublicDomain(candidateDomain)) {
+      return candidateDomain;
+    }
+
+    // Try removing common suffixes. Every derived hostname is independently
+    // admitted by the SSRF guard; a failed or blocked original probe never
+    // grants authority to a fallback hostname.
+    const suffixes = ['-inc', '-hq', '-io', '-co', '-app', '-labs'];
+    const base = candidateDomain.replace(/\.[^.]+$/, ''); // strip TLD
+    const tld = candidateDomain.slice(base.length); // e.g. '.com'
+    for (const suffix of suffixes) {
+      if (base.endsWith(suffix)) {
+        const cleaned = base.slice(0, -suffix.length) + tld;
+        if (await this.probePublicDomain(cleaned)) {
+          return cleaned;
         }
       }
     }
     return null;
+  }
+
+  private async probePublicDomain(domain: string): Promise<boolean> {
+    try {
+      const res = await ssrfGuardedFetch(
+        `https://${domain}`,
+        {
+          method: "HEAD",
+          signal: AbortSignal.timeout(5000),
+        },
+        {
+          maxRedirects: 5,
+          fetcher: (nextUrl, init, pinnedFetch) =>
+            fetchWithRetry(nextUrl, init, {
+              provider: "serp-domain-validation",
+              maxAttempts: 2,
+              fetchImpl: pinnedFetch,
+            }),
+        },
+      );
+      return res.ok;
+    } catch {
+      return false;
+    }
   }
 
   private parseLinkedInPersonResult(result: SerperResult): DiscoveredPerson | null {

@@ -157,9 +157,10 @@ export class OrgsController {
 
   /**
    * Org settings update. Writes sender identity (the CAN-SPAM §7704(a)(5)
-   * fields the send worker fail-closes on) and `plan` — org-level settings a
-   * regular MEMBER must not be able to change, so the same OWNER/ADMIN gate
-   * as the suppression endpoints (commit e61b3cb) applies.
+   * fields the send worker fail-closes on). A regular MEMBER must not be able
+   * to change organization settings, so the same OWNER/ADMIN gate as the
+   * suppression endpoints applies. Billing plan is deliberately absent from
+   * this public DTO; only verified billing-provider webhooks may change it.
    */
   @Patch(":id")
   async update(

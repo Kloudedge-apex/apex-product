@@ -496,7 +496,11 @@ export class LeadsService {
 
     const processCompany = async (co: typeof companies[number]) => {
       try {
-        const teamPeople = await this.teamPageScraper.scrapeTeamPage(co.domain, co.teamPageUrl);
+        const teamPeople = await this.teamPageScraper.scrapeTeamPage(
+          orgId,
+          co.domain,
+          co.teamPageUrl,
+        );
         for (const p of teamPeople) {
           await trackUpsert(co.id, p);
         }

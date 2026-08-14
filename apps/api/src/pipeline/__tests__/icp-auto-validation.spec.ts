@@ -38,7 +38,12 @@ vi.mock("../../runtime/util/ssrf-guard", async () => {
 import { BadRequestException } from "@nestjs/common";
 import { IcpAutoService } from "../icp-auto.service";
 import type { PrismaService } from "../../prisma/prisma.service";
-import type { LLMService, LLMResponse } from "../../runtime/llm.service";
+import type {
+  ChatMessage,
+  ChatOptions,
+  LLMService,
+  LLMResponse,
+} from "../../runtime/llm.service";
 
 const ORIGINAL_FETCH = globalThis.fetch;
 
@@ -71,10 +76,15 @@ function makeLlm(contents: string[]): {
   chatMock: ReturnType<typeof vi.fn>;
 } {
   const queue = [...contents];
-  const chatMock = vi.fn(async (): Promise<LLMResponse> => {
+  const chatMock = vi.fn(
+    async (
+      _messages: ChatMessage[],
+      _options?: ChatOptions,
+    ): Promise<LLMResponse> => {
     const content = queue.shift() ?? "";
     return { content, tokensUsed: 100, model: "gpt-4o-mini-mock", cost: 0 };
-  });
+    },
+  );
   const llm = { chat: chatMock } as unknown as LLMService;
   return { llm, chatMock };
 }
@@ -112,6 +122,10 @@ describe("IcpAutoService.generateForOrg — JSON validation retry", () => {
     // system nudge = 4 messages.
     const retryArgs = chatMock.mock.calls[1]![0] as unknown[];
     expect(retryArgs).toHaveLength(4);
+    expect(chatMock.mock.calls[0]![1]).toMatchObject({
+      orgId: "org-1",
+      metadata: { org_id: "org-1" },
+    });
   });
 
   it("throws BadRequestException when both LLM attempts fail to produce valid JSON", async () => {

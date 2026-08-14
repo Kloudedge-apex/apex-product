@@ -161,6 +161,105 @@ describe("verifyClerkToken claim policy", () => {
     ).rejects.toThrow("matching JWK");
   });
 
+  it("single-flights concurrent initial JWKS loads", async () => {
+    let releaseFetch: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      releaseFetch = resolve;
+    });
+    const fetchMock = vi.fn(async () => {
+      await gate;
+      return new Response(JSON.stringify({ keys: [publicJwk] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const checks = Array.from({ length: 20 }, () =>
+      verifyClerkToken(signToken(validClaims())),
+    );
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    releaseFetch?.();
+    await expect(Promise.all(checks)).resolves.toHaveLength(20);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("bounds unknown-kid rotation refreshes across attacker-controlled kids", async () => {
+    const fetchMock = vi.mocked(globalThis.fetch);
+    await expect(verifyClerkToken(signToken(validClaims()))).resolves.toBeDefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    const attempts = Array.from({ length: 50 }, (_, index) =>
+      verifyClerkToken(
+        signToken(validClaims(), {
+          alg: "RS256",
+          kid: `attacker-kid-${index}`,
+        }),
+      ),
+    );
+    const results = await Promise.allSettled(attempts);
+    expect(results.every((result) => result.status === "rejected")).toBe(true);
+    // One initial load plus at most one key-rotation refresh. Distinct kids do
+    // not clear the cache or create one outbound Clerk request each.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    await expect(
+      verifyClerkToken(
+        signToken(validClaims(), { alg: "RS256", kid: "another-attacker-kid" }),
+      ),
+    ).rejects.toThrow("matching JWK");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not slide an unknown-kid TTL and admits a propagated rotation", async () => {
+    const startedAt = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(startedAt);
+    const rotatedKid = "clerk-key-2";
+    const rotatedJwk = { ...publicJwk, kid: rotatedKid };
+    const responseFor = (keys: unknown[]) =>
+      new Response(JSON.stringify({ keys }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(async () => responseFor([publicJwk]))
+      // Clerk can briefly return the old set while rotation propagates.
+      .mockImplementationOnce(async () => responseFor([publicJwk]))
+      .mockImplementationOnce(async () => responseFor([publicJwk, rotatedJwk]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(verifyClerkToken(signToken(validClaims()))).resolves.toBeDefined();
+    const rotatedToken = signToken(validClaims(), {
+      alg: "RS256",
+      kid: rotatedKid,
+    });
+    await expect(verifyClerkToken(rotatedToken)).rejects.toThrow("matching JWK");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    clock.mockReturnValue(startedAt + 30_000);
+    await expect(verifyClerkToken(rotatedToken)).rejects.toThrow("matching JWK");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    clock.mockReturnValue(startedAt + 60_001);
+    await expect(verifyClerkToken(rotatedToken)).resolves.toMatchObject({
+      sub: "user_clerk_1",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("applies a wall timeout to JWKS fetches", async () => {
+    const fetchMock = vi.fn(async (_url: string | URL, init?: RequestInit) => {
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      throw new Error("synthetic network failure");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(verifyClerkToken(signToken(validClaims()))).rejects.toThrow(
+      "synthetic network failure",
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("fails closed in production when authorized parties are not configured", async () => {
     vi.stubEnv("NODE_ENV", "production");
     vi.stubEnv("CLERK_AUTHORIZED_PARTIES", undefined);
