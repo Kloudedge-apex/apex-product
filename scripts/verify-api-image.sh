@@ -79,6 +79,7 @@ const path = require("node:path");
     "/app/apps/api/src",
     "/app/packages/db/prisma",
     "/app/node_modules/@apex/db",
+    "/app/dist/ops/production-bootstrap-quiescence.cli.js",
     "/workspace",
   ];
   for (const file of forbiddenPaths) {
