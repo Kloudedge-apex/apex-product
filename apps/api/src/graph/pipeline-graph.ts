@@ -220,7 +220,7 @@ export function buildPipelineGraph(deps: Deps) {
           }
         }
 
-        void deps.evidenceLedger.leadSourced({
+        await deps.evidenceLedger.leadSourced({
           orgId: state.orgId,
           runId: state.runId,
           companies: totalCompanies,
@@ -494,7 +494,7 @@ export function buildPipelineGraph(deps: Deps) {
           }
         }
 
-        void deps.evidenceLedger.leadScored({
+        await deps.evidenceLedger.leadScored({
           orgId: state.orgId,
           runId: state.runId,
           scored: totalScored,

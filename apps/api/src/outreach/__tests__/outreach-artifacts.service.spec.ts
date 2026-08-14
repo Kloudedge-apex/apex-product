@@ -16,6 +16,7 @@ import { OutreachArtifactsService } from "../outreach-artifacts.service";
 import { OutreachSendQueueService } from "../outreach-send-queue.service";
 import { PrismaService } from "../../prisma/prisma.service";
 import { LangSmithService } from "../../observability/langsmith.service";
+import { EvidenceLedgerService } from "../../observability/evidence-ledger.service";
 
 type LangSmithMock = Pick<LangSmithService, "addRunToDataset"> & {
   addRunToDataset: ReturnType<typeof vi.fn>;
@@ -193,6 +194,32 @@ describe("OutreachArtifactsService.recordDryRun", () => {
     });
   });
 
+  it("returns the committed artifact when supplementary evidence persistence fails", async () => {
+    const artifact = artifactRow();
+    prisma.outreachArtifact.create.mockResolvedValue(artifact);
+    const evidenceLedger = {
+      artifactPersisted: vi
+        .fn()
+        .mockRejectedValue(new Error("synthetic evidence outage")),
+    } as unknown as EvidenceLedgerService;
+    service = new OutreachArtifactsService(prisma, evidenceLedger);
+
+    await expect(
+      service.recordDryRun({
+        orgId: "org_1",
+        graphRunId: "graph_1",
+        toolName: "send_email",
+        toolArgs: {
+          to: "dest@example.com",
+          subject: "Hi",
+          body: "Hello",
+        },
+      }),
+    ).resolves.toEqual(artifact);
+    expect(prisma.outreachArtifact.create).toHaveBeenCalledTimes(1);
+    expect(evidenceLedger.artifactPersisted).toHaveBeenCalledTimes(1);
+  });
+
   it("persists hubspot args as a HUBSPOT_NOTE channel artifact", async () => {
     prisma.outreachArtifact.create.mockResolvedValue(
       artifactRow({
@@ -210,6 +237,37 @@ describe("OutreachArtifactsService.recordDryRun", () => {
         channel: OutreachChannel.HUBSPOT_NOTE,
         recipientRef: "x@y.z",
         bodyText: "Followed up",
+      }),
+    });
+  });
+
+  it("persists LinkedIn args as a LINKEDIN channel artifact", async () => {
+    prisma.outreachArtifact.create.mockResolvedValue(
+      artifactRow({
+        toolName: "linkedin_send_message",
+        channel: OutreachChannel.LINKEDIN,
+        recipientRef: "urn:li:person:abc123",
+        subject: null,
+        bodyText: "Hello on LinkedIn",
+      }),
+    );
+    await service.recordDryRun({
+      orgId: "org_1",
+      toolName: "linkedin_send_message",
+      toolArgs: {
+        recipient_urn: "urn:li:person:abc123",
+        body: "Hello on LinkedIn",
+      },
+    });
+    expect(prisma.outreachArtifact.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        toolName: "linkedin_send_message",
+        channel: OutreachChannel.LINKEDIN,
+        recipientRef: "urn:li:person:abc123",
+        subject: null,
+        bodyText: "Hello on LinkedIn",
+        bodyHtml: null,
+        status: OutreachArtifactStatus.PENDING_REVIEW,
       }),
     });
   });

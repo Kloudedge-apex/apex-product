@@ -1,6 +1,10 @@
-import { Injectable, Logger, OnModuleDestroy } from "@nestjs/common";
+import { Injectable, Logger, OnModuleDestroy, Optional } from "@nestjs/common";
 import { Queue, JobsOptions, ConnectionOptions } from "bullmq";
 import type { QueueStats } from "../observability/metrics/metrics.service";
+import {
+  ProductionBootstrapWriterFenceService,
+  runWithProductionBootstrapWriterFence,
+} from "../ops/production-bootstrap-writer-fence";
 
 export interface QueueJob {
   id: string;
@@ -56,6 +60,7 @@ export function buildRedisConnectionOptions(): ConnectionOptions | null {
     ...base,
     host: host!,
     port: Number(process.env.REDIS_PORT ?? 6380),
+    username: process.env.REDIS_USERNAME,
     password: process.env.REDIS_PASSWORD,
     tls: process.env.REDIS_TLS === "false" ? undefined : {},
   } as unknown as ConnectionOptions;
@@ -73,7 +78,10 @@ export class QueueService implements OnModuleDestroy {
   private memQueue: QueueJob[] = [];
   private memProcessing = new Map<string, QueueJob>();
 
-  constructor() {
+  constructor(
+    @Optional()
+    private readonly productionBootstrapWriterFence?: ProductionBootstrapWriterFenceService,
+  ) {
     this.connection = buildRedisConnectionOptions();
 
     if (this.connection) {
@@ -104,23 +112,29 @@ export class QueueService implements OnModuleDestroy {
   }
 
   async enqueue(job: EnqueueInput): Promise<QueueJob> {
-    const queueJob: QueueJob = {
-      ...job,
-      status: "queued",
-      createdAt: new Date(),
-    };
+    return runWithProductionBootstrapWriterFence(
+      this.productionBootstrapWriterFence,
+      "queue-producer",
+      async () => {
+        const queueJob: QueueJob = {
+          ...job,
+          status: "queued",
+          createdAt: new Date(),
+        };
 
-    if (this.bullQueue) {
-      await this.bullQueue.add(
-        "execute-agent",
-        { agentId: job.agentId, orgId: job.orgId, runId: job.runId },
-        { jobId: job.id, ...DEFAULT_JOB_OPTIONS },
-      );
-      return queueJob;
-    }
+        if (this.bullQueue) {
+          await this.bullQueue.add(
+            "execute-agent",
+            { agentId: job.agentId, orgId: job.orgId, runId: job.runId },
+            { jobId: job.id, ...DEFAULT_JOB_OPTIONS },
+          );
+          return queueJob;
+        }
 
-    this.memQueue.push(queueJob);
-    return queueJob;
+        this.memQueue.push(queueJob);
+        return queueJob;
+      },
+    );
   }
 
   /** In-memory only: pop the next job. BullMQ Worker bypasses this. */
@@ -159,6 +173,14 @@ export class QueueService implements OnModuleDestroy {
   }
 
   async cancel(jobId: string): Promise<boolean> {
+    return runWithProductionBootstrapWriterFence(
+      this.productionBootstrapWriterFence,
+      "queue-producer",
+      () => this.cancelWithLease(jobId),
+    );
+  }
+
+  private async cancelWithLease(jobId: string): Promise<boolean> {
     if (this.bullQueue) {
       const job = await this.bullQueue.getJob(jobId);
       if (!job) return false;

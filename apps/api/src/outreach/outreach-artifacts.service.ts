@@ -68,6 +68,8 @@ function channelForTool(toolName: string): OutreachChannel | null {
       return OutreachChannel.EMAIL;
     case "hubspot":
       return OutreachChannel.HUBSPOT_NOTE;
+    case "linkedin_send_message":
+      return OutreachChannel.LINKEDIN;
     default:
       return null;
   }
@@ -163,13 +165,22 @@ export class OutreachArtifactsService {
       },
     });
 
-    void this.evidenceLedger?.artifactPersisted({
-      orgId: input.orgId,
-      runId: input.graphRunId ?? null,
-      artifactId: artifact.id,
-      status: artifact.status,
-      channel: artifact.channel,
-    });
+    try {
+      await this.evidenceLedger?.artifactPersisted({
+        orgId: input.orgId,
+        runId: input.graphRunId ?? null,
+        artifactId: artifact.id,
+        status: artifact.status,
+        channel: artifact.channel,
+      });
+    } catch {
+      // The artifact row is already committed. Evidence is supplementary;
+      // surfacing its failure as an artifact failure would make the executor
+      // report no artifact and could create retry duplicates.
+      this.logger.warn(
+        `Artifact persistence evidence failed for artifact=${artifact.id}`,
+      );
+    }
 
     return artifact;
   }
@@ -259,8 +270,8 @@ export class OutreachArtifactsService {
         `Artifact ${id} has no langsmith_run_id — skipping dataset append (legacy or tracing-disabled)`,
       );
     } else if (this.langsmith) {
-      void this.langsmith
-        .addRunToDataset(GOOD_SDR_DRAFTS_DATASET, runId, {
+      try {
+        await this.langsmith.addRunToDataset(GOOD_SDR_DRAFTS_DATASET, runId, {
           label: "approved",
           artifact_id: updated.id,
           org_id: updated.orgId,
@@ -269,14 +280,12 @@ export class OutreachArtifactsService {
           recipient_ref: updated.recipientRef,
           reviewer_note: null,
           reviewed_by: reviewedBy,
-        })
-        .catch((err) => {
-          this.logger.warn(
-            `addRunToDataset threw for artifact=${updated.id} runId=${runId}: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
         });
+      } catch {
+        this.logger.warn(
+          `Good-drafts dataset append failed for artifact=${updated.id}`,
+        );
+      }
     }
 
     // Hand off to the send worker. The APPROVED status is already persisted
@@ -339,8 +348,8 @@ export class OutreachArtifactsService {
         `Artifact ${id} has no langsmith_run_id — skipping dataset append (legacy or tracing-disabled)`,
       );
     } else if (this.langsmith) {
-      void this.langsmith
-        .addRunToDataset(BAD_SDR_DRAFTS_DATASET, runId, {
+      try {
+        await this.langsmith.addRunToDataset(BAD_SDR_DRAFTS_DATASET, runId, {
           artifact_id: updated.id,
           org_id: updated.orgId,
           graph_run_id: updated.graphRunId,
@@ -348,14 +357,12 @@ export class OutreachArtifactsService {
           recipient_ref: updated.recipientRef,
           reviewer_note: reviewerNote ?? null,
           reviewed_by: reviewedBy,
-        })
-        .catch((err) => {
-          this.logger.warn(
-            `addRunToDataset threw for artifact=${updated.id} runId=${runId}: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
         });
+      } catch {
+        this.logger.warn(
+          `Bad-drafts dataset append failed for artifact=${updated.id}`,
+        );
+      }
     }
 
     return updated;
@@ -466,6 +473,14 @@ function extractFromArgs(
       bodyHtml: null,
       recipientRef:
         str(args.contactEmail) ?? str(args.contactId) ?? str(args.companyId),
+    };
+  }
+  if (toolName === "linkedin_send_message") {
+    return {
+      subject: null,
+      bodyText: str(args.body),
+      bodyHtml: null,
+      recipientRef: str(args.recipient_urn),
     };
   }
   return { subject: null, bodyText: null, bodyHtml: null, recipientRef: null };

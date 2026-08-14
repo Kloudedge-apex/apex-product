@@ -8,7 +8,9 @@ import { getPromptForTemplate } from "./prompts";
 import { ToolRegistry } from "./tools/registry";
 import { ToolContext, toolToOpenAIFunction, IntegrationCredentials } from "./tools/tool.interface";
 import {
+  getToolPolicy,
   SideEffectPolicy,
+  ToolSideEffectLevel,
   type ApprovalEnvelope as PolicyApprovalEnvelope,
   type PolicyDecision,
 } from "./tools/side-effect";
@@ -28,7 +30,9 @@ export type { PendingApprovalEnvelope } from "./approval-envelope.types";
  * Per-process default: when set to "dry_run", external_write tools that
  * support dry-run get a synthetic artifact result instead of executing. Any
  * other value (including unset) treats external_write as policy-blocked
- * unless an explicit ApprovalEnvelope is provided.
+ * unless an explicit ApprovalEnvelope is provided. Even with an envelope,
+ * ExecutorService never invokes an external-write provider directly: it
+ * persists an OutreachArtifact for review and SendOutreachWorker dispatch.
  *
  * For Phase 2.5 the default is dry_run on every container — autonomous
  * external sending is not yet enabled.
@@ -37,6 +41,19 @@ function getOutreachExecutionMode(): "dry_run" | "agent_run" | "external_send" {
   const v = process.env.OUTREACH_EXECUTION_MODE;
   if (v === "agent_run" || v === "external_send") return v;
   return "dry_run";
+}
+
+/**
+ * External and destructive tools must cross the durable OutreachArtifact
+ * reservation/receipt boundary. Approval may authorize capture, but it must
+ * never turn the in-loop executor into a provider writer.
+ */
+function requiresDurableOutreachBoundary(toolName: string): boolean {
+  const level = getToolPolicy(toolName).sideEffectLevel;
+  return (
+    level === ToolSideEffectLevel.EXTERNAL_WRITE ||
+    level === ToolSideEffectLevel.DESTRUCTIVE
+  );
 }
 
 const MAX_STEPS = 10;
@@ -123,10 +140,12 @@ export class ExecutorService {
 
   /**
    * Policy-gate envelope: the *authorization* envelope consulted by
-   * SideEffectPolicy before an external-write tool fires. Phase 2.5 has no
-   * envelope source yet (graph approval gates only mark GraphRun.status,
+   * SideEffectPolicy before an external-write tool is captured. Phase 2.5 has
+   * no envelope source yet (graph approval gates only mark GraphRun.status,
    * not individual agent runs), so this returns undefined and external_write
-   * tools fall through to the dry_run / blocked path.
+   * tools fall through to the dry_run / blocked path. A future envelope may
+   * satisfy the policy gate, but cannot bypass the durable artifact boundary
+   * enforced in executeAgent.
    *
    * Future: read from GraphRun.approvalEnvelope JSON when the outreach
    * subgraph passes an envelope down to the SDR agent run.
@@ -471,12 +490,18 @@ export class ExecutorService {
             continue;
           }
 
-          // Dry-run short-circuit: policy allowed the call but routed it to
-          // artifact generation instead of external execution. The synthetic
-          // result lets the LLM continue its loop without touching the
-          // outside world.
-          if (policyDecision.mode === "dry_run") {
+          // Durable outreach short-circuit. Policy may authorize an external
+          // write, but ExecutorService is deliberately not a provider writer:
+          // all external/destructive calls become PENDING_REVIEW artifacts and
+          // only SendOutreachWorker may later dispatch them through the
+          // reservation/receipt protocol. Read-only and internal-write tools
+          // continue to execute in-process below.
+          const directExecutionBlocked =
+            policyDecision.mode === "execute" &&
+            requiresDurableOutreachBoundary(toolName);
+          if (policyDecision.mode === "dry_run" || directExecutionBlocked) {
             let artifactId: string | null = null;
+            let artifactError: string | null = null;
             try {
               const artifact = await this.outreachArtifacts.recordDryRun({
                 orgId: agent.orgId,
@@ -486,25 +511,53 @@ export class ExecutorService {
               });
               artifactId = artifact?.id ?? null;
             } catch (err) {
+              artifactError =
+                err instanceof Error ? err.message : "unknown error";
               await this.addLog(
                 runId,
                 "WARN",
-                `dry_run: failed to persist artifact for ${toolName}: ${err instanceof Error ? err.message : "unknown error"}`,
+                `${directExecutionBlocked ? "durable_outreach_boundary" : "dry_run"}: failed to persist artifact for ${toolName}: ${artifactError}`,
               );
             }
 
+            const logPrefix = directExecutionBlocked
+              ? "durable_outreach_boundary"
+              : "dry_run";
             await this.addLog(
               runId,
-              "INFO",
-              `dry_run: ${toolName} captured as artifact${artifactId ? ` ${artifactId}` : " (none)"}`,
+              artifactId ? "INFO" : "WARN",
+              `${logPrefix}: ${toolName} captured as artifact${artifactId ? ` ${artifactId}` : " (none)"}`,
             );
-            toolResult = {
-              success: true,
-              dryRun: true,
-              wouldHaveSent: toolArgs,
-              artifactId,
-              message: `Dry-run: ${toolName} did not execute externally`,
-            };
+            if (directExecutionBlocked && !artifactId) {
+              toolResult = {
+                success: false,
+                dryRun: true,
+                directExecutionBlocked: true,
+                routedToOutreachArtifact: false,
+                wouldHaveSent: toolArgs,
+                artifactId: null,
+                error:
+                  `Direct ${toolName} execution is disabled and no durable outreach artifact was created` +
+                  (artifactError ? `: ${artifactError}` : ""),
+              };
+            } else {
+              toolResult = {
+                success: true,
+                dryRun: true,
+                wouldHaveSent: toolArgs,
+                artifactId,
+                ...(directExecutionBlocked
+                  ? {
+                      directExecutionBlocked: true,
+                      routedToOutreachArtifact: true,
+                      pendingReview: true,
+                    }
+                  : {}),
+                message: directExecutionBlocked
+                  ? `Direct ${toolName} execution is disabled; the outreach artifact is pending review for worker dispatch`
+                  : `Dry-run: ${toolName} did not execute externally`,
+              };
+            }
             await this.persistStep(runId, dbStepIndex++, "TOOL_CALL", toolName, toolArgs, null, 0, 0);
             await this.persistStep(
               runId,

@@ -5,6 +5,11 @@ import { MemoryService } from "../memory.service";
 import { PrismaService } from "../../prisma/prisma.service";
 import { IntegrationsService } from "../../integrations/integrations.service";
 import { OutreachArtifactsService } from "../../outreach/outreach-artifacts.service";
+import { HubSpotTool } from "../tools/hubspot.tool";
+import { LinkedInSendMessageTool } from "../tools/linkedin-send-message.tool";
+import { SendEmailTool } from "../tools/send-email.tool";
+import type { ApprovalEnvelope } from "../tools/side-effect";
+import { WebSearchTool } from "../tools/web-search.tool";
 
 // Mock PrismaService
 function createMockPrisma() {
@@ -178,6 +183,172 @@ describe("ExecutorService", () => {
 
     // Should have logged execution
     expect(mockPrisma.agentLog.create).toHaveBeenCalled();
+  });
+
+  it("routes approved external writes to durable artifacts without invoking provider tools", async () => {
+    const approvalEnvelope: ApprovalEnvelope = {
+      approvalId: "approval_live_outreach",
+      approvedBy: "user_1",
+      approvedAt: "2026-08-14T00:00:00.000Z",
+      scope: "outreach",
+      allowedToolNames: [
+        "send_email",
+        "linkedin_send_message",
+        "hubspot",
+      ],
+      expiresAt: "2099-08-14T00:00:00.000Z",
+      dryRunAllowed: false,
+    };
+
+    class ApprovedExecutor extends ExecutorService {
+      protected override policyApprovalEnvelopeForRun(
+        _runId: string,
+      ): ApprovalEnvelope {
+        return approvalEnvelope;
+      }
+    }
+
+    const recordDryRun = vi
+      .fn()
+      .mockImplementation(
+        async ({ toolName }: { toolName: string }) => ({
+          id: `artifact_${toolName}`,
+        }),
+      );
+    const approvedExecutor = new ApprovedExecutor(
+      mockPrisma as PrismaService,
+      mockLLM as LLMService,
+      mockMemory as MemoryService,
+      mockIntegrations as IntegrationsService,
+      { recordDryRun } as unknown as OutreachArtifactsService,
+    );
+
+    const sendEmailExecute = vi
+      .spyOn(SendEmailTool.prototype, "execute")
+      .mockRejectedValue(new Error("direct email provider call must not run"));
+    const linkedInExecute = vi
+      .spyOn(LinkedInSendMessageTool.prototype, "execute")
+      .mockRejectedValue(new Error("direct LinkedIn provider call must not run"));
+    const hubSpotExecute = vi
+      .spyOn(HubSpotTool.prototype, "execute")
+      .mockRejectedValue(new Error("direct CRM provider call must not run"));
+    const webSearchExecute = vi
+      .spyOn(WebSearchTool.prototype, "execute")
+      .mockResolvedValue({ success: true, data: { results: [] } });
+
+    const previousMode = process.env.OUTREACH_EXECUTION_MODE;
+    process.env.OUTREACH_EXECUTION_MODE = "external_send";
+    try {
+      const chatMock = mockLLM.chat as ReturnType<typeof vi.fn>;
+      chatMock.mockResolvedValueOnce({
+        content: "",
+        tokensUsed: 100,
+        model: "gpt-4o-mock",
+        cost: 0.001,
+        toolCalls: [
+          {
+            id: "call_email",
+            type: "function" as const,
+            function: {
+              name: "send_email",
+              arguments: JSON.stringify({
+                to: "lead@example.com",
+                subject: "Hello",
+                body: "Email body",
+              }),
+            },
+          },
+          {
+            id: "call_linkedin",
+            type: "function" as const,
+            function: {
+              name: "linkedin_send_message",
+              arguments: JSON.stringify({
+                recipient_urn: "urn:li:person:abc123",
+                body: "LinkedIn body",
+              }),
+            },
+          },
+          {
+            id: "call_hubspot",
+            type: "function" as const,
+            function: {
+              name: "hubspot",
+              arguments: JSON.stringify({
+                action: "log_activity",
+                data: { contactEmail: "lead@example.com", note: "Followed up" },
+              }),
+            },
+          },
+          {
+            id: "call_web_search",
+            type: "function" as const,
+            function: {
+              name: "web_search",
+              arguments: JSON.stringify({ query: "Acme funding" }),
+            },
+          },
+        ],
+        finishReason: "tool_calls",
+      });
+      chatMock.mockResolvedValueOnce({
+        content: JSON.stringify({ type: "result" }),
+        tokensUsed: 100,
+        model: "gpt-4o-mock",
+        cost: 0.001,
+        finishReason: "stop",
+      });
+
+      const result = await approvedExecutor.executeAgent("agent_1", "run_1");
+
+      expect(sendEmailExecute).not.toHaveBeenCalled();
+      expect(linkedInExecute).not.toHaveBeenCalled();
+      expect(hubSpotExecute).not.toHaveBeenCalled();
+      expect(webSearchExecute).toHaveBeenCalledOnce();
+      expect(recordDryRun).toHaveBeenCalledTimes(3);
+      expect(
+        recordDryRun.mock.calls.map(
+          ([input]) => (input as { toolName: string }).toolName,
+        ),
+      ).toEqual(["send_email", "linkedin_send_message", "hubspot"]);
+
+      const externalResults = result.steps.filter(
+        (step) =>
+          step.type === "tool_result" &&
+          ["send_email", "linkedin_send_message", "hubspot"].includes(
+            step.toolName ?? "",
+          ),
+      );
+      expect(externalResults).toHaveLength(3);
+      for (const step of externalResults) {
+        expect(step.toolOutput).toMatchObject({
+          success: true,
+          dryRun: true,
+          directExecutionBlocked: true,
+          routedToOutreachArtifact: true,
+          pendingReview: true,
+          artifactId: `artifact_${step.toolName}`,
+        });
+      }
+
+      const logMessages = (
+        mockPrisma.agentLog.create as ReturnType<typeof vi.fn>
+      ).mock.calls.map(
+        ([input]) => (input as { data?: { message?: string } }).data?.message,
+      );
+      expect(
+        logMessages.filter((message) =>
+          message?.includes("durable_outreach_boundary"),
+        ),
+      ).toHaveLength(3);
+    } finally {
+      if (previousMode === undefined) delete process.env.OUTREACH_EXECUTION_MODE;
+      else process.env.OUTREACH_EXECUTION_MODE = previousMode;
+      sendEmailExecute.mockRestore();
+      linkedInExecute.mockRestore();
+      hubSpotExecute.mockRestore();
+      webSearchExecute.mockRestore();
+    }
   });
 
   it("should handle LLM returning a non-JSON final answer", async () => {

@@ -1,3 +1,4 @@
+import { Logger } from "@nestjs/common";
 import { EvidenceLedgerService } from "../../observability/evidence-ledger.service";
 import { LinkedInService } from "../../integrations/linkedin/linkedin.service";
 import { Tool, ToolContext, ToolResult } from "./tool.interface";
@@ -30,6 +31,7 @@ const MAX_BODY_LENGTH = 2_000;
  * so reaching `execute()` already implies "execute" mode.
  */
 export class LinkedInSendMessageTool implements Tool {
+  private readonly logger = new Logger(LinkedInSendMessageTool.name);
   name = "linkedin_send_message";
   description =
     "Send a personalized LinkedIn message to a connected prospect. Requires the recipient's LinkedIn member URN (urn:li:person:<id>). The message will be sent from the OAuth-connected LinkedIn account. SUBJECT to LinkedIn's strict rate limits - do not call more than a few times per agent run. If the recipient is not a 1st-degree connection, the send will fail.";
@@ -126,7 +128,7 @@ export class LinkedInSendMessageTool implements Tool {
 
     const messageId =
       sendResult.messageId ?? `linkedin:${Date.now()}`;
-    this.emitMessageSent(context, {
+    await this.emitMessageSent(context, {
       recipientUrn,
       messageId,
     });
@@ -143,26 +145,32 @@ export class LinkedInSendMessageTool implements Tool {
   }
 
   /**
-   * Fire-and-forget evidence emission for a real LinkedIn send. Mirrors
+   * Best-effort evidence emission for a real LinkedIn send. Mirrors
    * send-email's `outreach_tool_call` reference convention so the audit ledger
    * can distinguish artifact-driven sends from in-loop agent tool calls.
    */
-  private emitMessageSent(
+  private async emitMessageSent(
     context: ToolContext,
     payload: { readonly recipientUrn: string; readonly messageId: string },
-  ): void {
+  ): Promise<void> {
     if (!this.evidenceLedger) return;
-    void this.evidenceLedger.messageSent({
-      orgId: context.orgId,
-      runId: context.runId ?? null,
-      artifactId: null,
-      channel: "LINKEDIN",
-      recipientRef: payload.recipientUrn,
-      sendReceiptId: payload.messageId,
-      provider: "linkedin",
-      refType: "outreach_tool_call",
-      refId: payload.messageId,
-    });
+    try {
+      await this.evidenceLedger.messageSent({
+        orgId: context.orgId,
+        runId: context.runId ?? null,
+        artifactId: null,
+        channel: "LINKEDIN",
+        recipientRef: payload.recipientUrn,
+        sendReceiptId: payload.messageId,
+        provider: "linkedin",
+        refType: "outreach_tool_call",
+        refId: payload.messageId,
+      });
+    } catch {
+      this.logger.warn(
+        "Evidence ledger append failed after a successful LinkedIn send",
+      );
+    }
   }
 
   private mockSend(recipientUrn: string, body: string): ToolResult {

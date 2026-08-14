@@ -11,6 +11,11 @@ import {
 } from "../graph-run-queue.service";
 import { GraphService } from "../graph.service";
 import { PrismaService } from "../../prisma/prisma.service";
+import {
+  ProductionBootstrapWriterFenceClosedError,
+  ProductionBootstrapWriterFenceUnavailableError,
+  type ProductionBootstrapWriterFenceService,
+} from "../../ops/production-bootstrap-writer-fence";
 
 function graphRunRow(overrides: Partial<GraphRun> = {}): GraphRun {
   const now = new Date("2026-05-25T12:00:00Z");
@@ -525,6 +530,62 @@ describe("GraphRunWorker in-memory poll recovery", () => {
 });
 
 describe("GraphRunWorker recurrent recovery scheduling", () => {
+  it("contains and logs writer-fence rejection from periodic timer boundaries", async () => {
+    vi.useFakeTimers();
+    const previousGate = process.env.GRAPH_RUN_WORKER_ENABLED;
+    process.env.GRAPH_RUN_WORKER_ENABLED = "true";
+    const prisma = mockPrisma();
+    prisma.graphRun.findMany.mockResolvedValue([]);
+    let rejectTimer = false;
+    const fence = {
+      runWriter: vi.fn(async (_kind, operation) => {
+        if (rejectTimer) {
+          throw new ProductionBootstrapWriterFenceUnavailableError();
+        }
+        return operation();
+      }),
+    } as unknown as ProductionBootstrapWriterFenceService;
+    const worker = new GraphRunWorker(
+      prisma as unknown as PrismaService,
+      mockQueue(),
+      mockGraphService(),
+      undefined,
+      fence,
+    );
+    const errorLog = vi
+      .spyOn(
+        (worker as unknown as { logger: { error: (...args: unknown[]) => void } })
+          .logger,
+        "error",
+      )
+      .mockImplementation(() => undefined);
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+
+    try {
+      await worker.onModuleInit();
+      rejectTimer = true;
+      await vi.advanceTimersByTimeAsync(GRAPH_RUN_RECOVERY_SWEEP_INTERVAL_MS);
+
+      expect(errorLog).toHaveBeenCalledWith(
+        expect.stringContaining("in-memory poll failed"),
+      );
+      expect(errorLog).toHaveBeenCalledWith(
+        expect.stringContaining("recurring recovery sweep failed"),
+      );
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off("unhandledRejection", unhandled);
+      await worker.onModuleDestroy();
+      if (previousGate === undefined) {
+        delete process.env.GRAPH_RUN_WORKER_ENABLED;
+      } else {
+        process.env.GRAPH_RUN_WORKER_ENABLED = previousGate;
+      }
+      vi.useRealTimers();
+    }
+  });
+
   it("runs orphan recovery at boot and again on the recurring interval", async () => {
     vi.useFakeTimers();
     const previousGate = process.env.GRAPH_RUN_WORKER_ENABLED;
@@ -550,6 +611,127 @@ describe("GraphRunWorker recurrent recovery scheduling", () => {
       );
       expect(recover).toHaveBeenCalledTimes(2);
     } finally {
+      await worker.onModuleDestroy();
+      if (previousGate === undefined) {
+        delete process.env.GRAPH_RUN_WORKER_ENABLED;
+      } else {
+        process.env.GRAPH_RUN_WORKER_ENABLED = previousGate;
+      }
+      vi.useRealTimers();
+    }
+  });
+
+  it("attaches and schedules while CLOSED but skips ticks and blocks jobs", async () => {
+    vi.useFakeTimers();
+    const previousGate = process.env.GRAPH_RUN_WORKER_ENABLED;
+    process.env.GRAPH_RUN_WORKER_ENABLED = "true";
+    const prisma = mockPrisma();
+    const queue = mockQueue();
+    const bullMode = vi.spyOn(queue, "isBullMode");
+    const fence = {
+      runWriter: vi.fn(async () => {
+        throw new ProductionBootstrapWriterFenceClosedError();
+      }),
+    } as unknown as ProductionBootstrapWriterFenceService;
+    const worker = new GraphRunWorker(
+      prisma as unknown as PrismaService,
+      queue,
+      mockGraphService(),
+      undefined,
+      fence,
+    );
+
+    try {
+      await expect(worker.onModuleInit()).resolves.toBeUndefined();
+      expect(bullMode).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBeGreaterThanOrEqual(2);
+      await expect(worker.runRecoverySweep("test")).resolves.toBe(0);
+      await expect(
+        worker.processGraphRun({
+          graphRunId: "graph_1",
+          orgId: "org_1",
+          dispatchGeneration: 0,
+        }),
+      ).rejects.toBeInstanceOf(ProductionBootstrapWriterFenceClosedError);
+      expect(prisma.graphRun.findUnique).not.toHaveBeenCalled();
+    } finally {
+      await worker.onModuleDestroy();
+      if (previousGate === undefined) {
+        delete process.env.GRAPH_RUN_WORKER_ENABLED;
+      } else {
+        process.env.GRAPH_RUN_WORKER_ENABLED = previousGate;
+      }
+      vi.useRealTimers();
+    }
+  });
+
+  it("creates no BullMQ consumer while CLOSED and activates after exact OPEN", async () => {
+    vi.useFakeTimers();
+    const previousGate = process.env.GRAPH_RUN_WORKER_ENABLED;
+    process.env.GRAPH_RUN_WORKER_ENABLED = "true";
+    const prisma = mockPrisma();
+    prisma.graphRun.findMany.mockResolvedValue([]);
+    const isPaused = vi.fn(async () => false);
+    const queue = {
+      isBullMode: vi.fn(() => true),
+      getConnection: vi.fn(() => ({})),
+      getBullQueue: vi.fn(() => ({ isPaused })),
+      enqueueGraphRun: vi.fn(),
+    } as unknown as GraphRunQueueService;
+    let closed = true;
+    let epochUnavailable = true;
+    const fence = {
+      runWriter: vi.fn(async (_kind, operation) => {
+        if (closed) throw new ProductionBootstrapWriterFenceClosedError();
+        return operation();
+      }),
+      deploymentEpochMode: vi.fn(async () => {
+        if (epochUnavailable) {
+          throw new ProductionBootstrapWriterFenceUnavailableError();
+        }
+        return closed ? "closed" : "open";
+      }),
+    } as unknown as ProductionBootstrapWriterFenceService;
+    const worker = new GraphRunWorker(
+      prisma as unknown as PrismaService,
+      queue,
+      mockGraphService(),
+      undefined,
+      fence,
+    );
+    const start = vi
+      .spyOn(
+        worker as unknown as { startBullWorker(): void },
+        "startBullWorker",
+      )
+      .mockImplementation(() => undefined);
+    const warnLog = vi
+      .spyOn(
+        (worker as unknown as { logger: { warn: (...args: unknown[]) => void } })
+          .logger,
+        "warn",
+      )
+      .mockImplementation(() => undefined);
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+
+    try {
+      await expect(worker.onModuleInit()).resolves.toBeUndefined();
+      expect(isPaused).not.toHaveBeenCalled();
+      expect(start).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(warnLog).toHaveBeenCalledWith(
+        expect.stringContaining("activation remains fail-closed"),
+      );
+      expect(unhandled).not.toHaveBeenCalled();
+
+      epochUnavailable = false;
+      closed = false;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(start).toHaveBeenCalledOnce();
+    } finally {
+      process.off("unhandledRejection", unhandled);
       await worker.onModuleDestroy();
       if (previousGate === undefined) {
         delete process.env.GRAPH_RUN_WORKER_ENABLED;

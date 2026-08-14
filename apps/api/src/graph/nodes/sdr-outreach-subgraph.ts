@@ -118,7 +118,7 @@ export interface DrafterInput {
   readonly brief: ResearchBrief;
   readonly lead: SdrLeadInput;
   readonly previousAttempt?: { subject: string; body: string; issues: readonly string[] };
-  readonly onRunId?: (runId: string) => void;
+  readonly onRunId?: (runId: string) => void | Promise<void>;
   /**
    * Audit P0 #12: GraphRun-level LangSmith root run id, propagated from the
    * outer pipeline graph so the drafter LLM call lands as a child of the
@@ -400,14 +400,14 @@ async function defaultDrafter(
       // generating trace. We record only the latest attempt's runId — that's
       // the draft a human actually reviews.
       onRunStart: input.onRunId
-        ? (runId): void => {
-            input.onRunId?.(runId);
+        ? async (runId): Promise<void> => {
+            await input.onRunId?.(runId);
           }
         : undefined,
     },
   );
 
-  void evidenceLedger.messageDrafted({
+  await evidenceLedger.messageDrafted({
     orgId: input.lead.orgId,
     runId: input.lead.graphRunId ?? null,
     personId: input.lead.personId,
@@ -545,7 +545,7 @@ export function buildSdrOutreachSubgraph(deps: SubgraphDeps) {
             // the drafter's LLM call reattaches as a child instead of a
             // separate top-level run.
             parentRunId: deps.parentRunId,
-            onRunId: (runId): void => {
+            onRunId: async (runId): Promise<void> => {
               capturedRunId = runId;
               // Audit P0 #13: forward the LangSmith root run id to the
               // run-level evaluator so its terminal feedback (composite score,
@@ -554,7 +554,7 @@ export function buildSdrOutreachSubgraph(deps: SubgraphDeps) {
               // run-level-evaluator.service.ts:245 logs "no langsmith root
               // run for graphRun=..." for every terminal GraphRun.
               if (deps.runLevelEvaluator && state.lead.graphRunId) {
-                deps.runLevelEvaluator.recordLangSmithRunId(
+                await deps.runLevelEvaluator.recordLangSmithRunId(
                   state.lead.graphRunId,
                   runId,
                 );
@@ -606,14 +606,14 @@ export function buildSdrOutreachSubgraph(deps: SubgraphDeps) {
         );
 
         if (issues.length === 0) {
-          void deps.evidenceLedger.qaPass({
+          await deps.evidenceLedger.qaPass({
             orgId: state.lead.orgId,
             runId: state.lead.graphRunId ?? null,
             personId: state.lead.personId,
             durationMs: Date.now() - startedAt,
           });
         } else {
-          void deps.evidenceLedger.qaFail({
+          await deps.evidenceLedger.qaFail({
             orgId: state.lead.orgId,
             runId: state.lead.graphRunId ?? null,
             personId: state.lead.personId,

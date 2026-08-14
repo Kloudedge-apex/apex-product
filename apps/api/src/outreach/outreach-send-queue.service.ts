@@ -12,6 +12,10 @@ import {
   QueueStats,
   publishQueueDepth,
 } from "../observability/metrics/metrics.service";
+import {
+  ProductionBootstrapWriterFenceService,
+  runWithProductionBootstrapWriterFence,
+} from "../ops/production-bootstrap-writer-fence";
 
 /**
  * BullMQ queue dedicated to consuming APPROVED OutreachArtifact rows and
@@ -50,7 +54,11 @@ export class OutreachSendQueueService implements OnModuleInit, OnModuleDestroy {
    * unit tests still constructs. Under Nest DI it resolves to the single
    * global MetricsService instance (ObservabilityModule is @Global).
    */
-  constructor(@Optional() private readonly metrics?: MetricsService) {
+  constructor(
+    @Optional() private readonly metrics?: MetricsService,
+    @Optional()
+    private readonly productionBootstrapWriterFence?: ProductionBootstrapWriterFenceService,
+  ) {
     this.connection = buildRedisConnectionOptions();
 
     if (this.connection) {
@@ -157,16 +165,22 @@ export class OutreachSendQueueService implements OnModuleInit, OnModuleDestroy {
    * defensively) collapse to a single job rather than spawning multiple sends.
    */
   async enqueue(input: EnqueueOutreachSendInput): Promise<void> {
-    if (!this.bullQueue) {
-      // In-memory fallback path: the worker polls the DB directly, so no
-      // enqueue work is needed here.
-      return;
-    }
+    await runWithProductionBootstrapWriterFence(
+      this.productionBootstrapWriterFence,
+      "queue-producer",
+      async () => {
+        if (!this.bullQueue) {
+          // In-memory fallback path: the worker polls the DB directly, so no
+          // enqueue work is needed here.
+          return;
+        }
 
-    await this.bullQueue.add(
-      "send-outreach",
-      { artifactId: input.artifactId, orgId: input.orgId },
-      { jobId: input.artifactId, ...DEFAULT_JOB_OPTIONS },
+        await this.bullQueue.add(
+          "send-outreach",
+          { artifactId: input.artifactId, orgId: input.orgId },
+          { jobId: input.artifactId, ...DEFAULT_JOB_OPTIONS },
+        );
+      },
     );
   }
 

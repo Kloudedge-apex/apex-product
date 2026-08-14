@@ -55,6 +55,19 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Verify one-time production bootstrap workflow
+        run: /bin/bash scripts/verify-production-bootstrap-workflow.sh
+
+      - name: Run production bootstrap controller contracts
+        run: |
+          node --test scripts/tests/production-bootstrap-controller.test.mjs
+          node --test scripts/tests/production-bootstrap-database-identity.test.mjs
+          node --test scripts/tests/production-bootstrap-mutation-authority.test.mjs
+          node --test scripts/tests/production-bootstrap-phase-ledger.test.mjs
+          node --test scripts/tests/verify-production-post-clerk-migration-catalog.test.mjs
+          /bin/bash scripts/tests/production-bootstrap-entry-receipt.test.sh
+          /bin/bash scripts/tests/production-bootstrap-phase-receipt.test.sh
+
       - name: Generate Prisma client
         run: pnpm db:generate
 
@@ -160,6 +173,22 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Run real Redis and BullMQ writer-fence contract
+        env:
+          WRITER_FENCE_INTEGRATION_REDIS_URL: redis://127.0.0.1:6379/14
+        run: >-
+          timeout 45s pnpm --filter @apex/api exec vitest run
+          src/ops/__tests__/production-bootstrap-writer-fence.integration.spec.ts
+          --testTimeout=30000 --hookTimeout=10000
+
+      - name: Run private Clerk reconciliation executor adversary tests
+        env:
+          CLERK_EXECUTOR_TEST_DATABASE_ADMIN_URL: postgresql://workforce_rehearsal:synthetic_ci_only@127.0.0.1:5432/postgres
+        run: node --test scripts/tests/production-clerk-reconciliation-executor.test.mjs
+
+      - name: Reject wrong Redis target before BullMQ metadata writes
+        run: node --test scripts/tests/production-bootstrap-redis-target.test.mjs
 
       - name: Rehearse exact migration candidate
         env:

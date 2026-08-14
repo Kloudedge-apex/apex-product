@@ -23,6 +23,11 @@ import {
   SendEmailTool,
 } from "../../runtime/tools/send-email.tool";
 import { LinkedInSendMessageTool } from "../../runtime/tools/linkedin-send-message.tool";
+import {
+  ProductionBootstrapWriterFenceClosedError,
+  ProductionBootstrapWriterFenceUnavailableError,
+  type ProductionBootstrapWriterFenceService,
+} from "../../ops/production-bootstrap-writer-fence";
 
 beforeEach(() => {
   process.env.OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE =
@@ -2570,6 +2575,205 @@ describe("SendOutreachWorker.reconcileStuckArtifacts (recovery sweep)", () => {
     expect(before - approvedCutoff).toBeGreaterThanOrEqual(10 * 60_000 - 100);
     expect(before - approvedCutoff).toBeLessThan(10 * 60_000 + 1_000);
     expect(approvedCall.take).toBe(100);
+  });
+});
+
+describe("SendOutreachWorker production-bootstrap quiescence", () => {
+  it("contains and logs writer-fence rejection from poll and reconcile timers", async () => {
+    vi.useFakeTimers();
+    const previousGate = process.env.OUTREACH_WORKER_ENABLED;
+    process.env.OUTREACH_WORKER_ENABLED = "true";
+    const prisma = mockPrisma();
+    prisma.outreachArtifact.findMany.mockResolvedValue([]);
+    let rejectTimer = false;
+    const fence = {
+      runWriter: vi.fn(async (_kind, operation) => {
+        if (rejectTimer) {
+          throw new ProductionBootstrapWriterFenceUnavailableError();
+        }
+        return operation();
+      }),
+    } as unknown as ProductionBootstrapWriterFenceService;
+    const suppression = {
+      isSuppressed: vi.fn(async () => false),
+      isSuppressedInTransaction: vi.fn(async () => false),
+    } as unknown as Parameters<typeof SendOutreachWorker>[3];
+    const worker = new SendOutreachWorker(
+      prisma as unknown as PrismaService,
+      mockQueue(),
+      mockIntegrations(),
+      suppression,
+      mockLedger(),
+      undefined,
+      undefined,
+      fence,
+    );
+    const errorLog = vi
+      .spyOn(
+        (worker as unknown as { logger: { error: (...args: unknown[]) => void } })
+          .logger,
+        "error",
+      )
+      .mockImplementation(() => undefined);
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+
+    try {
+      await worker.onModuleInit();
+      rejectTimer = true;
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+
+      expect(errorLog).toHaveBeenCalledWith(
+        expect.stringContaining("in-memory poll failed"),
+      );
+      expect(errorLog).toHaveBeenCalledWith(
+        expect.stringContaining("reconcile sweep failed"),
+      );
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off("unhandledRejection", unhandled);
+      await worker.onModuleDestroy();
+      if (previousGate === undefined) {
+        delete process.env.OUTREACH_WORKER_ENABLED;
+      } else {
+        process.env.OUTREACH_WORKER_ENABLED = previousGate;
+      }
+      vi.useRealTimers();
+    }
+  });
+
+  it("attaches and schedules while CLOSED but skips sweeps and blocks delivery", async () => {
+    vi.useFakeTimers();
+    const previousGate = process.env.OUTREACH_WORKER_ENABLED;
+    process.env.OUTREACH_WORKER_ENABLED = "true";
+    const prisma = mockPrisma();
+    const queue = mockQueue();
+    const bullMode = vi.spyOn(queue, "isBullMode");
+    const fence = {
+      runWriter: vi.fn(async () => {
+        throw new ProductionBootstrapWriterFenceClosedError();
+      }),
+    } as unknown as ProductionBootstrapWriterFenceService;
+    const suppression = {
+      isSuppressed: vi.fn(async () => false),
+      isSuppressedInTransaction: vi.fn(async () => false),
+    } as unknown as Parameters<typeof SendOutreachWorker>[3];
+    const worker = new SendOutreachWorker(
+      prisma as unknown as PrismaService,
+      queue,
+      mockIntegrations(),
+      suppression,
+      mockLedger(),
+      undefined,
+      undefined,
+      fence,
+    );
+
+    try {
+      await expect(worker.onModuleInit()).resolves.toBeUndefined();
+      expect(bullMode).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBeGreaterThanOrEqual(2);
+      const sweep = (
+        worker as unknown as { runReconcileSweep(): Promise<void> }
+      ).runReconcileSweep.bind(worker);
+      await expect(sweep()).resolves.toBeUndefined();
+      await expect(
+        worker.processArtifact("art_1", "org_1"),
+      ).rejects.toBeInstanceOf(ProductionBootstrapWriterFenceClosedError);
+      expect(prisma.outreachArtifact.findUnique).not.toHaveBeenCalled();
+    } finally {
+      await worker.onModuleDestroy();
+      if (previousGate === undefined) {
+        delete process.env.OUTREACH_WORKER_ENABLED;
+      } else {
+        process.env.OUTREACH_WORKER_ENABLED = previousGate;
+      }
+      vi.useRealTimers();
+    }
+  });
+
+  it("creates no BullMQ consumer while CLOSED and activates after exact OPEN", async () => {
+    vi.useFakeTimers();
+    const previousGate = process.env.OUTREACH_WORKER_ENABLED;
+    process.env.OUTREACH_WORKER_ENABLED = "true";
+    const prisma = mockPrisma();
+    prisma.outreachArtifact.findMany.mockResolvedValue([]);
+    const isPaused = vi.fn(async () => false);
+    const queue = {
+      isBullMode: vi.fn(() => true),
+      getConnection: vi.fn(() => ({})),
+      getBullQueue: vi.fn(() => ({ isPaused })),
+      enqueue: vi.fn(),
+    } as unknown as OutreachSendQueueService;
+    let closed = true;
+    let epochUnavailable = true;
+    const fence = {
+      runWriter: vi.fn(async (_kind, operation) => {
+        if (closed) throw new ProductionBootstrapWriterFenceClosedError();
+        return operation();
+      }),
+      deploymentEpochMode: vi.fn(async () => {
+        if (epochUnavailable) {
+          throw new ProductionBootstrapWriterFenceUnavailableError();
+        }
+        return closed ? "closed" : "open";
+      }),
+    } as unknown as ProductionBootstrapWriterFenceService;
+    const suppression = {
+      isSuppressed: vi.fn(async () => false),
+      isSuppressedInTransaction: vi.fn(async () => false),
+    } as unknown as Parameters<typeof SendOutreachWorker>[3];
+    const worker = new SendOutreachWorker(
+      prisma as unknown as PrismaService,
+      queue,
+      mockIntegrations(),
+      suppression,
+      mockLedger(),
+      undefined,
+      undefined,
+      fence,
+    );
+    const start = vi
+      .spyOn(
+        worker as unknown as { startBullWorker(): void },
+        "startBullWorker",
+      )
+      .mockImplementation(() => undefined);
+    const warnLog = vi
+      .spyOn(
+        (worker as unknown as { logger: { warn: (...args: unknown[]) => void } })
+          .logger,
+        "warn",
+      )
+      .mockImplementation(() => undefined);
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+
+    try {
+      await expect(worker.onModuleInit()).resolves.toBeUndefined();
+      expect(isPaused).not.toHaveBeenCalled();
+      expect(start).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(warnLog).toHaveBeenCalledWith(
+        expect.stringContaining("activation remains fail-closed"),
+      );
+      expect(unhandled).not.toHaveBeenCalled();
+
+      epochUnavailable = false;
+      closed = false;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(start).toHaveBeenCalledOnce();
+    } finally {
+      process.off("unhandledRejection", unhandled);
+      await worker.onModuleDestroy();
+      if (previousGate === undefined) {
+        delete process.env.OUTREACH_WORKER_ENABLED;
+      } else {
+        process.env.OUTREACH_WORKER_ENABLED = previousGate;
+      }
+      vi.useRealTimers();
+    }
   });
 });
 

@@ -5,6 +5,11 @@ import { SuppressionService } from "../../../outreach/suppression.service";
 import { ConversationStoreService } from "../../../conversation-store/conversation-store.service";
 import { ConfigService } from "@nestjs/config";
 import { encrypt } from "../../crypto.util";
+import {
+  ProductionBootstrapWriterFenceClosedError,
+  ProductionBootstrapWriterFenceUnavailableError,
+  type ProductionBootstrapWriterFenceService,
+} from "../../../ops/production-bootstrap-writer-fence";
 
 // Mock google-auth-library (OAuth2Client used for OIDC verification)
 vi.mock("google-auth-library", () => {
@@ -97,12 +102,14 @@ function connectedIntegrationRow(orgId: string) {
 function buildService(
   mockPrisma: PrismaService,
   config: ConfigService = createMockConfig(),
+  writerFence?: ProductionBootstrapWriterFenceService,
 ): GmailService {
   return new GmailService(
     mockPrisma,
     config,
     { suppress: vi.fn() } as unknown as SuppressionService,
     {} as unknown as ConversationStoreService,
+    writerFence,
   );
 }
 
@@ -177,6 +184,67 @@ describe("GmailService watch auto-renewal (GL7)", () => {
       service.onModuleDestroy();
       await vi.advanceTimersByTimeAsync(3 * DAY_MS);
       expect(mockPrisma.integration.findMany).toHaveBeenCalledTimes(2);
+    });
+
+    it("contains and logs writer-fence rejection from the renewal timer", async () => {
+      vi.useFakeTimers();
+      enableWorker();
+      let rejectTimer = false;
+      const fence = {
+        runWriter: vi.fn(async (_kind, operation) => {
+          if (rejectTimer) {
+            throw new ProductionBootstrapWriterFenceUnavailableError();
+          }
+          return operation();
+        }),
+      } as unknown as ProductionBootstrapWriterFenceService;
+      service.onModuleDestroy();
+      service = buildService(mockPrisma, createMockConfig(), fence);
+      const errorLog = vi
+        .spyOn(
+          (service as unknown as {
+            logger: { error: (...args: unknown[]) => void };
+          }).logger,
+          "error",
+        )
+        .mockImplementation(() => undefined);
+      const unhandled = vi.fn();
+      process.on("unhandledRejection", unhandled);
+
+      try {
+        await service.onModuleInit();
+        rejectTimer = true;
+        await vi.advanceTimersByTimeAsync(DAY_MS);
+
+        expect(errorLog).toHaveBeenCalledWith(
+          "gmail.watch renewal sweep timer failed",
+          expect.objectContaining({
+            error: expect.stringContaining("writer fence is unavailable"),
+          }),
+        );
+        expect(unhandled).not.toHaveBeenCalled();
+      } finally {
+        process.off("unhandledRejection", unhandled);
+      }
+    });
+
+    it("schedules while CLOSED and skips boot/periodic provider sweeps", async () => {
+      vi.useFakeTimers();
+      enableWorker();
+      service.onModuleDestroy();
+      const fence = {
+        runWriter: vi.fn(async () => {
+          throw new ProductionBootstrapWriterFenceClosedError();
+        }),
+      } as unknown as ProductionBootstrapWriterFenceService;
+      service = buildService(mockPrisma, createMockConfig(), fence);
+
+      await expect(service.onModuleInit()).resolves.toBeUndefined();
+      expect(vi.getTimerCount()).toBe(1);
+      expect(mockPrisma.integration.findMany).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(DAY_MS);
+      expect(mockPrisma.integration.findMany).not.toHaveBeenCalled();
+      expect(fence.runWriter).toHaveBeenCalledTimes(3);
     });
   });
 

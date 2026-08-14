@@ -82,8 +82,18 @@ describe("Clerk identity lifecycle migration", () => {
       '"membershipEventRank" BETWEEN 1 AND 3',
     );
     expect(migrationSql).toContain(
-      "CREATE OR REPLACE FUNCTION clerk_identity_validate_cutover_arm()",
+      "CREATE OR REPLACE FUNCTION public.clerk_identity_validate_cutover_arm()",
     );
+    expect(migrationSql).toContain(
+      "SET search_path = pg_catalog, public, pg_temp",
+    );
+    for (const table of [
+      "clerk_organization_lifecycle",
+      "clerk_membership_lifecycle",
+      "clerk_user_lifecycle",
+    ]) {
+      expect(migrationSql).toContain(`FROM public."${table}"`);
+    }
     expect(migrationSql).toContain(
       '"eventVersion" > NEW."minimumEventVersion"',
     );

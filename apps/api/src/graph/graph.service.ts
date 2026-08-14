@@ -244,13 +244,13 @@ export class GraphService {
     }
 
     if (decision.approved) {
-      void this.evidenceLedger.approvalGranted({
+      await this.evidenceLedger.approvalGranted({
         orgId,
         runId,
         approvedBy: decision.approvedBy,
       });
     } else {
-      void this.evidenceLedger.approvalDenied({
+      await this.evidenceLedger.approvalDenied({
         orgId,
         runId,
         deniedBy: decision.approvedBy,
@@ -417,7 +417,7 @@ export class GraphService {
           );
           return;
         }
-        void this.evidenceLedger.approvalRequested({
+        await this.evidenceLedger.approvalRequested({
           orgId: result.orgId,
           runId,
           candidateCount,
@@ -458,7 +458,7 @@ export class GraphService {
           return;
         }
         this.logger.warn(`Graph ${runId} failed: ${error}`);
-        this.fireRunLevelEvaluator(runId);
+        await this.fireRunLevelEvaluator(runId);
         return;
       }
 
@@ -483,7 +483,7 @@ export class GraphService {
         return;
       }
       this.logger.log(`Graph ${runId} completed`);
-      this.fireRunLevelEvaluator(runId);
+      await this.fireRunLevelEvaluator(runId);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       const transition = await this.prisma.graphRun.updateMany({
@@ -499,7 +499,7 @@ export class GraphService {
         },
       });
       if (transition.count === 1) {
-        this.fireRunLevelEvaluator(runId);
+        await this.fireRunLevelEvaluator(runId);
       } else {
         this.logger.warn(
           `Graph ${runId} dispatch ${dispatchGeneration} failure was superseded; lifecycle row left unchanged`,
@@ -589,18 +589,18 @@ export class GraphService {
   }
 
   /**
-   * Fire-and-forget run-level evaluator. MUST NOT block the GraphRun's main
-   * path — failures log a warning and otherwise vanish, mirroring the
-   * per-LLM-call evaluator runner's contract.
+   * Best-effort run-level evaluator. Await settlement so a production writer
+   * scope cannot release while LangSmith feedback is still mutating; failures
+   * remain fail-soft and never change the durable GraphRun outcome.
    */
-  private fireRunLevelEvaluator(runId: string): void {
-    void this.runLevelEvaluator.evaluateGraphRun(runId).catch((err) => {
+  private async fireRunLevelEvaluator(runId: string): Promise<void> {
+    try {
+      await this.runLevelEvaluator.evaluateGraphRun(runId);
+    } catch {
       this.logger.warn(
-        `Run-level evaluator threw for graphRun=${runId}: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        `Run-level evaluator failed for graphRun=${runId}`,
       );
-    });
+    }
   }
 
   private snapshotPublicState(state: PipelineState): object {

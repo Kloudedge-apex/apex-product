@@ -2,6 +2,11 @@ import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import { isSchedulerEnabled, SchedulerService } from "../scheduler.service";
 import { PrismaService } from "../../prisma/prisma.service";
 import { RuntimeService } from "../runtime.service";
+import {
+  ProductionBootstrapWriterFenceClosedError,
+  ProductionBootstrapWriterFenceUnavailableError,
+  type ProductionBootstrapWriterFenceService,
+} from "../../ops/production-bootstrap-writer-fence";
 
 function createMockPrisma() {
   return {
@@ -76,6 +81,52 @@ describe("SchedulerService", () => {
         }),
       }),
     );
+  });
+
+  it("keeps its timer healthy and skips ticks while bootstrap is CLOSED", async () => {
+    const fence = {
+      runWriter: vi.fn(async () => {
+        throw new ProductionBootstrapWriterFenceClosedError();
+      }),
+    } as unknown as ProductionBootstrapWriterFenceService;
+    scheduler = new SchedulerService(mockPrisma, mockRuntime, fence);
+    scheduler.onModuleInit();
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(mockPrisma.agent.findMany).not.toHaveBeenCalled();
+    expect(fence.runWriter).toHaveBeenCalledOnce();
+  });
+
+  it("contains and logs writer-fence rejection from its periodic timer", async () => {
+    const fence = {
+      runWriter: vi.fn(async () => {
+        throw new ProductionBootstrapWriterFenceUnavailableError();
+      }),
+    } as unknown as ProductionBootstrapWriterFenceService;
+    scheduler = new SchedulerService(mockPrisma, mockRuntime, fence);
+    const errorLog = vi
+      .spyOn(
+        (scheduler as unknown as {
+          logger: { error: (...args: unknown[]) => void };
+        }).logger,
+        "error",
+      )
+      .mockImplementation(() => undefined);
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+
+    try {
+      scheduler.onModuleInit();
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(errorLog).toHaveBeenCalledWith(
+        expect.stringContaining("Scheduler schedule poll failed"),
+      );
+      expect(unhandled).not.toHaveBeenCalled();
+      expect(mockPrisma.agent.findMany).not.toHaveBeenCalled();
+    } finally {
+      process.off("unhandledRejection", unhandled);
+    }
   });
 
   it("should trigger run for agent due for execution (every_hour, no previous run)", async () => {

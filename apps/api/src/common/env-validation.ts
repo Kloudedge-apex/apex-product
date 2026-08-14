@@ -89,6 +89,46 @@ export function validateEnv(
     }
   }
 
+  const bootstrapAttemptId =
+    env.WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID;
+  const bootstrapMinimumGeneration =
+    env.WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION;
+  const bootstrapGuardPartial =
+    (bootstrapAttemptId === undefined) !==
+    (bootstrapMinimumGeneration === undefined);
+  if (bootstrapGuardPartial) {
+    issues.push(
+      "production bootstrap deployment guard requires both attempt id and minimum generation",
+    );
+  } else if (
+    bootstrapAttemptId !== undefined &&
+    bootstrapMinimumGeneration !== undefined
+  ) {
+    if (!/^[0-9a-f]{32}$/.test(bootstrapAttemptId)) {
+      issues.push(
+        "WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID must be exactly 32 lowercase hexadecimal characters",
+      );
+    }
+    if (!/^[1-9][0-9]*$/.test(bootstrapMinimumGeneration)) {
+      issues.push(
+        "WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION must be a positive safe integer",
+      );
+    } else if (!Number.isSafeInteger(Number(bootstrapMinimumGeneration))) {
+      issues.push(
+        "WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION must be a positive safe integer",
+      );
+    }
+  }
+  if (
+    isProd &&
+    bootstrapAttemptId === undefined &&
+    bootstrapMinimumGeneration === undefined
+  ) {
+    issues.push(
+      "production bootstrap deployment guard is required when NODE_ENV=production",
+    );
+  }
+
   if (isProd) {
     if (!env.METRICS_AUTH_TOKEN?.trim()) {
       issues.push("METRICS_AUTH_TOKEN is required when NODE_ENV=production");

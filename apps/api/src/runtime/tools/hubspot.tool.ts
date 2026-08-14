@@ -1,3 +1,4 @@
+import { Logger } from "@nestjs/common";
 import { EvidenceLedgerService } from "../../observability/evidence-ledger.service";
 import { Tool, ToolContext, ToolResult } from "./tool.interface";
 import { fetchWithRetry, withCircuitBreaker } from "../../common/http-retry.util";
@@ -13,6 +14,7 @@ function hubspotFetch(url: string, init: RequestInit): Promise<Response> {
 }
 
 export class HubSpotTool implements Tool {
+  private readonly logger = new Logger(HubSpotTool.name);
   name = "hubspot";
   description = "Interact with HubSpot CRM. Supports creating/updating contacts, searching contacts, creating deals, and logging activities.";
   parameters = {
@@ -69,7 +71,7 @@ export class HubSpotTool implements Tool {
           });
           if (!response.ok) throw new Error(`HubSpot API error: ${response.status}`);
           const result = (await response.json()) as { id?: string };
-          this.emitCrmSynced(context, {
+          await this.emitCrmSynced(context, {
             entityType: "contact",
             entityId: result.id,
             operation: "create",
@@ -88,7 +90,7 @@ export class HubSpotTool implements Tool {
           });
           if (!response.ok) throw new Error(`HubSpot API error: ${response.status}`);
           const result = (await response.json()) as { id?: string };
-          this.emitCrmSynced(context, {
+          await this.emitCrmSynced(context, {
             entityType: "contact",
             entityId: result.id ?? contactId,
             operation: "update",
@@ -126,7 +128,7 @@ export class HubSpotTool implements Tool {
           });
           if (!response.ok) throw new Error(`HubSpot API error: ${response.status}`);
           const result = (await response.json()) as { id?: string };
-          this.emitCrmSynced(context, {
+          await this.emitCrmSynced(context, {
             entityType: "deal",
             entityId: result.id,
             operation: "create",
@@ -145,7 +147,7 @@ export class HubSpotTool implements Tool {
           });
           if (!response.ok) throw new Error(`HubSpot API error: ${response.status}`);
           const result = (await response.json()) as { id?: string };
-          this.emitCrmSynced(context, {
+          await this.emitCrmSynced(context, {
             entityType: "deal",
             entityId: result.id ?? dealId,
             operation: "update",
@@ -166,7 +168,7 @@ export class HubSpotTool implements Tool {
           });
           if (!response.ok) throw new Error(`HubSpot API error: ${response.status}`);
           const result = (await response.json()) as { id?: string };
-          this.emitCrmSynced(context, {
+          await this.emitCrmSynced(context, {
             entityType: "note",
             entityId: result.id,
             operation: "create",
@@ -187,12 +189,12 @@ export class HubSpotTool implements Tool {
   }
 
   /**
-   * Fire-and-forget append to the evidence ledger. Only invoked when the real
+   * Best-effort append to the evidence ledger. Only invoked when the real
    * HubSpot API returns 2xx — failures and mock responses never produce an
    * event. Missing ids fall back to a synthetic placeholder so the ref column
    * is never empty (downstream KPI joins require a non-null refId).
    */
-  private emitCrmSynced(
+  private async emitCrmSynced(
     context: ToolContext,
     args: {
       readonly entityType: HubspotEntityType;
@@ -200,20 +202,24 @@ export class HubSpotTool implements Tool {
       readonly operation: HubspotOperation;
       readonly fieldsChanged: readonly string[];
     },
-  ): void {
+  ): Promise<void> {
     if (!this.evidenceLedger) return;
     const entityId = args.entityId && args.entityId.length > 0
       ? args.entityId
       : `hubspot:${args.entityType}:unknown:${Date.now()}`;
-    void this.evidenceLedger.crmSynced({
-      orgId: context.orgId,
-      runId: context.runId ?? null,
-      provider: "hubspot",
-      entityType: args.entityType,
-      entityId,
-      operation: args.operation,
-      fieldsChanged: args.fieldsChanged,
-    });
+    try {
+      await this.evidenceLedger.crmSynced({
+        orgId: context.orgId,
+        runId: context.runId ?? null,
+        provider: "hubspot",
+        entityType: args.entityType,
+        entityId,
+        operation: args.operation,
+        fieldsChanged: args.fieldsChanged,
+      });
+    } catch {
+      this.logger.warn("Evidence ledger append failed after a successful HubSpot write");
+    }
   }
 
   private executeMock(action: string, data: Record<string, unknown>): ToolResult {

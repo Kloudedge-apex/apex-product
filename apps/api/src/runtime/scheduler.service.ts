@@ -1,6 +1,16 @@
-import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from "@nestjs/common";
+import {
+  Injectable,
+  Logger,
+  OnModuleInit,
+  OnModuleDestroy,
+  Optional,
+} from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import { RuntimeService } from "./runtime.service";
+import {
+  ProductionBootstrapWriterFenceService,
+  runWithProductionBootstrapWriterFenceOrSkipClosed,
+} from "../ops/production-bootstrap-writer-fence";
 
 /** Cadence scheduling is deferred from the guarded-SDR release and fail-closed. */
 export function isSchedulerEnabled(
@@ -17,6 +27,8 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
   constructor(
     private prisma: PrismaService,
     private runtime: RuntimeService,
+    @Optional()
+    private readonly productionBootstrapWriterFence?: ProductionBootstrapWriterFenceService,
   ) {}
 
   onModuleInit(env: NodeJS.ProcessEnv = process.env) {
@@ -27,7 +39,10 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     // Check schedules every 60 seconds
-    this.intervalHandle = setInterval(() => this.checkSchedules(), 60000);
+    this.intervalHandle = setInterval(
+      () => this.runTimerTask("schedule poll", () => this.checkSchedules()),
+      60000,
+    );
     this.intervalHandle.unref();
     this.logger.log("Scheduler enabled (60s polling interval)");
   }
@@ -38,7 +53,28 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private runTimerTask(
+    label: string,
+    operation: () => Promise<unknown>,
+  ): void {
+    void operation().catch((error) => {
+      this.logger.error(
+        `Scheduler ${label} failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
+  }
+
   private async checkSchedules() {
+    await runWithProductionBootstrapWriterFenceOrSkipClosed(
+      this.productionBootstrapWriterFence,
+      "scheduler",
+      () => this.checkSchedulesWithLease(),
+    );
+  }
+
+  private async checkSchedulesWithLease() {
     try {
       // Get all active agents with schedules
       const agents = await this.prisma.agent.findMany({

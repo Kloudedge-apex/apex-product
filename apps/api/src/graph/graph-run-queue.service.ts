@@ -12,6 +12,10 @@ import {
   QueueStats,
   publishQueueDepth,
 } from "../observability/metrics/metrics.service";
+import {
+  ProductionBootstrapWriterFenceService,
+  runWithProductionBootstrapWriterFence,
+} from "../ops/production-bootstrap-writer-fence";
 
 /**
  * BullMQ queue dedicated to driving LangGraph pipeline runs to the next
@@ -80,7 +84,11 @@ export class GraphRunQueueService implements OnModuleInit, OnModuleDestroy {
    * ObservabilityModule) still constructs. Under Nest DI it resolves to the
    * single global MetricsService instance.
    */
-  constructor(@Optional() private readonly metrics?: MetricsService) {
+  constructor(
+    @Optional() private readonly metrics?: MetricsService,
+    @Optional()
+    private readonly productionBootstrapWriterFence?: ProductionBootstrapWriterFenceService,
+  ) {
     this.connection = buildRedisConnectionOptions();
 
     if (this.connection) {
@@ -187,26 +195,32 @@ export class GraphRunQueueService implements OnModuleInit, OnModuleDestroy {
    * and therefore cannot collide with a completed job retained by BullMQ.
    */
   async enqueueGraphRun(input: EnqueueGraphRunInput): Promise<void> {
-    if (!this.bullQueue) {
-      // In-memory fallback path: the worker polls the DB directly for ACTIVE
-      // GraphRuns whose updatedAt is stale, so no enqueue work is needed here.
-      return;
-    }
+    await runWithProductionBootstrapWriterFence(
+      this.productionBootstrapWriterFence,
+      "queue-producer",
+      async () => {
+        if (!this.bullQueue) {
+          // In-memory fallback path: the worker polls the DB directly for ACTIVE
+          // GraphRuns whose updatedAt is stale, so no enqueue work is needed here.
+          return;
+        }
 
-    const data: GraphRunJobData = {
-      graphRunId: input.graphRunId,
-      orgId: input.orgId,
-      dispatchGeneration: input.dispatchGeneration,
-    };
-    const jobId = graphRunDispatchJobId(
-      input.graphRunId,
-      input.dispatchGeneration,
+        const data: GraphRunJobData = {
+          graphRunId: input.graphRunId,
+          orgId: input.orgId,
+          dispatchGeneration: input.dispatchGeneration,
+        };
+        const jobId = graphRunDispatchJobId(
+          input.graphRunId,
+          input.dispatchGeneration,
+        );
+
+        await this.bullQueue.add("process-graph-run", data, {
+          jobId,
+          ...DEFAULT_JOB_OPTIONS,
+        });
+      },
     );
-
-    await this.bullQueue.add("process-graph-run", data, {
-      jobId,
-      ...DEFAULT_JOB_OPTIONS,
-    });
   }
 
   async onModuleDestroy() {

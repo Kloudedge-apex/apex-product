@@ -61,6 +61,16 @@ for port in "${API_PORT}" "${WORKER_PORT}"; do
 done
 [[ "${API_PORT}" != "${WORKER_PORT}" ]] || fail "API and worker ports must differ"
 
+EXPECTED_BOOTSTRAP_ATTEMPT_ID="${CANDIDATE_COMMIT:0:32}"
+BOOTSTRAP_ATTEMPT_ID="${WORKFORCE_RUNTIME_REHEARSAL_BOOTSTRAP_ATTEMPT_ID-${EXPECTED_BOOTSTRAP_ATTEMPT_ID}}"
+BOOTSTRAP_MINIMUM_GENERATION="${WORKFORCE_RUNTIME_REHEARSAL_BOOTSTRAP_MINIMUM_GENERATION-1}"
+[[ "${BOOTSTRAP_ATTEMPT_ID}" =~ ^[0-9a-f]{32}$ ]] ||
+  fail "synthetic bootstrap attempt id must be 32 lowercase hexadecimal characters"
+[[ "${BOOTSTRAP_ATTEMPT_ID}" == "${EXPECTED_BOOTSTRAP_ATTEMPT_ID}" ]] ||
+  fail "synthetic bootstrap attempt id must match the candidate-bound epoch"
+[[ "${BOOTSTRAP_MINIMUM_GENERATION}" == "1" ]] ||
+  fail "synthetic bootstrap minimum generation must be exactly 1"
+
 for required_command in awk basename curl date dirname docker find git grep jq \
   mktemp mv node openssl psql sleep tr uname; do
   command -v "${required_command}" >/dev/null 2>&1 ||
@@ -188,6 +198,8 @@ REDIS_PREFLIGHT="$(docker run --rm \
   --security-opt no-new-privileges \
   --network host \
   --env "REDIS_URL=${REDIS_URL}" \
+  --env "WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID=${BOOTSTRAP_ATTEMPT_ID}" \
+  --env "WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION=${BOOTSTRAP_MINIMUM_GENERATION}" \
   --interactive \
   --entrypoint node \
   "${IMAGE_ID}" - <<'NODE'
@@ -206,15 +218,31 @@ const Redis = require("ioredis");
     const pong = await client.ping();
     const keyCount = Number(await client.dbsize());
     if (pong !== "PONG" || keyCount !== 0) process.exit(2);
-    process.stdout.write("PONG|0");
+    const attempt = process.env.WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID;
+    const generation = process.env.WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION;
+    if (!/^[0-9a-f]{32}$/.test(attempt || "") || generation !== "1") process.exit(3);
+    const epoch = JSON.stringify({
+      schemaVersion: 1,
+      target: "workforce-os-production",
+      mode: "open",
+      bootstrapAttemptId: attempt,
+      generation: 1,
+    });
+    const seeded = await client
+      .multi()
+      .set("workforce-os:production-bootstrap:writer-fence:generation:v1", "1", "NX")
+      .set("workforce-os:production-bootstrap:writer-fence:v1", epoch, "NX")
+      .exec();
+    if (!seeded || seeded.some((entry) => entry[0] || entry[1] !== "OK")) process.exit(4);
+    process.stdout.write("PONG|OPEN|1");
   } finally {
     client.disconnect(false);
   }
 })().catch(() => process.exit(1));
 NODE
 )" || fail "guarded Redis database must be reachable and empty"
-[[ "${REDIS_PREFLIGHT}" == "PONG|0" ]] ||
-  fail "guarded Redis database must be reachable and empty"
+[[ "${REDIS_PREFLIGHT}" == "PONG|OPEN|1" ]] ||
+  fail "guarded Redis database must contain only the exact synthetic OPEN epoch"
 unset REDIS_PREFLIGHT
 
 MIGRATION_RECEIPT_SHA256="sha256:$(openssl dgst -sha256 -r \
@@ -260,6 +288,8 @@ COMMON_ENV=(
   --env REQUIRE_PRODUCTION_ENV=true
   --env "DATABASE_URL=${DATABASE_URL}"
   --env "REDIS_URL=${REDIS_URL}"
+  --env "WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID=${BOOTSTRAP_ATTEMPT_ID}"
+  --env "WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION=${BOOTSTRAP_MINIMUM_GENERATION}"
   --env ENCRYPTION_KEY=1111111111111111111111111111111111111111111111111111111111111111
   --env ADMIN_API_KEY=ci-synthetic-admin-only
   --env METRICS_AUTH_TOKEN=ci-synthetic-metrics-only

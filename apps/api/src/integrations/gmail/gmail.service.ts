@@ -8,6 +8,7 @@ import {
   ForbiddenException,
   ServiceUnavailableException,
   ConflictException,
+  Optional,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { google, gmail_v1, Auth } from "googleapis";
@@ -32,6 +33,10 @@ import {
   normalizeGmailWatchExpiration,
   withGmailWatchExpiration,
 } from "./gmail-watch-freshness";
+import {
+  ProductionBootstrapWriterFenceService,
+  runWithProductionBootstrapWriterFenceOrSkipClosed,
+} from "../../ops/production-bootstrap-writer-fence";
 
 interface GmailTokens {
   access_token: string;
@@ -149,6 +154,8 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
     private readonly config: ConfigService,
     private readonly suppression: SuppressionService,
     private readonly conversationStore: ConversationStoreService,
+    @Optional()
+    private readonly productionBootstrapWriterFence?: ProductionBootstrapWriterFenceService,
   ) {
     this.clientId = this.config.get<string>("GOOGLE_CLIENT_ID", "");
     this.clientSecret = this.config.get<string>("GOOGLE_CLIENT_SECRET", "");
@@ -180,8 +187,21 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
       );
       return;
     }
+    const startup = await runWithProductionBootstrapWriterFenceOrSkipClosed(
+      this.productionBootstrapWriterFence,
+      "gmail-watch-renewal",
+      async () => undefined,
+    );
+    if (!startup.ran) {
+      this.logger.log(
+        "Gmail watch startup sweep quiesced; periodic renewal remains scheduled",
+      );
+    }
     this.watchRenewalHandle = setInterval(
-      () => void this.runWatchRenewalSweep(),
+      () =>
+        this.runTimerTask("watch renewal sweep", () =>
+          this.runWatchRenewalSweep(),
+        ),
       WATCH_RENEWAL_INTERVAL_MS,
     );
     // Run once at boot so a worker that was down across an expiry window
@@ -196,12 +216,31 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private runTimerTask(
+    label: string,
+    operation: () => Promise<unknown>,
+  ): void {
+    void operation().catch((error) => {
+      this.logger.error(`gmail.${label} timer failed`, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }
+
   /**
    * Single-flight wrapper: a slow sweep (many orgs × Gmail API latency) must
    * not stack with the next interval tick. Failures are logged, never thrown —
    * renewal is best-effort recovery, the next tick retries.
    */
   private async runWatchRenewalSweep(): Promise<void> {
+    await runWithProductionBootstrapWriterFenceOrSkipClosed(
+      this.productionBootstrapWriterFence,
+      "gmail-watch-renewal",
+      () => this.runWatchRenewalSweepWithLease(),
+    );
+  }
+
+  private async runWatchRenewalSweepWithLease(): Promise<void> {
     try {
       const { renewed, failed } = await this.renewWatchesForConnectedIntegrations();
       if (renewed > 0 || failed > 0) {

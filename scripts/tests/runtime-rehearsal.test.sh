@@ -114,12 +114,14 @@ case "${1:-}" in
       if [[ "${scenario}" == "redis-not-empty" ]]; then
         printf 'PONG|1'
       else
-        printf 'PONG|0'
+        printf 'PONG|OPEN|1'
       fi
       exit 0
     fi
     name=""
     clerk_webhook_secret_seen=false
+    bootstrap_attempt_seen=false
+    bootstrap_generation_seen=false
     previous=""
     for value in "$@"; do
       if [[ "${previous}" == "--name" ]]; then
@@ -127,11 +129,19 @@ case "${1:-}" in
       elif [[ "${previous}" == "--env" &&
         "${value}" == "CLERK_WEBHOOK_SECRET=whsec_BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=" ]]; then
         clerk_webhook_secret_seen=true
+      elif [[ "${previous}" == "--env" &&
+        "${value}" == "WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID=${EXPECTED_COMMIT:0:32}" ]]; then
+        bootstrap_attempt_seen=true
+      elif [[ "${previous}" == "--env" &&
+        "${value}" == "WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION=1" ]]; then
+        bootstrap_generation_seen=true
       fi
       previous="${value}"
     done
     [[ -n "${name}" ]] || exit 1
     [[ "${clerk_webhook_secret_seen}" == "true" ]] || exit 1
+    [[ "${bootstrap_attempt_seen}" == "true" ]] || exit 1
+    [[ "${bootstrap_generation_seen}" == "true" ]] || exit 1
     [[ "${last_arg}" == "sha256:$(printf '%064d' 1)" ]] || exit 1
     : >"${state_dir}/${name}.created"
     printf 'fake-container-id\n'
@@ -252,6 +262,8 @@ run_case() {
     WORKFORCE_RUNTIME_REHEARSAL_SHUTDOWN_TIMEOUT_SECONDS=1 \
     DATABASE_URL="${CASE_DATABASE_URL-postgresql://workforce_rehearsal:synthetic_ci_only@127.0.0.1:5432/workforce_rehearsal_ci}" \
     REDIS_URL="${CASE_REDIS_URL-redis://127.0.0.1:6379/15}" \
+    WORKFORCE_RUNTIME_REHEARSAL_BOOTSTRAP_ATTEMPT_ID="${CASE_BOOTSTRAP_ATTEMPT_ID-${EXPECTED_COMMIT:0:32}}" \
+    WORKFORCE_RUNTIME_REHEARSAL_BOOTSTRAP_MINIMUM_GENERATION="${CASE_BOOTSTRAP_MINIMUM_GENERATION-1}" \
     bash "${RUNTIME_SCRIPT}" \
       workforce-os-api:ci-test "${EXPECTED_COMMIT}" \
       "${MIGRATION_RECEIPT}" "${LAST_OUTPUT}" >"${LAST_LOG}" 2>&1
@@ -317,10 +329,17 @@ CASE_REDIS_URL=redis://redis.example.com:6379/15 \
   expect_rejection remote-redis "credential-bounded loopback CI targets"
 CASE_REDIS_URL=redis://:secret@127.0.0.1:6379/15 \
   expect_rejection redis-credentials "credential-bounded loopback CI targets"
+CASE_BOOTSTRAP_ATTEMPT_ID= expect_rejection missing-bootstrap-attempt \
+  "synthetic bootstrap attempt id must be 32 lowercase hexadecimal characters"
+CASE_BOOTSTRAP_ATTEMPT_ID=ffffffffffffffffffffffffffffffff \
+  expect_rejection wrong-bootstrap-attempt \
+  "synthetic bootstrap attempt id must match the candidate-bound epoch"
+CASE_BOOTSTRAP_MINIMUM_GENERATION=0 expect_rejection rollback-bootstrap-generation \
+  "synthetic bootstrap minimum generation must be exactly 1"
 expect_rejection unexpected-tenant-data "not the reserved two-tenant synthetic fixture"
 
 expect_rejection revision-mismatch "image revision does not match"
-expect_rejection redis-not-empty "guarded Redis database must be reachable and empty"
+expect_rejection redis-not-empty "guarded Redis database must contain only the exact synthetic OPEN epoch"
 expect_rejection migration-verifier-reject
 expect_rejection container-collision "container name collision"
 expect_rejection worker-early-exit "container exited before its probe passed"

@@ -1,3 +1,4 @@
+import { Logger } from "@nestjs/common";
 import { EvidenceLedgerService } from "../../observability/evidence-ledger.service";
 import { Tool, ToolContext, ToolResult } from "./tool.interface";
 import {
@@ -105,6 +106,7 @@ export function getEmailDispatchOutcome(
 }
 
 export class SendEmailTool implements Tool {
+  private readonly logger = new Logger(SendEmailTool.name);
   name = "send_email";
   description =
     "Send an email through a connected Outlook or Gmail mailbox; otherwise operate in mock mode.";
@@ -225,7 +227,7 @@ export class SendEmailTool implements Tool {
         resolvedBodyContentType,
       );
       if (result.success) {
-        this.emitMessageSent(context, {
+        await this.emitMessageSent(context, {
           to,
           subject,
           provider: "outlook",
@@ -246,7 +248,7 @@ export class SendEmailTool implements Tool {
         resolvedBodyContentType,
       );
       if (result.success) {
-        this.emitMessageSent(context, {
+        await this.emitMessageSent(context, {
           to,
           subject,
           provider: "gmail",
@@ -261,11 +263,11 @@ export class SendEmailTool implements Tool {
   }
 
   /**
-   * Fire-and-forget append to the evidence ledger. Only invoked on the
+   * Best-effort append to the evidence ledger. Only invoked on the
    * real-provider success path — mock sends do not produce evidence because
    * no message actually left the building.
    */
-  private emitMessageSent(
+  private async emitMessageSent(
     context: ToolContext,
     payload: {
       readonly to: string;
@@ -273,21 +275,25 @@ export class SendEmailTool implements Tool {
       readonly provider: "outlook" | "gmail";
       readonly messageId: string | null;
     },
-  ): void {
+  ): Promise<void> {
     if (!this.evidenceLedger) return;
     const refId = payload.messageId ?? `${payload.provider}:${Date.now()}`;
-    void this.evidenceLedger.messageSent({
-      orgId: context.orgId,
-      runId: context.runId ?? null,
-      artifactId: null,
-      channel: "EMAIL",
-      recipientRef: payload.to,
-      subject: payload.subject,
-      sendReceiptId: payload.messageId ?? null,
-      provider: payload.provider,
-      refType: "outreach_tool_call",
-      refId,
-    });
+    try {
+      await this.evidenceLedger.messageSent({
+        orgId: context.orgId,
+        runId: context.runId ?? null,
+        artifactId: null,
+        channel: "EMAIL",
+        recipientRef: payload.to,
+        subject: payload.subject,
+        sendReceiptId: payload.messageId ?? null,
+        provider: payload.provider,
+        refType: "outreach_tool_call",
+        refId,
+      });
+    } catch {
+      this.logger.warn("Evidence ledger append failed after a successful email send");
+    }
   }
 
   private async sendViaGraph(

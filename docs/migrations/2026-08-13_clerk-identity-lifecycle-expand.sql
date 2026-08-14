@@ -673,10 +673,10 @@ $clerk_identity_table_contract$;
 -- newer than the provider snapshot cutoff. This guard runs only on the first
 -- false-to-true transition; later webhook cursors are expected to advance past
 -- the fixed snapshot cutoff and therefore must not be revalidated on rerun.
-CREATE OR REPLACE FUNCTION clerk_identity_validate_cutover_arm()
+CREATE OR REPLACE FUNCTION public.clerk_identity_validate_cutover_arm()
 RETURNS TRIGGER
 LANGUAGE plpgsql
-SET search_path FROM CURRENT
+SET search_path = pg_catalog, public, pg_temp
 AS $clerk_identity_validate_cutover_arm$
 DECLARE
   actual_active_organization_count BIGINT;
@@ -708,17 +708,17 @@ BEGIN
 
   SELECT COUNT(*)
   INTO actual_active_organization_count
-  FROM "clerk_organization_lifecycle"
+  FROM public."clerk_organization_lifecycle"
   WHERE NOT "deleted";
 
   SELECT COUNT(*)
   INTO actual_active_membership_count
-  FROM "clerk_membership_lifecycle"
+  FROM public."clerk_membership_lifecycle"
   WHERE NOT "deleted";
 
   SELECT COUNT(*)
   INTO actual_active_user_count
-  FROM "clerk_user_lifecycle"
+  FROM public."clerk_user_lifecycle"
   WHERE NOT "deleted" AND "membershipActive";
 
   IF actual_active_organization_count
@@ -743,19 +743,19 @@ BEGIN
 
   IF EXISTS (
     SELECT 1
-    FROM "clerk_organization_lifecycle"
+    FROM public."clerk_organization_lifecycle"
     WHERE "eventVersion" NOT BETWEEN 1 AND 9007199254740991
        OR "eventRank" NOT BETWEEN 1 AND 3
        OR "eventVersion" > NEW."minimumEventVersion"
     UNION ALL
     SELECT 1
-    FROM "clerk_membership_lifecycle"
+    FROM public."clerk_membership_lifecycle"
     WHERE "eventVersion" NOT BETWEEN 1 AND 9007199254740991
        OR "eventRank" NOT BETWEEN 1 AND 3
        OR "eventVersion" > NEW."minimumEventVersion"
     UNION ALL
     SELECT 1
-    FROM "clerk_user_lifecycle"
+    FROM public."clerk_user_lifecycle"
     WHERE ("membershipEventVersion" IS NULL)
           IS DISTINCT FROM ("membershipEventRank" IS NULL)
        OR (
@@ -777,11 +777,11 @@ END
 $clerk_identity_validate_cutover_arm$;
 
 DROP TRIGGER IF EXISTS clerk_identity_validate_cutover_arm
-  ON "clerk_identity_cutover";
+  ON public."clerk_identity_cutover";
 CREATE TRIGGER clerk_identity_validate_cutover_arm
-BEFORE INSERT OR UPDATE ON "clerk_identity_cutover"
+BEFORE INSERT OR UPDATE ON public."clerk_identity_cutover"
 FOR EACH ROW
-EXECUTE FUNCTION clerk_identity_validate_cutover_arm();
+EXECUTE FUNCTION public.clerk_identity_validate_cutover_arm();
 
 COMMIT;
 
@@ -905,7 +905,7 @@ $clerk_identity_index_postcondition$;
 --   AND (
 --     (o."clerkOrgId" IS NULL AND (
 --       u."clerkMembershipId" IS NOT NULL
---       OR u."clerkId" IS NULL
+--       OR u."clerkId" IS NOT NULL
 --       OR u."role" <> 'OWNER'
 --     ))
 --     OR

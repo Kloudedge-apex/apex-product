@@ -688,6 +688,27 @@ containerapp_plain_env_value() {
   }
 }
 
+bootstrap_guard_identity_from_state() {
+  local state_file=$1
+  local attempt generation
+  attempt="$(containerapp_plain_env_value \
+    "${state_file}" WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID)" || return 1
+  generation="$(containerapp_plain_env_value \
+    "${state_file}" WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION)" || return 1
+  if [[ ! "${attempt}" =~ ^[0-9a-f]{32}$ ]]; then
+    echo "ERROR: production bootstrap attempt guard is missing or malformed" >&2
+    return 1
+  fi
+  if [[ ! "${generation}" =~ ^[1-9][0-9]*$ ]] ||
+    (( ${#generation} > 16 )) ||
+    { (( ${#generation} == 16 )) &&
+      [[ "${generation}" > "9007199254740991" ]]; }; then
+    echo "ERROR: production bootstrap minimum writer-fence generation is missing or unsafe" >&2
+    return 1
+  fi
+  printf '%s:%s\n' "${attempt}" "${generation}"
+}
+
 require_containerapp_env_absent() {
   local state_file=$1
   local name=$2
@@ -826,10 +847,11 @@ assert_live_rollout_state() {
   local expected_console_image=$6
   local expected_console_revision=$7
   local expected_mode=$8
+  local allowed_guard_drift_role=${9:-none}
   local api_state="${RUNTIME_STATE_DIR}/${prefix}-api-active.json"
   local worker_state="${RUNTIME_STATE_DIR}/${prefix}-worker-active.json"
   local console_state="${RUNTIME_STATE_DIR}/${prefix}-console-active.json"
-  local api_mode worker_mode
+  local api_mode worker_mode api_guard worker_guard
   assert_active_revision_identity \
     "${API_APP}" "${expected_api_image}" "${expected_api_revision}" "${api_state}" || return 1
   assert_active_revision_identity \
@@ -840,6 +862,22 @@ assert_live_rollout_state() {
   worker_mode="$(delivery_unknown_mode_from_state "${worker_state}" worker)" || return 1
   if [[ "${api_mode}" != "disabled" || "${worker_mode}" != "${expected_mode}" ]]; then
     echo "ERROR: DELIVERY_UNKNOWN write mode changed outside this rollout" >&2
+    return 1
+  fi
+  if ! api_guard="$(bootstrap_guard_identity_from_state "${api_state}")"; then
+    [[ "${allowed_guard_drift_role}" == "api" ]] || return 1
+    api_guard="__ROLLBACK_GUARD_DRIFT__"
+  fi
+  if ! worker_guard="$(bootstrap_guard_identity_from_state "${worker_state}")"; then
+    [[ "${allowed_guard_drift_role}" == "worker" ]] || return 1
+    worker_guard="__ROLLBACK_GUARD_DRIFT__"
+  fi
+  if [[ -z "${BOOTSTRAP_GUARD_IDENTITY:-}" ]] ||
+    { [[ "${api_guard}" != "${BOOTSTRAP_GUARD_IDENTITY}" ]] &&
+      [[ "${allowed_guard_drift_role}" != "api" ]]; } ||
+    { [[ "${worker_guard}" != "${BOOTSTRAP_GUARD_IDENTITY}" ]] &&
+      [[ "${allowed_guard_drift_role}" != "worker" ]]; }; then
+    echo "ERROR: production bootstrap deployment guard changed outside this rollout" >&2
     return 1
   fi
 }
@@ -978,6 +1016,12 @@ update_containerapp_image() {
   fi
   wait_for_containerapp_image \
     "${app}" "${desired_image}" "${result_state_file}" || return 1
+  local result_guard
+  result_guard="$(bootstrap_guard_identity_from_state "${result_state_file}")" || return 1
+  if [[ "${result_guard}" != "${BOOTSTRAP_GUARD_IDENTITY}" ]]; then
+    echo "ERROR: ${app} image update dropped, changed, or downgraded the production bootstrap guard" >&2
+    return 1
+  fi
 }
 
 wait_for_exact_revision_activation() {
@@ -1064,13 +1108,14 @@ activate_containerapp_revision() {
   local expected_console_revision=${10}
   local expected_mode=${11}
   local result_state_file=${12}
+  local allowed_guard_drift_role=${13:-none}
 
   assert_live_rollout_state \
     "${state_prefix}" \
     "${expected_api_image}" "${expected_api_revision}" \
     "${expected_worker_image}" "${expected_worker_revision}" \
     "${expected_console_image}" "${expected_console_revision}" \
-    "${expected_mode}" || return 1
+    "${expected_mode}" "${allowed_guard_drift_role}" || return 1
   verify_retained_revision \
     "${app}" "${revision}" "${image}" \
     "${RUNTIME_STATE_DIR}/${state_prefix}-target-retained.json" || return 1
@@ -1085,6 +1130,12 @@ activate_containerapp_revision() {
   fi
   wait_for_exact_revision_activation \
     "${app}" "${revision}" "${image}" "${result_state_file}" || return 1
+  local result_guard
+  result_guard="$(bootstrap_guard_identity_from_state "${result_state_file}")" || return 1
+  if [[ "${result_guard}" != "${BOOTSTRAP_GUARD_IDENTITY}" ]]; then
+    echo "ERROR: ${app} rollback revision does not preserve the production bootstrap guard" >&2
+    return 1
+  fi
 }
 
 # Prove access to both targets before creating a registry artifact. Capturing
@@ -1145,6 +1196,15 @@ assert_active_revision_identity \
   "${WORKER_APP}" "${PREVIOUS_WORKER_IMAGE}" "${PREVIOUS_WORKER_REVISION}" "${INITIAL_WORKER_ACTIVE_STATE}"
 assert_active_revision_identity \
   "${CONSOLE_APP}" "${PREVIOUS_CONSOLE_IMAGE}" "${PREVIOUS_CONSOLE_REVISION}" "${INITIAL_CONSOLE_ACTIVE_STATE}"
+INITIAL_API_BOOTSTRAP_GUARD="$(bootstrap_guard_identity_from_state \
+  "${INITIAL_API_ACTIVE_STATE}")"
+INITIAL_WORKER_BOOTSTRAP_GUARD="$(bootstrap_guard_identity_from_state \
+  "${INITIAL_WORKER_ACTIVE_STATE}")"
+if [[ "${INITIAL_API_BOOTSTRAP_GUARD}" != "${INITIAL_WORKER_BOOTSTRAP_GUARD}" ]]; then
+  echo "ERROR: API and worker production bootstrap deployment guards do not match" >&2
+  exit 1
+fi
+BOOTSTRAP_GUARD_IDENTITY="${INITIAL_API_BOOTSTRAP_GUARD}"
 run_snapshot_helper "scripts/verify-containerapp-release-config.sh" \
   "${PREVIOUS_API_IMAGE}" \
   "${PREVIOUS_WORKER_IMAGE}"
@@ -1380,7 +1440,8 @@ rollback_partial_rollout() {
       "${current_worker_image}" "${current_worker_revision}" \
       "${PREVIOUS_CONSOLE_IMAGE}" "${PREVIOUS_CONSOLE_REVISION}" \
       "${DELIVERY_UNKNOWN_RECEIPT_MODE}" \
-      "${RUNTIME_STATE_DIR}/rollback-worker-result.json" || rollback_failed="true"
+      "${RUNTIME_STATE_DIR}/rollback-worker-result.json" \
+      worker || rollback_failed="true"
     if [[ "${rollback_failed}" != "true" ]]; then
       current_worker_image="${PREVIOUS_WORKER_IMAGE}"
       current_worker_revision="${PREVIOUS_WORKER_REVISION}"
@@ -1395,7 +1456,8 @@ rollback_partial_rollout() {
       "${current_worker_image}" "${current_worker_revision}" \
       "${PREVIOUS_CONSOLE_IMAGE}" "${PREVIOUS_CONSOLE_REVISION}" \
       "${DELIVERY_UNKNOWN_RECEIPT_MODE}" \
-      "${RUNTIME_STATE_DIR}/rollback-api-result.json" || rollback_failed="true"
+      "${RUNTIME_STATE_DIR}/rollback-api-result.json" \
+      api || rollback_failed="true"
     if [[ "${rollback_failed}" != "true" ]]; then
       current_api_image="${PREVIOUS_API_IMAGE}"
       current_api_revision="${PREVIOUS_API_REVISION}"

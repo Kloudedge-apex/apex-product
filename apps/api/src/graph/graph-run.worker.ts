@@ -16,6 +16,12 @@ import {
   GRAPH_RUN_QUEUE_NAME,
 } from "./graph-run-queue.service";
 import { MetricsService, METRIC } from "../observability/metrics/metrics.service";
+import {
+  productionBootstrapWorkerMayActivate,
+  ProductionBootstrapWriterFenceService,
+  runWithProductionBootstrapWriterFence,
+  runWithProductionBootstrapWriterFenceOrSkipClosed,
+} from "../ops/production-bootstrap-writer-fence";
 
 /**
  * Strict gating: only "true" enables this worker. Defaults off so an API
@@ -41,6 +47,7 @@ const BOOT_RECOVERY_LIMIT = 100;
 const IN_MEMORY_BATCH_SIZE = 10;
 const BULL_CONCURRENCY = 5;
 const BULL_ATTEMPTS = 3;
+const PRODUCTION_BOOTSTRAP_ACTIVATION_POLL_MS = 1_000;
 
 /**
  * LangGraph resume sentinel: invoking a compiled graph with `null` input
@@ -81,6 +88,8 @@ export class GraphRunWorker implements OnModuleInit, OnModuleDestroy {
   private bullWorker: Worker<GraphRunJobData> | null = null;
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
   private recoveryIntervalHandle: ReturnType<typeof setInterval> | null = null;
+  private activationIntervalHandle: ReturnType<typeof setInterval> | null = null;
+  private activationProbeInFlight = false;
   private inFlight = false;
   private recoverySweepInFlight = false;
 
@@ -89,6 +98,8 @@ export class GraphRunWorker implements OnModuleInit, OnModuleDestroy {
     private readonly queue: GraphRunQueueService,
     private readonly graphService: GraphService,
     @Optional() private readonly metrics?: MetricsService,
+    @Optional()
+    private readonly productionBootstrapWriterFence?: ProductionBootstrapWriterFenceService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -99,41 +110,32 @@ export class GraphRunWorker implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    // Validate the epoch before deciding whether this revision may attach a
+    // consumer. CLOSED candidates stay alive but create no BullMQ Worker, so
+    // even loss of BullMQ's pause key cannot claim or burn a queued attempt.
+    const startup = await runWithProductionBootstrapWriterFenceOrSkipClosed(
+      this.productionBootstrapWriterFence,
+      "graph-worker",
+      async () => undefined,
+    );
     if (this.queue.isBullMode()) {
-      const connection = this.queue.getConnection();
-      if (!connection) {
+      if (!this.queue.getConnection()) {
         throw new Error(
           "GraphRunQueueService reported BullMQ mode but connection missing",
         );
       }
-      this.bullWorker = new Worker<GraphRunJobData>(
-        GRAPH_RUN_QUEUE_NAME,
-        async (job) => this.handleJob(job),
-        { connection, concurrency: BULL_CONCURRENCY },
-      );
-      this.bullWorker.on("failed", async (job, err) => {
-        this.logger.error(
-          `Graph run job ${job?.id} failed: ${err.message} (attempt ${job?.attemptsMade}/${job?.opts?.attempts ?? "?"})`,
+      if (!startup.ran) {
+        this.logger.log(
+          "GraphRunWorker remains dormant until the guarded production bootstrap epoch is OPEN",
         );
-        this.metrics?.inc(METRIC.BULLMQ_FAILED_JOBS_TOTAL, { queue: GRAPH_RUN_QUEUE_NAME });
-        const attempts = job?.opts?.attempts ?? BULL_ATTEMPTS;
-        if (job && job.attemptsMade >= attempts) {
-          await this.markTerminalFailure(
-            job.data.graphRunId,
-            job.data.dispatchGeneration,
-            err.message,
-          );
-        }
-      });
-      this.bullWorker.on("error", (err) => {
-        this.logger.error(`GraphRun BullMQ worker error: ${err.message}`);
-      });
-      this.logger.log(
-        `GraphRunWorker enabled (BullMQ, queue=${GRAPH_RUN_QUEUE_NAME}, concurrency=${BULL_CONCURRENCY})`,
-      );
+        this.scheduleActivationProbe();
+      } else {
+        this.startBullWorker();
+      }
     } else {
       this.intervalHandle = setInterval(
-        () => this.pollInMemory(),
+        () =>
+          this.runTimerTask("in-memory poll", () => this.pollInMemory()),
         IN_MEMORY_POLL_INTERVAL_MS,
       );
       this.logger.log(
@@ -145,7 +147,10 @@ export class GraphRunWorker implements OnModuleInit, OnModuleDestroy {
     // has already started, and a worker can disappear between deploys. Keep a
     // bounded periodic sweep in every explicitly enabled worker process.
     this.recoveryIntervalHandle = setInterval(
-      () => void this.runRecoverySweep("Recurring"),
+      () =>
+        this.runTimerTask("recurring recovery sweep", () =>
+          this.runRecoverySweep("Recurring"),
+        ),
       GRAPH_RUN_RECOVERY_SWEEP_INTERVAL_MS,
     );
     this.recoveryIntervalHandle.unref?.();
@@ -153,6 +158,10 @@ export class GraphRunWorker implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleDestroy(): Promise<void> {
+    if (this.activationIntervalHandle) {
+      clearInterval(this.activationIntervalHandle);
+      this.activationIntervalHandle = null;
+    }
     if (this.intervalHandle) {
       clearInterval(this.intervalHandle);
       this.intervalHandle = null;
@@ -167,6 +176,96 @@ export class GraphRunWorker implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private scheduleActivationProbe(): void {
+    if (this.activationIntervalHandle) return;
+    this.activationIntervalHandle = setInterval(
+      () =>
+        this.runTimerTask("bootstrap activation probe", () =>
+          this.probeBullWorkerActivation(),
+        ),
+      PRODUCTION_BOOTSTRAP_ACTIVATION_POLL_MS,
+    );
+    this.activationIntervalHandle.unref?.();
+  }
+
+  private runTimerTask(
+    label: string,
+    operation: () => Promise<unknown>,
+  ): void {
+    void operation().catch((error) => {
+      this.logger.error(
+        `GraphRunWorker ${label} failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
+  }
+
+  private async probeBullWorkerActivation(): Promise<void> {
+    if (this.bullWorker || this.activationProbeInFlight) return;
+    this.activationProbeInFlight = true;
+    try {
+      if (
+        !(await productionBootstrapWorkerMayActivate(
+          this.productionBootstrapWriterFence,
+        ))
+      ) {
+        return;
+      }
+      await this.runRecoverySweep("Post-bootstrap");
+      this.startBullWorker();
+      if (this.activationIntervalHandle) {
+        clearInterval(this.activationIntervalHandle);
+        this.activationIntervalHandle = null;
+      }
+    } catch (error) {
+      this.logger.warn(
+        `GraphRunWorker activation remains fail-closed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    } finally {
+      this.activationProbeInFlight = false;
+    }
+  }
+
+  private startBullWorker(): void {
+    if (this.bullWorker) return;
+    const connection = this.queue.getConnection();
+    if (!connection) {
+      throw new Error(
+        "GraphRunQueueService reported BullMQ mode but connection missing",
+      );
+    }
+    this.bullWorker = new Worker<GraphRunJobData>(
+      GRAPH_RUN_QUEUE_NAME,
+      async (job) => this.handleJob(job),
+      { connection, concurrency: BULL_CONCURRENCY },
+    );
+    this.bullWorker.on("failed", async (job, err) => {
+      this.logger.error(
+        `Graph run job ${job?.id} failed: ${err.message} (attempt ${job?.attemptsMade}/${job?.opts?.attempts ?? "?"})`,
+      );
+      this.metrics?.inc(METRIC.BULLMQ_FAILED_JOBS_TOTAL, {
+        queue: GRAPH_RUN_QUEUE_NAME,
+      });
+      const attempts = job?.opts?.attempts ?? BULL_ATTEMPTS;
+      if (job && job.attemptsMade >= attempts) {
+        await this.markTerminalFailure(
+          job.data.graphRunId,
+          job.data.dispatchGeneration,
+          err.message,
+        );
+      }
+    });
+    this.bullWorker.on("error", (err) => {
+      this.logger.error(`GraphRun BullMQ worker error: ${err.message}`);
+    });
+    this.logger.log(
+      `GraphRunWorker enabled (BullMQ, queue=${GRAPH_RUN_QUEUE_NAME}, concurrency=${BULL_CONCURRENCY})`,
+    );
+  }
+
   /** BullMQ entrypoint. Throws to let BullMQ record failure + retry. */
   private async handleJob(job: Job<GraphRunJobData>): Promise<void> {
     await this.processGraphRun(job.data);
@@ -178,6 +277,14 @@ export class GraphRunWorker implements OnModuleInit, OnModuleDestroy {
    * Single-flight via `inFlight` so overlapping intervals don't double-process.
    */
   private async pollInMemory(): Promise<void> {
+    await runWithProductionBootstrapWriterFenceOrSkipClosed(
+      this.productionBootstrapWriterFence,
+      "graph-worker",
+      () => this.pollInMemoryWithLease(),
+    );
+  }
+
+  private async pollInMemoryWithLease(): Promise<void> {
     if (this.inFlight) return;
     this.inFlight = true;
     try {
@@ -242,6 +349,14 @@ export class GraphRunWorker implements OnModuleInit, OnModuleDestroy {
    * are no-ops (early return).
    */
   async processGraphRun(data: GraphRunJobData): Promise<void> {
+    await runWithProductionBootstrapWriterFence(
+      this.productionBootstrapWriterFence,
+      "graph-worker",
+      () => this.processGraphRunWithLease(data),
+    );
+  }
+
+  private async processGraphRunWithLease(data: GraphRunJobData): Promise<void> {
     const run = await this.prisma.graphRun.findUnique({
       where: { id: data.graphRunId },
     });
@@ -345,6 +460,15 @@ export class GraphRunWorker implements OnModuleInit, OnModuleDestroy {
 
   /** Run one boot/periodic sweep without allowing interval overlap. */
   async runRecoverySweep(source = "Recurring"): Promise<number> {
+    const result = await runWithProductionBootstrapWriterFenceOrSkipClosed(
+      this.productionBootstrapWriterFence,
+      "recovery",
+      () => this.runRecoverySweepWithLease(source),
+    );
+    return result.ran ? result.value : 0;
+  }
+
+  private async runRecoverySweepWithLease(source: string): Promise<number> {
     if (this.recoverySweepInFlight) return 0;
     this.recoverySweepInFlight = true;
     try {
@@ -382,6 +506,14 @@ export class GraphRunWorker implements OnModuleInit, OnModuleDestroy {
    * to spin up the BullMQ worker.
    */
   async recoverOrphanedRuns(): Promise<number> {
+    return runWithProductionBootstrapWriterFence(
+      this.productionBootstrapWriterFence,
+      "recovery",
+      () => this.recoverOrphanedRunsWithLease(),
+    );
+  }
+
+  private async recoverOrphanedRunsWithLease(): Promise<number> {
     const cutoff = new Date(Date.now() - BOOT_ORPHAN_AGE_MS);
     const orphans = await this.prisma.graphRun.findMany({
       where: {

@@ -328,6 +328,7 @@ SHARED_NON_SECRET_ENV_NAMES=(
   BULLMQ_QUEUE_DEPTH_ALERT_THRESHOLD
   REDIS_HOST
   REDIS_PORT
+  REDIS_USERNAME
   REDIS_TLS
   SSRF_GUARD_HOSTNAME_ALLOWLIST
   LANGSMITH_TRACING
@@ -341,10 +342,28 @@ SHARED_NON_SECRET_ENV_NAMES=(
   FRONTEND_URL
   ALLOW_DEV_ORG_HEADER
   ENCRYPTION_KEY_DEV_FALLBACK
+  WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID
+  WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION
 )
 for ENV_NAME in "${SHARED_NON_SECRET_ENV_NAMES[@]}"; do
   require_env_value_parity "${ENV_NAME}"
 done
+
+BOOTSTRAP_ATTEMPT_ID="$(env_value \
+  "${API_JSON}" WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID)"
+BOOTSTRAP_MINIMUM_GENERATION="$(env_value \
+  "${API_JSON}" WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION)"
+if [[ ! "${BOOTSTRAP_ATTEMPT_ID}" =~ ^[0-9a-f]{32}$ ]]; then
+  echo "ERROR: production bootstrap attempt guard must be exactly 32 lowercase hexadecimal characters" >&2
+  exit 1
+fi
+if [[ ! "${BOOTSTRAP_MINIMUM_GENERATION}" =~ ^[1-9][0-9]*$ ]] ||
+  (( ${#BOOTSTRAP_MINIMUM_GENERATION} > 16 )) ||
+  { (( ${#BOOTSTRAP_MINIMUM_GENERATION} == 16 )) &&
+    [[ "${BOOTSTRAP_MINIMUM_GENERATION}" > "9007199254740991" ]]; }; then
+  echo "ERROR: production bootstrap minimum writer-fence generation must be a positive safe integer" >&2
+  exit 1
+fi
 
 FRONTEND_URL_VALUE="$(env_value "${API_JSON}" FRONTEND_URL)"
 if [[ ! "${FRONTEND_URL_VALUE}" =~ ^https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?$ ]]; then

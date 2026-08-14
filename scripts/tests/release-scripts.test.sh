@@ -500,12 +500,26 @@ if [[ "${1:-} ${2:-}" == "containerapp show" ]]; then
   else
     max_inactive="${FAKE_WORKER_MAX_INACTIVE_REVISIONS:-10}"
   fi
+  bootstrap_attempt="0123456789abcdef0123456789abcdef"
+  bootstrap_generation="7"
+  omit_bootstrap_guard="false"
+  if [[ "${app}" == "${FAKE_BOOTSTRAP_GUARD_MUTATE_ON_NEW_APP:-}" &&
+    "${revision}" == "${app}--new" ]]; then
+    case "${FAKE_BOOTSTRAP_GUARD_MUTATION:-}" in
+      missing) omit_bootstrap_guard="true" ;;
+      attempt) bootstrap_attempt="ffffffffffffffffffffffffffffffff" ;;
+      downgrade) bootstrap_generation="6" ;;
+    esac
+  fi
   jq -n \
     --arg id "/subscriptions/test-subscription/resourceGroups/Ledgr-prod/providers/Microsoft.App/containerApps/${app}" \
     --arg app "${app}" \
     --arg image "${current}" \
     --arg revision "${revision}" \
     --arg omit_max_inactive_app "${FAKE_OMIT_MAX_INACTIVE_APP:-}" \
+    --arg bootstrap_attempt "${bootstrap_attempt}" \
+    --arg bootstrap_generation "${bootstrap_generation}" \
+    --arg omit_bootstrap_guard "${omit_bootstrap_guard}" \
     --argjson max_inactive "${max_inactive}" \
     '{
       id: $id,
@@ -527,7 +541,11 @@ if [[ "${1:-} ${2:-}" == "containerapp show" ]]; then
         template: {containers: [{
           name: $app,
           image: $image,
-          env: [{name: "OUTREACH_LIVE_FOR_ORGS", value: ""}]
+          env: ([{name: "OUTREACH_LIVE_FOR_ORGS", value: ""}] +
+            (if $omit_bootstrap_guard == "true" then [] else [
+              {name: "WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID", value: $bootstrap_attempt},
+              {name: "WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION", value: $bootstrap_generation}
+            ] end))
         }]}
       }
     }'
@@ -567,9 +585,23 @@ if [[ "${1:-} ${2:-} ${3:-}" == "containerapp revision show" ]]; then
       current="ledgracr.azurecr.io/apex-api@sha256:$(printf '4%.0s' {1..64})"
     fi
   fi
+  bootstrap_attempt="0123456789abcdef0123456789abcdef"
+  bootstrap_generation="7"
+  omit_bootstrap_guard="false"
+  if [[ "${app}" == "${FAKE_BOOTSTRAP_GUARD_MUTATE_ON_NEW_APP:-}" &&
+    "${requested_revision}" == "${app}--new" ]]; then
+    case "${FAKE_BOOTSTRAP_GUARD_MUTATION:-}" in
+      missing) omit_bootstrap_guard="true" ;;
+      attempt) bootstrap_attempt="ffffffffffffffffffffffffffffffff" ;;
+      downgrade) bootstrap_generation="6" ;;
+    esac
+  fi
   jq -n \
     --arg revision "${requested_revision}" \
     --arg image "${current}" \
+    --arg bootstrap_attempt "${bootstrap_attempt}" \
+    --arg bootstrap_generation "${bootstrap_generation}" \
+    --arg omit_bootstrap_guard "${omit_bootstrap_guard}" \
     --argjson active "${active}" '{
       name: $revision,
       properties: {
@@ -578,7 +610,11 @@ if [[ "${1:-} ${2:-} ${3:-}" == "containerapp revision show" ]]; then
         provisioningState: "Provisioned",
         template: {containers: [{
           image: $image,
-          env: [{name: "OUTREACH_LIVE_FOR_ORGS", value: ""}]
+          env: ([{name: "OUTREACH_LIVE_FOR_ORGS", value: ""}] +
+            (if $omit_bootstrap_guard == "true" then [] else [
+              {name: "WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID", value: $bootstrap_attempt},
+              {name: "WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION", value: $bootstrap_generation}
+            ] end))
         }]}
       }
     }'
@@ -686,6 +722,8 @@ run_fake_deploy() {
     FAKE_OMIT_MAX_INACTIVE_APP="${FAKE_OMIT_MAX_INACTIVE_APP:-}" \
     FAKE_MISSING_RETAINED_APP="${FAKE_MISSING_RETAINED_APP:-}" \
     FAKE_CHANGED_RETAINED_APP="${FAKE_CHANGED_RETAINED_APP:-}" \
+    FAKE_BOOTSTRAP_GUARD_MUTATE_ON_NEW_APP="${FAKE_BOOTSTRAP_GUARD_MUTATE_ON_NEW_APP:-}" \
+    FAKE_BOOTSTRAP_GUARD_MUTATION="${FAKE_BOOTSTRAP_GUARD_MUTATION:-}" \
     GIT_SSL_CAINFO="${HARNESS}/hostile-ca.pem" \
     GIT_SSL_NO_VERIFY=true \
     GIT_TRACE="${HARNESS}/hostile-git-trace" \
@@ -724,6 +762,8 @@ reset_deploy_harness() {
   FAKE_OMIT_MAX_INACTIVE_APP=""
   FAKE_MISSING_RETAINED_APP=""
   FAKE_CHANGED_RETAINED_APP=""
+  FAKE_BOOTSTRAP_GUARD_MUTATE_ON_NEW_APP=""
+  FAKE_BOOTSTRAP_GUARD_MUTATION=""
   FAKE_MIGRATION_FAIL_CALL=""
   FAKE_MIGRATION_FRESH_EXPIRES_AFTER_CALL=""
   printf '0\n' >"${SHOW_CALL_COUNT}"
@@ -738,7 +778,7 @@ reset_deploy_harness() {
 }
 
 test_deploy_admission() {
-  local requested_image snapshot_context direct_token rollback_api rollback_worker exact_baseline_log
+  local requested_image snapshot_context direct_token rollback_api rollback_worker exact_baseline_log guard_mutation
   make_deploy_harness
   FAKE_BRANCH="release/go-live-test"
   FAKE_COMMIT="$(printf '1%.0s' {1..40})"
@@ -835,6 +875,20 @@ test_deploy_admission() {
     fail "bootstrap parent did not remove its exact private snapshot after release"
   fi
   pass
+
+  for guard_mutation in missing attempt downgrade; do
+    reset_deploy_harness
+    FAKE_BOOTSTRAP_GUARD_MUTATE_ON_NEW_APP="apex-gtm-api"
+    FAKE_BOOTSTRAP_GUARD_MUTATION="${guard_mutation}"
+    if run_fake_deploy >/dev/null 2>&1; then
+      fail "deploy accepted a ${guard_mutation} bootstrap guard after the API image update"
+    fi
+    assert_log_contains "${CALL_LOG}" "az containerapp update --name apex-gtm-api"
+    assert_log_excludes "${CALL_LOG}" "az containerapp update --name apex-gtm-worker"
+    assert_log_contains "${CALL_LOG}" \
+      "az containerapp revision activate --name apex-gtm-api --resource-group Ledgr-prod --revision apex-gtm-api--revision"
+    pass
+  done
 
   reset_deploy_harness
   FAKE_OMIT_MAX_INACTIVE_APP="apex-gtm-api"
@@ -2467,6 +2521,8 @@ write_containerapp_fixture() {
             env: [
               {name: "NODE_ENV", value: "production"},
               {name: "REQUIRE_PRODUCTION_ENV", value: "true"},
+              {name: "WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID", value: "0123456789abcdef0123456789abcdef"},
+              {name: "WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION", value: "7"},
               {name: "WORKER_ENABLED", value: $enabled},
               {name: "GRAPH_RUN_WORKER_ENABLED", value: $enabled},
               {name: "OUTREACH_WORKER_ENABLED", value: $enabled},
@@ -2570,6 +2626,59 @@ EOF
     API_REVISION_FILE="${harness}/api-revision.json" WORKER_REVISION_FILE="${harness}/worker-revision.json" \
     "${harness}/scripts/verify-containerapp-release-config.sh" \
     "${api_image}" "${worker_image}" >/dev/null
+  pass
+
+  jq '.properties.template.containers[0].env |= map(select(
+    .name != "WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID" and
+    .name != "WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION"
+  ))' "${harness}/api.json" >"${harness}/api-missing-bootstrap-guard.json"
+  jq '.properties.template.containers[0].env |= map(select(
+    .name != "WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID" and
+    .name != "WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION"
+  ))' "${harness}/worker.json" >"${harness}/worker-missing-bootstrap-guard.json"
+  if env PATH="${harness}/bin:${PATH}" \
+    API_JSON_FILE="${harness}/api-missing-bootstrap-guard.json" \
+    WORKER_JSON_FILE="${harness}/worker-missing-bootstrap-guard.json" \
+    API_REVISION_FILE="${harness}/api-revision.json" \
+    WORKER_REVISION_FILE="${harness}/worker-revision.json" \
+    "${harness}/scripts/verify-containerapp-release-config.sh" \
+    "${api_image}" "${worker_image}" >/dev/null 2>&1; then
+    fail "Container App verifier accepted a missing bootstrap deployment guard"
+  fi
+  pass
+
+  jq '(.properties.template.containers[0].env[] |
+    select(.name == "WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID").value) =
+    "ffffffffffffffffffffffffffffffff"' \
+    "${harness}/worker.json" >"${harness}/worker-bootstrap-attempt-drift.json"
+  if env PATH="${harness}/bin:${PATH}" \
+    API_JSON_FILE="${harness}/api.json" \
+    WORKER_JSON_FILE="${harness}/worker-bootstrap-attempt-drift.json" \
+    API_REVISION_FILE="${harness}/api-revision.json" \
+    WORKER_REVISION_FILE="${harness}/worker-revision.json" \
+    "${harness}/scripts/verify-containerapp-release-config.sh" \
+    "${api_image}" "${worker_image}" >/dev/null 2>&1; then
+    fail "Container App verifier accepted mismatched bootstrap attempt guards"
+  fi
+  pass
+
+  jq '(.properties.template.containers[0].env[] |
+    select(.name == "WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION").value) =
+    "9007199254740992"' \
+    "${harness}/api.json" >"${harness}/api-unsafe-bootstrap-generation.json"
+  jq '(.properties.template.containers[0].env[] |
+    select(.name == "WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION").value) =
+    "9007199254740992"' \
+    "${harness}/worker.json" >"${harness}/worker-unsafe-bootstrap-generation.json"
+  if env PATH="${harness}/bin:${PATH}" \
+    API_JSON_FILE="${harness}/api-unsafe-bootstrap-generation.json" \
+    WORKER_JSON_FILE="${harness}/worker-unsafe-bootstrap-generation.json" \
+    API_REVISION_FILE="${harness}/api-revision.json" \
+    WORKER_REVISION_FILE="${harness}/worker-revision.json" \
+    "${harness}/scripts/verify-containerapp-release-config.sh" \
+    "${api_image}" "${worker_image}" >/dev/null 2>&1; then
+    fail "Container App verifier accepted an unsafe bootstrap generation guard"
+  fi
   pass
 
   jq 'del(.properties.configuration.maxInactiveRevisions)' \

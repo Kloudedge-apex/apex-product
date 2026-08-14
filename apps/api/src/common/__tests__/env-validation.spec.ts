@@ -41,6 +41,9 @@ function baseProdEnv(): NodeJS.ProcessEnv {
     API_PUBLIC_URL: "https://api.workforceos.xyz",
     OAUTH_STATE_SECRET: "s".repeat(32),
     FRONTEND_URL: "https://workforceos.xyz",
+    WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID:
+      "0123456789abcdef0123456789abcdef",
+    WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION: "1",
   } as NodeJS.ProcessEnv;
 }
 
@@ -48,6 +51,39 @@ describe("validateEnv", () => {
   it("passes with a complete production env", () => {
     const { issues } = validateEnv(baseProdEnv());
     expect(issues).toEqual([]);
+  });
+
+  it("requires the production bootstrap guard pair in production", () => {
+    const env = baseProdEnv();
+    delete env.WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID;
+    delete env.WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION;
+    expect(validateEnv(env).issues).toContain(
+      "production bootstrap deployment guard is required when NODE_ENV=production",
+    );
+  });
+
+  it("rejects a partial bootstrap guard pair in every environment", () => {
+    const env = baseProdEnv();
+    env.NODE_ENV = "development";
+    env.REQUIRE_PRODUCTION_ENV = "false";
+    delete env.WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION;
+    expect(validateEnv(env).issues).toContain(
+      "production bootstrap deployment guard requires both attempt id and minimum generation",
+    );
+  });
+
+  it("rejects malformed or unsafe bootstrap guard values", () => {
+    const env = baseProdEnv();
+    env.WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID = "ABC";
+    env.WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION =
+      "9007199254740992";
+    const { issues } = validateEnv(env);
+    expect(issues).toContain(
+      "WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID must be exactly 32 lowercase hexadecimal characters",
+    );
+    expect(issues).toContain(
+      "WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION must be a positive safe integer",
+    );
   });
 
   it("fails when DATABASE_URL is missing", () => {

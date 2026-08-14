@@ -100,13 +100,13 @@ export class RunLevelEvaluatorService {
   /**
    * Capture the LangSmith root run id for a GraphRun. Called by the graph
    * runtime when the first traced LLM call returns its run id. The DB write
-   * is fire-and-forget so a transient DB hiccup never breaks tracing — the
-   * in-memory cache still holds the value for this pod's lifetime.
+   * remains best-effort so a transient DB hiccup never breaks tracing, but is
+   * awaited so its writer lease cannot be released while the write is live.
    */
-  recordLangSmithRunId(graphRunId: string, runId: string): void {
+  async recordLangSmithRunId(graphRunId: string, runId: string): Promise<void> {
     if (!graphRunId || !runId) return;
     this.langsmithRunIds.set(graphRunId, runId);
-    void this.prisma.graphRun
+    await this.prisma.graphRun
       .update({
         where: { id: graphRunId },
         data: { langsmithRootRunId: runId },

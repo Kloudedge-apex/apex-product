@@ -1,5 +1,5 @@
 import { Module } from "@nestjs/common";
-import { APP_GUARD } from "@nestjs/core";
+import { APP_GUARD, APP_INTERCEPTOR } from "@nestjs/core";
 import { ConfigModule } from "@nestjs/config";
 import { PrismaModule } from "./prisma/prisma.module";
 import { HealthModule } from "./health/health.module";
@@ -24,6 +24,7 @@ import { BetaStubsModule } from "./beta-stubs/beta-stubs.module";
 import { ConversationsModule } from "./conversations/conversations.module";
 import { OrgScopeGuard } from "./common/org-scope.guard";
 import { RateLimitGuard } from "./common/rate-limit.guard";
+import { ProductionBootstrapWriterFenceInterceptor } from "./ops/production-bootstrap-writer-fence.interceptor";
 
 /**
  * Guards run in registration order. `OrgScopeGuard` must run first so that
@@ -59,6 +60,10 @@ import { RateLimitGuard } from "./common/rate-limit.guard";
   providers: [
     { provide: APP_GUARD, useClass: OrgScopeGuard },
     { provide: APP_GUARD, useClass: RateLimitGuard },
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: ProductionBootstrapWriterFenceInterceptor,
+    },
   ],
 })
 export class AppModule {}

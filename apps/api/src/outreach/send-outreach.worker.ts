@@ -38,6 +38,13 @@ import { EvidenceLedgerService } from "../observability/evidence-ledger.service"
 import { isLiveSendAllowedForOrg } from "./outreach-allowlist.util";
 import { SuppressionService } from "./suppression.service";
 import { ConversationStoreService } from "../conversation-store/conversation-store.service";
+import {
+  assertProductionBootstrapWriterLease,
+  productionBootstrapWorkerMayActivate,
+  ProductionBootstrapWriterFenceService,
+  runWithProductionBootstrapWriterFence,
+  runWithProductionBootstrapWriterFenceOrSkipClosed,
+} from "../ops/production-bootstrap-writer-fence";
 import { acquireOrgSendReservationLock } from "./outreach-send-reservation-lock";
 import {
   acquireReplySingleFlightLock,
@@ -131,6 +138,7 @@ const IN_MEMORY_BATCH_SIZE = 10;
 // automatically re-sent. An attested writer records DELIVERY_UNKNOWN;
 // otherwise the claim remains SENDING for operator reconciliation.
 const RECONCILE_INTERVAL_MS = 5 * 60_000;
+const PRODUCTION_BOOTSTRAP_ACTIVATION_POLL_MS = 1_000;
 const APPROVED_REQUEUE_AGE_MS = 10 * 60_000;
 const SENDING_STALE_AGE_MS = 15 * 60_000;
 const RECONCILE_BATCH_LIMIT = 100;
@@ -257,6 +265,8 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
   private bullWorker: Worker<SendJobData> | null = null;
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
   private reconcileHandle: ReturnType<typeof setInterval> | null = null;
+  private activationIntervalHandle: ReturnType<typeof setInterval> | null = null;
+  private activationProbeInFlight = false;
   private inFlight = false;
   private reconcileInFlight = false;
 
@@ -271,6 +281,8 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
     @Optional() private readonly evidenceLedger?: EvidenceLedgerService,
     @Optional() private readonly linkedinService?: LinkedInService,
     @Optional() private readonly conversationStore?: ConversationStoreService,
+    @Optional()
+    private readonly productionBootstrapWriterFence?: ProductionBootstrapWriterFenceService,
   ) {
     // Build the LinkedIn tool with the optional service + ledger so worker-
     // dispatched sends use the same code path as in-loop agent calls. When
@@ -280,7 +292,6 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
     // it as a failed dispatch (mock mode must never be recorded as SENT).
     this.linkedinSendTool = new LinkedInSendMessageTool(
       this.linkedinService,
-      this.evidenceLedger,
     );
   }
 
@@ -292,42 +303,32 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    // CLOSED candidates stay alive but create no BullMQ Worker. This is
+    // independent of BullMQ's pause key, so deleting that key cannot claim or
+    // burn an outreach delivery attempt before the exact epoch reaches OPEN.
+    const startup = await runWithProductionBootstrapWriterFenceOrSkipClosed(
+      this.productionBootstrapWriterFence,
+      "outreach-worker",
+      async () => undefined,
+    );
     if (this.queue.isBullMode()) {
-      const connection = this.queue.getConnection();
-      if (!connection) {
+      if (!this.queue.getConnection()) {
         throw new Error(
           "OutreachSendQueueService reported BullMQ mode but connection missing",
         );
       }
-      this.bullWorker = new Worker<SendJobData>(
-        OUTREACH_SEND_QUEUE_NAME,
-        async (job) => this.handleJob(job),
-        { connection, concurrency: 5 },
-      );
-      this.bullWorker.on("failed", async (job, err) => {
-        this.logger.error(
-          `Outreach send job ${job?.id} failed: ${err.message} (attempt ${job?.attemptsMade}/${job?.opts?.attempts ?? "?"})`,
+      if (!startup.ran) {
+        this.logger.log(
+          "SendOutreachWorker remains dormant until the guarded production bootstrap epoch is OPEN",
         );
-        // BullMQ's retry budget exhausted? Persist a terminal failure on the
-        // artifact so the UI can surface it.
-        const attempts = job?.opts?.attempts ?? 1;
-        if (job && job.attemptsMade >= attempts) {
-          await this.markTerminalFailure(
-            job.data.artifactId,
-            job.data.orgId,
-            err.message,
-          );
-        }
-      });
-      this.bullWorker.on("error", (err) => {
-        this.logger.error(`Outreach BullMQ worker error: ${err.message}`);
-      });
-      this.logger.log(
-        `SendOutreachWorker enabled (BullMQ, queue=${OUTREACH_SEND_QUEUE_NAME})`,
-      );
+        this.scheduleActivationProbe();
+      } else {
+        this.startBullWorker();
+      }
     } else {
       this.intervalHandle = setInterval(
-        () => this.pollInMemory(),
+        () =>
+          this.runTimerTask("in-memory poll", () => this.pollInMemory()),
         IN_MEMORY_POLL_INTERVAL_MS,
       );
       this.logger.log(
@@ -341,13 +342,20 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
     // releasing them for another send. Runs once at boot so a restart doesn't
     // wait a full interval to make ambiguous claims safe.
     this.reconcileHandle = setInterval(
-      () => void this.runReconcileSweep(),
+      () =>
+        this.runTimerTask("reconcile sweep", () =>
+          this.runReconcileSweep(),
+        ),
       RECONCILE_INTERVAL_MS,
     );
     await this.runReconcileSweep();
   }
 
   async onModuleDestroy(): Promise<void> {
+    if (this.activationIntervalHandle) {
+      clearInterval(this.activationIntervalHandle);
+      this.activationIntervalHandle = null;
+    }
     if (this.intervalHandle) {
       clearInterval(this.intervalHandle);
       this.intervalHandle = null;
@@ -362,6 +370,95 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private scheduleActivationProbe(): void {
+    if (this.activationIntervalHandle) return;
+    this.activationIntervalHandle = setInterval(
+      () =>
+        this.runTimerTask("bootstrap activation probe", () =>
+          this.probeBullWorkerActivation(),
+        ),
+      PRODUCTION_BOOTSTRAP_ACTIVATION_POLL_MS,
+    );
+    this.activationIntervalHandle.unref?.();
+  }
+
+  private runTimerTask(
+    label: string,
+    operation: () => Promise<unknown>,
+  ): void {
+    void operation().catch((error) => {
+      this.logger.error(
+        `SendOutreachWorker ${label} failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
+  }
+
+  private async probeBullWorkerActivation(): Promise<void> {
+    if (this.bullWorker || this.activationProbeInFlight) return;
+    this.activationProbeInFlight = true;
+    try {
+      if (
+        !(await productionBootstrapWorkerMayActivate(
+          this.productionBootstrapWriterFence,
+        ))
+      ) {
+        return;
+      }
+      await this.runReconcileSweep();
+      this.startBullWorker();
+      if (this.activationIntervalHandle) {
+        clearInterval(this.activationIntervalHandle);
+        this.activationIntervalHandle = null;
+      }
+    } catch (error) {
+      this.logger.warn(
+        `SendOutreachWorker activation remains fail-closed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    } finally {
+      this.activationProbeInFlight = false;
+    }
+  }
+
+  private startBullWorker(): void {
+    if (this.bullWorker) return;
+    const connection = this.queue.getConnection();
+    if (!connection) {
+      throw new Error(
+        "OutreachSendQueueService reported BullMQ mode but connection missing",
+      );
+    }
+    this.bullWorker = new Worker<SendJobData>(
+      OUTREACH_SEND_QUEUE_NAME,
+      async (job) => this.handleJob(job),
+      { connection, concurrency: 5 },
+    );
+    this.bullWorker.on("failed", async (job, err) => {
+      this.logger.error(
+        `Outreach send job ${job?.id} failed: ${err.message} (attempt ${job?.attemptsMade}/${job?.opts?.attempts ?? "?"})`,
+      );
+      // BullMQ's retry budget exhausted? Persist a terminal failure on the
+      // artifact so the UI can surface it.
+      const attempts = job?.opts?.attempts ?? 1;
+      if (job && job.attemptsMade >= attempts) {
+        await this.markTerminalFailure(
+          job.data.artifactId,
+          job.data.orgId,
+          err.message,
+        );
+      }
+    });
+    this.bullWorker.on("error", (err) => {
+      this.logger.error(`Outreach BullMQ worker error: ${err.message}`);
+    });
+    this.logger.log(
+      `SendOutreachWorker enabled (BullMQ, queue=${OUTREACH_SEND_QUEUE_NAME})`,
+    );
+  }
+
   /** BullMQ entrypoint. Throws to let BullMQ record failure + retry. */
   private async handleJob(job: Job<SendJobData>): Promise<void> {
     await this.processArtifact(job.data.artifactId, job.data.orgId);
@@ -373,6 +470,14 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
    * `inFlight` so overlapping intervals don't double-process.
    */
   private async pollInMemory(): Promise<void> {
+    await runWithProductionBootstrapWriterFenceOrSkipClosed(
+      this.productionBootstrapWriterFence,
+      "outreach-worker",
+      () => this.pollInMemoryWithLease(),
+    );
+  }
+
+  private async pollInMemoryWithLease(): Promise<void> {
     if (this.inFlight) return;
     this.inFlight = true;
     try {
@@ -428,6 +533,17 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
    * provider may have accepted a request whose response never arrived.
    */
   async processArtifact(artifactId: string, orgId: string): Promise<void> {
+    await runWithProductionBootstrapWriterFence(
+      this.productionBootstrapWriterFence,
+      "outreach-worker",
+      () => this.processArtifactWithLease(artifactId, orgId),
+    );
+  }
+
+  private async processArtifactWithLease(
+    artifactId: string,
+    orgId: string,
+  ): Promise<void> {
     const artifact = await this.prisma.outreachArtifact.findUnique({
       where: { id: artifactId },
     });
@@ -625,7 +741,7 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    void this.evidenceLedger?.messageSent({
+    await this.evidenceLedger?.messageSent({
       orgId: artifact.orgId,
       runId: artifact.graphRunId ?? null,
       artifactId: artifact.id,
@@ -1148,6 +1264,9 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
         };
         const payload = artifact.payload as Record<string, unknown>;
         try {
+          await assertProductionBootstrapWriterLease(
+            this.productionBootstrapWriterFence,
+          );
           return await this.sendEmailTool.execute(payload, context);
         } catch (err) {
           if (!liveAllowed) throw err;
@@ -1186,6 +1305,9 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
           args.integration_id = payload.integration_id;
         }
         try {
+          await assertProductionBootstrapWriterLease(
+            this.productionBootstrapWriterFence,
+          );
           return await this.linkedinSendTool.execute(args, context);
         } catch (err) {
           if (!liveAllowed) throw err;
@@ -1389,6 +1511,14 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
    * the sweep is best-effort recovery, not a correctness dependency.
    */
   private async runReconcileSweep(): Promise<void> {
+    await runWithProductionBootstrapWriterFenceOrSkipClosed(
+      this.productionBootstrapWriterFence,
+      "recovery",
+      () => this.runReconcileSweepWithLease(),
+    );
+  }
+
+  private async runReconcileSweepWithLease(): Promise<void> {
     if (this.reconcileInFlight) return;
     this.reconcileInFlight = true;
     try {
@@ -1428,6 +1558,17 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
    * at-most-once automatic dispatch, not guaranteed exactly-once delivery.
    */
   async reconcileStuckArtifacts(): Promise<{
+    deliveryUnknown: number;
+    requeued: number;
+  }> {
+    return runWithProductionBootstrapWriterFence(
+      this.productionBootstrapWriterFence,
+      "recovery",
+      () => this.reconcileStuckArtifactsWithLease(),
+    );
+  }
+
+  private async reconcileStuckArtifactsWithLease(): Promise<{
     deliveryUnknown: number;
     requeued: number;
   }> {
