@@ -174,6 +174,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Generate Prisma client
+        run: pnpm db:generate
+
       - name: Run real Redis and BullMQ writer-fence contract
         env:
           WRITER_FENCE_INTEGRATION_REDIS_URL: redis://127.0.0.1:6379/14
