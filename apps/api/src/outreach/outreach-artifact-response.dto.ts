@@ -7,6 +7,7 @@ import {
 } from "@prisma/client";
 import { ApiProperty } from "@nestjs/swagger";
 import {
+  effectiveArtifactStatus,
   hasLegacyAutoFailedMarker,
   isLegacyAutoFailedArtifact,
 } from "./outreach-artifact-failure";
@@ -135,11 +136,12 @@ export class OutreachArtifactPageResponseDto {
 export function toOutreachArtifactResponse(
   artifact: OutreachArtifact,
 ): OutreachArtifactResponseDto {
-  let status: OutreachArtifactReadStatus = artifact.status;
+  let status: OutreachArtifactReadStatus = effectiveArtifactStatus(artifact);
 
-  if (isLegacyAutoFailedArtifact(artifact)) {
-    status = OutreachArtifactStatus.FAILED;
-  } else if (hasLegacyAutoFailedMarker(artifact)) {
+  if (
+    hasLegacyAutoFailedMarker(artifact) &&
+    !isLegacyAutoFailedArtifact(artifact)
+  ) {
     status = RECONCILIATION_REQUIRED_STATUS;
   }
 

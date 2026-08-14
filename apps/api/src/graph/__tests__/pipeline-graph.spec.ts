@@ -511,15 +511,46 @@ describe("pipeline-graph (supervisor routing)", () => {
   it.each([
     [
       "REJECTED",
+      null,
+      "REJECTED",
       "persisted",
       "COMPLETE",
       "0 sent, 0 failed, 1 other persisted",
     ],
-    ["SENT", "sent", "COMPLETE", "1 sent, 0 failed, 0 other persisted"],
-    ["FAILED", "failed", "FAILED", "0 sent, 1 failed, 0 other persisted"],
+    [
+      "REJECTED",
+      "delivery-unknown: ambiguous provider response",
+      "DELIVERY_UNKNOWN",
+      "persisted",
+      "COMPLETE",
+      "0 sent, 0 failed, 1 other persisted",
+    ],
+    [
+      "SENT",
+      null,
+      "SENT",
+      "sent",
+      "COMPLETE",
+      "1 sent, 0 failed, 0 other persisted",
+    ],
+    [
+      "FAILED",
+      null,
+      "FAILED",
+      "failed",
+      "FAILED",
+      "0 sent, 1 failed, 0 other persisted",
+    ],
   ] as const)(
     "reports an existing %s artifact truthfully while preserving the generated count",
-    async (artifactStatus, outcomeStatus, stageStatus, messageFragment) => {
+    async (
+      storedStatus,
+      reviewerNote,
+      artifactStatus,
+      outcomeStatus,
+      stageStatus,
+      messageFragment,
+    ) => {
       let recordCalls = 0;
       const existingDeps = {
         ...deps,
@@ -532,8 +563,9 @@ describe("pipeline-graph (supervisor routing)", () => {
           outreachArtifact: {
             findFirst: async () => ({
               id: `artifact_${artifactStatus}`,
-              status: artifactStatus,
+              status: storedStatus,
               payload: { personId: "p1" },
+              reviewerNote,
             }),
           },
         } as unknown as Parameters<typeof buildPipelineGraph>[0]["prisma"],

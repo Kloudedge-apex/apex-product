@@ -331,7 +331,7 @@ export class OrgsService {
         select: { credentials: true },
       }),
       // Exactly the same conservative capacity-risk rows as the worker:
-      // confirmed SENT, fresh SENDING, and today's DELIVERY_UNKNOWN.
+      // confirmed SENT, every unresolved SENDING, and today's DELIVERY_UNKNOWN.
       this.prisma.outreachArtifact.count({
         where: {
           orgId: org.id,

@@ -255,7 +255,7 @@ describe("OrgsService.computeSendReadiness", () => {
       expect(readiness.dailyCapRemaining).toBe(6);
     });
 
-    it("counts this org's confirmed, fresh in-flight, and unknown delivery risk", async () => {
+    it("counts this org's confirmed, unresolved in-flight, and unknown delivery risk", async () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date("2026-06-13T15:30:00.000Z"));
 
@@ -273,10 +273,14 @@ describe("OrgsService.computeSendReadiness", () => {
             },
             {
               status: "SENDING",
-              updatedAt: { gte: new Date("2026-06-13T15:15:00.000Z") },
             },
             {
               status: "DELIVERY_UNKNOWN",
+              updatedAt: { gte: new Date("2026-06-13T00:00:00.000Z") },
+            },
+            {
+              status: "REJECTED",
+              reviewerNote: { startsWith: "delivery-unknown:" },
               updatedAt: { gte: new Date("2026-06-13T00:00:00.000Z") },
             },
           ],

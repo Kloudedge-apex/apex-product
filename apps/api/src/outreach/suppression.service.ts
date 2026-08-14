@@ -15,6 +15,7 @@ import {
 } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { acquireOrgSendReservationLock } from "./outreach-send-reservation-lock";
+import { effectiveArtifactStatus } from "./outreach-artifact-failure";
 
 /**
  * Suppression list for outbound (CAN-SPAM / GDPR e-Privacy compliance).
@@ -246,7 +247,12 @@ export class SuppressionService {
     const [persistedArtifact, persistedSuppression] = await Promise.all([
       this.prisma.outreachArtifact.findFirst({
         where: { id: artifact.id, orgId: input.orgId },
-        select: { id: true, status: true },
+        select: {
+          id: true,
+          status: true,
+          reviewerNote: true,
+          failedAt: true,
+        },
       }),
       this.prisma.outreachSuppression.findUnique({
         where: {
@@ -275,7 +281,7 @@ export class SuppressionService {
     return {
       artifact: {
         id: persistedArtifact.id,
-        status: persistedArtifact.status,
+        status: effectiveArtifactStatus(persistedArtifact),
         statusChanged: statusWrite.count === 1,
       },
       suppression: {

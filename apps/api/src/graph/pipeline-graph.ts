@@ -38,6 +38,7 @@ import {
 } from "./outreach-recipient";
 import {
   artifactFailureReason,
+  effectiveArtifactStatus,
   isFailedArtifact,
 } from "../outreach/outreach-artifact-failure";
 
@@ -128,8 +129,9 @@ function outcomeStatusForArtifact(artifact: {
   readonly failedAt?: Date | null;
 }): "queued" | "sent" | "persisted" | "failed" {
   if (isFailedArtifact(artifact)) return "failed";
-  if (artifact.status === "PENDING_REVIEW") return "queued";
-  if (artifact.status === "SENT") return "sent";
+  const status = effectiveArtifactStatus(artifact);
+  if (status === "PENDING_REVIEW") return "queued";
+  if (status === "SENT") return "sent";
   return "persisted";
 }
 
@@ -801,12 +803,14 @@ export function buildPipelineGraph(deps: Deps) {
                 continue;
               }
               claimedRecipients.set(email, person.id);
+              const effectiveStatus =
+                effectiveArtifactStatus(existingArtifact);
               const outcomeStatus = outcomeStatusForArtifact(existingArtifact);
               outreachResults.push({
                 personId: person.id,
                 agentRunId: existingArtifact.id,
                 status: outcomeStatus,
-                artifactStatus: existingArtifact.status,
+                artifactStatus: effectiveStatus,
                 ...(outcomeStatus === "failed"
                   ? {
                       error:

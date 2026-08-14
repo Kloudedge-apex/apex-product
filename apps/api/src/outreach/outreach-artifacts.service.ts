@@ -22,6 +22,7 @@ import {
   assertArtifactRecipientCurrent,
 } from "./outreach-artifact-eligibility";
 import {
+  effectiveArtifactStatus,
   effectiveArtifactStatusWhere,
   isReservedFailureNote,
 } from "./outreach-artifact-failure";
@@ -140,7 +141,10 @@ export class OutreachArtifactsService {
         this.logger.log(
           `OutreachArtifact already exists for graphRun=${input.graphRunId} recipient=${recipientRef} tool=${input.toolName}; returning existing id=${existing.id}`,
         );
-        return existing;
+        return {
+          ...existing,
+          status: effectiveArtifactStatus(existing),
+        };
       }
     }
 
@@ -315,7 +319,7 @@ export class OutreachArtifactsService {
   ): Promise<OutreachArtifact> {
     if (isReservedFailureNote(reviewerNote)) {
       throw new BadRequestException(
-        "Reviewer notes cannot use the reserved auto-failed: system prefix",
+        "Reviewer notes cannot use reserved auto-failed: or delivery-unknown: system prefixes",
       );
     }
     const updated = await this.transitionReview(

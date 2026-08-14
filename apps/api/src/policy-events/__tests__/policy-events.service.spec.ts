@@ -14,8 +14,9 @@ describe("PolicyEventsService", () => {
             id: "artifact_unknown",
             graphRunId: "graph_1",
             toolName: "send_email",
-            status: OutreachArtifactStatus.DELIVERY_UNKNOWN,
-            reviewerNote: "Provider outcome could not be reconciled",
+            status: OutreachArtifactStatus.REJECTED,
+            reviewerNote:
+              "delivery-unknown: Provider outcome could not be reconciled",
             failureReason: null,
             failedAt: null,
             sentAt: null,
@@ -41,7 +42,7 @@ describe("PolicyEventsService", () => {
           toolName: "send_email",
           sideEffectLevel: "external_write",
           decision: "delivery_unknown",
-          reason: "Provider outcome could not be reconciled",
+          reason: "delivery-unknown: Provider outcome could not be reconciled",
           createdAt: updatedAt.toISOString(),
         },
       ],
@@ -51,7 +52,13 @@ describe("PolicyEventsService", () => {
     expect(prisma.outreachArtifact.findMany).toHaveBeenCalledWith({
       where: {
         orgId: "org_1",
-        status: OutreachArtifactStatus.DELIVERY_UNKNOWN,
+        OR: [
+          { status: OutreachArtifactStatus.DELIVERY_UNKNOWN },
+          {
+            status: OutreachArtifactStatus.REJECTED,
+            reviewerNote: { startsWith: "delivery-unknown:" },
+          },
+        ],
       },
       orderBy: { updatedAt: "desc" },
       take: 25,

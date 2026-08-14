@@ -163,7 +163,7 @@ describe("DashboardService.activity outreach lifecycle", () => {
       {
         id: "artifact_unknown",
         toolName: "send_email",
-        status: OutreachArtifactStatus.DELIVERY_UNKNOWN,
+        status: OutreachArtifactStatus.REJECTED,
         createdAt: new Date("2026-08-12T09:00:30.000Z"),
         reviewedAt: new Date("2026-08-12T09:01:30.000Z"),
         reviewerNote: "delivery-unknown: provider outcome was ambiguous",

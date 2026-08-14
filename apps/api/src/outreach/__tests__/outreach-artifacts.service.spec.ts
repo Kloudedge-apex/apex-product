@@ -258,6 +258,30 @@ describe("OutreachArtifactsService.recordDryRun", () => {
     );
     expect(prisma.outreachArtifact.create).not.toHaveBeenCalled();
   });
+
+  it("normalizes a reused delivery-unknown marker and prevents a duplicate graph artifact", async () => {
+    prisma.outreachArtifact.findFirst.mockResolvedValue(
+      artifactRow({
+        status: OutreachArtifactStatus.REJECTED,
+        reviewerNote: "delivery-unknown: provider response was ambiguous",
+      }),
+    );
+
+    const result = await service.recordDryRun({
+      orgId: "org_1",
+      graphRunId: "graph_1",
+      toolName: "send_email",
+      toolArgs: {
+        to: "dest@example.com",
+        subject: "Hi",
+        body: "Body",
+        personId: "person_1",
+      },
+    });
+
+    expect(result?.status).toBe(OutreachArtifactStatus.DELIVERY_UNKNOWN);
+    expect(prisma.outreachArtifact.create).not.toHaveBeenCalled();
+  });
 });
 
 describe("OutreachArtifactsService.approve / reject", () => {
@@ -320,6 +344,19 @@ describe("OutreachArtifactsService.approve / reject", () => {
         "art_1",
         "user_x",
         "auto-failed: typed by a reviewer",
+      ),
+    ).rejects.toThrow(BadRequestException);
+    expect(prisma.outreachArtifact.findUnique).not.toHaveBeenCalled();
+    expect(prisma.outreachArtifact.update).not.toHaveBeenCalled();
+  });
+
+  it("reserves the delivery-unknown prefix for system compatibility outcomes", async () => {
+    await expect(
+      service.reject(
+        "org_1",
+        "art_1",
+        "user_x",
+        "delivery-unknown: typed by a reviewer",
       ),
     ).rejects.toThrow(BadRequestException);
     expect(prisma.outreachArtifact.findUnique).not.toHaveBeenCalled();
@@ -964,6 +1001,53 @@ describe("OutreachArtifactsService.list / get", () => {
     expect(detail).not.toHaveProperty("persistedStatus");
   });
 
+  it("filters and exposes legacy-safe delivery-unknown markers as DELIVERY_UNKNOWN", async () => {
+    const compatibilityOutcome = artifactRow({
+      status: OutreachArtifactStatus.REJECTED,
+      reviewerNote:
+        "delivery-unknown: provider response was ambiguous; automatic retry disabled",
+    });
+    prisma.outreachArtifact.findMany.mockResolvedValue([
+      compatibilityOutcome,
+    ]);
+    prisma.outreachArtifact.count.mockResolvedValue(1);
+    prisma.outreachArtifact.findUnique.mockResolvedValue(compatibilityOutcome);
+
+    const list = await service.listForOrg("org_1", {
+      status: OutreachArtifactStatus.DELIVERY_UNKNOWN,
+    });
+    const page = await service.listPageForOrg("org_1", {
+      status: OutreachArtifactStatus.DELIVERY_UNKNOWN,
+      page: 1,
+      limit: 20,
+    });
+    const graphRunList = await service.listForGraphRun("org_1", "graph_1");
+    const detail = await service.get("org_1", "art_1");
+
+    expect(prisma.outreachArtifact.findMany).toHaveBeenCalledWith({
+      where: {
+        orgId: "org_1",
+        OR: [
+          { status: OutreachArtifactStatus.DELIVERY_UNKNOWN },
+          {
+            status: OutreachArtifactStatus.REJECTED,
+            reviewerNote: { startsWith: "delivery-unknown:" },
+          },
+        ],
+      },
+      orderBy: { createdAt: "desc" },
+      take: 100,
+    });
+    expect(list[0]?.status).toBe(OutreachArtifactStatus.DELIVERY_UNKNOWN);
+    expect(page.items[0]?.status).toBe(
+      OutreachArtifactStatus.DELIVERY_UNKNOWN,
+    );
+    expect(graphRunList[0]?.status).toBe(
+      OutreachArtifactStatus.DELIVERY_UNKNOWN,
+    );
+    expect(detail.status).toBe(OutreachArtifactStatus.DELIVERY_UNKNOWN);
+  });
+
   it("returns RECONCILIATION_REQUIRED for an unattested historical marker from list and get", async () => {
     const historicalMarker = artifactRow({
       status: OutreachArtifactStatus.REJECTED,
@@ -991,7 +1075,20 @@ describe("OutreachArtifactsService.list / get", () => {
         status: OutreachArtifactStatus.REJECTED,
         OR: [
           { reviewerNote: null },
-          { NOT: { reviewerNote: { startsWith: "auto-failed:" } } },
+          {
+            AND: [
+              {
+                NOT: {
+                  reviewerNote: { startsWith: "auto-failed:" },
+                },
+              },
+              {
+                NOT: {
+                  reviewerNote: { startsWith: "delivery-unknown:" },
+                },
+              },
+            ],
+          },
         ],
       },
       orderBy: { createdAt: "desc" },

@@ -11,6 +11,11 @@ import {
   decrypt,
   _resetCryptoKeyCacheForTests,
 } from "../../integrations/crypto.util";
+import {
+  DELIVERY_UNKNOWN_COMPATIBILITY_EPOCH,
+  DELIVERY_UNKNOWN_FIRST_CLASS_WRITE_ACK,
+  DELIVERY_UNKNOWN_WRITE_MODE,
+} from "../../outreach/outreach-delivery-unknown-compatibility";
 
 const HEX_KEY = "a".repeat(64);
 const HEX_KEY_2 = "b".repeat(64);
@@ -368,6 +373,75 @@ describe("validateEnv", () => {
       env.OUTREACH_FAILED_STATUS_WRITES_ENABLED = "true";
       env.OUTREACH_FAILED_STATUS_WRITES_ACK =
         "readers-drained-legacy-inventory-reviewed-v1";
+      const { issues } = validateEnv(env);
+      expect(issues).toEqual([]);
+    });
+  });
+
+  describe("DELIVERY_UNKNOWN write-mode rollback compatibility gate", () => {
+    it("defaults to disabled with no writer attestation", () => {
+      const { issues } = validateEnv(baseProdEnv());
+      expect(issues).toEqual([]);
+    });
+
+    it("accepts explicit disabled mode only without an attestation or epoch", () => {
+      const env = baseProdEnv();
+      env.OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE =
+        DELIVERY_UNKNOWN_WRITE_MODE.DISABLED;
+      expect(validateEnv(env).issues).toEqual([]);
+
+      env.OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK =
+        DELIVERY_UNKNOWN_FIRST_CLASS_WRITE_ACK;
+      env.OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH =
+        DELIVERY_UNKNOWN_COMPATIBILITY_EPOCH;
+      const { issues } = validateEnv(env);
+      expect(
+        issues.some((issue) =>
+          issue.includes(
+            "OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE=disabled requires",
+          ),
+        ),
+      ).toBe(true);
+    });
+
+    it("rejects invalid modes and the removed boolean contract", () => {
+      const env = baseProdEnv();
+      env.OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE = "compatibility-fallback";
+      env.OUTREACH_DELIVERY_UNKNOWN_STATUS_WRITES_ENABLED = "false";
+      const { issues } = validateEnv(env);
+      expect(issues).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining(
+            "OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE must be disabled or first-class",
+          ),
+          expect.stringContaining(
+            "OUTREACH_DELIVERY_UNKNOWN_STATUS_WRITES_ENABLED and OUTREACH_DELIVERY_UNKNOWN_STATUS_WRITES_ACK are unsupported",
+          ),
+        ]),
+      );
+    });
+
+    it("requires the exact first-class attestation and compatibility epoch", () => {
+      const env = baseProdEnv();
+      env.OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE =
+        DELIVERY_UNKNOWN_WRITE_MODE.FIRST_CLASS;
+      env.OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK = "wrong-ack";
+      env.OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH = "wrong-epoch";
+      expect(validateEnv(env).issues).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining(
+            `OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK=${DELIVERY_UNKNOWN_FIRST_CLASS_WRITE_ACK}`,
+          ),
+          expect.stringContaining(
+            `OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH=${DELIVERY_UNKNOWN_COMPATIBILITY_EPOCH}`,
+          ),
+        ]),
+      );
+
+      env.OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK =
+        DELIVERY_UNKNOWN_FIRST_CLASS_WRITE_ACK;
+      env.OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH =
+        DELIVERY_UNKNOWN_COMPATIBILITY_EPOCH;
       const { issues } = validateEnv(env);
       expect(issues).toEqual([]);
     });

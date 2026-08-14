@@ -7,6 +7,10 @@ import {
 } from "@prisma/client";
 import {
   SendOutreachWorker,
+  DELIVERY_UNKNOWN_COMPATIBILITY_EPOCH,
+  DELIVERY_UNKNOWN_FIRST_CLASS_WRITE_ACK,
+  DELIVERY_UNKNOWN_WRITE_MODE,
+  resolveDeliveryUnknownWriteMode,
   isLiveSendAllowedForOrg,
   getDailySendCapPerOrg,
 } from "../send-outreach.worker";
@@ -19,6 +23,59 @@ import {
   SendEmailTool,
 } from "../../runtime/tools/send-email.tool";
 import { LinkedInSendMessageTool } from "../../runtime/tools/linkedin-send-message.tool";
+
+beforeEach(() => {
+  process.env.OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE =
+    DELIVERY_UNKNOWN_WRITE_MODE.FIRST_CLASS;
+  process.env.OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK =
+    DELIVERY_UNKNOWN_FIRST_CLASS_WRITE_ACK;
+  process.env.OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH =
+    DELIVERY_UNKNOWN_COMPATIBILITY_EPOCH;
+});
+
+afterEach(() => {
+  delete process.env.OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE;
+  delete process.env.OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK;
+  delete process.env.OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH;
+});
+
+describe("DELIVERY_UNKNOWN status write compatibility mode", () => {
+  it("resolves absent and partially attested configuration to disabled", () => {
+    expect(resolveDeliveryUnknownWriteMode({})).toBe(
+      DELIVERY_UNKNOWN_WRITE_MODE.DISABLED,
+    );
+    expect(
+      resolveDeliveryUnknownWriteMode({
+        OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE:
+          DELIVERY_UNKNOWN_WRITE_MODE.FIRST_CLASS,
+        OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK:
+          DELIVERY_UNKNOWN_FIRST_CLASS_WRITE_ACK,
+      }),
+    ).toBe(DELIVERY_UNKNOWN_WRITE_MODE.DISABLED);
+    expect(
+      resolveDeliveryUnknownWriteMode({
+        OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE: "compatibility-fallback",
+        OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK:
+          "compatible-api-worker-console-baselines-verified-v1",
+        OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH:
+          DELIVERY_UNKNOWN_COMPATIBILITY_EPOCH,
+      }),
+    ).toBe(DELIVERY_UNKNOWN_WRITE_MODE.DISABLED);
+  });
+
+  it("resolves only the exact first-class attestation", () => {
+    expect(
+      resolveDeliveryUnknownWriteMode({
+        OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE:
+          DELIVERY_UNKNOWN_WRITE_MODE.FIRST_CLASS,
+        OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK:
+          DELIVERY_UNKNOWN_FIRST_CLASS_WRITE_ACK,
+        OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH:
+          DELIVERY_UNKNOWN_COMPATIBILITY_EPOCH,
+      }),
+    ).toBe(DELIVERY_UNKNOWN_WRITE_MODE.FIRST_CLASS);
+  });
+});
 
 function artifactRow(
   overrides: Partial<OutreachArtifact> = {},
@@ -578,6 +635,23 @@ describe("SendOutreachWorker.processArtifact", () => {
     expect(prisma.outreachArtifact.update).not.toHaveBeenCalled();
   });
 
+  it("never re-dispatches a SENDING claim preserved by disabled unknown writes", async () => {
+    process.env.OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE =
+      DELIVERY_UNKNOWN_WRITE_MODE.DISABLED;
+    delete process.env.OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK;
+    delete process.env.OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH;
+    prisma.outreachArtifact.findUnique.mockResolvedValue(
+      artifactRow({ status: OutreachArtifactStatus.SENDING }),
+    );
+    const sendSpy = vi.spyOn(SendEmailTool.prototype, "execute");
+
+    await worker.processArtifact("art_1", "org_1");
+
+    expect(sendSpy).not.toHaveBeenCalled();
+    expect(prisma.outreachArtifact.updateMany).not.toHaveBeenCalled();
+    expect(prisma.outreachArtifact.update).not.toHaveBeenCalled();
+  });
+
   it("aborts when the artifact belongs to a different org", async () => {
     prisma.outreachArtifact.findUnique.mockResolvedValue(
       artifactRow({ orgId: "other_org" }),
@@ -648,6 +722,37 @@ describe("SendOutreachWorker.processArtifact", () => {
       });
       expect(prisma.outreachArtifact.update).not.toHaveBeenCalled();
       expect(ledger.messageSent).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.OUTREACH_LIVE_FOR_ORGS;
+    }
+  });
+
+  it("leaves an ambiguous provider claim SENDING when writes are disabled", async () => {
+    process.env.OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE =
+      DELIVERY_UNKNOWN_WRITE_MODE.DISABLED;
+    delete process.env.OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK;
+    delete process.env.OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH;
+    process.env.OUTREACH_LIVE_FOR_ORGS = "org_1";
+    try {
+      prisma.outreachArtifact.findUnique.mockResolvedValue(artifactRow());
+      vi.spyOn(SendEmailTool.prototype, "execute").mockResolvedValueOnce({
+        success: false,
+        data: {
+          sent: false,
+          provider: "gmail",
+          dispatchOutcome: EMAIL_DISPATCH_OUTCOME.DELIVERY_UNKNOWN,
+        },
+        error: "socket closed before response",
+      });
+
+      await worker.processArtifact("art_1", "org_1");
+
+      const terminalWrites =
+        prisma.outreachArtifact.updateMany.mock.calls.filter(
+          ([args]) => args.where.status === OutreachArtifactStatus.SENDING,
+        );
+      expect(terminalWrites).toEqual([]);
+      expect(prisma.outreachArtifact.update).not.toHaveBeenCalled();
     } finally {
       delete process.env.OUTREACH_LIVE_FOR_ORGS;
     }
@@ -1237,7 +1342,7 @@ describe("SendOutreachWorker GL8a — per-org daily send cap", () => {
     expect(ledger.messageSent).not.toHaveBeenCalled();
   });
 
-  it("counts org-scoped SENT, fresh SENDING, and today's DELIVERY_UNKNOWN capacity risk", async () => {
+  it("counts org-scoped SENT, every unresolved SENDING, and today's DELIVERY_UNKNOWN capacity risk", async () => {
     process.env.OUTREACH_LIVE_FOR_ORGS = "org_1";
     prisma.outreachArtifact.findUnique.mockResolvedValue(artifactRow());
     prisma.outreachArtifact.count.mockResolvedValue(99);
@@ -1260,7 +1365,12 @@ describe("SendOutreachWorker GL8a — per-org daily send cap", () => {
       OutreachArtifactStatus.SENT,
       OutreachArtifactStatus.SENDING,
       OutreachArtifactStatus.DELIVERY_UNKNOWN,
+      OutreachArtifactStatus.REJECTED,
     ]);
+    expect(arg.where.OR[3]).toMatchObject({
+      reviewerNote: { startsWith: "delivery-unknown:" },
+      updatedAt: { gte: expect.any(Date) },
+    });
     const cutoff = arg.where.OR[0]?.sentAt?.gte;
     expect(cutoff).toBeInstanceOf(Date);
     // Must be exactly midnight UTC of today.
@@ -1272,10 +1382,7 @@ describe("SendOutreachWorker GL8a — per-org daily send cap", () => {
     expect(age).toBeGreaterThanOrEqual(0);
     expect(age).toBeLessThan(24 * 60 * 60 * 1000);
     const sendingFloor = arg.where.OR[1]?.updatedAt?.gte;
-    expect(sendingFloor).toBeInstanceOf(Date);
-    expect(Date.now() - (sendingFloor?.getTime() ?? 0)).toBeLessThanOrEqual(
-      15 * 60 * 1000 + 1_000,
-    );
+    expect(sendingFloor).toBeUndefined();
     expect(arg.where.OR[2]?.updatedAt?.gte).toEqual(cutoff);
   });
 
@@ -1461,6 +1568,9 @@ describe("SendOutreachWorker GL8b — recipient cooldown", () => {
     const sql = (riskCall[0] as readonly string[]).join("?");
     expect(sql).toContain('lower(btrim("recipientRef"))');
     expect(sql).toContain("DELIVERY_UNKNOWN");
+    expect(sql).toMatch(
+      /"status" = 'SENDING'::"OutreachArtifactStatus"\s*\)\s*OR/,
+    );
     expect(riskCall[1]).toBe("org_1");
     expect(riskCall[2]).toBe("art_1");
     expect(riskCall[3]).toBe(OutreachChannel.EMAIL);
@@ -1501,24 +1611,35 @@ describe("SendOutreachWorker GL8b — recipient cooldown", () => {
     expect(sendSpy).not.toHaveBeenCalled();
   });
 
-  it("defers without suppressing when the same recipient has a fresh SENDING claim", async () => {
-    prisma.outreachArtifact.findUnique.mockResolvedValue(artifactRow());
-    prisma.$queryRaw.mockResolvedValueOnce([]).mockResolvedValueOnce([
-      {
-        id: "art_in_flight",
-        status: OutreachArtifactStatus.SENDING,
-        sentAt: null,
-        updatedAt: new Date(),
-      },
-    ]);
-    const sendSpy = vi.spyOn(SendEmailTool.prototype, "execute");
+  it.each([
+    DELIVERY_UNKNOWN_WRITE_MODE.DISABLED,
+    DELIVERY_UNKNOWN_WRITE_MODE.FIRST_CLASS,
+  ])(
+    "defers without suppressing for an unresolved stale SENDING claim in %s mode",
+    async (writeMode) => {
+      process.env.OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE = writeMode;
+      if (writeMode === DELIVERY_UNKNOWN_WRITE_MODE.DISABLED) {
+        delete process.env.OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK;
+        delete process.env.OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH;
+      }
+      prisma.outreachArtifact.findUnique.mockResolvedValue(artifactRow());
+      prisma.$queryRaw.mockResolvedValueOnce([]).mockResolvedValueOnce([
+        {
+          id: "art_in_flight",
+          status: OutreachArtifactStatus.SENDING,
+          sentAt: null,
+          updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+        },
+      ]);
+      const sendSpy = vi.spyOn(SendEmailTool.prototype, "execute");
 
-    await worker.processArtifact("art_1", "org_1");
+      await worker.processArtifact("art_1", "org_1");
 
-    expect(prisma.outreachArtifact.updateMany).not.toHaveBeenCalled();
-    expect(prisma.outreachArtifact.update).not.toHaveBeenCalled();
-    expect(sendSpy).not.toHaveBeenCalled();
-  });
+      expect(prisma.outreachArtifact.updateMany).not.toHaveBeenCalled();
+      expect(prisma.outreachArtifact.update).not.toHaveBeenCalled();
+      expect(sendSpy).not.toHaveBeenCalled();
+    },
+  );
 
   it("proceeds normally when there is no recent send to that recipient", async () => {
     process.env.OUTREACH_LIVE_FOR_ORGS = "org_1";
@@ -2088,12 +2209,25 @@ describe("SendOutreachWorker conversation safety gates", () => {
         where: {
           id?: { not?: string };
           status?: OutreachArtifactStatus | { in?: OutreachArtifactStatus[] };
+          OR?: Array<{
+            status?: OutreachArtifactStatus;
+            OR?: Array<{ status?: OutreachArtifactStatus }>;
+          }>;
         };
       }) => {
-        const statusFilter =
+        const directStatusFilter =
           typeof args.where.status === "string"
             ? [args.where.status]
             : (args.where.status?.in ?? []);
+        const statusFilter = [
+          ...directStatusFilter,
+          ...(args.where.OR ?? []).flatMap((entry) => [
+            ...(entry.status ? [entry.status] : []),
+            ...(entry.OR ?? []).flatMap((nested) =>
+              nested.status ? [nested.status] : [],
+            ),
+          ]),
+        ];
         return (
           [...rows.values()]
             .filter(
@@ -2342,6 +2476,24 @@ describe("SendOutreachWorker.reconcileStuckArtifacts (recovery sweep)", () => {
         reviewerNote: expect.stringContaining("automatic retry disabled"),
       }),
     });
+    expect(queue.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("leaves stale SENDING claims unchanged while writes are disabled", async () => {
+    process.env.OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE =
+      DELIVERY_UNKNOWN_WRITE_MODE.DISABLED;
+    delete process.env.OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK;
+    delete process.env.OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH;
+    prisma.outreachArtifact.findMany
+      .mockResolvedValueOnce([
+        artifactRow({ status: OutreachArtifactStatus.SENDING }),
+      ])
+      .mockResolvedValueOnce([]);
+
+    const result = await worker.reconcileStuckArtifacts();
+
+    expect(result).toEqual({ deliveryUnknown: 0, requeued: 0 });
+    expect(prisma.outreachArtifact.updateMany).not.toHaveBeenCalled();
     expect(queue.enqueue).not.toHaveBeenCalled();
   });
 

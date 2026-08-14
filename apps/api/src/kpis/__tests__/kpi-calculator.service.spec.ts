@@ -84,6 +84,16 @@ function artifactMatchesWhere(
     !or.some((branch) => artifactMatchesWhere(artifact, branch))
   )
     return false;
+  const and = Array.isArray(where.AND)
+    ? where.AND
+    : where.AND
+      ? [where.AND]
+      : [];
+  if (
+    and.length > 0 &&
+    !and.every((branch) => artifactMatchesWhere(artifact, branch))
+  )
+    return false;
   const not = Array.isArray(where.NOT)
     ? where.NOT
     : where.NOT

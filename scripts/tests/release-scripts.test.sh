@@ -65,6 +65,19 @@ assert_immediately_preceded_by() {
     fail "expected '${target}' immediately after '${expected_previous}', got '${previous_line}'"
 }
 
+assert_last_immediately_preceded_by() {
+  local log_file=$1
+  local target=$2
+  local expected_previous=$3
+  local target_line previous_line
+  target_line="$(grep -nF -- "${target}" "${log_file}" | tail -n 1 | cut -d: -f1)"
+  [[ -n "${target_line}" && ${target_line} -gt 1 ]] ||
+    fail "missing final log entry with predecessor: ${target}"
+  previous_line="$(sed -n "$((target_line - 1))p" "${log_file}")"
+  [[ "${previous_line}" == *"${expected_previous}"* ]] ||
+    fail "expected final '${target}' immediately after '${expected_previous}', got '${previous_line}'"
+}
+
 make_registry_harness() {
   HARNESS="$(mktemp -d)"
   TEMP_DIRS+=("${HARNESS}")
@@ -169,6 +182,22 @@ make_deploy_harness() {
   cp "${REPO_ROOT}/docs/ops/production-clerk-auth.sha256" \
     "${HARNESS}/repo/docs/ops/"
 
+  # The copied controller gets a fail-closed, harness-only revocation point so
+  # rollback can exercise an authority loss after the forward write. It cannot
+  # make production admission more permissive and is never applied to source.
+  awk '
+    { print }
+    /^require_exclusive_containerapp_mutation_authority\(\) \{$/ {
+      print "  if [[ -n \"${FAKE_AUTHORITY_DENY_FILE:-}\" && -e \"${FAKE_AUTHORITY_DENY_FILE:-/nonexistent}\" ]]; then"
+      print "    echo \"ERROR: harness revoked Container Apps mutation authority\" >&2"
+      print "    return 1"
+      print "  fi"
+    }
+  ' "${HARNESS}/repo/scripts/deploy-prod.sh" \
+    >"${HARNESS}/repo/scripts/deploy-prod.sh.next"
+  mv "${HARNESS}/repo/scripts/deploy-prod.sh.next" \
+    "${HARNESS}/repo/scripts/deploy-prod.sh"
+
   cat >"${HARNESS}/repo/scripts/verify-registry-api-image.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'verify-registry %s %s\n' "$1" "$2" >>"${CALL_LOG}"
@@ -197,7 +226,22 @@ EOF
 
   cat >"${HARNESS}/repo/scripts/verify-migration-release-receipt.sh" <<'EOF'
 #!/usr/bin/env bash
-printf 'verify-migrations %s %s %s %s\n' "$1" "$2" "$3" "$4" >>"${CALL_LOG}"
+call=0
+if [[ -s "${MIGRATION_CALL_COUNT}" ]]; then
+  call="$(cat "${MIGRATION_CALL_COUNT}")"
+fi
+call=$((call + 1))
+printf '%s\n' "${call}" >"${MIGRATION_CALL_COUNT}"
+printf 'verify-migrations same-attempt=%s %s\n' \
+  "${WORKFORCE_RELEASE_SAME_ATTEMPT_ROLLBACK:-false}" "$*" >>"${CALL_LOG}"
+if [[ -n "${FAKE_MIGRATION_FAIL_CALL:-}" && "${call}" == "${FAKE_MIGRATION_FAIL_CALL}" ]]; then
+  exit "${FAKE_MIGRATION_FAIL_STATUS:-1}"
+fi
+if [[ -n "${FAKE_MIGRATION_FRESH_EXPIRES_AFTER_CALL:-}" &&
+  ${call} -ge ${FAKE_MIGRATION_FRESH_EXPIRES_AFTER_CALL} &&
+  "${WORKFORCE_RELEASE_SAME_ATTEMPT_ROLLBACK:-false}" != "true" ]]; then
+  exit 1
+fi
 exit "${FAKE_MIGRATION_STATUS:-0}"
 EOF
 
@@ -210,11 +254,24 @@ fi
 config_call=$((config_call + 1))
 printf '%s\n' "${config_call}" >"${CONFIG_CALL_COUNT}"
 printf 'verify-containerapps %s %s\n' "${1:-}" "${2:-}" >>"${CALL_LOG}"
+inject_rollback_failure_state() {
+  if [[ -n "${FAKE_ROLLBACK_DRIFT_APP:-}" ]]; then
+    printf '%s\t%s\t%s\n' \
+      "${FAKE_ROLLBACK_DRIFT_APP}" \
+      "${FAKE_ROLLBACK_DRIFT_IMAGE}" \
+      "${FAKE_ROLLBACK_DRIFT_APP}--external" >>"${AZ_STATE}"
+  fi
+  if [[ "${FAKE_AUTHORITY_FAIL_ON_ROLLBACK:-false}" == "true" ]]; then
+    : >"${FAKE_AUTHORITY_DENY_FILE}"
+  fi
+}
 if [[ -n "${FAKE_CONFIG_FAIL_CALL:-}" && "${config_call}" == "${FAKE_CONFIG_FAIL_CALL}" ]]; then
+  inject_rollback_failure_state
   exit "${FAKE_CONFIG_FAIL_STATUS:-1}"
 fi
 if [[ -n "${FAKE_CONFIG_FAIL_FROM_CALL:-}" &&
   ${config_call} -ge ${FAKE_CONFIG_FAIL_FROM_CALL} ]]; then
+  inject_rollback_failure_state
   exit "${FAKE_CONFIG_FAIL_STATUS:-1}"
 fi
 exit "${FAKE_CONFIG_STATUS:-0}"
@@ -366,10 +423,48 @@ if [[ "${1:-} ${2:-} ${3:-}" == "acr task show-run" ]]; then
   fi
   exit 0
 fi
+state_value() {
+  local app=$1
+  local field=$2
+  local value
+  value="$(awk -F '\t' -v app="${app}" -v field="${field}" '$1 == app { value=$field } END { print value }' "${AZ_STATE}")"
+  if [[ -n "${value}" ]]; then
+    printf '%s\n' "${value}"
+    return
+  fi
+  case "${app}:${field}" in
+    apex-gtm-api:2) printf '%s\n' "${FAKE_PREVIOUS_API_IMAGE}" ;;
+    apex-gtm-api:3) printf '%s\n' 'apex-gtm-api--revision' ;;
+    apex-gtm-worker:2) printf '%s\n' "${FAKE_PREVIOUS_WORKER_IMAGE}" ;;
+    apex-gtm-worker:3) printf '%s\n' 'apex-gtm-worker--revision' ;;
+    nikxius-web:2) printf '%s\n' "${FAKE_PREVIOUS_CONSOLE_IMAGE}" ;;
+    nikxius-web:3) printf '%s\n' 'nikxius-web--revision' ;;
+    *) return 1 ;;
+  esac
+}
+
+record_state() {
+  printf '%s\t%s\t%s\n' "$1" "$2" "$3" >>"${AZ_STATE}"
+}
+
+maybe_inject_concurrent_state() {
+  local app=$1
+  read_call=0
+  if [[ -s "${SHOW_CALL_COUNT}" ]]; then read_call="$(cat "${SHOW_CALL_COUNT}")"; fi
+  read_call=$((read_call + 1))
+  printf '%s\n' "${read_call}" >"${SHOW_CALL_COUNT}"
+  if [[ -n "${FAKE_CONCURRENT_APP:-}" && "${app}" == "${FAKE_CONCURRENT_APP}" &&
+    ${read_call} -gt ${FAKE_CONCURRENT_AFTER_SHOW:-2} &&
+    "$(state_value "${app}" 3)" != "${app}--concurrent" ]]; then
+    printf 'concurrent-image %s %s\n' "${app}" "${FAKE_CONCURRENT_IMAGE}" >>"${CALL_LOG}"
+    record_state "${app}" "${FAKE_CONCURRENT_IMAGE}" "${app}--concurrent"
+  fi
+}
+
 if [[ "${1:-} ${2:-}" == "containerapp update" ]]; then
   app="$(argument --name "$@")"
   image="$(argument --image "$@")"
-  printf '%s\t%s\n' "${app}" "${image}" >>"${AZ_STATE}"
+  record_state "${app}" "${image}" "${app}--new"
   if [[ -n "${FAKE_SIGNAL_APP:-}" && "${app}" == "${FAKE_SIGNAL_APP}" &&
     "${image}" == "${FAKE_SIGNAL_IMAGE:-}" ]]; then
     printf 'signal-ready %s after %s update\n' "${FAKE_SIGNAL_NAME}" "${app}" >>"${CALL_LOG}"
@@ -380,37 +475,111 @@ if [[ "${1:-} ${2:-}" == "containerapp update" ]]; then
   fi
   exit 0
 fi
+if [[ "${1:-} ${2:-} ${3:-}" == "containerapp revision activate" ]]; then
+  app="$(argument --name "$@")"
+  revision="$(argument --revision "$@")"
+  case "${app}" in
+    apex-gtm-api) image="${FAKE_PREVIOUS_API_IMAGE}" ;;
+    apex-gtm-worker) image="${FAKE_PREVIOUS_WORKER_IMAGE}" ;;
+    *) exit 1 ;;
+  esac
+  record_state "${app}" "${image}" "${revision}"
+  exit 0
+fi
+if [[ "${1:-} ${2:-} ${3:-} ${4:-}" == "containerapp ingress traffic set" ]]; then
+  exit 0
+fi
 if [[ "${1:-} ${2:-}" == "containerapp show" ]]; then
   printf '%s\n' "${PPID}" >"${DEPLOY_PID_FILE}"
   app="$(argument --name "$@")"
-  show_call=0
-  if [[ -s "${SHOW_CALL_COUNT}" ]]; then
-    show_call="$(cat "${SHOW_CALL_COUNT}")"
-  fi
-  show_call=$((show_call + 1))
-  printf '%s\n' "${show_call}" >"${SHOW_CALL_COUNT}"
-  if [[ -n "${FAKE_CONCURRENT_APP:-}" && "${app}" == "${FAKE_CONCURRENT_APP}" &&
-    ${show_call} -gt ${FAKE_CONCURRENT_AFTER_SHOW:-2} ]]; then
-    printf 'concurrent-image %s %s\n' "${app}" "${FAKE_CONCURRENT_IMAGE}" >>"${CALL_LOG}"
-    current="${FAKE_CONCURRENT_IMAGE}"
-  elif [[ "${app}" == "apex-gtm-api" ]]; then
-    current="$(awk -F '\t' -v app="${app}" '$1 == app { value=$2 } END { print value }' "${AZ_STATE}")"
-    current="${current:-${FAKE_PREVIOUS_API_IMAGE}}"
+  maybe_inject_concurrent_state "${app}"
+  current="$(state_value "${app}" 2)"
+  revision="$(state_value "${app}" 3)"
+  if [[ "${app}" == "apex-gtm-api" ]]; then
+    max_inactive="${FAKE_API_MAX_INACTIVE_REVISIONS:-10}"
   else
-    current="$(awk -F '\t' -v app="${app}" '$1 == app { value=$2 } END { print value }' "${AZ_STATE}")"
-    current="${current:-${FAKE_PREVIOUS_WORKER_IMAGE}}"
+    max_inactive="${FAKE_WORKER_MAX_INACTIVE_REVISIONS:-10}"
   fi
   jq -n \
     --arg id "/subscriptions/test-subscription/resourceGroups/Ledgr-prod/providers/Microsoft.App/containerApps/${app}" \
     --arg app "${app}" \
     --arg image "${current}" \
+    --arg revision "${revision}" \
+    --arg omit_max_inactive_app "${FAKE_OMIT_MAX_INACTIVE_APP:-}" \
+    --argjson max_inactive "${max_inactive}" \
     '{
       id: $id,
       properties: {
         provisioningState: "Succeeded",
-        latestRevisionName: ($app + "--revision"),
-        latestReadyRevisionName: ($app + "--revision"),
-        template: {containers: [{name: $app, image: $image}]}
+        provisioningState: "Succeeded",
+        latestRevisionName: $revision,
+        latestReadyRevisionName: $revision,
+        configuration: ({
+          activeRevisionsMode: "Single",
+          ingress: (if $app == "apex-gtm-api" then {
+            external: true,
+            traffic: [{revisionName: $revision, latestRevision: false, weight: 100}]
+          } else {external: false} end)
+        } + (if $omit_max_inactive_app == $app
+          then {}
+          else {maxInactiveRevisions: $max_inactive}
+          end)),
+        template: {containers: [{
+          name: $app,
+          image: $image,
+          env: [{name: "OUTREACH_LIVE_FOR_ORGS", value: ""}]
+        }]}
+      }
+    }'
+  exit 0
+fi
+if [[ "${1:-} ${2:-} ${3:-}" == "containerapp revision list" ]]; then
+  app="$(argument --name "$@")"
+  maybe_inject_concurrent_state "${app}"
+  current="$(state_value "${app}" 2)"
+  revision="$(state_value "${app}" 3)"
+  jq -n --arg revision "${revision}" --arg image "${current}" '[{
+    name: $revision,
+    properties: {active: true, template: {containers: [{image: $image}]}}
+  }]'
+  exit 0
+fi
+if [[ "${1:-} ${2:-} ${3:-}" == "containerapp revision show" ]]; then
+  app="$(argument --name "$@")"
+  requested_revision="$(argument --revision "$@")"
+  maybe_inject_concurrent_state "${app}"
+  active_revision="$(state_value "${app}" 3)"
+  if [[ "${requested_revision}" == "${active_revision}" ]]; then
+    active=true
+    current="$(state_value "${app}" 2)"
+  else
+    if [[ "${FAKE_MISSING_RETAINED_APP:-}" == "${app}" ]]; then
+      exit 1
+    fi
+    active=false
+    case "${app}" in
+      apex-gtm-api) current="${FAKE_PREVIOUS_API_IMAGE}" ;;
+      apex-gtm-worker) current="${FAKE_PREVIOUS_WORKER_IMAGE}" ;;
+      nikxius-web) current="${FAKE_PREVIOUS_CONSOLE_IMAGE}" ;;
+      *) exit 1 ;;
+    esac
+    if [[ "${FAKE_CHANGED_RETAINED_APP:-}" == "${app}" ]]; then
+      current="ledgracr.azurecr.io/apex-api@sha256:$(printf '4%.0s' {1..64})"
+    fi
+  fi
+  jq -n \
+    --arg revision "${requested_revision}" \
+    --arg image "${current}" \
+    --argjson active "${active}" '{
+      name: $revision,
+      properties: {
+        active: $active,
+        healthState: "Healthy",
+        provisioningState: "Provisioned",
+        template: {containers: [{
+          image: $image,
+          env: [{name: "OUTREACH_LIVE_FOR_ORGS", value: ""}]
+        }]}
       }
     }'
   exit 0
@@ -429,6 +598,7 @@ EOF
   CALL_LOG="${HARNESS}/calls.log"
   AZ_STATE="${HARNESS}/az-state.tsv"
   CONFIG_CALL_COUNT="${HARNESS}/config-call-count"
+  MIGRATION_CALL_COUNT="${HARNESS}/migration-call-count"
   SHOW_CALL_COUNT="${HARNESS}/show-call-count"
   DEPLOY_PID_FILE="${HARNESS}/deploy.pid"
   BOOTSTRAP_PID_FILE="${HARNESS}/bootstrap.pid"
@@ -436,11 +606,13 @@ EOF
   BOOTSTRAP_SIGNAL_READY_FILE="${HARNESS}/bootstrap-signal-ready"
   SIGNAL_READY_FILE="${HARNESS}/signal-ready"
   SIGNAL_CONTINUE_FILE="${HARNESS}/signal-continue"
+  FAKE_AUTHORITY_DENY_FILE="${HARNESS}/authority-denied"
   touch "${HARNESS}/receipt.json"
   touch "${HARNESS}/receipt.json.sig" "${HARNESS}/allowed-signers"
   : >"${CALL_LOG}"
   : >"${AZ_STATE}"
   printf '0\n' >"${CONFIG_CALL_COUNT}"
+  printf '0\n' >"${MIGRATION_CALL_COUNT}"
   printf '0\n' >"${SHOW_CALL_COUNT}"
   FAKE_TREE_COMMIT="$(printf '6%.0s' {1..40})"
   FAKE_LEASE_COMMIT="$(printf '7%.0s' {1..40})"
@@ -467,6 +639,7 @@ run_fake_deploy() {
     CURL_CA_BUNDLE="${HARNESS}/hostile-ca.pem" \
     AZ_STATE="${AZ_STATE}" \
     CONFIG_CALL_COUNT="${CONFIG_CALL_COUNT}" \
+    MIGRATION_CALL_COUNT="${MIGRATION_CALL_COUNT}" \
     SHOW_CALL_COUNT="${SHOW_CALL_COUNT}" \
     DEPLOY_PID_FILE="${DEPLOY_PID_FILE}" \
     BOOTSTRAP_PID_FILE="${BOOTSTRAP_PID_FILE}" \
@@ -485,6 +658,9 @@ run_fake_deploy() {
     FAKE_VERIFY_STATUS="${FAKE_VERIFY_STATUS:-0}" \
     FAKE_CI_STATUS="${FAKE_CI_STATUS:-0}" \
     FAKE_MIGRATION_STATUS="${FAKE_MIGRATION_STATUS:-0}" \
+    FAKE_MIGRATION_FAIL_CALL="${FAKE_MIGRATION_FAIL_CALL:-}" \
+    FAKE_MIGRATION_FAIL_STATUS="${FAKE_MIGRATION_FAIL_STATUS:-1}" \
+    FAKE_MIGRATION_FRESH_EXPIRES_AFTER_CALL="${FAKE_MIGRATION_FRESH_EXPIRES_AFTER_CALL:-}" \
     FAKE_LOCK_STATUS="${FAKE_LOCK_STATUS:-0}" \
     FAKE_LOCK_CLEANUP_STATUS="${FAKE_LOCK_CLEANUP_STATUS:-0}" \
     FAKE_MUTATE_SOURCE_HELPER_ON_LOCK="${FAKE_MUTATE_SOURCE_HELPER_ON_LOCK:-false}" \
@@ -494,6 +670,10 @@ run_fake_deploy() {
     FAKE_CONFIG_FAIL_CALL="${FAKE_CONFIG_FAIL_CALL:-}" \
     FAKE_CONFIG_FAIL_FROM_CALL="${FAKE_CONFIG_FAIL_FROM_CALL:-}" \
     FAKE_CONFIG_FAIL_STATUS="${FAKE_CONFIG_FAIL_STATUS:-1}" \
+    FAKE_ROLLBACK_DRIFT_APP="${FAKE_ROLLBACK_DRIFT_APP:-}" \
+    FAKE_ROLLBACK_DRIFT_IMAGE="${FAKE_ROLLBACK_DRIFT_IMAGE:-}" \
+    FAKE_AUTHORITY_FAIL_ON_ROLLBACK="${FAKE_AUTHORITY_FAIL_ON_ROLLBACK:-false}" \
+    FAKE_AUTHORITY_DENY_FILE="${FAKE_AUTHORITY_DENY_FILE}" \
     FAKE_SIGNAL_APP="${FAKE_SIGNAL_APP:-}" \
     FAKE_SIGNAL_IMAGE="${FAKE_SIGNAL_IMAGE:-}" \
     FAKE_SIGNAL_NAME="${FAKE_SIGNAL_NAME:-TERM}" \
@@ -501,6 +681,11 @@ run_fake_deploy() {
     FAKE_CONCURRENT_APP="${FAKE_CONCURRENT_APP:-}" \
     FAKE_CONCURRENT_IMAGE="${FAKE_CONCURRENT_IMAGE:-}" \
     FAKE_CONCURRENT_AFTER_SHOW="${FAKE_CONCURRENT_AFTER_SHOW:-2}" \
+    FAKE_API_MAX_INACTIVE_REVISIONS="${FAKE_API_MAX_INACTIVE_REVISIONS:-10}" \
+    FAKE_WORKER_MAX_INACTIVE_REVISIONS="${FAKE_WORKER_MAX_INACTIVE_REVISIONS:-10}" \
+    FAKE_OMIT_MAX_INACTIVE_APP="${FAKE_OMIT_MAX_INACTIVE_APP:-}" \
+    FAKE_MISSING_RETAINED_APP="${FAKE_MISSING_RETAINED_APP:-}" \
+    FAKE_CHANGED_RETAINED_APP="${FAKE_CHANGED_RETAINED_APP:-}" \
     GIT_SSL_CAINFO="${HARNESS}/hostile-ca.pem" \
     GIT_SSL_NO_VERIFY=true \
     GIT_TRACE="${HARNESS}/hostile-git-trace" \
@@ -510,6 +695,7 @@ run_fake_deploy() {
     ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED="${ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED-true}" \
     FAKE_PREVIOUS_API_IMAGE="ledgracr.azurecr.io/apex-api@sha256:$(printf 'd%.0s' {1..64})" \
     FAKE_PREVIOUS_WORKER_IMAGE="ledgracr.azurecr.io/apex-api@sha256:$(printf 'e%.0s' {1..64})" \
+    FAKE_PREVIOUS_CONSOLE_IMAGE="ledgracr.azurecr.io/workforceos-fe@sha256:$(printf 'f%.0s' {1..64})" \
     "${HARNESS}/repo/scripts/deploy-prod.sh" "${deploy_args[@]}"
   deploy_status=$?
   return "${deploy_status}"
@@ -519,6 +705,7 @@ reset_deploy_harness() {
   : >"${CALL_LOG}"
   : >"${AZ_STATE}"
   printf '0\n' >"${CONFIG_CALL_COUNT}"
+  printf '0\n' >"${MIGRATION_CALL_COUNT}"
   FAKE_LOCK_STATUS=0
   FAKE_LOCK_CLEANUP_STATUS=0
   FAKE_MUTATE_SOURCE_HELPER_ON_LOCK=false
@@ -526,7 +713,19 @@ reset_deploy_harness() {
   FAKE_BOOTSTRAP_SIGNAL_POINT=""
   FAKE_OMIT_YES=false
   ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED=true
+  FAKE_CONFIG_STATUS=0
+  FAKE_CONFIG_FAIL_CALL=""
   FAKE_CONFIG_FAIL_FROM_CALL=""
+  FAKE_ROLLBACK_DRIFT_APP=""
+  FAKE_ROLLBACK_DRIFT_IMAGE=""
+  FAKE_AUTHORITY_FAIL_ON_ROLLBACK=false
+  FAKE_API_MAX_INACTIVE_REVISIONS=10
+  FAKE_WORKER_MAX_INACTIVE_REVISIONS=10
+  FAKE_OMIT_MAX_INACTIVE_APP=""
+  FAKE_MISSING_RETAINED_APP=""
+  FAKE_CHANGED_RETAINED_APP=""
+  FAKE_MIGRATION_FAIL_CALL=""
+  FAKE_MIGRATION_FRESH_EXPIRES_AFTER_CALL=""
   printf '0\n' >"${SHOW_CALL_COUNT}"
   rm -f -- \
     "${DEPLOY_PID_FILE}" \
@@ -534,11 +733,12 @@ reset_deploy_harness() {
     "${BOOTSTRAP_DESCENDANT_PID_FILE}" \
     "${BOOTSTRAP_SIGNAL_READY_FILE}" \
     "${SIGNAL_READY_FILE}" \
-    "${SIGNAL_CONTINUE_FILE}"
+    "${SIGNAL_CONTINUE_FILE}" \
+    "${FAKE_AUTHORITY_DENY_FILE}"
 }
 
 test_deploy_admission() {
-  local requested_image snapshot_context direct_token
+  local requested_image snapshot_context direct_token rollback_api rollback_worker exact_baseline_log
   make_deploy_harness
   FAKE_BRANCH="release/go-live-test"
   FAKE_COMMIT="$(printf '1%.0s' {1..40})"
@@ -547,6 +747,20 @@ test_deploy_admission() {
   FAKE_DIGEST="sha256:$(printf '2%.0s' {1..64})"
   FAKE_VERIFY_STATUS=0
   requested_image="ledgracr.azurecr.io/apex-api@${FAKE_DIGEST}"
+  rollback_api="ledgracr.azurecr.io/apex-api@sha256:$(printf 'd%.0s' {1..64})"
+  rollback_worker="ledgracr.azurecr.io/apex-api@sha256:$(printf 'e%.0s' {1..64})"
+  exact_baseline_log="${FAKE_COMMIT} ${rollback_api} apex-gtm-api--revision ${rollback_worker} apex-gtm-worker--revision ledgracr.azurecr.io/workforceos-fe@sha256:$(printf 'f%.0s' {1..64}) nikxius-web--revision disabled"
+
+  grep -Fq -- "Microsoft.App/containerApps/write authority across apex-gtm-api" \
+    "${REPO_ROOT}/scripts/deploy-prod.sh" ||
+    fail "deploy authority contract does not name the API mutation target"
+  grep -Fq -- "apex-gtm-worker, and nikxius-web" \
+    "${REPO_ROOT}/scripts/deploy-prod.sh" ||
+    fail "deploy authority contract does not name the worker and console mutation targets"
+  grep -Fq -- "mutation lease that excludes every other writer" \
+    "${REPO_ROOT}/scripts/deploy-prod.sh" ||
+    fail "deploy authority contract does not admit only a coordinated three-app lease"
+  pass
 
   # Only the bootstrap parent may delete its runtime directory. Even a direct
   # child with an otherwise valid snapshot identity must never recursively
@@ -584,7 +798,9 @@ test_deploy_admission() {
   # under Bash 3 covers the zero discovered BASH_FUNC_* environment case.
   run_fake_deploy >/dev/null
   assert_log_contains "${CALL_LOG}" "verify-ci ${FAKE_COMMIT}"
-  assert_log_contains "${CALL_LOG}" "verify-migrations ${HARNESS}/receipt.json ${HARNESS}/receipt.json.sig ${HARNESS}/allowed-signers ${FAKE_COMMIT}"
+  assert_log_contains "${CALL_LOG}" "verify-migrations "
+  assert_log_contains "${CALL_LOG}" "${exact_baseline_log}"
+  assert_before "${CALL_LOG}" "${exact_baseline_log}" "az acr build"
   assert_log_contains "${CALL_LOG}" "az acr task show-run --registry ledgracr --run-id ${FAKE_RUN_ID}"
   assert_log_contains "${CALL_LOG}" "verify-registry ${requested_image} ${FAKE_COMMIT}"
   assert_log_contains "${CALL_LOG}" \
@@ -601,11 +817,12 @@ test_deploy_admission() {
   assert_log_contains "${CALL_LOG}" "az containerapp update --name apex-gtm-worker"
   assert_log_contains "${CALL_LOG}" "az containerapp update --name apex-gtm-api"
   assert_immediately_preceded_by "${CALL_LOG}" \
-    "az containerapp update --name apex-gtm-worker" \
-    "az containerapp show --name apex-gtm-worker --resource-group Ledgr-prod --output json"
+    "az containerapp update --name apex-gtm-api" "${exact_baseline_log}"
   assert_immediately_preceded_by "${CALL_LOG}" \
-    "az containerapp update --name apex-gtm-api" \
-    "az containerapp show --name apex-gtm-api --resource-group Ledgr-prod --output json"
+    "az containerapp update --name apex-gtm-worker" "${exact_baseline_log}"
+  assert_before "${CALL_LOG}" \
+    "az containerapp revision show --name nikxius-web" \
+    "az containerapp update --name apex-gtm-api"
   assert_before "${CALL_LOG}" "verify-registry" "az containerapp update"
   assert_before "${CALL_LOG}" "az containerapp update --name apex-gtm-api" \
     "az containerapp update --name apex-gtm-worker"
@@ -617,6 +834,24 @@ test_deploy_admission() {
   if [[ -z "${snapshot_context}" || -e "${snapshot_context}" ]]; then
     fail "bootstrap parent did not remove its exact private snapshot after release"
   fi
+  pass
+
+  reset_deploy_harness
+  FAKE_OMIT_MAX_INACTIVE_APP="apex-gtm-api"
+  if run_fake_deploy >/dev/null 2>&1; then
+    fail "deploy accepted API state without explicit inactive-revision retention"
+  fi
+  assert_log_excludes "${CALL_LOG}" "az acr build"
+  assert_log_excludes "${CALL_LOG}" "az containerapp update"
+  pass
+
+  reset_deploy_harness
+  FAKE_WORKER_MAX_INACTIVE_REVISIONS=0
+  if run_fake_deploy >/dev/null 2>&1; then
+    fail "deploy accepted zero worker inactive-revision retention"
+  fi
+  assert_log_excludes "${CALL_LOG}" "az acr build"
+  assert_log_excludes "${CALL_LOG}" "az containerapp update"
   pass
 
   reset_deploy_harness
@@ -664,6 +899,17 @@ test_deploy_admission() {
   if run_fake_deploy >/dev/null 2>&1; then
     fail "deploy continued after exact registry verification failed"
   fi
+  assert_log_excludes "${CALL_LOG}" "az containerapp update"
+  pass
+
+  reset_deploy_harness
+  FAKE_CONCURRENT_APP="apex-gtm-api"
+  FAKE_CONCURRENT_IMAGE="${rollback_api}"
+  if run_fake_deploy >/dev/null 2>&1; then
+    fail "deploy overwrote a same-image concurrent configuration revision"
+  fi
+  assert_log_contains "${CALL_LOG}" \
+    "concurrent-image apex-gtm-api ${rollback_api}"
   assert_log_excludes "${CALL_LOG}" "az containerapp update"
   pass
 
@@ -728,7 +974,7 @@ test_deploy_admission() {
 test_deploy_rollback() {
   local requested_image previous_api_image previous_worker_image rollout_status
   local deploy_job deploy_pid signal_ready
-  local forward_api forward_worker rollback_api rollback_worker
+  local forward_api forward_worker rollback_api rollback_worker exact_baseline_log
   make_deploy_harness
   FAKE_BRANCH="release/go-live-test"
   FAKE_COMMIT="$(printf '1%.0s' {1..40})"
@@ -742,8 +988,25 @@ test_deploy_rollback() {
   previous_worker_image="ledgracr.azurecr.io/apex-api@sha256:$(printf 'e%.0s' {1..64})"
   forward_worker="az containerapp update --name apex-gtm-worker --resource-group Ledgr-prod --image ${requested_image} --output none"
   forward_api="az containerapp update --name apex-gtm-api --resource-group Ledgr-prod --image ${requested_image} --output none"
-  rollback_worker="az containerapp update --name apex-gtm-worker --resource-group Ledgr-prod --image ${previous_worker_image} --output none"
-  rollback_api="az containerapp update --name apex-gtm-api --resource-group Ledgr-prod --image ${previous_api_image} --output none"
+  rollback_worker="az containerapp revision activate --name apex-gtm-worker --resource-group Ledgr-prod --revision apex-gtm-worker--revision --output none"
+  rollback_api="az containerapp revision activate --name apex-gtm-api --resource-group Ledgr-prod --revision apex-gtm-api--revision --output none"
+  exact_baseline_log="${FAKE_COMMIT} ${previous_api_image} apex-gtm-api--revision ${previous_worker_image} apex-gtm-worker--revision ledgracr.azurecr.io/workforceos-fe@sha256:$(printf 'f%.0s' {1..64}) nikxius-web--revision disabled"
+
+  # The final fresh receipt check occurs after the slow three-app identity
+  # reads. If it expires there, no forward or compensating ACA write is legal.
+  FAKE_MIGRATION_FRESH_EXPIRES_AFTER_CALL=4
+  if run_fake_deploy >/dev/null 2>&1; then
+    fail "deploy accepted a receipt that expired during final pre-write identity reads"
+  fi
+  assert_last_immediately_preceded_by "${CALL_LOG}" \
+    "verify-migrations same-attempt=false" \
+    "az containerapp revision show --name nikxius-web"
+  assert_log_excludes "${CALL_LOG}" "az containerapp update"
+  assert_log_excludes "${CALL_LOG}" "az containerapp revision activate"
+  assert_log_excludes "${CALL_LOG}" "az containerapp ingress traffic set"
+  pass
+
+  reset_deploy_harness
 
   # A failed read-back after the reader-first API mutation must restore the API
   # and leave the writer worker untouched.
@@ -753,13 +1016,95 @@ test_deploy_rollback() {
   fi
   assert_log_contains "${CALL_LOG}" "${forward_api}"
   assert_log_contains "${CALL_LOG}" "${rollback_api}"
-  assert_immediately_preceded_by "${CALL_LOG}" "${rollback_api}" \
-    "az containerapp show --name apex-gtm-api --resource-group Ledgr-prod --output json"
   assert_log_excludes "${CALL_LOG}" "az containerapp update --name apex-gtm-worker"
   assert_before "${CALL_LOG}" "${forward_api}" "${rollback_api}"
+  assert_log_contains "${CALL_LOG}" "${exact_baseline_log}"
   assert_log_contains "${CALL_LOG}" "verify-containerapps ${previous_api_image} ${previous_worker_image}"
   assert_log_excludes "${CALL_LOG}" \
     "push --force-with-lease=refs/heads/workforce-os-release-lock/production-gtm-platform:${FAKE_LEASE_COMMIT} https://github.com/Kloudedge-apex/apex-product.git :refs/heads/workforce-os-release-lock/production-gtm-platform"
+  pass
+
+  # The immediately prior API revision must still exist before a worker write
+  # or rollback activation. A platform-retention miss leaves both mutation
+  # paths fail-closed.
+  reset_deploy_harness
+  FAKE_CONFIG_FAIL_CALL=""
+  FAKE_MISSING_RETAINED_APP="apex-gtm-api"
+  if run_fake_deploy >/dev/null 2>&1; then
+    fail "deploy continued after the prior API revision disappeared"
+  fi
+  assert_log_contains "${CALL_LOG}" "${forward_api}"
+  assert_log_excludes "${CALL_LOG}" "${forward_worker}"
+  assert_log_excludes "${CALL_LOG}" "az containerapp revision activate"
+  assert_log_excludes "${CALL_LOG}" "az containerapp ingress traffic set"
+  pass
+
+  reset_deploy_harness
+  FAKE_CONFIG_FAIL_CALL=""
+  FAKE_CHANGED_RETAINED_APP="apex-gtm-api"
+  if run_fake_deploy >/dev/null 2>&1; then
+    fail "deploy continued after the prior API revision image changed"
+  fi
+  assert_log_contains "${CALL_LOG}" "${forward_api}"
+  assert_log_excludes "${CALL_LOG}" "${forward_worker}"
+  assert_log_excludes "${CALL_LOG}" "az containerapp revision activate"
+  assert_log_excludes "${CALL_LOG}" "az containerapp ingress traffic set"
+  pass
+
+  # Rollback runs with errexit disabled. A fresh active-state mismatch must
+  # still return explicitly before either compensating Azure mutation.
+  reset_deploy_harness
+  FAKE_CONFIG_FAIL_CALL=3
+  FAKE_ROLLBACK_DRIFT_APP="apex-gtm-api"
+  FAKE_ROLLBACK_DRIFT_IMAGE="ledgracr.azurecr.io/apex-api@sha256:$(printf '3%.0s' {1..64})"
+  if run_fake_deploy >/dev/null 2>&1; then
+    fail "deploy succeeded after rollback detected external production drift"
+  fi
+  assert_log_contains "${CALL_LOG}" "${forward_api}"
+  assert_log_excludes "${CALL_LOG}" "az containerapp revision activate"
+  assert_log_excludes "${CALL_LOG}" "az containerapp ingress traffic set"
+  pass
+
+  # The same set +e path must stop if exclusive write authority is revoked
+  # after the forward mutation but before compensation.
+  reset_deploy_harness
+  FAKE_CONFIG_FAIL_CALL=3
+  FAKE_AUTHORITY_FAIL_ON_ROLLBACK=true
+  if run_fake_deploy >"${HARNESS}/rollback-authority-failure.log" 2>&1; then
+    fail "deploy succeeded after rollback mutation authority was revoked"
+  fi
+  assert_log_contains "${CALL_LOG}" "${forward_api}"
+  assert_log_contains "${HARNESS}/rollback-authority-failure.log" \
+    "harness revoked Container Apps mutation authority"
+  assert_log_excludes "${CALL_LOG}" "az containerapp revision activate"
+  assert_log_excludes "${CALL_LOG}" "az containerapp ingress traffic set"
+  pass
+
+  # Admission freshness may expire during a slow build, but rollback must
+  # reverify the frozen signed bytes and exact identities in the same attempt.
+  reset_deploy_harness
+  FAKE_CONFIG_FAIL_CALL=3
+  FAKE_MIGRATION_FRESH_EXPIRES_AFTER_CALL=5
+  if run_fake_deploy >/dev/null 2>&1; then
+    fail "deploy succeeded after API verification failed in the receipt-expiry scenario"
+  fi
+  assert_log_contains "${CALL_LOG}" "verify-migrations same-attempt=true"
+  assert_log_contains "${CALL_LOG}" "${rollback_api}"
+  pass
+
+  # A signed-baseline verifier failure at rollback time must stop before any
+  # compensating write, even though earlier admission checks succeeded.
+  reset_deploy_harness
+  FAKE_CONFIG_FAIL_CALL=3
+  FAKE_MIGRATION_FAIL_CALL=5
+  if run_fake_deploy >"${HARNESS}/rollback-baseline-failure.log" 2>&1; then
+    fail "deploy succeeded after rollback baseline verification failed"
+  fi
+  assert_log_contains "${CALL_LOG}" "${forward_api}"
+  assert_log_excludes "${CALL_LOG}" "${rollback_api}"
+  assert_log_excludes "${CALL_LOG}" "${rollback_worker}"
+  assert_log_contains "${HARNESS}/rollback-baseline-failure.log" \
+    "signed rollback baseline verification failed; no compensating write was attempted"
   pass
 
   # If rollback read-back also fails, production state is uncertain and the
@@ -789,13 +1134,15 @@ test_deploy_rollback() {
   assert_log_contains "${CALL_LOG}" "${forward_api}"
   assert_log_contains "${CALL_LOG}" "${rollback_api}"
   assert_log_contains "${CALL_LOG}" "${rollback_worker}"
-  assert_immediately_preceded_by "${CALL_LOG}" "${rollback_api}" \
-    "az containerapp show --name apex-gtm-api --resource-group Ledgr-prod --output json"
-  assert_immediately_preceded_by "${CALL_LOG}" "${rollback_worker}" \
-    "az containerapp show --name apex-gtm-worker --resource-group Ledgr-prod --output json"
   assert_before "${CALL_LOG}" "${forward_api}" "${rollback_api}"
   assert_before "${CALL_LOG}" "${forward_api}" "${forward_worker}"
   assert_before "${CALL_LOG}" "${rollback_worker}" "${rollback_api}"
+  assert_log_contains "${CALL_LOG}" \
+    "az containerapp ingress traffic set --name apex-gtm-api --resource-group Ledgr-prod --revision-weight apex-gtm-api--revision=100 --output none"
+  assert_log_excludes "${CALL_LOG}" \
+    "az containerapp update --name apex-gtm-api --resource-group Ledgr-prod --image ${previous_api_image}"
+  assert_log_excludes "${CALL_LOG}" \
+    "az containerapp update --name apex-gtm-worker --resource-group Ledgr-prod --image ${previous_worker_image}"
   assert_log_contains "${CALL_LOG}" "verify-containerapps ${previous_api_image} ${previous_worker_image}"
   pass
 
@@ -1626,7 +1973,7 @@ EOF
 }
 
 test_migration_receipt_contract_parity() {
-  local schema_min schema_max verifier_count
+  local schema_min schema_max verifier_count schema_version
   schema_min="$(jq -er '.properties.migrations.minItems | numbers' \
     "${REPO_ROOT}/docs/ops/production-migration-receipt.schema.json")"
   schema_max="$(jq -er '.properties.migrations.maxItems | numbers' \
@@ -1636,6 +1983,8 @@ test_migration_receipt_contract_parity() {
     in_migrations && /^\)$/ { print count; exit }
     in_migrations && /^[[:space:]]+"/ { count += 1 }
   ' "${REPO_ROOT}/scripts/verify-migration-release-receipt.sh")"
+  schema_version="$(jq -er '.properties.schemaVersion.const' \
+    "${REPO_ROOT}/docs/ops/production-migration-receipt.schema.json")"
 
   [[ "${schema_min}" == "${schema_max}" ]] ||
     fail "migration receipt schema minItems/maxItems disagree: ${schema_min}/${schema_max}"
@@ -1647,11 +1996,23 @@ test_migration_receipt_contract_parity() {
   grep -Fq -- 'length == $migration_count' \
     "${REPO_ROOT}/scripts/verify-migration-release-receipt.sh" ||
     fail "migration verifier does not enforce its derived migration count"
+  [[ "${schema_version}" == "3" ]] ||
+    fail "production migration receipt schema is not freshness-bound compatibility-baseline v3"
+  jq -e '
+    (.required | index("rollbackBaseline")) != null
+    and (.required | index("expiresAt")) != null
+    and (.properties.rollbackBaseline.required | length) == 10
+    and (.properties.rollbackBaseline.properties.compatibilityAttestation.const
+      == "enum-aware-api-worker-console-baseline-v1")
+  ' "${REPO_ROOT}/docs/ops/production-migration-receipt.schema.json" >/dev/null ||
+    fail "migration receipt schema does not require the complete rollback baseline"
   pass
 }
 
 test_migration_receipt_verifier() {
   local harness commit evidence migrations_json index path pause source_hash entry
+  local api_image worker_image console_image api_revision worker_revision console_revision
+  local now_epoch verified_at expires_at
   local -a paths pauses
   harness="$(mktemp -d)"
   TEMP_DIRS+=("${harness}")
@@ -1687,6 +2048,15 @@ test_migration_receipt_verifier() {
   git -C "${harness}/repo" commit -q -m "fixture: committed release evidence"
   commit="$(git -C "${harness}/repo" rev-parse HEAD)"
   evidence="sha256:$(printf '6%.0s' {1..64})"
+  api_image="ledgracr.azurecr.io/apex-api@sha256:$(printf '7%.0s' {1..64})"
+  worker_image="ledgracr.azurecr.io/apex-api@sha256:$(printf '8%.0s' {1..64})"
+  console_image="ledgracr.azurecr.io/workforceos-fe@sha256:$(printf '9%.0s' {1..64})"
+  api_revision="apex-gtm-api--rollback-a"
+  worker_revision="apex-gtm-worker--rollback-b"
+  console_revision="nikxius-web--rollback-c"
+  now_epoch="$(date -u +%s)"
+  verified_at="$(jq -nr --argjson epoch "${now_epoch}" '$epoch | todateiso8601')"
+  expires_at="$(jq -nr --argjson epoch "$((now_epoch + 600))" '$epoch | todateiso8601')"
   migrations_json='[]'
   for index in "${!paths[@]}"; do
     path="${paths[$index]}"
@@ -1711,12 +2081,21 @@ test_migration_receipt_verifier() {
   jq -n \
     --arg commit "${commit}" \
     --arg evidence "${evidence}" \
+    --arg api_image "${api_image}" \
+    --arg api_revision "${api_revision}" \
+    --arg worker_image "${worker_image}" \
+    --arg worker_revision "${worker_revision}" \
+    --arg console_image "${console_image}" \
+    --arg console_revision "${console_revision}" \
+    --arg verified_at "${verified_at}" \
+    --arg expires_at "${expires_at}" \
     --argjson migrations "${migrations_json}" '{
-      schemaVersion: 1,
+      schemaVersion: 3,
       environment: "production",
       candidateCommit: $commit,
       status: "applied-and-verified",
-      verifiedAt: "2026-08-12T12:00:00Z",
+      verifiedAt: $verified_at,
+      expiresAt: $expires_at,
       operator: "operator-a",
       approver: "approver-b",
       changeTicket: "change-1",
@@ -1724,6 +2103,30 @@ test_migration_receipt_verifier() {
       stagingRehearsalEvidenceHash: $evidence,
       productionApplyEvidenceHash: $evidence,
       rollbackRehearsalEvidenceHash: $evidence,
+      rollbackBaseline: {
+        apiImage: $api_image,
+        apiRevision: $api_revision,
+        workerImage: $worker_image,
+        workerRevision: $worker_revision,
+        consoleImage: $console_image,
+        consoleRevision: $console_revision,
+        compatibilityAttestation: "enum-aware-api-worker-console-baseline-v1",
+        compatibilityEpoch: "outreach-delivery-unknown-v1",
+        deliveryUnknownWriteMode: "disabled",
+        attestation: "delivery-unknown-writes-disabled-v1"
+      },
+      outreachQuiescence: {
+        apiMutationsBlocked: true,
+        legacyWorkerStopped: true,
+        queuesPaused: {agentRuns: true, graphRuns: true, outreachSend: true},
+        activeJobs: {agentRuns: 0, graphRuns: 0, outreachSend: 0},
+        sendingRows: 0,
+        firstClassDeliveryUnknownRows: 0,
+        legacyDeliveryUnknownMarkerRows: 0,
+        replySlotDuplicateRows: 0,
+        liveSendAllowlistEmpty: true,
+        evidenceHash: $evidence
+      },
       migrations: $migrations
     }' >"${harness}/receipt.json"
 
@@ -1737,6 +2140,177 @@ test_migration_receipt_verifier() {
     "${harness}/receipt.json.sig" \
     "${harness}/allowed-signers" \
     "${commit}" >/dev/null
+  pass
+
+  mkdir -p "${harness}/freshness-bin"
+  cat >"${harness}/freshness-bin/date" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" != "-u +%s" ]]; then
+  exec /bin/date "$@"
+fi
+count=0
+if [[ -s "${DATE_CALL_COUNT}" ]]; then count="$(cat "${DATE_CALL_COUNT}")"; fi
+count=$((count + 1))
+printf '%s\n' "${count}" >"${DATE_CALL_COUNT}"
+if [[ ${count} -eq 1 ]]; then
+  printf '%s\n' "${DATE_FIRST_EPOCH}"
+else
+  printf '%s\n' "${DATE_FINAL_EPOCH}"
+fi
+EOF
+  chmod +x "${harness}/freshness-bin/date"
+  printf '0\n' >"${harness}/date-call-count"
+  if env PATH="${harness}/freshness-bin:${PATH}" \
+    DATE_CALL_COUNT="${harness}/date-call-count" \
+    DATE_FIRST_EPOCH="${now_epoch}" \
+    DATE_FINAL_EPOCH="$((now_epoch + 600))" \
+    "${harness}/repo/scripts/verify-migration-release-receipt.sh" \
+      "${harness}/receipt.json" \
+      "${harness}/receipt.json.sig" \
+      "${harness}/allowed-signers" \
+      "${commit}" >/dev/null 2>&1; then
+    fail "migration receipt verifier accepted the exact expiresAt boundary"
+  fi
+  [[ "$(cat "${harness}/date-call-count")" == "2" ]] ||
+    fail "migration receipt verifier did not recheck freshness at return"
+  pass
+
+  jq '.rollbackBaseline.compatibilityAttestation = "unverified-baseline"' \
+    "${harness}/receipt.json" >"${harness}/unverified-baseline-receipt.json"
+  ssh-keygen -Y sign \
+    -f "${harness}/approver-key" \
+    -n workforce-os-migration-receipt \
+    "${harness}/unverified-baseline-receipt.json" >/dev/null 2>&1
+  if "${harness}/repo/scripts/verify-migration-release-receipt.sh" \
+    "${harness}/unverified-baseline-receipt.json" \
+    "${harness}/unverified-baseline-receipt.json.sig" \
+    "${harness}/allowed-signers" \
+    "${commit}" >/dev/null 2>&1; then
+    fail "migration receipt verifier accepted an unverified enum-compatibility baseline"
+  fi
+  pass
+
+  "${harness}/repo/scripts/verify-migration-release-receipt.sh" \
+    "${harness}/receipt.json" \
+    "${harness}/receipt.json.sig" \
+    "${harness}/allowed-signers" \
+    "${commit}" \
+    "${api_image}" \
+    "${api_revision}" \
+    "${worker_image}" \
+    "${worker_revision}" \
+    "${console_image}" \
+    "${console_revision}" \
+    disabled >/dev/null
+  pass
+
+  if "${harness}/repo/scripts/verify-migration-release-receipt.sh" \
+    "${harness}/receipt.json" \
+    "${harness}/receipt.json.sig" \
+    "${harness}/allowed-signers" \
+    "${commit}" \
+    "ledgracr.azurecr.io/apex-api@sha256:$(printf '9%.0s' {1..64})" \
+    "${api_revision}" \
+    "${worker_image}" \
+    "${worker_revision}" \
+    "${console_image}" \
+    "${console_revision}" \
+    disabled >/dev/null 2>&1; then
+    fail "migration receipt verifier accepted a different rollback API digest"
+  fi
+  pass
+
+  if "${harness}/repo/scripts/verify-migration-release-receipt.sh" \
+    "${harness}/receipt.json" \
+    "${harness}/receipt.json.sig" \
+    "${harness}/allowed-signers" \
+    "${commit}" \
+    "${api_image}" \
+    "apex-gtm-api--different" \
+    "${worker_image}" \
+    "${worker_revision}" \
+    "${console_image}" \
+    "${console_revision}" \
+    disabled >/dev/null 2>&1; then
+    fail "migration receipt verifier accepted a different rollback API revision"
+  fi
+  pass
+
+  if "${harness}/repo/scripts/verify-migration-release-receipt.sh" \
+    "${harness}/receipt.json" \
+    "${harness}/receipt.json.sig" \
+    "${harness}/allowed-signers" \
+    "${commit}" \
+    "${api_image}" \
+    "${api_revision}" \
+    "${worker_image}" \
+    "${worker_revision}" \
+    "${console_image}" \
+    "${console_revision}" \
+    first-class >/dev/null 2>&1; then
+    fail "migration receipt verifier accepted a different DELIVERY_UNKNOWN write mode"
+  fi
+  pass
+
+  if "${harness}/repo/scripts/verify-migration-release-receipt.sh" \
+    "${harness}/receipt.json" \
+    "${harness}/receipt.json.sig" \
+    "${harness}/allowed-signers" \
+    "${commit}" \
+    "${api_image}" \
+    "${api_revision}" \
+    "${worker_image}" \
+    "${worker_revision}" \
+    "ledgracr.azurecr.io/workforceos-fe@sha256:$(printf 'a%.0s' {1..64})" \
+    "${console_revision}" \
+    disabled >/dev/null 2>&1; then
+    fail "migration receipt verifier accepted a different console/BFF digest"
+  fi
+  pass
+
+  jq '.verifiedAt = "2026-01-01T00:00:00Z" | .expiresAt = "2026-01-01T00:10:00Z"' \
+    "${harness}/receipt.json" >"${harness}/stale-receipt.json"
+  ssh-keygen -Y sign \
+    -f "${harness}/approver-key" \
+    -n workforce-os-migration-receipt \
+    "${harness}/stale-receipt.json" >/dev/null 2>&1
+  if "${harness}/repo/scripts/verify-migration-release-receipt.sh" \
+    "${harness}/stale-receipt.json" \
+    "${harness}/stale-receipt.json.sig" \
+    "${harness}/allowed-signers" \
+    "${commit}" >/dev/null 2>&1; then
+    fail "migration receipt verifier accepted a stale signed receipt"
+  fi
+  pass
+
+  jq 'del(.outreachQuiescence)' \
+    "${harness}/receipt.json" >"${harness}/missing-quiescence-receipt.json"
+  ssh-keygen -Y sign \
+    -f "${harness}/approver-key" \
+    -n workforce-os-migration-receipt \
+    "${harness}/missing-quiescence-receipt.json" >/dev/null 2>&1
+  if "${harness}/repo/scripts/verify-migration-release-receipt.sh" \
+    "${harness}/missing-quiescence-receipt.json" \
+    "${harness}/missing-quiescence-receipt.json.sig" \
+    "${harness}/allowed-signers" \
+    "${commit}" >/dev/null 2>&1; then
+    fail "migration receipt verifier accepted disabled bootstrap without quiescence evidence"
+  fi
+  pass
+
+  jq '.outreachQuiescence.legacyDeliveryUnknownMarkerRows = 1' \
+    "${harness}/receipt.json" >"${harness}/legacy-marker-receipt.json"
+  ssh-keygen -Y sign \
+    -f "${harness}/approver-key" \
+    -n workforce-os-migration-receipt \
+    "${harness}/legacy-marker-receipt.json" >/dev/null 2>&1
+  if "${harness}/repo/scripts/verify-migration-release-receipt.sh" \
+    "${harness}/legacy-marker-receipt.json" \
+    "${harness}/legacy-marker-receipt.json.sig" \
+    "${harness}/allowed-signers" \
+    "${commit}" >/dev/null 2>&1; then
+    fail "migration receipt verifier accepted an incompatible legacy marker inventory"
+  fi
   pass
 
   printf '\n-- uncommitted attacker-controlled bytes\n' \
@@ -1876,6 +2450,7 @@ write_containerapp_fixture() {
       properties: {
         configuration: {
           activeRevisionsMode: "Single",
+          maxInactiveRevisions: 10,
           ingress: (if $enabled == "true"
             then {external: false, allowInsecure: false}
             else {external: true, allowInsecure: false, targetPort: 4000, fqdn: "api.workforceos.xyz"}
@@ -1897,7 +2472,7 @@ write_containerapp_fixture() {
               {name: "CORS_ALLOWED_ORIGINS", value: "https://workforceos.xyz"},
               {name: "API_PUBLIC_URL", value: "https://api.workforceos.xyz"},
               {name: "FRONTEND_URL", value: "https://workforceos.xyz"},
-              {name: "OUTREACH_LIVE_FOR_ORGS", value: "org-owned-smoke"},
+              {name: "OUTREACH_LIVE_FOR_ORGS", value: ""},
               {name: "OUTREACH_ALLOW_WILDCARD", value: "false"},
               {name: "CLERK_JWKS_URL", value: "https://clerk.workforceos.xyz/.well-known/jwks.json"},
               {name: "CLERK_ISSUER", value: "https://clerk.workforceos.xyz"},
@@ -1993,6 +2568,32 @@ EOF
     API_REVISION_FILE="${harness}/api-revision.json" WORKER_REVISION_FILE="${harness}/worker-revision.json" \
     "${harness}/scripts/verify-containerapp-release-config.sh" \
     "${api_image}" "${worker_image}" >/dev/null
+  pass
+
+  jq 'del(.properties.configuration.maxInactiveRevisions)' \
+    "${harness}/api.json" >"${harness}/api-missing-revision-retention.json"
+  if env PATH="${harness}/bin:${PATH}" \
+    API_JSON_FILE="${harness}/api-missing-revision-retention.json" \
+    WORKER_JSON_FILE="${harness}/worker.json" \
+    API_REVISION_FILE="${harness}/api-revision.json" \
+    WORKER_REVISION_FILE="${harness}/worker-revision.json" \
+    "${harness}/scripts/verify-containerapp-release-config.sh" \
+    "${api_image}" "${worker_image}" >/dev/null 2>&1; then
+    fail "Container App verifier accepted missing inactive-revision retention"
+  fi
+  pass
+
+  jq '.properties.configuration.maxInactiveRevisions = 0' \
+    "${harness}/worker.json" >"${harness}/worker-zero-revision-retention.json"
+  if env PATH="${harness}/bin:${PATH}" \
+    API_JSON_FILE="${harness}/api.json" \
+    WORKER_JSON_FILE="${harness}/worker-zero-revision-retention.json" \
+    API_REVISION_FILE="${harness}/api-revision.json" \
+    WORKER_REVISION_FILE="${harness}/worker-revision.json" \
+    "${harness}/scripts/verify-containerapp-release-config.sh" \
+    "${api_image}" "${worker_image}" >/dev/null 2>&1; then
+    fail "Container App verifier accepted zero inactive-revision retention"
+  fi
   pass
 
   jq '.properties.template.containers[0].env |= map(select(.name != "FRONTEND_URL"))' \
@@ -2215,6 +2816,73 @@ EOF
     "${harness}/scripts/verify-containerapp-release-config.sh" \
     "${api_image}" "${worker_image}" >/dev/null 2>&1; then
     fail "Container App verifier rejected the attested FAILED write gate"
+  fi
+  pass
+
+  jq '.properties.template.containers[0].env += [
+    {name: "OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH", value: "outreach-delivery-unknown-v1"}
+  ]' "${harness}/worker.json" >"${harness}/worker-disabled-with-epoch.json"
+  if env PATH="${harness}/bin:${PATH}" \
+    API_JSON_FILE="${harness}/api.json" \
+    WORKER_JSON_FILE="${harness}/worker-disabled-with-epoch.json" \
+    API_REVISION_FILE="${harness}/api-revision.json" WORKER_REVISION_FILE="${harness}/worker-revision.json" \
+    "${harness}/scripts/verify-containerapp-release-config.sh" \
+    "${api_image}" "${worker_image}" >/dev/null 2>&1; then
+    fail "Container App verifier accepted a disabled worker carrying a compatibility epoch"
+  fi
+  pass
+
+  jq '.properties.template.containers[0].env += [{name: "OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE", value: "first-class"}]' \
+    "${harness}/api.json" >"${harness}/api-enabled-delivery-unknown-write-gate.json"
+  if env PATH="${harness}/bin:${PATH}" \
+    API_JSON_FILE="${harness}/api-enabled-delivery-unknown-write-gate.json" \
+    WORKER_JSON_FILE="${harness}/worker.json" \
+    API_REVISION_FILE="${harness}/api-revision.json" WORKER_REVISION_FILE="${harness}/worker-revision.json" \
+    "${harness}/scripts/verify-containerapp-release-config.sh" \
+    "${api_image}" "${worker_image}" >/dev/null 2>&1; then
+    fail "Container App verifier accepted DELIVERY_UNKNOWN writes on the API"
+  fi
+  pass
+
+  jq '.properties.template.containers[0].env += [{name: "OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE", value: "first-class"}]' \
+    "${harness}/worker.json" >"${harness}/worker-unattested-delivery-unknown-write-gate.json"
+  if env PATH="${harness}/bin:${PATH}" \
+    API_JSON_FILE="${harness}/api.json" \
+    WORKER_JSON_FILE="${harness}/worker-unattested-delivery-unknown-write-gate.json" \
+    API_REVISION_FILE="${harness}/api-revision.json" WORKER_REVISION_FILE="${harness}/worker-revision.json" \
+    "${harness}/scripts/verify-containerapp-release-config.sh" \
+    "${api_image}" "${worker_image}" >/dev/null 2>&1; then
+    fail "Container App verifier accepted an unattested DELIVERY_UNKNOWN write gate"
+  fi
+  pass
+
+  jq '.properties.template.containers[0].env += [
+    {name: "OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE", value: "first-class"},
+    {name: "OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK", value: "readers-drained-rollback-baselines-verified-v1"},
+    {name: "OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH", value: "wrong-epoch"}
+  ]' "${harness}/worker.json" >"${harness}/worker-wrong-delivery-unknown-epoch.json"
+  if env PATH="${harness}/bin:${PATH}" \
+    API_JSON_FILE="${harness}/api.json" \
+    WORKER_JSON_FILE="${harness}/worker-wrong-delivery-unknown-epoch.json" \
+    API_REVISION_FILE="${harness}/api-revision.json" WORKER_REVISION_FILE="${harness}/worker-revision.json" \
+    "${harness}/scripts/verify-containerapp-release-config.sh" \
+    "${api_image}" "${worker_image}" >/dev/null 2>&1; then
+    fail "Container App verifier accepted the wrong DELIVERY_UNKNOWN compatibility epoch"
+  fi
+  pass
+
+  jq '.properties.template.containers[0].env += [
+    {name: "OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE", value: "first-class"},
+    {name: "OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK", value: "readers-drained-rollback-baselines-verified-v1"},
+    {name: "OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH", value: "outreach-delivery-unknown-v1"}
+  ]' "${harness}/worker.json" >"${harness}/worker-attested-delivery-unknown-write-gate.json"
+  if ! env PATH="${harness}/bin:${PATH}" \
+    API_JSON_FILE="${harness}/api.json" \
+    WORKER_JSON_FILE="${harness}/worker-attested-delivery-unknown-write-gate.json" \
+    API_REVISION_FILE="${harness}/api-revision.json" WORKER_REVISION_FILE="${harness}/worker-revision.json" \
+    "${harness}/scripts/verify-containerapp-release-config.sh" \
+    "${api_image}" "${worker_image}" >/dev/null 2>&1; then
+    fail "Container App verifier rejected fully attested DELIVERY_UNKNOWN writes"
   fi
   pass
 

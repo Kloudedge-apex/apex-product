@@ -3,6 +3,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { OutreachArtifactStatus, MeetingStatus } from "@prisma/client";
 import {
   artifactFailedAt,
+  effectiveArtifactStatus,
   hasLegacyAutoFailedMarker,
   isFailedArtifact,
   isLegacyAutoFailedArtifact,
@@ -155,6 +156,9 @@ export class DashboardService {
 
     for (const a of artifacts) {
       const failed = isFailedArtifact(a);
+      const effectiveStatus = effectiveArtifactStatus(a);
+      const deliveryUnknown =
+        effectiveStatus === OutreachArtifactStatus.DELIVERY_UNKNOWN;
       const reliableLegacyApproval =
         isLegacyAutoFailedArtifact(a) && a.failedAt !== null;
       const preservesApproval = (
@@ -166,7 +170,7 @@ export class DashboardService {
           OutreachArtifactStatus.DELIVERY_UNKNOWN,
           OutreachArtifactStatus.FAILED,
         ] as readonly OutreachArtifactStatus[]
-      ).includes(a.status);
+      ).includes(effectiveStatus);
       events.push({
         id: `artifact:${a.id}:created`,
         kind: "draft_created",
@@ -186,6 +190,7 @@ export class DashboardService {
       if (
         !failed &&
         !hasLegacyAutoFailedMarker(a) &&
+        !deliveryUnknown &&
         a.status === OutreachArtifactStatus.REJECTED &&
         a.reviewedAt
       ) {
@@ -215,7 +220,7 @@ export class DashboardService {
           leadId: "",
         });
       }
-      if (a.status === OutreachArtifactStatus.DELIVERY_UNKNOWN) {
+      if (deliveryUnknown) {
         events.push({
           id: `artifact:${a.id}:delivery_unknown`,
           kind: "delivery_unknown",

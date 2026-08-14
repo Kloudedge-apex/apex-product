@@ -157,8 +157,24 @@ that evidence.
 After the authorized production apply, create a sanitized receipt conforming to
 `docs/ops/production-migration-receipt.schema.json`. Store it outside the Git
 working tree and include only hashes, operator/approver identifiers, the change
-ticket, booleans, and the exact candidate commit. Do not include connection
+ticket, booleans, the exact candidate commit, and the non-secret immutable
+rollback baseline. Receipt schema v3 requires exact immutable API, worker, and
+console/BFF digest references; their exact active revision names; the
+independent `enum-aware-api-worker-console-baseline-v1` compatibility
+attestation; the `outreach-delivery-unknown-v1` compatibility epoch; the
+`disabled` or `first-class` write mode; its mode-specific attestation; and
+`verifiedAt` plus `expiresAt` no more than 15 minutes apart. A disabled receipt
+also requires a
+signed `outreachQuiescence` object proving API mutations blocked, the legacy
+worker stopped, all agent-run/graph-run/outreach-send queues paused with zero
+active jobs, zero `SENDING`, first-class `DELIVERY_UNKNOWN`, historical
+`delivery-unknown:` marker, and reply-slot duplicate rows, and an empty live
+send allowlist. Bind the evidence to a sanitized hash. Do not include connection
 strings, SQL output, row values, customer identifiers, or message content.
+The quiescence object is signed point-in-time evidence, not a live lock. Its
+booleans do not hold API blocks, queue pauses, zero-active-job state, or a
+stopped worker across the build. A separately protected production authority
+must own those controls and revalidate them for the entire bootstrap window.
 The `approver` must be a principal in a separately controlled OpenSSH
 allowed-signers file, also kept outside the repository. After reviewing the
 final receipt bytes, that approver signs them with the fixed namespace:
@@ -192,6 +208,74 @@ reads a confirmation from stdin. Once externally admitted, the
 `workforce-os-production` release environment must execute
 `scripts/deploy-prod.sh` directly (not through `bash`) so its privileged
 bootstrap shebang applies, using:
+
+The controller freezes the receipt, signature, and trust-root bytes into its
+private same-attempt runtime directory, then verifies the signature, freshness,
+and fixed eight-migration order. It binds the receipt to the exact active API,
+worker, and console/BFF revision, image, and write mode. Immediately before
+every forward or rollback mutation it re-reads all three exact active
+identities, so a same-image configuration revision is still a mismatch.
+Both backend apps must explicitly retain at least one inactive revision. After
+each forward write, the controller proves the signed prior revision still
+exists, is inactive, and still references its exact digest before attempting
+the next write. Inactive revisions do not have to expose running lifecycle
+states; `Healthy` and `Provisioned` are required after exact reactivation.
+Rollback re-verifies the same frozen signed bytes without reapplying the
+admission clock after a long build, reactivates only the signed baseline
+revisions, and assigns API traffic explicitly to the signed revision name at
+100%. It never manufactures rollback revisions with `--image`.
+
+### Two-phase activation for first-class `DELIVERY_UNKNOWN` writes
+
+The `2026-08-12_outreach-delivery-unknown-expand.sql` enum expansion remains
+fourth in the fixed eight-migration sequence. There is no fallback writer
+mode. Historical `REJECTED` rows with a reserved
+`delivery-unknown:` marker are read-only normalization input; new application
+code must never create them.
+
+`scripts/deploy-prod.sh` is a subsequent-rollout controller only. It requires
+an already active, healthy API, worker, and console and requires the worker
+consumer gates and minimum replica count to remain enabled. It therefore must
+not be used to bootstrap from a stopped legacy worker. The separate protected
+workflow that would hold quiescence, establish the first enum-aware disabled
+API/worker/console baseline, and independently attest those three exact
+identities is not implemented or authorized. Until that bootstrap is complete,
+this release remains production **NO-GO**; a signed quiescence snapshot alone
+does not close the time-of-check/time-of-use gap.
+
+Use this order and do not collapse the gates:
+
+1. Block API mutations, stop the legacy worker, pause all three queues, wait
+   for zero active jobs, and prove the signed zero inventories listed above.
+2. Apply and verify the enum/index migration while the system remains quiesced.
+3. Through that separate protected bootstrap workflow, deploy immutable
+   console/BFF, API, and worker revisions with
+   `OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE=disabled` (or absent), no write
+   acknowledgement, and an empty live-send allowlist. Do not substitute the
+   subsequent-rollout controller for this unimplemented bootstrap workflow.
+4. Prove all legacy revisions inactive and capture the exact enum-aware
+   console/API/worker digests and revision names in a new fresh signed receipt
+   carrying
+   `compatibilityAttestation: enum-aware-api-worker-console-baseline-v1`.
+5. Through a separate protected configuration workflow that is not authorized
+   by `scripts/deploy-prod.sh`, create the worker-only first-class revision while
+   the system remains quiesced:
+
+```text
+OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE=first-class
+OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK=readers-drained-rollback-baselines-verified-v1
+OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH=outreach-delivery-unknown-v1
+```
+
+6. Verify the first-class revision and exact compatible rollback baselines,
+   then resume queues and API mutations last.
+
+The corresponding signed baseline uses
+`deliveryUnknownWriteMode: first-class` and
+`attestation: delivery-unknown-readers-drained-rollback-baselines-verified-v1`.
+Missing or mismatched values fail startup and release-config verification.
+Never restore a pre-enum revision after a first-class value exists; use a
+separately reviewed data downgrade if that recovery is ever required.
 
 ### Two-phase activation for first-class `FAILED` writes
 
@@ -301,9 +385,11 @@ update operation. The image update is therefore not described as optimistic
 CAS. It is fail-closed unless
 `ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED=true`; set that variable only after
 an RBAC audit proves the protected CI OIDC principal is the exclusive identity
-with `Microsoft.App/containerApps/write` on both production apps and confirms
-interactive users cannot write them. The Git lease serializes attempts by that
-principal, and the controller re-reads both apps immediately before the first
+with `Microsoft.App/containerApps/write` across the exact `apex-gtm-api`,
+`apex-gtm-worker`, and `nikxius-web` resources, or proves all three are covered
+by one coordinated mutation lease that excludes every other writer. The Git
+lease serializes attempts by that principal, and the controller re-reads all
+three apps immediately before the first
 write, immediately before each later or compensating write, and after every
 write. A manual-only, fail-closed workflow source now exists at
 `.github/workflows/release-production.yml` on the review branch, with its source
@@ -343,10 +429,12 @@ stale approval, and forbid force-push and deletion.
 The repository also currently contains a legacy repository-scoped
 `AZURE_CREDENTIALS` secret. No current workflow consumes it, and its value was
 not read, but the authority of its principal is unverified. Revoke/rotate that
-credential or prove that its principal cannot write either production
-Container App before asserting exclusive authority. Azure OIDC federation and
+credential or prove that its principal cannot write any of the three production
+Container Apps before asserting exclusive authority. Azure OIDC federation and
 an RBAC audit must still prove that its service principal is the exclusive
-`Microsoft.App/containerApps/write` identity for both apps. The allowed-signers
+`Microsoft.App/containerApps/write` identity across `apex-gtm-api`,
+`apex-gtm-worker`, and `nikxius-web`, or is confined by the same coordinated
+three-resource mutation lease. The allowed-signers
 source pin is still `UNCONFIGURED`, and all eight migrations still require
 staging rehearsal, separate production approval, apply, and signed receipt
 evidence. Therefore the authority attestation must remain unset until every
@@ -740,16 +828,23 @@ There is no server-side fix for `invalid_grant` — it requires the user.
 ### 5. `DELIVERY_UNKNOWN` and `SENDING` claims stuck > 15 min
 
 Code: the reconcile sweep (`reconcileStuckArtifacts()`, every 5 min, also once
-at worker boot) changes `SENDING` rows older than 15 min to terminal
-`DELIVERY_UNKNOWN`. It does not re-enqueue them. A stale claim cannot prove
-whether process loss happened before or after the provider accepted the POST.
-Automatically dispatching it again would risk duplicate mail.
+at worker boot) examines `SENDING` rows older than 15 min. In attested
+`first-class` mode it changes them to terminal `DELIVERY_UNKNOWN`; in
+`disabled` mode it deliberately leaves them `SENDING`. Neither state is
+re-enqueued, and both remain capacity and recipient-delivery risks until an
+operator reconciles provider truth. A stale claim cannot prove whether process
+loss happened before or after the provider accepted the POST. Automatically
+dispatching it again would risk duplicate mail. Reserved
+`REJECTED`/`delivery-unknown:` rows are historical read-only compatibility
+input; current workers never create them.
 
 ```sql
 SELECT id, "orgId", status, "recipientRef", subject, "updatedAt",
        "sendReceiptId", "reviewerNote"
 FROM "OutreachArtifact"
 WHERE status = 'DELIVERY_UNKNOWN'
+   OR (status = 'REJECTED'
+       AND "reviewerNote" LIKE 'delivery-unknown:%')
    OR (status = 'SENDING'
        AND "updatedAt" < now() - interval '15 minutes')
 ORDER BY "updatedAt" DESC;
@@ -761,9 +856,11 @@ ORDER BY "updatedAt" DESC;
    consumers on `outreach-send`, fix the worker (env gate? crash-loop? KS-2/KS-3
    left engaged?).
 2. Restart the worker (`az containerapp revision restart` or KS-3
-   stop/start). Look for
-   `Reconcile sweep: quarantined N stale SENDING claim(s) as DELIVERY_UNKNOWN`
-   in worker logs.
+   stop/start). In `first-class` mode, look for
+   `Reconcile sweep: quarantined N stale SENDING claim(s) as DELIVERY_UNKNOWN`.
+   In `disabled` mode, expect
+   `Stale claim ... remains SENDING because delivery-unknown writes are disabled`
+   and keep dispatch quiesced until reconciliation is complete.
 3. For each `DELIVERY_UNKNOWN`, inspect the connected provider's Sent mailbox
    or message API using recipient, subject, and the narrow send-time window.
    Record the provider evidence in the incident/change record.

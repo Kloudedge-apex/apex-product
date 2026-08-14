@@ -27,6 +27,10 @@ import {
   REPLY_SINGLE_FLIGHT_STATUSES,
 } from "../outreach/reply-single-flight";
 import { acquireOrgSendReservationLock } from "../outreach/outreach-send-reservation-lock";
+import {
+  deliveryUnknownArtifactWhere,
+  effectiveArtifactStatus,
+} from "../outreach/outreach-artifact-failure";
 
 const MAX_PAGE_SIZE = 100;
 const MAX_THREAD_MESSAGES = 20;
@@ -159,23 +163,29 @@ export class ConversationsService {
     });
     if (!row) throw new NotFoundException(`Conversation ${id} not found`);
 
+    const replyArtifacts = row.outreachArtifacts.map((artifact) => ({
+      ...artifact,
+      status: effectiveArtifactStatus(artifact),
+    }));
     const latestInboundId = row.messages.find(
       (message) => message.direction === "INBOUND",
     )?.id;
-    const pending = row.outreachArtifacts.find((artifact) => {
+    const pending = replyArtifacts.find((artifact) => {
+      const deliveryUnknown =
+        artifact.status === OutreachArtifactStatus.DELIVERY_UNKNOWN;
       const blocksDrafting =
         artifact.status === OutreachArtifactStatus.DRAFT ||
         artifact.status === OutreachArtifactStatus.PENDING_REVIEW ||
         artifact.status === OutreachArtifactStatus.APPROVED ||
         artifact.status === OutreachArtifactStatus.SENDING ||
-        artifact.status === OutreachArtifactStatus.DELIVERY_UNKNOWN;
+        deliveryUnknown;
       if (!blocksDrafting) return false;
 
       // An ambiguous outcome blocks the whole thread until reconciliation.
       // Other open artifacts are relevant only to the latest inbound turn;
       // null-source rows are legacy and conservatively block every turn.
       return (
-        artifact.status === OutreachArtifactStatus.DELIVERY_UNKNOWN ||
+        deliveryUnknown ||
         artifact.replyToMessageId === null ||
         artifact.replyToMessageId === latestInboundId
       );
@@ -194,7 +204,7 @@ export class ConversationsService {
           senderName: message.senderName ?? message.senderEmail,
         })),
       pendingDraftId: pending?.id ?? null,
-      replyArtifacts: row.outreachArtifacts,
+      replyArtifacts,
       followUps: row.followUpTasks,
       meetings: row.meetings,
     };
@@ -351,13 +361,14 @@ export class ConversationsService {
       intelligence: generated,
     });
 
+    const status = effectiveArtifactStatus(persisted.artifact);
     return {
       artifactId: persisted.artifact.id,
-      status: persisted.artifact.status,
+      status,
       created: persisted.created,
       message: persisted.created
         ? "Reply draft created and held for human review."
-        : existingReplyMessage(persisted.artifact.status),
+        : existingReplyMessage(status),
     };
   }
 
@@ -404,13 +415,14 @@ export class ConversationsService {
       sourceMessageId: latestInbound.id,
       inReplyTo: latestInbound.internetMessageId,
     });
+    const status = effectiveArtifactStatus(persisted.artifact);
     return {
       artifactId: persisted.artifact.id,
-      status: persisted.artifact.status,
+      status,
       created: persisted.created,
       message: persisted.created
         ? "Reply draft created and held for human review."
-        : existingReplyMessage(persisted.artifact.status),
+        : existingReplyMessage(status),
     };
   }
 
@@ -545,12 +557,10 @@ export class ConversationsService {
               // An unresolved/in-flight reply to an older inbound message
               // blocks the whole thread until provider truth is known.
               {
-                status: {
-                  in: [
-                    OutreachArtifactStatus.SENDING,
-                    OutreachArtifactStatus.DELIVERY_UNKNOWN,
-                  ],
-                },
+                OR: [
+                  { status: OutreachArtifactStatus.SENDING },
+                  deliveryUnknownArtifactWhere(),
+                ],
               },
             ],
           },
@@ -809,12 +819,14 @@ function staleReplySourceConflict(): ConflictException {
 function existingReplyResponse(artifact: {
   readonly id: string;
   readonly status: OutreachArtifactStatus;
+  readonly reviewerNote?: string | null;
 }) {
+  const status = effectiveArtifactStatus(artifact);
   return {
     artifactId: artifact.id,
-    status: artifact.status,
+    status,
     created: false,
-    message: existingReplyMessage(artifact.status),
+    message: existingReplyMessage(status),
   };
 }
 

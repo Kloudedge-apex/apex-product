@@ -68,6 +68,16 @@ env_value() {
   ' <<<"${json}"
 }
 
+require_env_absent() {
+  local json=$1
+  local name=$2
+  local label=$3
+  if [[ "$(jq -er --arg name "${name}" '[.properties.template.containers[0].env[]? | select(.name == $name)] | length' <<<"${json}")" != "0" ]]; then
+    echo "ERROR: ${label} must be absent" >&2
+    exit 1
+  fi
+}
+
 clerk_auth_tuple_sha256() {
   local json=$1
   local name value
@@ -147,6 +157,20 @@ require_unset_or_false() {
   fi
 }
 
+require_inactive_revision_retention() {
+  local json=$1
+  local app=$2
+  local retained
+  retained="$(json_value "${json}" '.properties.configuration.maxInactiveRevisions')" || {
+    echo "ERROR: ${app} maxInactiveRevisions must be explicit" >&2
+    exit 1
+  }
+  if [[ ! "${retained}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: ${app} maxInactiveRevisions must retain at least one rollback revision" >&2
+    exit 1
+  fi
+}
+
 require_env_value_parity() {
   local name=$1
   local api_value worker_value
@@ -197,6 +221,8 @@ require_value \
   "$(env_value "${WORKER_JSON}" REQUIRE_PRODUCTION_ENV)" \
   "true" \
   "worker REQUIRE_PRODUCTION_ENV"
+require_inactive_revision_retention "${API_JSON}" "${API_APP}"
+require_inactive_revision_retention "${WORKER_JSON}" "${WORKER_APP}"
 
 for GATE in WORKER_ENABLED GRAPH_RUN_WORKER_ENABLED OUTREACH_WORKER_ENABLED; do
   require_value "$(env_value "${API_JSON}" "${GATE}")" "false" "API ${GATE}"
@@ -220,6 +246,45 @@ if [[ "${WORKER_FAILED_WRITE_GATE}" == "true" ]]; then
     "readers-drained-legacy-inventory-reviewed-v1" \
     "worker first-class FAILED write attestation"
 fi
+for LEGACY_DELIVERY_UNKNOWN_ENV in \
+  OUTREACH_DELIVERY_UNKNOWN_STATUS_WRITES_ENABLED \
+  OUTREACH_DELIVERY_UNKNOWN_STATUS_WRITES_ACK; do
+  require_env_absent "${API_JSON}" "${LEGACY_DELIVERY_UNKNOWN_ENV}" "API legacy ${LEGACY_DELIVERY_UNKNOWN_ENV}"
+  require_env_absent "${WORKER_JSON}" "${LEGACY_DELIVERY_UNKNOWN_ENV}" "worker legacy ${LEGACY_DELIVERY_UNKNOWN_ENV}"
+done
+API_DELIVERY_UNKNOWN_WRITE_MODE="$(env_value "${API_JSON}" OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE)"
+WORKER_DELIVERY_UNKNOWN_WRITE_MODE="$(env_value "${WORKER_JSON}" OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE)"
+API_DELIVERY_UNKNOWN_WRITE_MODE="${API_DELIVERY_UNKNOWN_WRITE_MODE:-disabled}"
+WORKER_DELIVERY_UNKNOWN_WRITE_MODE="${WORKER_DELIVERY_UNKNOWN_WRITE_MODE:-disabled}"
+require_value "${API_DELIVERY_UNKNOWN_WRITE_MODE}" "disabled" "API DELIVERY_UNKNOWN write mode"
+require_env_absent "${API_JSON}" OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK "API DELIVERY_UNKNOWN write acknowledgement"
+require_env_absent "${API_JSON}" OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH "API DELIVERY_UNKNOWN compatibility epoch"
+case "${WORKER_DELIVERY_UNKNOWN_WRITE_MODE}" in
+  disabled)
+    require_env_absent "${WORKER_JSON}" OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK \
+      "disabled worker DELIVERY_UNKNOWN write acknowledgement"
+    require_env_absent "${WORKER_JSON}" OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH \
+      "disabled worker DELIVERY_UNKNOWN compatibility epoch"
+    if [[ -n "$(env_value "${WORKER_JSON}" OUTREACH_LIVE_FOR_ORGS)" ]]; then
+      echo "ERROR: disabled DELIVERY_UNKNOWN bootstrap mode requires an empty worker live-send allowlist" >&2
+      exit 1
+    fi
+    ;;
+  first-class)
+    require_value \
+      "$(env_value "${WORKER_JSON}" OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK)" \
+      "readers-drained-rollback-baselines-verified-v1" \
+      "worker first-class DELIVERY_UNKNOWN acknowledgement"
+    require_value \
+      "$(env_value "${WORKER_JSON}" OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH)" \
+      "outreach-delivery-unknown-v1" \
+      "worker DELIVERY_UNKNOWN rollback compatibility epoch"
+    ;;
+  *)
+    echo "ERROR: worker OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE must be disabled or first-class" >&2
+    exit 1
+    ;;
+esac
 require_value "$(env_value "${API_JSON}" SCHEDULER_ENABLED)" "false" "API SCHEDULER_ENABLED"
 require_value "$(env_value "${WORKER_JSON}" SCHEDULER_ENABLED)" "false" "worker SCHEDULER_ENABLED"
 

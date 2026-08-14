@@ -266,7 +266,7 @@ describe("ConversationsService", () => {
       );
     });
 
-    it("surfaces DELIVERY_UNKNOWN as the blocker while ignoring an old-turn pending draft", async () => {
+    it("surfaces a compatibility delivery-unknown marker as the blocker while ignoring an old-turn pending draft", async () => {
       prisma.conversation.findFirst.mockResolvedValue(
         conversationRow({
           messages: [inboundMessage({ id: "message_latest" })],
@@ -278,7 +278,8 @@ describe("ConversationsService", () => {
             },
             {
               id: "unknown_delivery",
-              status: OutreachArtifactStatus.DELIVERY_UNKNOWN,
+              status: OutreachArtifactStatus.REJECTED,
+              reviewerNote: "delivery-unknown: ambiguous provider response",
               replyToMessageId: "message_old",
             },
           ],
@@ -290,6 +291,22 @@ describe("ConversationsService", () => {
       const result = await service.get("org_1", "conversation_1");
 
       expect(result.pendingDraftId).toBe("unknown_delivery");
+      expect(result.replyArtifacts).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: "unknown_delivery",
+            status: OutreachArtifactStatus.DELIVERY_UNKNOWN,
+          }),
+        ]),
+      );
+      expect(result.replyArtifacts).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: "unknown_delivery",
+            status: OutreachArtifactStatus.REJECTED,
+          }),
+        ]),
+      );
     });
 
     it("does not expose a terminal FAILED reply as a pending draft blocker", async () => {
@@ -432,12 +449,20 @@ describe("ConversationsService", () => {
                   },
                 },
                 {
-                  status: {
-                    in: [
-                      OutreachArtifactStatus.SENDING,
-                      OutreachArtifactStatus.DELIVERY_UNKNOWN,
-                    ],
-                  },
+                  OR: [
+                    { status: OutreachArtifactStatus.SENDING },
+                    {
+                      OR: [
+                        { status: OutreachArtifactStatus.DELIVERY_UNKNOWN },
+                        {
+                          status: OutreachArtifactStatus.REJECTED,
+                          reviewerNote: {
+                            startsWith: "delivery-unknown:",
+                          },
+                        },
+                      ],
+                    },
+                  ],
                 },
               ],
             },
@@ -445,6 +470,30 @@ describe("ConversationsService", () => {
         },
         orderBy: [{ createdAt: "asc" }, { id: "asc" }],
       });
+      expect(llm.chat).not.toHaveBeenCalled();
+      expect(prisma.outreachArtifact.create).not.toHaveBeenCalled();
+    });
+
+    it("normalizes a compatibility marker returned by the pre-generation duplicate check", async () => {
+      prisma.conversation.findFirst.mockResolvedValue(
+        conversationRow({ messages: [inboundMessage()] }),
+      );
+      prisma.outreachArtifact.findFirst.mockResolvedValue({
+        id: "artifact_unknown",
+        status: OutreachArtifactStatus.REJECTED,
+        reviewerNote: "delivery-unknown: ambiguous provider response",
+      });
+
+      await expect(
+        service.generateReplyDraft("org_1", "conversation_1"),
+      ).resolves.toEqual({
+        artifactId: "artifact_unknown",
+        status: OutreachArtifactStatus.DELIVERY_UNKNOWN,
+        created: false,
+        message:
+          "A reply in this conversation has an unresolved delivery outcome; reconcile it before creating another.",
+      });
+
       expect(llm.chat).not.toHaveBeenCalled();
       expect(prisma.outreachArtifact.create).not.toHaveBeenCalled();
     });
@@ -711,6 +760,31 @@ describe("ConversationsService", () => {
         }),
       });
       expect(llm.chat).not.toHaveBeenCalled();
+    });
+
+    it("normalizes a compatibility marker found after the human reply locks are acquired", async () => {
+      prisma.conversation.findFirst.mockResolvedValue(
+        conversationRow({ messages: [inboundMessage()] }),
+      );
+      prisma.outreachArtifact.findFirst.mockResolvedValue({
+        id: "artifact_unknown",
+        status: OutreachArtifactStatus.REJECTED,
+        reviewerNote: "delivery-unknown: ambiguous provider response",
+      });
+
+      await expect(
+        service.createHumanReplyDraft("org_1", "conversation_1", {
+          body: "A replacement that must not be persisted",
+        }),
+      ).resolves.toEqual({
+        artifactId: "artifact_unknown",
+        status: OutreachArtifactStatus.DELIVERY_UNKNOWN,
+        created: false,
+        message:
+          "A reply in this conversation has an unresolved delivery outcome; reconcile it before creating another.",
+      });
+
+      expect(prisma.outreachArtifact.create).not.toHaveBeenCalled();
     });
 
     it("serializes concurrent human drafts and truthfully returns one created artifact", async () => {

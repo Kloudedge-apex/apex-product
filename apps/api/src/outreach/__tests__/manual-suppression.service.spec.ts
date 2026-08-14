@@ -172,6 +172,50 @@ describe("SuppressionService manual admin workflows", () => {
       expect(write.where.status.in).not.toContain(status);
     });
 
+    it("returns a compatibility marker as DELIVERY_UNKNOWN without rewriting it", async () => {
+      prisma.outreachArtifact.findFirst
+        .mockResolvedValueOnce({
+          id: "artifact_1",
+          channel: OutreachChannel.EMAIL,
+          recipientRef: "prospect@example.com",
+        })
+        .mockResolvedValueOnce({
+          id: "artifact_1",
+          status: OutreachArtifactStatus.REJECTED,
+          reviewerNote: "delivery-unknown: provider response was ambiguous",
+          failedAt: null,
+        });
+      prisma.outreachArtifact.updateMany.mockResolvedValue({ count: 0 });
+      vi.spyOn(service, "suppress").mockResolvedValue({ created: true });
+      prisma.outreachSuppression.findUnique.mockResolvedValue({
+        id: "suppression_1",
+        recipientRef: "prospect@example.com",
+        reason: OutreachSuppressionReason.MANUAL,
+        source: "admin_manual",
+      });
+
+      const result = await service.suppressArtifactRecipient({
+        orgId: "org_1",
+        artifactId: "artifact_1",
+        actor,
+      });
+
+      expect(result.artifact).toEqual({
+        id: "artifact_1",
+        status: OutreachArtifactStatus.DELIVERY_UNKNOWN,
+        statusChanged: false,
+      });
+      expect(prisma.outreachArtifact.findFirst).toHaveBeenLastCalledWith({
+        where: { id: "artifact_1", orgId: "org_1" },
+        select: {
+          id: true,
+          status: true,
+          reviewerNote: true,
+          failedAt: true,
+        },
+      });
+    });
+
     it("is idempotent when the artifact and recipient are already suppressed", async () => {
       prisma.outreachArtifact.findFirst
         .mockResolvedValueOnce({

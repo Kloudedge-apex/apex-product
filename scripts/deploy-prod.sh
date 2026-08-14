@@ -409,6 +409,8 @@ RESOURCE_GROUP="Ledgr-prod"
 ACR_REPO="apex-api"
 API_APP="apex-gtm-api"
 WORKER_APP="apex-gtm-worker"
+CONSOLE_APP="nikxius-web"
+CONSOLE_ACR_REPO="workforceos-fe"
 DOCKERFILE="apps/api/Dockerfile"
 
 RELEASE_LOCK_REF="refs/heads/workforce-os-release-lock/production-gtm-platform"
@@ -544,6 +546,19 @@ if [[ "${REMOTE_COMMIT}" != "${COMMIT}" ]]; then
 fi
 
 run_snapshot_helper "scripts/verify-github-release-ci.sh" "${COMMIT}"
+# Freeze all externally supplied evidence into the private same-attempt runtime
+# directory before the first verification. Every later forward and rollback
+# check reuses these exact bytes; caller-controlled paths are never reread.
+MIGRATION_RECEIPT_SOURCE="${MIGRATION_RECEIPT}"
+MIGRATION_SIGNATURE_SOURCE="${MIGRATION_SIGNATURE}"
+MIGRATION_ALLOWED_SIGNERS_SOURCE="${MIGRATION_ALLOWED_SIGNERS}"
+MIGRATION_RECEIPT="${RUNTIME_STATE_DIR}/migration-receipt.json"
+MIGRATION_SIGNATURE="${RUNTIME_STATE_DIR}/migration-receipt.sig"
+MIGRATION_ALLOWED_SIGNERS="${RUNTIME_STATE_DIR}/migration-allowed-signers"
+cp -- "${MIGRATION_RECEIPT_SOURCE}" "${MIGRATION_RECEIPT}"
+cp -- "${MIGRATION_SIGNATURE_SOURCE}" "${MIGRATION_SIGNATURE}"
+cp -- "${MIGRATION_ALLOWED_SIGNERS_SOURCE}" "${MIGRATION_ALLOWED_SIGNERS}"
+chmod 600 "${MIGRATION_RECEIPT}" "${MIGRATION_SIGNATURE}" "${MIGRATION_ALLOWED_SIGNERS}"
 run_snapshot_helper "scripts/verify-migration-release-receipt.sh" \
   "${MIGRATION_RECEIPT}" \
   "${MIGRATION_SIGNATURE}" \
@@ -621,10 +636,13 @@ RELEASE_LOCK_ACQUIRED="true"
 capture_containerapp_state() {
   local app=$1
   local output_file=$2
-  az containerapp show \
+  if ! az containerapp show \
     --name "${app}" \
     --resource-group "${RESOURCE_GROUP}" \
-    --output json >"${output_file}"
+    --output json >"${output_file}"; then
+    echo "ERROR: could not read Container App state for ${app}" >&2
+    return 1
+  fi
   jq -e --arg app "${app}" '
     (.id | type == "string" and
       (ascii_downcase | endswith("/providers/microsoft.app/containerapps/" + ($app | ascii_downcase))))
@@ -642,6 +660,190 @@ containerapp_state_value() {
   jq -er "${expression}" "${state_file}"
 }
 
+containerapp_plain_env_value() {
+  local state_file=$1
+  local name=$2
+  local count
+  if ! count="$(jq -er --arg name "${name}" '
+    [.properties.template.containers[0].env[]? | select(.name == $name)] | length
+  ' "${state_file}")"; then
+    echo "ERROR: could not inspect ${name} in captured Container App state" >&2
+    return 1
+  fi
+  if [[ "${count}" == "0" ]]; then
+    echo "__ABSENT__"
+    return 0
+  fi
+  if [[ "${count}" != "1" ]]; then
+    echo "ERROR: ${name} must appear at most once in captured Container App state" >&2
+    return 1
+  fi
+  jq -er --arg name "${name}" '
+    [.properties.template.containers[0].env[]? | select(.name == $name)][0]
+    | select((.secretRef // "") == "" and (.value | type == "string"))
+    | .value
+  ' "${state_file}" || {
+    echo "ERROR: ${name} must be a plain non-secret Container App value" >&2
+    return 1
+  }
+}
+
+require_containerapp_env_absent() {
+  local state_file=$1
+  local name=$2
+  local count
+  if ! count="$(jq -er --arg name "${name}" '[.properties.template.containers[0].env[]? | select(.name == $name)] | length' "${state_file}")"; then
+    echo "ERROR: could not inspect ${name} in captured Container App state" >&2
+    return 1
+  fi
+  if [[ "${count}" != "0" ]]; then
+    echo "ERROR: ${name} must be absent from captured Container App state" >&2
+    return 1
+  fi
+}
+
+delivery_unknown_mode_from_state() {
+  local state_file=$1
+  local role=$2
+  local mode ack epoch
+  require_containerapp_env_absent \
+    "${state_file}" OUTREACH_DELIVERY_UNKNOWN_STATUS_WRITES_ENABLED || return 1
+  require_containerapp_env_absent \
+    "${state_file}" OUTREACH_DELIVERY_UNKNOWN_STATUS_WRITES_ACK || return 1
+  mode="$(containerapp_plain_env_value \
+    "${state_file}" OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE)" || return 1
+  ack="$(containerapp_plain_env_value \
+    "${state_file}" OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK)" || return 1
+  epoch="$(containerapp_plain_env_value \
+    "${state_file}" OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH)" || return 1
+  if [[ "${mode}" == "__ABSENT__" ]]; then
+    mode="disabled"
+  fi
+  if [[ "${role}" == "api" ]]; then
+    if [[ "${mode}" != "disabled" || "${ack}" != "__ABSENT__" ||
+      "${epoch}" != "__ABSENT__" ]]; then
+      echo "ERROR: the API must keep DELIVERY_UNKNOWN writes disabled without acknowledgement or epoch" >&2
+      return 1
+    fi
+    printf '%s\n' "${mode}"
+    return 0
+  fi
+  case "${mode}" in
+    disabled)
+      if [[ "${ack}" != "__ABSENT__" || "${epoch}" != "__ABSENT__" ]]; then
+        echo "ERROR: disabled DELIVERY_UNKNOWN writes must not carry an acknowledgement or epoch" >&2
+        return 1
+      fi
+      local live_send_allowlist
+      live_send_allowlist="$(containerapp_plain_env_value \
+        "${state_file}" OUTREACH_LIVE_FOR_ORGS)" || return 1
+      if [[ "${live_send_allowlist}" != "__ABSENT__" && -n "${live_send_allowlist}" ]]; then
+        echo "ERROR: disabled DELIVERY_UNKNOWN write mode requires an empty live-send allowlist" >&2
+        return 1
+      fi
+      ;;
+    first-class)
+      if [[ "${ack}" != "readers-drained-rollback-baselines-verified-v1" ||
+        "${epoch}" != "outreach-delivery-unknown-v1" ]]; then
+        echo "ERROR: first-class DELIVERY_UNKNOWN writes lack the exact reader-drain acknowledgement" >&2
+        return 1
+      fi
+      ;;
+    *)
+      echo "ERROR: DELIVERY_UNKNOWN write mode must be disabled or first-class" >&2
+      return 1
+      ;;
+  esac
+  printf '%s\n' "${mode}"
+}
+
+capture_active_revision_state() {
+  local app=$1
+  local output_file=$2
+  local list_file="${output_file}.list"
+  local active_revision
+  if ! az containerapp revision list \
+    --name "${app}" \
+    --resource-group "${RESOURCE_GROUP}" \
+    --output json >"${list_file}"; then
+    echo "ERROR: could not list active revisions for ${app}" >&2
+    return 1
+  fi
+  active_revision="$(jq -er '
+    [.[] | select(.properties.active == true)]
+    | if length == 1 and (.[0].name | type == "string" and length > 0)
+      then .[0].name
+      else error("expected exactly one active revision")
+      end
+  ' "${list_file}")" || {
+    echo "ERROR: ${app} does not have exactly one active revision" >&2
+    return 1
+  }
+  if ! az containerapp revision show \
+    --name "${app}" \
+    --resource-group "${RESOURCE_GROUP}" \
+    --revision "${active_revision}" \
+    --output json >"${output_file}"; then
+    echo "ERROR: could not read active revision ${active_revision} for ${app}" >&2
+    return 1
+  fi
+  jq -e --arg revision "${active_revision}" '
+    .name == $revision
+    and .properties.active == true
+    and .properties.healthState == "Healthy"
+    and .properties.provisioningState == "Provisioned"
+    and (.properties.template.containers | length == 1)
+    and (.properties.template.containers[0].image | type == "string" and length > 0)
+  ' "${output_file}" >/dev/null || {
+    echo "ERROR: ${app} active revision is not a single healthy provisioned container" >&2
+    return 1
+  }
+}
+
+assert_active_revision_identity() {
+  local app=$1
+  local expected_image=$2
+  local expected_revision=$3
+  local output_file=$4
+  local actual_image actual_revision
+  capture_active_revision_state "${app}" "${output_file}" || return 1
+  actual_revision="$(containerapp_state_value "${output_file}" '.name')" || return 1
+  actual_image="$(containerapp_state_value \
+    "${output_file}" '.properties.template.containers[0].image')" || return 1
+  if [[ "${actual_revision}" != "${expected_revision}" ||
+    "${actual_image}" != "${expected_image}" ]]; then
+    echo "ERROR: ${app} active revision/image changed outside this rollout" >&2
+    return 1
+  fi
+}
+
+assert_live_rollout_state() {
+  local prefix=$1
+  local expected_api_image=$2
+  local expected_api_revision=$3
+  local expected_worker_image=$4
+  local expected_worker_revision=$5
+  local expected_console_image=$6
+  local expected_console_revision=$7
+  local expected_mode=$8
+  local api_state="${RUNTIME_STATE_DIR}/${prefix}-api-active.json"
+  local worker_state="${RUNTIME_STATE_DIR}/${prefix}-worker-active.json"
+  local console_state="${RUNTIME_STATE_DIR}/${prefix}-console-active.json"
+  local api_mode worker_mode
+  assert_active_revision_identity \
+    "${API_APP}" "${expected_api_image}" "${expected_api_revision}" "${api_state}" || return 1
+  assert_active_revision_identity \
+    "${WORKER_APP}" "${expected_worker_image}" "${expected_worker_revision}" "${worker_state}" || return 1
+  assert_active_revision_identity \
+    "${CONSOLE_APP}" "${expected_console_image}" "${expected_console_revision}" "${console_state}" || return 1
+  api_mode="$(delivery_unknown_mode_from_state "${api_state}" api)" || return 1
+  worker_mode="$(delivery_unknown_mode_from_state "${worker_state}" worker)" || return 1
+  if [[ "${api_mode}" != "disabled" || "${worker_mode}" != "${expected_mode}" ]]; then
+    echo "ERROR: DELIVERY_UNKNOWN write mode changed outside this rollout" >&2
+    return 1
+  fi
+}
+
 wait_for_containerapp_image() {
   local app=$1
   local expected_image=$2
@@ -649,10 +851,16 @@ wait_for_containerapp_image() {
   local attempt image provisioning latest ready
   for ((attempt = 1; attempt <= 180; attempt++)); do
     if capture_containerapp_state "${app}" "${state_file}"; then
-      image="$(containerapp_state_value "${state_file}" '.properties.template.containers[0].image')"
-      provisioning="$(containerapp_state_value "${state_file}" '.properties.provisioningState // ""')"
-      latest="$(containerapp_state_value "${state_file}" '.properties.latestRevisionName // ""')"
-      ready="$(containerapp_state_value "${state_file}" '.properties.latestReadyRevisionName // ""')"
+      if ! image="$(containerapp_state_value \
+        "${state_file}" '.properties.template.containers[0].image')" ||
+        ! provisioning="$(containerapp_state_value \
+          "${state_file}" '.properties.provisioningState // ""')" ||
+        ! latest="$(containerapp_state_value \
+          "${state_file}" '.properties.latestRevisionName // ""')" ||
+        ! ready="$(containerapp_state_value \
+          "${state_file}" '.properties.latestReadyRevisionName // ""')"; then
+        continue
+      fi
       if [[ "${provisioning}" == "Failed" || "${provisioning}" == "Canceled" ]]; then
         echo "ERROR: ${app} entered ${provisioning} while applying ${expected_image}" >&2
         return 1
@@ -668,40 +876,98 @@ wait_for_containerapp_image() {
   return 1
 }
 
+require_inactive_revision_retention() {
+  local state_file=$1
+  local app=$2
+  local retained
+  if ! retained="$(containerapp_state_value \
+    "${state_file}" '.properties.configuration.maxInactiveRevisions')"; then
+    echo "ERROR: ${app} maxInactiveRevisions must be explicit" >&2
+    return 1
+  fi
+  if [[ ! "${retained}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: ${app} maxInactiveRevisions must retain at least one rollback revision" >&2
+    return 1
+  fi
+}
+
+verify_retained_revision() {
+  local app=$1
+  local revision=$2
+  local expected_image=$3
+  local state_file=$4
+  if ! az containerapp revision show \
+    --name "${app}" \
+    --resource-group "${RESOURCE_GROUP}" \
+    --revision "${revision}" \
+    --output json >"${state_file}"; then
+    echo "ERROR: signed rollback revision ${revision} is no longer available" >&2
+    return 1
+  fi
+  jq -e --arg revision "${revision}" --arg image "${expected_image}" '
+    .name == $revision
+    and .properties.active == false
+    and (.properties.template.containers | length == 1)
+    and .properties.template.containers[0].image == $image
+  ' "${state_file}" >/dev/null || {
+    echo "ERROR: signed rollback revision ${revision} was not retained exactly" >&2
+    return 1
+  }
+}
+
 require_exclusive_containerapp_mutation_authority() {
   if [[ "${ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED:-}" != "true" ]]; then
     echo "ERROR: Azure Container Apps mutation authority is not exclusively attested" >&2
     echo "       ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED=true is permitted only after" >&2
     echo "       an RBAC audit proves the protected CI OIDC principal is the exclusive" >&2
-    echo "       Microsoft.App/containerApps/write authority for both production apps" >&2
+    echo "       Microsoft.App/containerApps/write authority across apex-gtm-api," >&2
+    echo "       apex-gtm-worker, and nikxius-web, or all three share one coordinated" >&2
+    echo "       mutation lease that excludes every other writer" >&2
     return 1
   fi
 }
 
 update_containerapp_image() {
   local app=$1
-  local expected_current_image=$2
-  local desired_image=$3
-  local state_file=$4
-  local result_state_file=$5
-  local current_image
+  local desired_image=$2
+  local state_prefix=$3
+  local expected_api_image=$4
+  local expected_api_revision=$5
+  local expected_worker_image=$6
+  local expected_worker_revision=$7
+  local expected_console_image=$8
+  local expected_console_revision=$9
+  local expected_mode=${10}
+  local result_state_file=${11}
 
-  # Refresh inside the mutation helper so every forward and compensating write
-  # compares the target's latest observable state immediately before invoking
-  # the Azure update command. Callers must not rely on an older preflight read.
-  capture_containerapp_state "${app}" "${state_file}"
-  current_image="$(containerapp_state_value "${state_file}" '.properties.template.containers[0].image')"
-  if [[ "${current_image}" != "${expected_current_image}" ]]; then
-    echo "ERROR: ${app} state snapshot does not contain the expected current image" >&2
-    return 1
-  fi
+  # Immediately before the mutation, re-read all three active revisions and
+  # compare exact revision, image, and compatibility mode identities. A
+  # same-image configuration update creates a new revision and is rejected.
+  assert_live_rollout_state \
+    "${state_prefix}" \
+    "${expected_api_image}" "${expected_api_revision}" \
+    "${expected_worker_image}" "${expected_worker_revision}" \
+    "${expected_console_image}" "${expected_console_revision}" \
+    "${expected_mode}" || return 1
+
+  # Identity reads can be slow. Reverify the frozen signed receipt only after
+  # those reads so a receipt that expires during them cannot authorize a write.
+  verify_signed_rollback_baseline_contract || return 1
 
   # The stable Container Apps REST specifications through 2026-01-01 expose
   # neither a resource ETag nor an If-Match update parameter. Do not imply CAS.
   # This write is admitted only when RBAC makes the protected CI OIDC principal
   # the exclusive writer; the fixed GitHub ref serializes that principal's
   # release attempts. Re-check the attestation immediately before every write.
-  require_exclusive_containerapp_mutation_authority
+  require_exclusive_containerapp_mutation_authority || return 1
+  case "${app}" in
+    "${API_APP}") API_UPDATE_ATTEMPTED="true" ;;
+    "${WORKER_APP}") WORKER_UPDATE_ATTEMPTED="true" ;;
+    *)
+      echo "ERROR: unsupported Container App update target: ${app}" >&2
+      return 1
+      ;;
+  esac
   if ! az containerapp update \
     --name "${app}" \
     --resource-group "${RESOURCE_GROUP}" \
@@ -710,7 +976,115 @@ update_containerapp_image() {
     echo "ERROR: ${app} image update failed or its outcome is uncertain" >&2
     return 1
   fi
-  wait_for_containerapp_image "${app}" "${desired_image}" "${result_state_file}"
+  wait_for_containerapp_image \
+    "${app}" "${desired_image}" "${result_state_file}" || return 1
+}
+
+wait_for_exact_revision_activation() {
+  local app=$1
+  local expected_revision=$2
+  local expected_image=$3
+  local state_file=$4
+  local attempt actual_revision actual_image
+  for ((attempt = 1; attempt <= 180; attempt++)); do
+    if capture_active_revision_state "${app}" "${state_file}"; then
+      if ! actual_revision="$(containerapp_state_value "${state_file}" '.name')" ||
+        ! actual_image="$(containerapp_state_value \
+          "${state_file}" '.properties.template.containers[0].image')"; then
+        continue
+      fi
+      if [[ "${actual_revision}" == "${expected_revision}" &&
+        "${actual_image}" == "${expected_image}" ]]; then
+        return 0
+      fi
+    fi
+    sleep 5
+  done
+  echo "ERROR: timed out waiting for ${app} to reactivate exact revision ${expected_revision}" >&2
+  return 1
+}
+
+verify_api_traffic_on_active_revision() {
+  local expected_revision=$1
+  local state_file=$2
+  capture_containerapp_state "${API_APP}" "${state_file}" || return 1
+  jq -e --arg revision "${expected_revision}" '
+    .properties.configuration.activeRevisionsMode == "Single"
+    and (.properties.configuration.ingress.external == true)
+    and (.properties.configuration.ingress.traffic | type == "array" and length == 1)
+    and (.properties.configuration.ingress.traffic[0].weight == 100)
+    and .properties.configuration.ingress.traffic[0].revisionName == $revision
+    and ((.properties.configuration.ingress.traffic[0].latestRevision // false) == false)
+  ' "${state_file}" >/dev/null || {
+    echo "ERROR: API traffic is not exclusively bound to the exact active rollback revision" >&2
+    return 1
+  }
+}
+
+set_api_traffic_to_exact_revision() {
+  local revision=$1
+  local expected_api_image=$2
+  local expected_api_revision=$3
+  local expected_worker_image=$4
+  local expected_worker_revision=$5
+  local expected_console_image=$6
+  local expected_console_revision=$7
+  local expected_mode=$8
+  local result_state_file=$9
+
+  assert_live_rollout_state \
+    rollback-api-before-traffic \
+    "${expected_api_image}" "${expected_api_revision}" \
+    "${expected_worker_image}" "${expected_worker_revision}" \
+    "${expected_console_image}" "${expected_console_revision}" \
+    "${expected_mode}" || return 1
+  require_exclusive_containerapp_mutation_authority || return 1
+  if ! az containerapp ingress traffic set \
+    --name "${API_APP}" \
+    --resource-group "${RESOURCE_GROUP}" \
+    --revision-weight "${revision}=100" \
+    --output none; then
+    echo "ERROR: API exact rollback traffic assignment failed or is uncertain" >&2
+    return 1
+  fi
+  verify_api_traffic_on_active_revision \
+    "${revision}" "${result_state_file}" || return 1
+}
+
+activate_containerapp_revision() {
+  local app=$1
+  local revision=$2
+  local image=$3
+  local state_prefix=$4
+  local expected_api_image=$5
+  local expected_api_revision=$6
+  local expected_worker_image=$7
+  local expected_worker_revision=$8
+  local expected_console_image=$9
+  local expected_console_revision=${10}
+  local expected_mode=${11}
+  local result_state_file=${12}
+
+  assert_live_rollout_state \
+    "${state_prefix}" \
+    "${expected_api_image}" "${expected_api_revision}" \
+    "${expected_worker_image}" "${expected_worker_revision}" \
+    "${expected_console_image}" "${expected_console_revision}" \
+    "${expected_mode}" || return 1
+  verify_retained_revision \
+    "${app}" "${revision}" "${image}" \
+    "${RUNTIME_STATE_DIR}/${state_prefix}-target-retained.json" || return 1
+  require_exclusive_containerapp_mutation_authority || return 1
+  if ! az containerapp revision activate \
+    --name "${app}" \
+    --resource-group "${RESOURCE_GROUP}" \
+    --revision "${revision}" \
+    --output none; then
+    echo "ERROR: ${app} exact revision activation failed or its outcome is uncertain" >&2
+    return 1
+  fi
+  wait_for_exact_revision_activation \
+    "${app}" "${revision}" "${image}" "${result_state_file}" || return 1
 }
 
 # Prove access to both targets before creating a registry artifact. Capturing
@@ -718,24 +1092,108 @@ update_containerapp_image() {
 # recovery identity; the script never guesses a mutable rollback tag.
 INITIAL_API_STATE="${RUNTIME_STATE_DIR}/initial-api.json"
 INITIAL_WORKER_STATE="${RUNTIME_STATE_DIR}/initial-worker.json"
+INITIAL_CONSOLE_STATE="${RUNTIME_STATE_DIR}/initial-console.json"
 capture_containerapp_state "${API_APP}" "${INITIAL_API_STATE}"
 capture_containerapp_state "${WORKER_APP}" "${INITIAL_WORKER_STATE}"
+capture_containerapp_state "${CONSOLE_APP}" "${INITIAL_CONSOLE_STATE}"
+require_inactive_revision_retention "${INITIAL_API_STATE}" "${API_APP}"
+require_inactive_revision_retention "${INITIAL_WORKER_STATE}" "${WORKER_APP}"
 PREVIOUS_API_IMAGE="$(containerapp_state_value \
   "${INITIAL_API_STATE}" '.properties.template.containers[0].image')"
 PREVIOUS_WORKER_IMAGE="$(containerapp_state_value \
   "${INITIAL_WORKER_STATE}" '.properties.template.containers[0].image')"
-if [[ -z "${PREVIOUS_API_IMAGE}" || -z "${PREVIOUS_WORKER_IMAGE}" ]]; then
-  echo "ERROR: could not resolve both current Container App image references" >&2
+PREVIOUS_CONSOLE_IMAGE="$(containerapp_state_value \
+  "${INITIAL_CONSOLE_STATE}" '.properties.template.containers[0].image')"
+PREVIOUS_API_REVISION="$(containerapp_state_value \
+  "${INITIAL_API_STATE}" '.properties.latestReadyRevisionName // ""')"
+PREVIOUS_WORKER_REVISION="$(containerapp_state_value \
+  "${INITIAL_WORKER_STATE}" '.properties.latestReadyRevisionName // ""')"
+PREVIOUS_CONSOLE_REVISION="$(containerapp_state_value \
+  "${INITIAL_CONSOLE_STATE}" '.properties.latestReadyRevisionName // ""')"
+LATEST_API_REVISION="$(containerapp_state_value \
+  "${INITIAL_API_STATE}" '.properties.latestRevisionName // ""')"
+LATEST_WORKER_REVISION="$(containerapp_state_value \
+  "${INITIAL_WORKER_STATE}" '.properties.latestRevisionName // ""')"
+LATEST_CONSOLE_REVISION="$(containerapp_state_value \
+  "${INITIAL_CONSOLE_STATE}" '.properties.latestRevisionName // ""')"
+if [[ -z "${PREVIOUS_API_IMAGE}" || -z "${PREVIOUS_WORKER_IMAGE}" ||
+  -z "${PREVIOUS_CONSOLE_IMAGE}" ]]; then
+  echo "ERROR: could not resolve all current Container App image references" >&2
+  exit 1
+fi
+if [[ ! "${PREVIOUS_API_REVISION}" =~ ^${API_APP}--[a-z0-9][a-z0-9-]*$ ]] ||
+  [[ ! "${PREVIOUS_WORKER_REVISION}" =~ ^${WORKER_APP}--[a-z0-9][a-z0-9-]*$ ]] ||
+  [[ ! "${PREVIOUS_CONSOLE_REVISION}" =~ ^${CONSOLE_APP}--[a-z0-9][a-z0-9-]*$ ]] ||
+  [[ "${LATEST_API_REVISION}" != "${PREVIOUS_API_REVISION}" ]] ||
+  [[ "${LATEST_WORKER_REVISION}" != "${PREVIOUS_WORKER_REVISION}" ]] ||
+  [[ "${LATEST_CONSOLE_REVISION}" != "${PREVIOUS_CONSOLE_REVISION}" ]]; then
+  echo "ERROR: API, worker, and console baselines must be exact latest-ready production revisions" >&2
   exit 1
 fi
 if [[ ! "${PREVIOUS_API_IMAGE}" =~ ^${REGISTRY}\.azurecr\.io/${ACR_REPO}@sha256:[0-9a-f]{64}$ ]] ||
-  [[ ! "${PREVIOUS_WORKER_IMAGE}" =~ ^${REGISTRY}\.azurecr\.io/${ACR_REPO}@sha256:[0-9a-f]{64}$ ]]; then
-  echo "ERROR: both current apps must already use immutable digest references for safe rollback" >&2
+  [[ ! "${PREVIOUS_WORKER_IMAGE}" =~ ^${REGISTRY}\.azurecr\.io/${ACR_REPO}@sha256:[0-9a-f]{64}$ ]] ||
+  [[ ! "${PREVIOUS_CONSOLE_IMAGE}" =~ ^${REGISTRY}\.azurecr\.io/${CONSOLE_ACR_REPO}@sha256:[0-9a-f]{64}$ ]]; then
+  echo "ERROR: API, worker, and console must already use immutable digest references for safe rollback" >&2
   exit 1
 fi
+INITIAL_API_ACTIVE_STATE="${RUNTIME_STATE_DIR}/initial-api-active.json"
+INITIAL_WORKER_ACTIVE_STATE="${RUNTIME_STATE_DIR}/initial-worker-active.json"
+INITIAL_CONSOLE_ACTIVE_STATE="${RUNTIME_STATE_DIR}/initial-console-active.json"
+assert_active_revision_identity \
+  "${API_APP}" "${PREVIOUS_API_IMAGE}" "${PREVIOUS_API_REVISION}" "${INITIAL_API_ACTIVE_STATE}"
+assert_active_revision_identity \
+  "${WORKER_APP}" "${PREVIOUS_WORKER_IMAGE}" "${PREVIOUS_WORKER_REVISION}" "${INITIAL_WORKER_ACTIVE_STATE}"
+assert_active_revision_identity \
+  "${CONSOLE_APP}" "${PREVIOUS_CONSOLE_IMAGE}" "${PREVIOUS_CONSOLE_REVISION}" "${INITIAL_CONSOLE_ACTIVE_STATE}"
 run_snapshot_helper "scripts/verify-containerapp-release-config.sh" \
   "${PREVIOUS_API_IMAGE}" \
   "${PREVIOUS_WORKER_IMAGE}"
+
+API_DELIVERY_UNKNOWN_WRITE_MODE="$(delivery_unknown_mode_from_state \
+  "${INITIAL_API_ACTIVE_STATE}" api)"
+DELIVERY_UNKNOWN_RECEIPT_MODE="$(delivery_unknown_mode_from_state \
+  "${INITIAL_WORKER_ACTIVE_STATE}" worker)"
+if [[ "${API_DELIVERY_UNKNOWN_WRITE_MODE}" != "disabled" ]]; then
+  echo "ERROR: API DELIVERY_UNKNOWN write mode is not disabled" >&2
+  exit 1
+fi
+
+verify_signed_rollback_baseline_contract() {
+  local freshness_mode="${1:-fresh}"
+  if [[ "${freshness_mode}" == "same-attempt-rollback" ]]; then
+    WORKFORCE_RELEASE_SAME_ATTEMPT_ROLLBACK=true \
+      run_snapshot_helper "scripts/verify-migration-release-receipt.sh" \
+        "${MIGRATION_RECEIPT}" \
+        "${MIGRATION_SIGNATURE}" \
+        "${MIGRATION_ALLOWED_SIGNERS}" \
+        "${COMMIT}" \
+        "${PREVIOUS_API_IMAGE}" \
+        "${PREVIOUS_API_REVISION}" \
+        "${PREVIOUS_WORKER_IMAGE}" \
+        "${PREVIOUS_WORKER_REVISION}" \
+        "${PREVIOUS_CONSOLE_IMAGE}" \
+        "${PREVIOUS_CONSOLE_REVISION}" \
+        "${DELIVERY_UNKNOWN_RECEIPT_MODE}"
+    return
+  fi
+  if [[ "${freshness_mode}" != "fresh" ]]; then
+    echo "ERROR: unknown signed rollback baseline freshness mode" >&2
+    return 1
+  fi
+  run_snapshot_helper "scripts/verify-migration-release-receipt.sh" \
+    "${MIGRATION_RECEIPT}" \
+    "${MIGRATION_SIGNATURE}" \
+    "${MIGRATION_ALLOWED_SIGNERS}" \
+    "${COMMIT}" \
+    "${PREVIOUS_API_IMAGE}" \
+    "${PREVIOUS_API_REVISION}" \
+    "${PREVIOUS_WORKER_IMAGE}" \
+    "${PREVIOUS_WORKER_REVISION}" \
+    "${PREVIOUS_CONSOLE_IMAGE}" \
+    "${PREVIOUS_CONSOLE_REVISION}" \
+    "${DELIVERY_UNKNOWN_RECEIPT_MODE}"
+}
+verify_signed_rollback_baseline_contract
 
 # Full-SHA traceability tag. Tags remain mutable registry aliases, so the
 # deployment identity is resolved to a content digest after the build.
@@ -748,6 +1206,11 @@ echo "Build tag: ${TAGGED_IMAGE}"
 echo "Apps   : ${API_APP} + ${WORKER_APP} (rg ${RESOURCE_GROUP})"
 echo "Current API image   : ${PREVIOUS_API_IMAGE}"
 echo "Current worker image: ${PREVIOUS_WORKER_IMAGE}"
+echo "Current console image: ${PREVIOUS_CONSOLE_IMAGE}"
+echo "Rollback API revision   : ${PREVIOUS_API_REVISION}"
+echo "Rollback worker revision: ${PREVIOUS_WORKER_REVISION}"
+echo "Rollback console revision: ${PREVIOUS_CONSOLE_REVISION}"
+echo "DELIVERY_UNKNOWN writes : ${DELIVERY_UNKNOWN_RECEIPT_MODE}"
 echo
 
 # --- Build once from the immutable tracked commit ---------------------------
@@ -825,22 +1288,41 @@ if [[ "${CURRENT_REMOTE_COMMIT}" != "${COMMIT}" ]]; then
 fi
 PREFLIGHT_API_STATE="${RUNTIME_STATE_DIR}/preflight-api.json"
 PREFLIGHT_WORKER_STATE="${RUNTIME_STATE_DIR}/preflight-worker.json"
+PREFLIGHT_CONSOLE_STATE="${RUNTIME_STATE_DIR}/preflight-console.json"
 capture_containerapp_state "${API_APP}" "${PREFLIGHT_API_STATE}"
 capture_containerapp_state "${WORKER_APP}" "${PREFLIGHT_WORKER_STATE}"
+capture_containerapp_state "${CONSOLE_APP}" "${PREFLIGHT_CONSOLE_STATE}"
 CURRENT_API_IMAGE="$(containerapp_state_value \
   "${PREFLIGHT_API_STATE}" '.properties.template.containers[0].image')"
 CURRENT_WORKER_IMAGE="$(containerapp_state_value \
   "${PREFLIGHT_WORKER_STATE}" '.properties.template.containers[0].image')"
+CURRENT_CONSOLE_IMAGE="$(containerapp_state_value \
+  "${PREFLIGHT_CONSOLE_STATE}" '.properties.template.containers[0].image')"
+CURRENT_API_REVISION="$(containerapp_state_value \
+  "${PREFLIGHT_API_STATE}" '.properties.latestReadyRevisionName // ""')"
+CURRENT_WORKER_REVISION="$(containerapp_state_value \
+  "${PREFLIGHT_WORKER_STATE}" '.properties.latestReadyRevisionName // ""')"
+CURRENT_CONSOLE_REVISION="$(containerapp_state_value \
+  "${PREFLIGHT_CONSOLE_STATE}" '.properties.latestReadyRevisionName // ""')"
 if [[ "${CURRENT_API_IMAGE}" != "${PREVIOUS_API_IMAGE}" ||
-  "${CURRENT_WORKER_IMAGE}" != "${PREVIOUS_WORKER_IMAGE}" ]]; then
-  echo "ERROR: production images changed while the artifact was building; refusing to overwrite a concurrent release" >&2
-  echo "Captured API/worker: ${PREVIOUS_API_IMAGE} / ${PREVIOUS_WORKER_IMAGE}" >&2
-  echo "Current API/worker : ${CURRENT_API_IMAGE:-<missing>} / ${CURRENT_WORKER_IMAGE:-<missing>}" >&2
+  "${CURRENT_WORKER_IMAGE}" != "${PREVIOUS_WORKER_IMAGE}" ||
+  "${CURRENT_CONSOLE_IMAGE}" != "${PREVIOUS_CONSOLE_IMAGE}" ||
+  "${CURRENT_API_REVISION}" != "${PREVIOUS_API_REVISION}" ||
+  "${CURRENT_WORKER_REVISION}" != "${PREVIOUS_WORKER_REVISION}" ||
+  "${CURRENT_CONSOLE_REVISION}" != "${PREVIOUS_CONSOLE_REVISION}" ]]; then
+  echo "ERROR: production API/worker/console rollback baselines changed while the artifact was building" >&2
   exit 1
 fi
+assert_live_rollout_state \
+  preflight \
+  "${PREVIOUS_API_IMAGE}" "${PREVIOUS_API_REVISION}" \
+  "${PREVIOUS_WORKER_IMAGE}" "${PREVIOUS_WORKER_REVISION}" \
+  "${PREVIOUS_CONSOLE_IMAGE}" "${PREVIOUS_CONSOLE_REVISION}" \
+  "${DELIVERY_UNKNOWN_RECEIPT_MODE}"
 run_snapshot_helper "scripts/verify-containerapp-release-config.sh" \
   "${PREVIOUS_API_IMAGE}" \
   "${PREVIOUS_WORKER_IMAGE}"
+verify_signed_rollback_baseline_contract
 
 # --- Roll BOTH apps to the same digest --------------------------------------
 WORKER_UPDATE_ATTEMPTED="false"
@@ -848,46 +1330,94 @@ API_UPDATE_ATTEMPTED="false"
 rollback_partial_rollout() {
   local rollout_status=$1
   local rollback_failed="false"
-  local current_image rollback_state rollback_result_state
+  local rollback_api_state="${RUNTIME_STATE_DIR}/rollback-api-current.json"
+  local rollback_worker_state="${RUNTIME_STATE_DIR}/rollback-worker-current.json"
+  local rollback_console_state="${RUNTIME_STATE_DIR}/rollback-console-current.json"
+  local current_api_image current_api_revision current_worker_image current_worker_revision
+  local current_console_image current_console_revision current_api_mode current_worker_mode
   trap - ERR
   trap '' HUP INT TERM
   set +e
-  echo "ERROR: rollout did not complete; restoring the captured immutable images." >&2
-  if [[ "${WORKER_UPDATE_ATTEMPTED}" == "true" ]]; then
-    rollback_state="${RUNTIME_STATE_DIR}/rollback-worker-current.json"
-    rollback_result_state="${RUNTIME_STATE_DIR}/rollback-worker-result.json"
-    current_image=""
-    capture_containerapp_state "${WORKER_APP}" "${rollback_state}" || rollback_failed="true"
-    current_image="$(containerapp_state_value \
-      "${rollback_state}" '.properties.template.containers[0].image')" || rollback_failed="true"
-    if [[ "${current_image}" == "${IMAGE}" ]]; then
-      update_containerapp_image \
-        "${WORKER_APP}" "${IMAGE}" "${PREVIOUS_WORKER_IMAGE}" \
-        "${rollback_state}" "${rollback_result_state}" || rollback_failed="true"
-    elif [[ "${current_image}" != "${PREVIOUS_WORKER_IMAGE}" ]]; then
-      echo "ERROR: ${WORKER_APP} changed outside this rollout; refusing to overwrite it during rollback" >&2
-      rollback_failed="true"
+  echo "ERROR: rollout did not complete; reactivating the exact signed baseline revisions." >&2
+  if ! verify_signed_rollback_baseline_contract same-attempt-rollback; then
+    echo "ERROR: signed rollback baseline verification failed; no compensating write was attempted." >&2
+    echo "Previous API image/revision   : ${PREVIOUS_API_IMAGE} / ${PREVIOUS_API_REVISION}" >&2
+    echo "Previous worker image/revision: ${PREVIOUS_WORKER_IMAGE} / ${PREVIOUS_WORKER_REVISION}" >&2
+    exit "${rollout_status}"
+  fi
+  capture_active_revision_state "${API_APP}" "${rollback_api_state}" || rollback_failed="true"
+  capture_active_revision_state "${WORKER_APP}" "${rollback_worker_state}" || rollback_failed="true"
+  capture_active_revision_state "${CONSOLE_APP}" "${rollback_console_state}" || rollback_failed="true"
+  if [[ "${rollback_failed}" != "true" ]]; then
+    current_api_image="$(containerapp_state_value "${rollback_api_state}" '.properties.template.containers[0].image')" || rollback_failed="true"
+    current_api_revision="$(containerapp_state_value "${rollback_api_state}" '.name')" || rollback_failed="true"
+    current_worker_image="$(containerapp_state_value "${rollback_worker_state}" '.properties.template.containers[0].image')" || rollback_failed="true"
+    current_worker_revision="$(containerapp_state_value "${rollback_worker_state}" '.name')" || rollback_failed="true"
+    current_console_image="$(containerapp_state_value "${rollback_console_state}" '.properties.template.containers[0].image')" || rollback_failed="true"
+    current_console_revision="$(containerapp_state_value "${rollback_console_state}" '.name')" || rollback_failed="true"
+    current_api_mode="$(delivery_unknown_mode_from_state "${rollback_api_state}" api)" || rollback_failed="true"
+    current_worker_mode="$(delivery_unknown_mode_from_state "${rollback_worker_state}" worker)" || rollback_failed="true"
+  fi
+  if [[ "${rollback_failed}" != "true" ]] &&
+    { [[ "${current_console_image}" != "${PREVIOUS_CONSOLE_IMAGE}" ]] ||
+      [[ "${current_console_revision}" != "${PREVIOUS_CONSOLE_REVISION}" ]] ||
+      [[ "${current_api_mode}" != "disabled" ]] ||
+      [[ "${current_worker_mode}" != "${DELIVERY_UNKNOWN_RECEIPT_MODE}" ]] ||
+      { [[ "${current_api_revision}" != "${PREVIOUS_API_REVISION}" ]] && [[ "${current_api_image}" != "${IMAGE}" ]]; } ||
+      { [[ "${current_worker_revision}" != "${PREVIOUS_WORKER_REVISION}" ]] && [[ "${current_worker_image}" != "${IMAGE}" ]]; }; }; then
+    echo "ERROR: active production identity changed outside this rollout; refusing compensating mutation" >&2
+    rollback_failed="true"
+  fi
+  if [[ "${rollback_failed}" != "true" && "${WORKER_UPDATE_ATTEMPTED}" == "true" &&
+    "${current_worker_revision}" != "${PREVIOUS_WORKER_REVISION}" ]]; then
+    activate_containerapp_revision \
+      "${WORKER_APP}" "${PREVIOUS_WORKER_REVISION}" "${PREVIOUS_WORKER_IMAGE}" \
+      rollback-worker-before-activate \
+      "${current_api_image}" "${current_api_revision}" \
+      "${current_worker_image}" "${current_worker_revision}" \
+      "${PREVIOUS_CONSOLE_IMAGE}" "${PREVIOUS_CONSOLE_REVISION}" \
+      "${DELIVERY_UNKNOWN_RECEIPT_MODE}" \
+      "${RUNTIME_STATE_DIR}/rollback-worker-result.json" || rollback_failed="true"
+    if [[ "${rollback_failed}" != "true" ]]; then
+      current_worker_image="${PREVIOUS_WORKER_IMAGE}"
+      current_worker_revision="${PREVIOUS_WORKER_REVISION}"
     fi
   fi
-  if [[ "${API_UPDATE_ATTEMPTED}" == "true" ]]; then
-    rollback_state="${RUNTIME_STATE_DIR}/rollback-api-current.json"
-    rollback_result_state="${RUNTIME_STATE_DIR}/rollback-api-result.json"
-    current_image=""
-    capture_containerapp_state "${API_APP}" "${rollback_state}" || rollback_failed="true"
-    current_image="$(containerapp_state_value \
-      "${rollback_state}" '.properties.template.containers[0].image')" || rollback_failed="true"
-    if [[ "${current_image}" == "${IMAGE}" ]]; then
-      update_containerapp_image \
-        "${API_APP}" "${IMAGE}" "${PREVIOUS_API_IMAGE}" \
-        "${rollback_state}" "${rollback_result_state}" || rollback_failed="true"
-    elif [[ "${current_image}" != "${PREVIOUS_API_IMAGE}" ]]; then
-      echo "ERROR: ${API_APP} changed outside this rollout; refusing to overwrite it during rollback" >&2
-      rollback_failed="true"
+  if [[ "${rollback_failed}" != "true" && "${API_UPDATE_ATTEMPTED}" == "true" &&
+    "${current_api_revision}" != "${PREVIOUS_API_REVISION}" ]]; then
+    activate_containerapp_revision \
+      "${API_APP}" "${PREVIOUS_API_REVISION}" "${PREVIOUS_API_IMAGE}" \
+      rollback-api-before-activate \
+      "${current_api_image}" "${current_api_revision}" \
+      "${current_worker_image}" "${current_worker_revision}" \
+      "${PREVIOUS_CONSOLE_IMAGE}" "${PREVIOUS_CONSOLE_REVISION}" \
+      "${DELIVERY_UNKNOWN_RECEIPT_MODE}" \
+      "${RUNTIME_STATE_DIR}/rollback-api-result.json" || rollback_failed="true"
+    if [[ "${rollback_failed}" != "true" ]]; then
+      current_api_image="${PREVIOUS_API_IMAGE}"
+      current_api_revision="${PREVIOUS_API_REVISION}"
     fi
   fi
-  run_snapshot_helper "scripts/verify-containerapp-release-config.sh" \
-    "${PREVIOUS_API_IMAGE}" \
-    "${PREVIOUS_WORKER_IMAGE}" || rollback_failed="true"
+  if [[ "${rollback_failed}" != "true" && "${API_UPDATE_ATTEMPTED}" == "true" ]]; then
+    set_api_traffic_to_exact_revision \
+      "${PREVIOUS_API_REVISION}" \
+      "${current_api_image}" "${current_api_revision}" \
+      "${current_worker_image}" "${current_worker_revision}" \
+      "${PREVIOUS_CONSOLE_IMAGE}" "${PREVIOUS_CONSOLE_REVISION}" \
+      "${DELIVERY_UNKNOWN_RECEIPT_MODE}" \
+      "${RUNTIME_STATE_DIR}/rollback-api-traffic.json" || rollback_failed="true"
+  fi
+  if [[ "${rollback_failed}" != "true" ]]; then
+    assert_live_rollout_state \
+      rollback-final \
+      "${PREVIOUS_API_IMAGE}" "${PREVIOUS_API_REVISION}" \
+      "${PREVIOUS_WORKER_IMAGE}" "${PREVIOUS_WORKER_REVISION}" \
+      "${PREVIOUS_CONSOLE_IMAGE}" "${PREVIOUS_CONSOLE_REVISION}" \
+      "${DELIVERY_UNKNOWN_RECEIPT_MODE}" || rollback_failed="true"
+    verify_api_traffic_on_active_revision \
+      "${PREVIOUS_API_REVISION}" \
+      "${RUNTIME_STATE_DIR}/rollback-api-traffic-final.json" || rollback_failed="true"
+  fi
   if [[ "${rollback_failed}" == "true" ]]; then
     echo "ERROR: automatic rollback verification failed; operator intervention is required." >&2
     echo "Previous API image   : ${PREVIOUS_API_IMAGE}" >&2
@@ -915,24 +1445,61 @@ trap 'rollback_on_signal 143' TERM
 # can persist newly appended enum values such as FAILED. Rollback reverses this
 # order so the writer is disabled before an older reader is restored.
 RELEASE_LOCK_SAFE_TO_RELEASE="false"
-API_UPDATE_ATTEMPTED="true"
 echo "Rolling ${API_APP} -> ${IMAGE}"
 API_RESULT_STATE="${RUNTIME_STATE_DIR}/api-result.json"
 update_containerapp_image \
-  "${API_APP}" "${PREVIOUS_API_IMAGE}" "${IMAGE}" \
-  "${PREFLIGHT_API_STATE}" "${API_RESULT_STATE}"
+  "${API_APP}" "${IMAGE}" forward-api-before-update \
+  "${PREVIOUS_API_IMAGE}" "${PREVIOUS_API_REVISION}" \
+  "${PREVIOUS_WORKER_IMAGE}" "${PREVIOUS_WORKER_REVISION}" \
+  "${PREVIOUS_CONSOLE_IMAGE}" "${PREVIOUS_CONSOLE_REVISION}" \
+  "${DELIVERY_UNKNOWN_RECEIPT_MODE}" "${API_RESULT_STATE}"
+NEW_API_REVISION="$(containerapp_state_value "${API_RESULT_STATE}" '.properties.latestReadyRevisionName // ""')"
+if [[ ! "${NEW_API_REVISION}" =~ ^${API_APP}--[a-z0-9][a-z0-9-]*$ ||
+  "${NEW_API_REVISION}" == "${PREVIOUS_API_REVISION}" ]]; then
+  echo "ERROR: API rollout did not create a distinct canonical revision" >&2
+  false
+fi
+verify_retained_revision \
+  "${API_APP}" "${PREVIOUS_API_REVISION}" "${PREVIOUS_API_IMAGE}" \
+  "${RUNTIME_STATE_DIR}/post-api-retained-baseline.json"
 run_snapshot_helper "scripts/verify-containerapp-release-config.sh" \
   "${IMAGE}" \
   "${PREVIOUS_WORKER_IMAGE}"
 echo "API reader is healthy on ${DIGEST}"
 
-WORKER_UPDATE_ATTEMPTED="true"
 echo "Rolling ${WORKER_APP} -> ${IMAGE}"
 WORKER_RESULT_STATE="${RUNTIME_STATE_DIR}/worker-result.json"
 update_containerapp_image \
-  "${WORKER_APP}" "${PREVIOUS_WORKER_IMAGE}" "${IMAGE}" \
-  "${PREFLIGHT_WORKER_STATE}" "${WORKER_RESULT_STATE}"
+  "${WORKER_APP}" "${IMAGE}" forward-worker-before-update \
+  "${IMAGE}" "${NEW_API_REVISION}" \
+  "${PREVIOUS_WORKER_IMAGE}" "${PREVIOUS_WORKER_REVISION}" \
+  "${PREVIOUS_CONSOLE_IMAGE}" "${PREVIOUS_CONSOLE_REVISION}" \
+  "${DELIVERY_UNKNOWN_RECEIPT_MODE}" "${WORKER_RESULT_STATE}"
+NEW_WORKER_REVISION="$(containerapp_state_value "${WORKER_RESULT_STATE}" '.properties.latestReadyRevisionName // ""')"
+if [[ ! "${NEW_WORKER_REVISION}" =~ ^${WORKER_APP}--[a-z0-9][a-z0-9-]*$ ||
+  "${NEW_WORKER_REVISION}" == "${PREVIOUS_WORKER_REVISION}" ]]; then
+  echo "ERROR: worker rollout did not create a distinct canonical revision" >&2
+  false
+fi
+verify_retained_revision \
+  "${API_APP}" "${PREVIOUS_API_REVISION}" "${PREVIOUS_API_IMAGE}" \
+  "${RUNTIME_STATE_DIR}/post-worker-api-retained-baseline.json"
+verify_retained_revision \
+  "${WORKER_APP}" "${PREVIOUS_WORKER_REVISION}" "${PREVIOUS_WORKER_IMAGE}" \
+  "${RUNTIME_STATE_DIR}/post-worker-retained-baseline.json"
 run_snapshot_helper "scripts/verify-containerapp-release-config.sh" "${IMAGE}" "${IMAGE}"
+assert_live_rollout_state \
+  forward-final \
+  "${IMAGE}" "${NEW_API_REVISION}" \
+  "${IMAGE}" "${NEW_WORKER_REVISION}" \
+  "${PREVIOUS_CONSOLE_IMAGE}" "${PREVIOUS_CONSOLE_REVISION}" \
+  "${DELIVERY_UNKNOWN_RECEIPT_MODE}"
+verify_retained_revision \
+  "${API_APP}" "${PREVIOUS_API_REVISION}" "${PREVIOUS_API_IMAGE}" \
+  "${RUNTIME_STATE_DIR}/final-api-retained-baseline.json"
+verify_retained_revision \
+  "${WORKER_APP}" "${PREVIOUS_WORKER_REVISION}" "${PREVIOUS_WORKER_IMAGE}" \
+  "${RUNTIME_STATE_DIR}/final-worker-retained-baseline.json"
 echo "API and worker are healthy on ${DIGEST}"
 
 trap - ERR HUP INT TERM

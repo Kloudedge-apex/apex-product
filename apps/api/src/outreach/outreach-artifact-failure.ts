@@ -8,6 +8,15 @@ import { OutreachArtifactStatus, type Prisma } from "@prisma/client";
  */
 export const LEGACY_AUTO_FAILED_PREFIX = "auto-failed:";
 
+/**
+ * Compatibility representation for an ambiguous provider outcome while old
+ * readers or rollback images may not understand the DELIVERY_UNKNOWN enum.
+ * REJECTED is intentionally used only as the physical storage state: current
+ * readers expose these provenance-bearing rows as DELIVERY_UNKNOWN and never
+ * as a human rejection.
+ */
+export const LEGACY_DELIVERY_UNKNOWN_PREFIX = "delivery-unknown:";
+
 export interface ArtifactFailureView {
   readonly status: OutreachArtifactStatus;
   readonly reviewerNote?: string | null;
@@ -31,11 +40,37 @@ export function isLegacyAutoFailedArtifact(
   return hasLegacyAutoFailedMarker(artifact) && artifact.failedAt != null;
 }
 
-export function isFailedArtifact(artifact: ArtifactFailureView): boolean {
+export function isLegacyDeliveryUnknownArtifact(
+  artifact: Pick<ArtifactFailureView, "status" | "reviewerNote">,
+): boolean {
   return (
-    artifact.status === OutreachArtifactStatus.FAILED ||
-    isLegacyAutoFailedArtifact(artifact)
+    artifact.status === OutreachArtifactStatus.REJECTED &&
+    artifact.reviewerNote?.startsWith(LEGACY_DELIVERY_UNKNOWN_PREFIX) === true
   );
+}
+
+/**
+ * The one shared projection from rolling-deploy storage state to the status
+ * understood by current readers. No API or policy path should interpret a
+ * reserved compatibility marker from the physical REJECTED value directly.
+ */
+export function effectiveArtifactStatus(
+  artifact: Pick<
+    ArtifactFailureView,
+    "status" | "reviewerNote" | "failedAt"
+  >,
+): OutreachArtifactStatus {
+  if (isLegacyDeliveryUnknownArtifact(artifact)) {
+    return OutreachArtifactStatus.DELIVERY_UNKNOWN;
+  }
+  if (isLegacyAutoFailedArtifact(artifact)) {
+    return OutreachArtifactStatus.FAILED;
+  }
+  return artifact.status;
+}
+
+export function isFailedArtifact(artifact: ArtifactFailureView): boolean {
+  return effectiveArtifactStatus(artifact) === OutreachArtifactStatus.FAILED;
 }
 
 export function artifactFailureReason(
@@ -59,7 +94,11 @@ export function artifactFailedAt(artifact: ArtifactFailureView): Date | null {
 export function isReservedFailureNote(
   note: string | null | undefined,
 ): boolean {
-  return note?.trimStart().startsWith(LEGACY_AUTO_FAILED_PREFIX) === true;
+  const normalized = note?.trimStart();
+  return (
+    normalized?.startsWith(LEGACY_AUTO_FAILED_PREFIX) === true ||
+    normalized?.startsWith(LEGACY_DELIVERY_UNKNOWN_PREFIX) === true
+  );
 }
 
 export function failedArtifactWhere(): Prisma.OutreachArtifactWhereInput {
@@ -81,9 +120,30 @@ export function humanRejectedArtifactWhere(): Prisma.OutreachArtifactWhereInput 
     OR: [
       { reviewerNote: null },
       {
-        NOT: {
-          reviewerNote: { startsWith: LEGACY_AUTO_FAILED_PREFIX },
-        },
+        AND: [
+          {
+            NOT: {
+              reviewerNote: { startsWith: LEGACY_AUTO_FAILED_PREFIX },
+            },
+          },
+          {
+            NOT: {
+              reviewerNote: { startsWith: LEGACY_DELIVERY_UNKNOWN_PREFIX },
+            },
+          },
+        ],
+      },
+    ],
+  };
+}
+
+export function deliveryUnknownArtifactWhere(): Prisma.OutreachArtifactWhereInput {
+  return {
+    OR: [
+      { status: OutreachArtifactStatus.DELIVERY_UNKNOWN },
+      {
+        status: OutreachArtifactStatus.REJECTED,
+        reviewerNote: { startsWith: LEGACY_DELIVERY_UNKNOWN_PREFIX },
       },
     ],
   };
@@ -94,6 +154,8 @@ export function effectiveArtifactStatusWhere(
   status: OutreachArtifactStatus,
 ): Prisma.OutreachArtifactWhereInput {
   if (status === OutreachArtifactStatus.FAILED) return failedArtifactWhere();
+  if (status === OutreachArtifactStatus.DELIVERY_UNKNOWN)
+    return deliveryUnknownArtifactWhere();
   if (status === OutreachArtifactStatus.REJECTED)
     return humanRejectedArtifactWhere();
   return { status };
@@ -120,6 +182,10 @@ export function reviewedDecisionArtifactWhere(): Prisma.OutreachArtifactWhereInp
         status: OutreachArtifactStatus.REJECTED,
         reviewerNote: { startsWith: LEGACY_AUTO_FAILED_PREFIX },
         failedAt: { not: null },
+      },
+      {
+        status: OutreachArtifactStatus.REJECTED,
+        reviewerNote: { startsWith: LEGACY_DELIVERY_UNKNOWN_PREFIX },
       },
     ],
   };
@@ -148,6 +214,10 @@ export function approvedOutcomeArtifactWhere(): Prisma.OutreachArtifactWhereInpu
         status: OutreachArtifactStatus.REJECTED,
         reviewerNote: { startsWith: LEGACY_AUTO_FAILED_PREFIX },
         failedAt: { not: null },
+      },
+      {
+        status: OutreachArtifactStatus.REJECTED,
+        reviewerNote: { startsWith: LEGACY_DELIVERY_UNKNOWN_PREFIX },
       },
     ],
   };

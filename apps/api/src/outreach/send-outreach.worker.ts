@@ -50,6 +50,23 @@ import {
 } from "./outreach-artifact-eligibility";
 import { isGmailWatchFresh } from "../integrations/gmail/gmail-watch-freshness";
 import { senderIdentityReadiness } from "./sender-identity.util";
+import {
+  LEGACY_DELIVERY_UNKNOWN_PREFIX,
+  deliveryUnknownArtifactWhere,
+  effectiveArtifactStatus,
+} from "./outreach-artifact-failure";
+import {
+  DELIVERY_UNKNOWN_WRITE_MODE,
+  type DeliveryUnknownWriteMode,
+  resolveDeliveryUnknownWriteMode,
+} from "./outreach-delivery-unknown-compatibility";
+
+export {
+  DELIVERY_UNKNOWN_COMPATIBILITY_EPOCH,
+  DELIVERY_UNKNOWN_FIRST_CLASS_WRITE_ACK,
+  DELIVERY_UNKNOWN_WRITE_MODE,
+  resolveDeliveryUnknownWriteMode,
+} from "./outreach-delivery-unknown-compatibility";
 
 export { isLiveSendAllowedForOrg } from "./outreach-allowlist.util";
 
@@ -110,24 +127,27 @@ const IN_MEMORY_BATCH_SIZE = 10;
 // Reconcile sweep cadence + thresholds. APPROVED rows older than the requeue
 // age have lost their BullMQ job (Redis flush, enqueue failure post-approve).
 // A stale SENDING claim cannot reveal whether its worker died before or after
-// the provider accepted the POST, so it must become terminal
-// DELIVERY_UNKNOWN rather than being released and automatically re-sent.
+// the provider accepted the POST, so it must never be released and
+// automatically re-sent. An attested writer records DELIVERY_UNKNOWN;
+// otherwise the claim remains SENDING for operator reconciliation.
 const RECONCILE_INTERVAL_MS = 5 * 60_000;
 const APPROVED_REQUEUE_AGE_MS = 10 * 60_000;
 const SENDING_STALE_AGE_MS = 15 * 60_000;
 const RECONCILE_BATCH_LIMIT = 100;
 
-// GL8a: per-org daily live-send cap. Confirmed sends, fresh in-flight claims,
-// and unresolved delivery outcomes all reserve capacity; over-cap artifacts
+// GL8a: per-org daily live-send cap. Confirmed sends, every unresolved
+// in-flight claim, and unresolved delivery outcomes all reserve capacity;
+// SENDING has no age escape because disabled compatibility mode deliberately
+// preserves ambiguous claims until an operator reconciles them. Over-cap artifacts
 // are deferred (left APPROVED, job completes) — never terminal-failed — and
 // the reconcile sweep retries them until the UTC-midnight reset clears
 // headroom.
 const DEFAULT_DAILY_SEND_CAP_PER_ORG = 40;
 
 // GL8b: per-recipient cooldown. Confirmed SENT and DELIVERY_UNKNOWN outcomes
-// within this window suppress another contact; a fresh SENDING reservation
-// defers it until the first outcome resolves. Comparisons are trimmed and
-// case-folded inside the org boundary.
+// within this window suppress another contact; any SENDING reservation defers
+// it until the first outcome is explicitly resolved. Comparisons are trimmed
+// and case-folded inside the org boundary.
 const RECIPIENT_COOLDOWN_DAYS = 14;
 const RECIPIENT_COOLDOWN_MS = RECIPIENT_COOLDOWN_DAYS * 24 * 60 * 60 * 1000;
 
@@ -164,10 +184,11 @@ function startOfUtcDay(now: Date): Date {
 }
 
 /**
- * Capacity-risk rows for the current UTC day. A fresh SENDING claim may have
- * crossed midnight, so its short safety window is intentionally independent
- * of the day boundary. DELIVERY_UNKNOWN is terminal and consumes capacity on
- * the day it was recorded because the provider may have delivered it.
+ * Capacity-risk rows for the current UTC day. Every SENDING claim reserves
+ * capacity until explicit reconciliation; an age cutoff would let disabled
+ * compatibility mode silently forget an ambiguous provider request.
+ * DELIVERY_UNKNOWN is terminal and consumes capacity on the day it was
+ * recorded because the provider may have delivered it.
  */
 export function dailySendCapacityWhere(
   now: Date = new Date(),
@@ -180,12 +201,14 @@ export function dailySendCapacityWhere(
       },
       {
         status: OutreachArtifactStatus.SENDING,
-        updatedAt: {
-          gte: new Date(now.getTime() - SENDING_STALE_AGE_MS),
-        },
       },
       {
         status: OutreachArtifactStatus.DELIVERY_UNKNOWN,
+        updatedAt: { gte: startOfUtcDay(now) },
+      },
+      {
+        status: OutreachArtifactStatus.REJECTED,
+        reviewerNote: { startsWith: LEGACY_DELIVERY_UNKNOWN_PREFIX },
         updatedAt: { gte: startOfUtcDay(now) },
       },
     ],
@@ -197,6 +220,19 @@ interface RecipientDeliveryRisk {
   status: OutreachArtifactStatus;
   sentAt: Date | null;
   updatedAt: Date;
+}
+
+function deliveryUnknownTransitionData(
+  mode: DeliveryUnknownWriteMode,
+  reviewerNote: string,
+): Prisma.OutreachArtifactUpdateManyMutationInput | null {
+  if (mode === DELIVERY_UNKNOWN_WRITE_MODE.FIRST_CLASS) {
+    return {
+      status: OutreachArtifactStatus.DELIVERY_UNKNOWN,
+      reviewerNote,
+    };
+  }
+  return null;
 }
 
 type SendReservationDecision =
@@ -301,9 +337,9 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
 
     // Periodic reconcile sweep (mirrors GraphRunWorker's crash-recovery
     // sweep, but on an interval because send work is continuous): re-enqueue
-    // stranded APPROVED rows and quarantine stale SENDING claims as terminal
-    // DELIVERY_UNKNOWN. Runs once at boot so a restart doesn't wait a full
-    // interval to make ambiguous claims safe.
+    // stranded APPROVED rows and reconcile stale SENDING claims without ever
+    // releasing them for another send. Runs once at boot so a restart doesn't
+    // wait a full interval to make ambiguous claims safe.
     this.reconcileHandle = setInterval(
       () => void this.runReconcileSweep(),
       RECONCILE_INTERVAL_MS,
@@ -442,7 +478,7 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
         return;
       case "RECIPIENT_IN_FLIGHT":
         this.logger.log(
-          `Artifact ${artifactId} deferred — recipient ${artifact.recipientRef} has fresh SENDING artifact ${reservation.risk.id}`,
+          `Artifact ${artifactId} deferred — recipient ${artifact.recipientRef} has unresolved SENDING artifact ${reservation.risk.id}`,
         );
         return;
       case "RECIPIENT_SUPPRESSED":
@@ -613,7 +649,6 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
   ): Promise<SendReservationDecision> {
     const now = new Date();
     const cooldownFloor = new Date(now.getTime() - RECIPIENT_COOLDOWN_MS);
-    const freshSendingFloor = new Date(now.getTime() - SENDING_STALE_AGE_MS);
 
     return this.prisma.$transaction(async (tx) => {
       await acquireOrgSendReservationLock(tx, artifact.orgId);
@@ -785,15 +820,13 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
           where: {
             ...replyThreadWhere,
             id: { not: artifact.id },
-            status: {
-              in: [
-                OutreachArtifactStatus.SENDING,
-                OutreachArtifactStatus.DELIVERY_UNKNOWN,
-              ],
-            },
+            OR: [
+              { status: OutreachArtifactStatus.SENDING },
+              deliveryUnknownArtifactWhere(),
+            ],
           },
           orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-          select: { id: true, status: true },
+          select: { id: true, status: true, reviewerNote: true },
         });
 
         // A confirmed send blocks only the same inbound source. A newer
@@ -808,7 +841,7 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
                 status: OutreachArtifactStatus.SENT,
               },
               orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-              select: { id: true, status: true },
+              select: { id: true, status: true, reviewerNote: true },
             });
 
         // For pre-index legacy duplicates that are merely reviewable, the
@@ -829,7 +862,7 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
                   },
                 },
                 orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-                select: { id: true, status: true },
+                select: { id: true, status: true, reviewerNote: true },
               });
         if (
           !threadDeliveryBlocker &&
@@ -866,6 +899,7 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
             : null);
 
         if (replyBlocker) {
+          const blockerStatus = effectiveArtifactStatus(replyBlocker);
           const update = await tx.outreachArtifact.updateMany({
             where: {
               id: artifact.id,
@@ -876,16 +910,16 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
               status: OutreachArtifactStatus.SUPPRESSED,
               reviewerNote: (
                 `policy-skip: duplicate reply for the same conversation/source; ` +
-                `${replyBlocker.status} artifact ${replyBlocker.id} owns the reply slot`
+                `${blockerStatus} artifact ${replyBlocker.id} owns the reply slot`
               ).slice(0, 1_000),
             },
           });
           return update.count === 1
             ? {
                 kind: "REPLY_CONFLICT",
-                reason: `${replyBlocker.status} artifact ${replyBlocker.id} already owns the applicable reply slot`,
+                reason: `${blockerStatus} artifact ${replyBlocker.id} already owns the applicable reply slot`,
                 blockerId: replyBlocker.id,
-                blockerStatus: replyBlocker.status,
+                blockerStatus,
               }
             : { kind: "SKIPPED" };
         }
@@ -946,7 +980,14 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
         const normalizedRecipient = current.recipientRef.trim().toLowerCase();
         if (normalizedRecipient.length > 0) {
           const risks = await tx.$queryRaw<RecipientDeliveryRisk[]>`
-            SELECT "id", "status", "sentAt", "updatedAt"
+            SELECT "id",
+              CASE
+                WHEN "status" = 'REJECTED'::"OutreachArtifactStatus"
+                  AND "reviewerNote" LIKE 'delivery-unknown:%'
+                THEN 'DELIVERY_UNKNOWN'::"OutreachArtifactStatus"
+                ELSE "status"
+              END AS "status",
+              "sentAt", "updatedAt"
             FROM "OutreachArtifact"
             WHERE "orgId" = ${artifact.orgId}
               AND "id" <> ${artifact.id}
@@ -960,10 +1001,14 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
                 )
                 OR (
                   "status" = 'SENDING'::"OutreachArtifactStatus"
-                  AND "updatedAt" >= ${freshSendingFloor}
                 )
                 OR (
                   "status" = 'DELIVERY_UNKNOWN'::"OutreachArtifactStatus"
+                  AND "updatedAt" >= ${cooldownFloor}
+                )
+                OR (
+                  "status" = 'REJECTED'::"OutreachArtifactStatus"
+                  AND "reviewerNote" LIKE ${`${LEGACY_DELIVERY_UNKNOWN_PREFIX}%`}
                   AND "updatedAt" >= ${cooldownFloor}
                 )
               )
@@ -1285,7 +1330,8 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
    * either no provider request was attempted or a provider response rejected
    * it. The guarded updateMany leaves a row that raced terminal untouched.
    * If this best-effort release fails, SENDING is intentionally not retried;
-   * the stale sweep later quarantines it as DELIVERY_UNKNOWN.
+   * the stale sweep either records DELIVERY_UNKNOWN under the attested mode
+   * or leaves the claim SENDING for operator reconciliation.
    */
   private async releaseClaim(artifactId: string): Promise<void> {
     try {
@@ -1297,16 +1343,16 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
       this.logger.error(
         `Failed to release SENDING claim for ${artifactId}: ${
           err instanceof Error ? err.message : String(err)
-        } — reconcile sweep will quarantine it as DELIVERY_UNKNOWN`,
+        } — reconcile sweep will keep it non-dispatchable pending reconciliation`,
       );
     }
   }
 
   /**
-   * Permanently quarantine an ambiguous live-provider outcome. This guarded
-   * SENDING -> DELIVERY_UNKNOWN transition is terminal: BullMQ redelivery and
-   * the reconcile sweep both skip it. Operators must inspect the provider's
-   * Sent mailbox/API before considering a separately reviewed replacement.
+   * Keep an ambiguous live-provider outcome non-dispatchable. With exact
+   * first-class attestation this performs a guarded SENDING ->
+   * DELIVERY_UNKNOWN transition; otherwise it deliberately leaves SENDING
+   * unchanged. Operators must inspect provider truth before any replacement.
    */
   private async markDeliveryUnknown(
     artifactId: string,
@@ -1315,12 +1361,20 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
     const note =
       `delivery-unknown: ${reason}; automatic retry disabled - ` +
       `reconcile provider state before any replacement send`;
+    const writeMode = resolveDeliveryUnknownWriteMode();
+    const data = deliveryUnknownTransitionData(
+      writeMode,
+      note.slice(0, 1000),
+    );
+    if (!data) {
+      this.logger.error(
+        `Artifact ${artifactId} remains SENDING because delivery-unknown writes are disabled - automatic dispatch stays blocked pending provider reconciliation`,
+      );
+      return;
+    }
     const result = await this.prisma.outreachArtifact.updateMany({
       where: { id: artifactId, status: OutreachArtifactStatus.SENDING },
-      data: {
-        status: OutreachArtifactStatus.DELIVERY_UNKNOWN,
-        reviewerNote: note.slice(0, 1000),
-      },
+      data,
     });
     if (result.count > 0) {
       this.logger.error(
@@ -1359,9 +1413,10 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
    * GraphRunWorker.recoverOrphanedRuns):
    *
    *  1. SENDING claims whose updatedAt is older than SENDING_STALE_AGE_MS are
-   *     quarantined as terminal DELIVERY_UNKNOWN. Process death does not tell
-   *     us whether the provider accepted the POST, so automatic release and
-   *     re-dispatch would create a duplicate-delivery window. The guarded
+   *     recorded as terminal DELIVERY_UNKNOWN only under exact first-class
+   *     attestation; disabled mode leaves them SENDING. Process death does not
+   *     tell us whether the provider accepted the POST, so automatic release
+   *     and re-dispatch would create a duplicate-delivery window. The guarded
    *     updateMany never clobbers a row that raced terminal in the meantime.
    *  2. APPROVED rows whose updatedAt is older than APPROVED_REQUEUE_AGE_MS
    *     are re-enqueued — their BullMQ job was lost (Redis flush, enqueue
@@ -1389,13 +1444,22 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
     });
     for (const artifact of staleClaims) {
       try {
+        const note =
+          `${LEGACY_DELIVERY_UNKNOWN_PREFIX} stale SENDING claim after worker/process loss; ` +
+          `automatic retry disabled - reconcile provider state before any replacement send`;
+        const data = deliveryUnknownTransitionData(
+          resolveDeliveryUnknownWriteMode(),
+          note,
+        );
+        if (!data) {
+          this.logger.warn(
+            `Stale claim ${artifact.id} remains SENDING because delivery-unknown writes are disabled`,
+          );
+          continue;
+        }
         const quarantinedNow = await this.prisma.outreachArtifact.updateMany({
           where: { id: artifact.id, status: OutreachArtifactStatus.SENDING },
-          data: {
-            status: OutreachArtifactStatus.DELIVERY_UNKNOWN,
-            reviewerNote:
-              "delivery-unknown: stale SENDING claim after worker/process loss; automatic retry disabled - reconcile provider state before any replacement send",
-          },
+          data,
         });
         // count 0 → the claim resolved between findMany and the guarded
         // transition. Leave the winning state alone.
@@ -1474,8 +1538,9 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
    * original human approval identity/timestamp remain untouched; operational
    * evidence is written to failureReason/failedAt. A row still SENDING is not
    * safe to classify: the claim-release or unknown-outcome persistence may
-   * have failed, so it is quarantined as DELIVERY_UNKNOWN rather than being
-   * auto-retried or called failed.
+   * have failed, so it is recorded as DELIVERY_UNKNOWN when first-class writes
+   * are attested, or remains SENDING when disabled. It is never auto-retried or
+   * misclassified as a confirmed failure.
    */
   private async markTerminalFailure(
     artifactId: string,

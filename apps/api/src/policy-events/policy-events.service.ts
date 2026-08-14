@@ -4,6 +4,8 @@ import { OutreachArtifactStatus, type Prisma } from "@prisma/client";
 import {
   artifactFailedAt,
   artifactFailureReason,
+  deliveryUnknownArtifactWhere,
+  effectiveArtifactStatus,
   failedArtifactWhere,
   hasLegacyAutoFailedMarker,
   humanRejectedArtifactWhere,
@@ -54,7 +56,7 @@ function policyDecisionWhere(
         failedAt: null,
       };
     case "delivery_unknown":
-      return { status: OutreachArtifactStatus.DELIVERY_UNKNOWN };
+      return deliveryUnknownArtifactWhere();
     case "blocked":
       return {
         OR: [
@@ -120,27 +122,30 @@ export class PolicyEventsService {
       const reconciliationRequired =
         hasLegacyAutoFailedMarker(a) && a.failedAt == null;
       const failed = isFailedArtifact(a);
+      const effectiveStatus = effectiveArtifactStatus(a);
+      const deliveryUnknown =
+        effectiveStatus === OutreachArtifactStatus.DELIVERY_UNKNOWN;
       const decision: PolicyDecision = reconciliationRequired
         ? "reconciliation_required"
         : failed
           ? "failed"
-          : a.status === OutreachArtifactStatus.DELIVERY_UNKNOWN
+          : deliveryUnknown
             ? "delivery_unknown"
-            : a.status === OutreachArtifactStatus.REJECTED ||
-                a.status === OutreachArtifactStatus.SUPPRESSED
+            : effectiveStatus === OutreachArtifactStatus.REJECTED ||
+                effectiveStatus === OutreachArtifactStatus.SUPPRESSED
               ? "blocked"
-              : a.status === OutreachArtifactStatus.SENT ||
-                  a.status === OutreachArtifactStatus.SENDING ||
-                  a.status === OutreachArtifactStatus.APPROVED
+              : effectiveStatus === OutreachArtifactStatus.SENT ||
+                  effectiveStatus === OutreachArtifactStatus.SENDING ||
+                  effectiveStatus === OutreachArtifactStatus.APPROVED
                 ? "allowed"
                 : "dry_run";
       const at = reconciliationRequired
         ? a.updatedAt
         : failed
           ? (artifactFailedAt(a) ?? a.updatedAt)
-          : a.status === OutreachArtifactStatus.SENT && a.sentAt
+          : effectiveStatus === OutreachArtifactStatus.SENT && a.sentAt
             ? a.sentAt
-            : a.status === OutreachArtifactStatus.DELIVERY_UNKNOWN
+            : deliveryUnknown
               ? a.updatedAt
               : (a.reviewedAt ?? a.createdAt);
       return {

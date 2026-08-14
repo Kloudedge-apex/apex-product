@@ -3,6 +3,11 @@ import { isIP } from "node:net";
 import { Logger } from "@nestjs/common";
 import { isWorkerEnabled } from "../runtime/worker.service";
 import { resolveApiPublicOrigin } from "../outreach/unsubscribe-token.util";
+import {
+  DELIVERY_UNKNOWN_COMPATIBILITY_EPOCH,
+  DELIVERY_UNKNOWN_FIRST_CLASS_WRITE_ACK,
+  DELIVERY_UNKNOWN_WRITE_MODE,
+} from "../outreach/outreach-delivery-unknown-compatibility";
 
 /**
  * Fail-fast startup config validator.
@@ -168,6 +173,58 @@ export function validateEnv(
       issues.push(
         "OUTREACH_FAILED_STATUS_WRITES_ENABLED=true requires " +
           "OUTREACH_FAILED_STATUS_WRITES_ACK=readers-drained-legacy-inventory-reviewed-v1",
+      );
+    }
+
+    const deliveryUnknownMode = env.OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE;
+    const deliveryUnknownAck = env.OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK;
+    const rollbackCompatibilityEpoch =
+      env.OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH;
+    const configuredDeliveryUnknownMode =
+      deliveryUnknownMode ?? DELIVERY_UNKNOWN_WRITE_MODE.DISABLED;
+
+    if (
+      deliveryUnknownMode !== undefined &&
+      deliveryUnknownMode !== DELIVERY_UNKNOWN_WRITE_MODE.DISABLED &&
+      deliveryUnknownMode !== DELIVERY_UNKNOWN_WRITE_MODE.FIRST_CLASS
+    ) {
+      issues.push(
+        "OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE must be disabled or first-class when set",
+      );
+    }
+    if (
+      configuredDeliveryUnknownMode ===
+        DELIVERY_UNKNOWN_WRITE_MODE.FIRST_CLASS &&
+      deliveryUnknownAck !== DELIVERY_UNKNOWN_FIRST_CLASS_WRITE_ACK
+    ) {
+      issues.push(
+        "OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE=first-class requires " +
+          `OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK=${DELIVERY_UNKNOWN_FIRST_CLASS_WRITE_ACK}`,
+      );
+    }
+    if (
+      configuredDeliveryUnknownMode === DELIVERY_UNKNOWN_WRITE_MODE.FIRST_CLASS &&
+      rollbackCompatibilityEpoch !== DELIVERY_UNKNOWN_COMPATIBILITY_EPOCH
+    ) {
+      issues.push(
+        `OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE=${configuredDeliveryUnknownMode} requires ` +
+          `OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH=${DELIVERY_UNKNOWN_COMPATIBILITY_EPOCH}`,
+      );
+    }
+    if (
+      configuredDeliveryUnknownMode === DELIVERY_UNKNOWN_WRITE_MODE.DISABLED &&
+      (deliveryUnknownAck?.trim() || rollbackCompatibilityEpoch?.trim())
+    ) {
+      issues.push(
+        "OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE=disabled requires OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK and OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH to be empty",
+      );
+    }
+    if (
+      env.OUTREACH_DELIVERY_UNKNOWN_STATUS_WRITES_ENABLED !== undefined ||
+      env.OUTREACH_DELIVERY_UNKNOWN_STATUS_WRITES_ACK !== undefined
+    ) {
+      issues.push(
+        "OUTREACH_DELIVERY_UNKNOWN_STATUS_WRITES_ENABLED and OUTREACH_DELIVERY_UNKNOWN_STATUS_WRITES_ACK are unsupported; use the explicit OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE contract",
       );
     }
   }

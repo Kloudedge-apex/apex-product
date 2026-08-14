@@ -10,11 +10,66 @@ RECEIPT="${1:-}"
 SIGNATURE="${2:-}"
 ALLOWED_SIGNERS="${3:-}"
 EXPECTED_COMMIT="${4:-}"
+EXPECTED_API_IMAGE="${5:-}"
+EXPECTED_API_REVISION="${6:-}"
+EXPECTED_WORKER_IMAGE="${7:-}"
+EXPECTED_WORKER_REVISION="${8:-}"
+EXPECTED_CONSOLE_IMAGE="${9:-}"
+EXPECTED_CONSOLE_REVISION="${10:-}"
+EXPECTED_DELIVERY_UNKNOWN_WRITE_MODE="${11:-}"
 
+DELIVERY_UNKNOWN_COMPATIBILITY_EPOCH="outreach-delivery-unknown-v1"
+ROLLBACK_BASELINE_COMPATIBILITY_ATTESTATION="enum-aware-api-worker-console-baseline-v1"
+DELIVERY_UNKNOWN_DISABLED_ATTESTATION="delivery-unknown-writes-disabled-v1"
+DELIVERY_UNKNOWN_FIRST_CLASS_ATTESTATION="delivery-unknown-readers-drained-rollback-baselines-verified-v1"
+RECEIPT_MAX_LIFETIME_SECONDS=900
+RECEIPT_FUTURE_SKEW_SECONDS=60
+SAME_ATTEMPT_ROLLBACK="${WORKFORCE_RELEASE_SAME_ATTEMPT_ROLLBACK:-false}"
+
+if [[ "${#}" -ne 4 && "${#}" -ne 11 ]]; then
+  echo "Usage: $0 <receipt.json> <receipt.sig> <allowed-signers> <full-lowercase-git-sha> [<api-digest-image> <api-revision> <worker-digest-image> <worker-revision> <console-digest-image> <console-revision> <disabled|first-class>]" >&2
+  exit 2
+fi
 if [[ -z "${RECEIPT}" || -z "${SIGNATURE}" || -z "${ALLOWED_SIGNERS}" ||
   ! "${EXPECTED_COMMIT}" =~ ^[0-9a-f]{40}$ ]]; then
-  echo "Usage: $0 <receipt.json> <receipt.sig> <allowed-signers> <full-lowercase-git-sha>" >&2
+  echo "Usage: $0 <receipt.json> <receipt.sig> <allowed-signers> <full-lowercase-git-sha> [<api-digest-image> <api-revision> <worker-digest-image> <worker-revision> <console-digest-image> <console-revision> <disabled|first-class>]" >&2
   exit 2
+fi
+if [[ "${#}" -eq 11 ]]; then
+  if [[ ! "${EXPECTED_API_IMAGE}" =~ ^ledgracr\.azurecr\.io/apex-api@sha256:[0-9a-f]{64}$ ]] ||
+    [[ ! "${EXPECTED_WORKER_IMAGE}" =~ ^ledgracr\.azurecr\.io/apex-api@sha256:[0-9a-f]{64}$ ]] ||
+    [[ ! "${EXPECTED_CONSOLE_IMAGE}" =~ ^ledgracr\.azurecr\.io/workforceos-fe@sha256:[0-9a-f]{64}$ ]] ||
+    [[ ! "${EXPECTED_API_REVISION}" =~ ^apex-gtm-api--[a-z0-9][a-z0-9-]*$ ]] ||
+    [[ ! "${EXPECTED_WORKER_REVISION}" =~ ^apex-gtm-worker--[a-z0-9][a-z0-9-]*$ ]] ||
+    [[ ! "${EXPECTED_CONSOLE_REVISION}" =~ ^nikxius-web--[a-z0-9][a-z0-9-]*$ ]] ||
+    [[ "${EXPECTED_DELIVERY_UNKNOWN_WRITE_MODE}" != "disabled" &&
+      "${EXPECTED_DELIVERY_UNKNOWN_WRITE_MODE}" != "first-class" ]]; then
+    echo "ERROR: expected rollback baseline arguments are not canonical production identities" >&2
+    exit 2
+  fi
+fi
+if [[ "${SAME_ATTEMPT_ROLLBACK}" != "false" && "${SAME_ATTEMPT_ROLLBACK}" != "true" ]]; then
+  echo "ERROR: invalid same-attempt rollback freshness mode" >&2
+  exit 2
+fi
+if [[ "${SAME_ATTEMPT_ROLLBACK}" == "true" ]]; then
+  if [[ "${#}" -ne 11 || "${WORKFORCE_RELEASE_SNAPSHOT_ACTIVE:-}" != "true" ||
+    -z "${WORKFORCE_RELEASE_RUNTIME_STATE_DIR:-}" ]]; then
+    echo "ERROR: freshness bypass is confined to an exact-identity same-attempt rollback" >&2
+    exit 1
+  fi
+  RUNTIME_STATE_REAL="$(cd "${WORKFORCE_RELEASE_RUNTIME_STATE_DIR}" 2>/dev/null && pwd -P)" || {
+    echo "ERROR: same-attempt runtime state directory is unavailable" >&2
+    exit 1
+  }
+  RECEIPT_REAL="$(cd "$(dirname "${RECEIPT}")" 2>/dev/null && printf '%s/%s\n' "$(pwd -P)" "$(basename "${RECEIPT}")")" || {
+    echo "ERROR: same-attempt receipt path is unavailable" >&2
+    exit 1
+  }
+  if [[ "${RECEIPT_REAL}" != "${RUNTIME_STATE_REAL}/migration-receipt.json" ]]; then
+    echo "ERROR: same-attempt rollback must use the private admitted receipt snapshot" >&2
+    exit 1
+  fi
 fi
 for REQUIRED_FILE in "${RECEIPT}" "${SIGNATURE}" "${ALLOWED_SIGNERS}"; do
   if [[ ! -f "${REQUIRED_FILE}" ]]; then
@@ -22,7 +77,7 @@ for REQUIRED_FILE in "${RECEIPT}" "${SIGNATURE}" "${ALLOWED_SIGNERS}"; do
     exit 1
   fi
 done
-REQUIRED_COMMANDS=(jq openssl ssh-keygen)
+REQUIRED_COMMANDS=(date jq openssl ssh-keygen)
 if [[ "${WORKFORCE_RELEASE_SNAPSHOT_ACTIVE:-}" != "true" ]]; then
   REQUIRED_COMMANDS+=(git)
 fi
@@ -125,26 +180,29 @@ EXPECTED_MIGRATION_COUNT="${#MIGRATIONS[@]}"
 if ! jq -e \
   --arg commit "${EXPECTED_COMMIT}" \
   --argjson migration_count "${EXPECTED_MIGRATION_COUNT}" '
-  (keys == [
+  ((keys - ["outreachQuiescence"]) == [
     "approver",
     "candidateCommit",
     "changeTicket",
     "databaseIdentityHash",
     "environment",
+    "expiresAt",
     "migrations",
     "operator",
     "productionApplyEvidenceHash",
+    "rollbackBaseline",
     "rollbackRehearsalEvidenceHash",
     "schemaVersion",
     "stagingRehearsalEvidenceHash",
     "status",
     "verifiedAt"
   ])
-  and .schemaVersion == 1
+  and .schemaVersion == 3
   and .environment == "production"
   and .candidateCommit == $commit
   and .status == "applied-and-verified"
   and (.verifiedAt | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
+  and (.expiresAt | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
   and (.operator | type == "string" and length > 0)
   and (.approver | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}$"))
   and .operator != .approver
@@ -153,9 +211,100 @@ if ! jq -e \
   and (.stagingRehearsalEvidenceHash | type == "string" and test("^sha256:[0-9a-f]{64}$"))
   and (.productionApplyEvidenceHash | type == "string" and test("^sha256:[0-9a-f]{64}$"))
   and (.rollbackRehearsalEvidenceHash | type == "string" and test("^sha256:[0-9a-f]{64}$"))
+  and (.rollbackBaseline | type == "object")
+  and (.rollbackBaseline | keys == [
+    "apiImage",
+    "apiRevision",
+    "attestation",
+    "compatibilityAttestation",
+    "compatibilityEpoch",
+    "consoleImage",
+    "consoleRevision",
+    "deliveryUnknownWriteMode",
+    "workerImage",
+    "workerRevision"
+  ])
+  and (.rollbackBaseline.apiImage | type == "string" and test("^ledgracr\\.azurecr\\.io/apex-api@sha256:[0-9a-f]{64}$"))
+  and (.rollbackBaseline.apiRevision | type == "string" and test("^apex-gtm-api--[a-z0-9][a-z0-9-]*$"))
+  and (.rollbackBaseline.workerImage | type == "string" and test("^ledgracr\\.azurecr\\.io/apex-api@sha256:[0-9a-f]{64}$"))
+  and (.rollbackBaseline.workerRevision | type == "string" and test("^apex-gtm-worker--[a-z0-9][a-z0-9-]*$"))
+  and (.rollbackBaseline.consoleImage | type == "string" and test("^ledgracr\\.azurecr\\.io/workforceos-fe@sha256:[0-9a-f]{64}$"))
+  and (.rollbackBaseline.consoleRevision | type == "string" and test("^nikxius-web--[a-z0-9][a-z0-9-]*$"))
+  and .rollbackBaseline.compatibilityAttestation == "enum-aware-api-worker-console-baseline-v1"
+  and .rollbackBaseline.compatibilityEpoch == "outreach-delivery-unknown-v1"
+  and (
+    (.rollbackBaseline.deliveryUnknownWriteMode == "disabled"
+      and .rollbackBaseline.attestation == "delivery-unknown-writes-disabled-v1")
+    or
+    (.rollbackBaseline.deliveryUnknownWriteMode == "first-class"
+      and .rollbackBaseline.attestation == "delivery-unknown-readers-drained-rollback-baselines-verified-v1")
+  )
+  and (
+    if .rollbackBaseline.deliveryUnknownWriteMode == "disabled"
+    then
+      (has("outreachQuiescence")
+       and (.outreachQuiescence | type == "object")
+       and (.outreachQuiescence | keys == [
+         "activeJobs",
+         "apiMutationsBlocked",
+         "evidenceHash",
+         "firstClassDeliveryUnknownRows",
+         "legacyDeliveryUnknownMarkerRows",
+         "legacyWorkerStopped",
+         "liveSendAllowlistEmpty",
+         "queuesPaused",
+         "replySlotDuplicateRows",
+         "sendingRows"
+       ])
+       and .outreachQuiescence.apiMutationsBlocked == true
+       and .outreachQuiescence.legacyWorkerStopped == true
+       and (.outreachQuiescence.queuesPaused | keys == ["agentRuns", "graphRuns", "outreachSend"])
+       and .outreachQuiescence.queuesPaused.agentRuns == true
+       and .outreachQuiescence.queuesPaused.graphRuns == true
+       and .outreachQuiescence.queuesPaused.outreachSend == true
+       and (.outreachQuiescence.activeJobs | keys == ["agentRuns", "graphRuns", "outreachSend"])
+       and .outreachQuiescence.activeJobs.agentRuns == 0
+       and .outreachQuiescence.activeJobs.graphRuns == 0
+       and .outreachQuiescence.activeJobs.outreachSend == 0
+       and .outreachQuiescence.sendingRows == 0
+       and .outreachQuiescence.firstClassDeliveryUnknownRows == 0
+       and .outreachQuiescence.legacyDeliveryUnknownMarkerRows == 0
+       and .outreachQuiescence.replySlotDuplicateRows == 0
+       and .outreachQuiescence.liveSendAllowlistEmpty == true
+       and (.outreachQuiescence.evidenceHash | type == "string" and test("^sha256:[0-9a-f]{64}$")))
+    else (has("outreachQuiescence") | not)
+    end
+  )
   and (.migrations | type == "array" and length == $migration_count)
 ' >/dev/null "${RECEIPT_COPY}"; then
   echo "ERROR: migration receipt metadata is incomplete or invalid" >&2
+  exit 1
+fi
+
+if ! VERIFIED_AT_EPOCH="$(jq -er '.verifiedAt | fromdateiso8601' "${RECEIPT_COPY}")" ||
+  ! EXPIRES_AT_EPOCH="$(jq -er '.expiresAt | fromdateiso8601' "${RECEIPT_COPY}")"; then
+  echo "ERROR: migration receipt freshness timestamps are invalid" >&2
+  exit 1
+fi
+receipt_freshness_is_valid_at() {
+  local current_epoch=$1
+  if [[ ! "${VERIFIED_AT_EPOCH}" =~ ^[0-9]+$ ]] ||
+    [[ ! "${EXPIRES_AT_EPOCH}" =~ ^[0-9]+$ ]] ||
+    [[ ! "${current_epoch}" =~ ^[0-9]+$ ]] ||
+    ((EXPIRES_AT_EPOCH <= VERIFIED_AT_EPOCH)) ||
+    ((EXPIRES_AT_EPOCH - VERIFIED_AT_EPOCH > RECEIPT_MAX_LIFETIME_SECONDS)); then
+    return 1
+  fi
+  if [[ "${SAME_ATTEMPT_ROLLBACK}" != "true" ]] &&
+    { ((VERIFIED_AT_EPOCH - current_epoch > RECEIPT_FUTURE_SKEW_SECONDS)) ||
+      ((current_epoch >= EXPIRES_AT_EPOCH)); }; then
+    return 1
+  fi
+}
+
+CURRENT_EPOCH="$(date -u +%s)"
+if ! receipt_freshness_is_valid_at "${CURRENT_EPOCH}"; then
+  echo "ERROR: migration receipt is stale, future-dated, or exceeds the 15-minute lifetime" >&2
   exit 1
 fi
 
@@ -168,6 +317,39 @@ if ! ssh-keygen -Y verify \
   <"${RECEIPT_COPY}" >/dev/null; then
   echo "ERROR: migration receipt signature is not valid for trusted approver ${APPROVER}" >&2
   exit 1
+fi
+
+if [[ "${#}" -eq 11 ]]; then
+  if ! jq -e \
+    --arg api_image "${EXPECTED_API_IMAGE}" \
+    --arg api_revision "${EXPECTED_API_REVISION}" \
+    --arg worker_image "${EXPECTED_WORKER_IMAGE}" \
+    --arg worker_revision "${EXPECTED_WORKER_REVISION}" \
+    --arg console_image "${EXPECTED_CONSOLE_IMAGE}" \
+    --arg console_revision "${EXPECTED_CONSOLE_REVISION}" \
+    --arg compatibility_attestation "${ROLLBACK_BASELINE_COMPATIBILITY_ATTESTATION}" \
+    --arg epoch "${DELIVERY_UNKNOWN_COMPATIBILITY_EPOCH}" \
+    --arg mode "${EXPECTED_DELIVERY_UNKNOWN_WRITE_MODE}" \
+    --arg disabled_attestation "${DELIVERY_UNKNOWN_DISABLED_ATTESTATION}" \
+    --arg first_class_attestation "${DELIVERY_UNKNOWN_FIRST_CLASS_ATTESTATION}" '
+      .rollbackBaseline.apiImage == $api_image
+      and .rollbackBaseline.apiRevision == $api_revision
+      and .rollbackBaseline.workerImage == $worker_image
+      and .rollbackBaseline.workerRevision == $worker_revision
+      and .rollbackBaseline.consoleImage == $console_image
+      and .rollbackBaseline.consoleRevision == $console_revision
+      and .rollbackBaseline.compatibilityAttestation == $compatibility_attestation
+      and .rollbackBaseline.compatibilityEpoch == $epoch
+      and .rollbackBaseline.deliveryUnknownWriteMode == $mode
+      and .rollbackBaseline.attestation ==
+        (if $mode == "disabled"
+         then $disabled_attestation
+         else $first_class_attestation
+         end)
+    ' >/dev/null "${RECEIPT_COPY}"; then
+    echo "ERROR: signed migration receipt does not match the exact current rollback baseline" >&2
+    exit 1
+  fi
 fi
 
 for index in "${!MIGRATIONS[@]}"; do
@@ -214,4 +396,17 @@ for index in "${!MIGRATIONS[@]}"; do
   fi
 done
 
-echo "Signed production migration receipt verified for ${EXPECTED_COMMIT} (approver ${APPROVER}; ${EXPECTED_MIGRATION_COUNT} ordered migrations)"
+# Signature verification and hashing the reviewed migration inventory can
+# cross the expiry boundary. Reapply the identical predicate at return so a
+# caller never receives a fresh success based only on the earlier clock read.
+FINAL_CURRENT_EPOCH="$(date -u +%s)"
+if ! receipt_freshness_is_valid_at "${FINAL_CURRENT_EPOCH}"; then
+  echo "ERROR: migration receipt expired before verification completed" >&2
+  exit 1
+fi
+
+if [[ "${#}" -eq 11 ]]; then
+  echo "Signed production migration receipt verified for ${EXPECTED_COMMIT} (approver ${APPROVER}; ${EXPECTED_MIGRATION_COUNT} ordered migrations; fresh exact ${EXPECTED_DELIVERY_UNKNOWN_WRITE_MODE} API/worker/console rollback baseline)"
+else
+  echo "Signed production migration receipt verified for ${EXPECTED_COMMIT} (approver ${APPROVER}; ${EXPECTED_MIGRATION_COUNT} ordered migrations)"
+fi
