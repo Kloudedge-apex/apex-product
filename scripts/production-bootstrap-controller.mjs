@@ -712,6 +712,15 @@ function azArgs(request, tail) {
   ];
 }
 
+export function azureInheritedRoleAssignmentListArgs(request, scope) {
+  return azArgs(request, [
+    "role", "assignment", "list",
+    "--scope", scope,
+    "--include-inherited",
+    "--output", "json",
+  ]);
+}
+
 function blobLeaseArgs(request) {
   return [
     "--account-name", request.storage.accountName,
@@ -1082,13 +1091,11 @@ function verifyAzureIdentity(runner, request) {
   };
   const assignmentsByScope = {};
   for (const [label, scope] of Object.entries(scopes)) {
-    const assignments = runner.json("az", azArgs(request, [
-      "role", "assignment", "list",
-      "--scope", scope,
-      "--include-inherited",
-      "--all",
-      "--output", "json",
-    ]), { label: `${label} exact live mutation-authority assignments` });
+    const assignments = runner.json(
+      "az",
+      azureInheritedRoleAssignmentListArgs(request, scope),
+      { label: `${label} exact live mutation-authority assignments` },
+    );
     if (!Array.isArray(assignments)) fail(`${label} mutation-authority assignments are invalid`);
     const normalized = assignments.map((assignment) => ({
       condition: assignment.condition ?? null,

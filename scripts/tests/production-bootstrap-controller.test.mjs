@@ -12,6 +12,7 @@ import {
   assertNextCatalogPlan,
   assertPostClerkCatalogPlan,
   attemptLeaseId,
+  azureInheritedRoleAssignmentListArgs,
   buildAdmissionContext,
   classifyPreOpenActionReplay,
   runReplayableMutationSteps,
@@ -189,6 +190,19 @@ test("request validator enforces independent operator and approver", () => {
     () => validateRequest(mutate(["approver"], "release.operator@example.com")),
     /must differ/,
   );
+});
+
+test("Azure inherited role-assignment reads use the supported scoped CLI contract", () => {
+  const request = validRequest();
+  const scope = request.authority.apiContainerAppResourceId;
+  assert.deepEqual(azureInheritedRoleAssignmentListArgs(request, scope), [
+    "role", "assignment", "list",
+    "--scope", scope,
+    "--include-inherited",
+    "--output", "json",
+    "--subscription", SUBSCRIPTION,
+    "--only-show-errors",
+  ]);
 });
 
 test("request validator rejects an activation revision reused as disabled baseline", () => {
