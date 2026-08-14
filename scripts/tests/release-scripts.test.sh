@@ -1011,11 +1011,13 @@ test_deploy_rollback() {
   # A failed read-back after the reader-first API mutation must restore the API
   # and leave the writer worker untouched.
   FAKE_CONFIG_FAIL_CALL=3
-  if run_fake_deploy >/dev/null 2>&1; then
+  if run_fake_deploy >"${HARNESS}/api-post-update-rollback.log" 2>&1; then
     fail "deploy succeeded after API post-update verification failed"
   fi
   assert_log_contains "${CALL_LOG}" "${forward_api}"
   assert_log_contains "${CALL_LOG}" "${rollback_api}"
+  assert_log_excludes "${HARNESS}/api-post-update-rollback.log" \
+    "signed rollback baseline verification failed"
   assert_log_excludes "${CALL_LOG}" "az containerapp update --name apex-gtm-worker"
   assert_before "${CALL_LOG}" "${forward_api}" "${rollback_api}"
   assert_log_contains "${CALL_LOG}" "${exact_baseline_log}"

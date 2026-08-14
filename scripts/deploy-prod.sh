@@ -1173,8 +1173,11 @@ verify_signed_rollback_baseline_contract() {
         "${PREVIOUS_WORKER_REVISION}" \
         "${PREVIOUS_CONSOLE_IMAGE}" \
         "${PREVIOUS_CONSOLE_REVISION}" \
-        "${DELIVERY_UNKNOWN_RECEIPT_MODE}"
-    return
+        "${DELIVERY_UNKNOWN_RECEIPT_MODE}" || return 1
+    # A bare return here is not portable while this function runs from the ERR
+    # trap: Linux Bash can preserve the triggering rollout failure status even
+    # after the verifier succeeds. Make the successful verification explicit.
+    return 0
   fi
   if [[ "${freshness_mode}" != "fresh" ]]; then
     echo "ERROR: unknown signed rollback baseline freshness mode" >&2
