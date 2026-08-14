@@ -123,7 +123,15 @@ lock check before each command and a fresh catalog verification before replay.
 
 ## Workflow secret scope
 
-The manual workflow injects receipt/signature material only into actions that
+Before checkout or OIDC, the manual workflow reads every OIDC identity,
+authority, and evidence variable from the exact
+`workforce-os-production` environment API. It verifies action-required secret
+metadata at that environment endpoint and passes only the audited non-secret
+values forward as step outputs. Repository- or organization-level `vars`
+fallback is forbidden; a same-named repository secret cannot substitute
+because the action-required environment secret must exist before it is read.
+
+The workflow injects receipt/signature material only into actions that
 verify a receipt; Clerk, delivery-review, exclusive-DDL, and operational-smoke
 artifacts only into `prepare`; and
 PostgreSQL credentials only into `invoke-clerk` or `apply-schema`. The `audit`

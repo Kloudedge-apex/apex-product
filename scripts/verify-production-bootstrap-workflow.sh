@@ -102,6 +102,7 @@ require_literal '  group: workforce-os-production'
 require_literal '  cancel-in-progress: false'
 require_literal '    environment: workforce-os-production'
 require_literal '    timeout-minutes: 120'
+require_literal '        id: production_environment'
 require_literal '"${GITHUB_EVENT_NAME}" != "workflow_dispatch"'
 require_literal '"${GITHUB_REF}" != "refs/heads/master"'
 require_literal '"${REF_PROTECTED}" != "true"'
@@ -116,6 +117,43 @@ require_literal 'PRODUCTION_BOOTSTRAP_PROVIDER_DELIVERY_DRAIN_B64'
 require_literal 'PRODUCTION_BOOTSTRAP_DATABASE_DDL_AUTHORITY_B64'
 require_literal 'PRODUCTION_BOOTSTRAP_FAILED_LIST_SMOKE_EVIDENCE_B64'
 require_literal 'PRODUCTION_BOOTSTRAP_DASHBOARD_POLICY_SMOKE_EVIDENCE_B64'
+require_literal 'repos/${GITHUB_REPOSITORY}/environments/workforce-os-production/variables/${name}'
+require_literal 'repos/${GITHUB_REPOSITORY}/environments/workforce-os-production/secrets/${name}'
+require_literal 'azure_client_id="$(read_environment_variable "AZURE_CLIENT_ID")"'
+require_literal 'azure_tenant_id="$(read_environment_variable "AZURE_TENANT_ID")"'
+require_literal 'azure_subscription_id="$(read_environment_variable "AZURE_SUBSCRIPTION_ID")"'
+require_literal 'azure_principal_object_id="$(read_environment_variable "AZURE_PRINCIPAL_OBJECT_ID")"'
+require_literal '"ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED")"'
+require_literal '"DATABASE_DDL_EXCLUSIVE_AUTHORITY_CONFIRMED")"'
+require_literal '"OUTSTANDING_DELIVERY_REVIEW_CONFIRMED")"'
+require_literal '"PROVIDER_DELIVERY_DRAIN_CONFIRMED")"'
+require_literal 'verify_environment_secret "PRODUCTION_BOOTSTRAP_REQUEST_B64"'
+require_literal 'verify_environment_secret "PRODUCTION_DATABASE_URL"'
+require_literal 'verify_environment_secret "PRODUCTION_REDIS_URL"'
+require_literal 'verify_environment_secret "PRODUCTION_MIGRATION_ALLOWED_SIGNERS_B64"'
+require_literal 'verify_environment_secret "PRODUCTION_BOOTSTRAP_CLERK_PLAN_B64"'
+require_literal 'verify_environment_secret "PRODUCTION_BOOTSTRAP_CLERK_PLAN_SIGNATURE_B64"'
+require_literal 'verify_environment_secret "PRODUCTION_BOOTSTRAP_CLERK_DRY_RUN_B64"'
+require_literal 'verify_environment_secret "PRODUCTION_BOOTSTRAP_CLERK_DRY_RUN_SIGNATURE_B64"'
+require_literal 'verify_environment_secret "PRODUCTION_BOOTSTRAP_OUTSTANDING_DELIVERY_REVIEW_B64"'
+require_literal 'verify_environment_secret "PRODUCTION_BOOTSTRAP_PROVIDER_DELIVERY_DRAIN_B64"'
+require_literal 'verify_environment_secret "PRODUCTION_BOOTSTRAP_DATABASE_DDL_AUTHORITY_B64"'
+require_literal 'verify_environment_secret "PRODUCTION_BOOTSTRAP_FAILED_LIST_SMOKE_EVIDENCE_B64"'
+require_literal 'verify_environment_secret "PRODUCTION_BOOTSTRAP_DASHBOARD_POLICY_SMOKE_EVIDENCE_B64"'
+require_literal 'verify_environment_secret "PRODUCTION_BOOTSTRAP_RECEIPT_B64"'
+require_literal 'verify_environment_secret "PRODUCTION_BOOTSTRAP_RECEIPT_SIGNATURE_B64"'
+require_literal 'verify_environment_secret "PRODUCTION_BOOTSTRAP_PGPASS_B64"'
+require_literal 'client-id: ${{ steps.production_environment.outputs.azure_client_id }}'
+require_literal 'tenant-id: ${{ steps.production_environment.outputs.azure_tenant_id }}'
+require_literal 'subscription-id: ${{ steps.production_environment.outputs.azure_subscription_id }}'
+require_literal 'AZURE_CLIENT_ID: ${{ steps.production_environment.outputs.azure_client_id }}'
+require_literal 'AZURE_TENANT_ID: ${{ steps.production_environment.outputs.azure_tenant_id }}'
+require_literal 'AZURE_SUBSCRIPTION_ID: ${{ steps.production_environment.outputs.azure_subscription_id }}'
+require_literal 'AZURE_PRINCIPAL_OBJECT_ID: ${{ steps.production_environment.outputs.azure_principal_object_id }}'
+require_literal 'ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED: ${{ steps.production_environment.outputs.exclusive_aca_authority }}'
+require_literal "OUTSTANDING_DELIVERY_REVIEW_CONFIRMED: \${{ inputs.action == 'prepare' && steps.production_environment.outputs.outstanding_delivery_review || '' }}"
+require_literal "PROVIDER_DELIVERY_DRAIN_CONFIRMED: \${{ inputs.action == 'prepare' && steps.production_environment.outputs.provider_delivery_drain || '' }}"
+require_literal "DATABASE_DDL_EXCLUSIVE_AUTHORITY_CONFIRMED: \${{ contains(fromJSON('[\"prepare\",\"invoke-clerk\",\"apply-schema\"]'), inputs.action) && steps.production_environment.outputs.exclusive_ddl_authority || '' }}"
 require_literal '--outstanding-delivery-review'
 require_literal '--provider-delivery-drain'
 require_literal '--database-ddl-authority-evidence'
@@ -129,9 +167,13 @@ require_literal 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa0
 reject_pattern 'abort-before-schema' "removed abort action reappeared"
 reject_pattern 'continue-on-error[[:space:]]*:[[:space:]]*true' "continue-on-error is forbidden"
 reject_pattern 'uses:[[:space:]]+[^[:space:]@]+@(main|master|v[0-9]+)([[:space:]#]|$)' "mutable action references are forbidden"
+reject_pattern '\$\{\{[[:space:]]*vars\.' "repository or organization variable fallback is forbidden"
+reject_pattern 'repos/\$\{GITHUB_REPOSITORY\}/actions/(variables|secrets)' "repository-scoped release configuration is forbidden"
 reject_pattern '^[[:space:]]+(DATABASE_URL|REDIS_URL|PGPASS_B64):[[:space:]]+\$\{\{[[:space:]]*secrets\.' "production database or Redis secrets must be action-scoped and absent from audit"
 
 assert_before "Validate protected manual authority" "Checkout exact protected master source"
+assert_before 'read_environment_variable()' 'Checkout exact protected master source'
+assert_before 'verify_environment_secret "PRODUCTION_BOOTSTRAP_REQUEST_B64"' 'Checkout exact protected master source'
 assert_before "Checkout exact protected master source" "Authenticate to Azure with protected OIDC"
 assert_before "Authenticate to Azure with protected OIDC" "Run one exact-snapshot bootstrap action"
 assert_before 'unset REQUEST_B64' 'node scripts/production-bootstrap-controller.mjs'

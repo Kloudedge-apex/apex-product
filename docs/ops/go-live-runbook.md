@@ -439,6 +439,13 @@ from the separately checked-out `master` source. The candidate is checked out
 to a different directory, materialized on the selected local release branch,
 and only then supplies the signer pin and release controller.
 
+The one-time bootstrap workflow enforces the same environment-only rule before
+checkout or OIDC. It reads the four Azure identity values and every authority
+boolean through the environment-variable API, verifies the exact
+action-required environment-secret metadata, and passes only audited
+non-secret outputs to Azure login and the controller. Generic `${{ vars.* }}`
+fallback is rejected by the source contract.
+
 At this review point, the external GitHub `master` and
 `release/go-live-2026-06-01` refs are unprotected, so the workflow cannot be
 admitted and production remains **NO-GO**. The environment protections above

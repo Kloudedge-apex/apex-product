@@ -60,6 +60,7 @@ jobs:
 
       - name: Run production bootstrap controller contracts
         run: |
+          node --test scripts/tests/production-bootstrap-workflow.test.mjs
           node --test scripts/tests/production-bootstrap-controller.test.mjs
           node --test scripts/tests/production-bootstrap-database-identity.test.mjs
           node --test scripts/tests/production-bootstrap-mutation-authority.test.mjs

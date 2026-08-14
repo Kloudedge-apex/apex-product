@@ -44,28 +44,20 @@ jobs:
 
     steps:
       - name: Validate protected manual authority
+        id: production_environment
         env:
           GH_TOKEN: ${{ github.token }}
           ACTION: ${{ inputs.action }}
           CONFIRMATION: ${{ inputs.confirmation }}
           REF_PROTECTED: ${{ github.ref_protected }}
           WORKFLOW_SHA: ${{ github.sha }}
-          ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED: ${{ vars.ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED }}
-          DATABASE_DDL_EXCLUSIVE_AUTHORITY_CONFIRMED: ${{ contains(fromJSON('["prepare","invoke-clerk","apply-schema"]'), inputs.action) && vars.DATABASE_DDL_EXCLUSIVE_AUTHORITY_CONFIRMED || '' }}
         run: |
           set -Eeuo pipefail
           if [[ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ||
             "${GITHUB_REF}" != "refs/heads/master" || "${REF_PROTECTED}" != "true" ||
             "${CONFIRMATION}" != "BOOTSTRAP WORKFORCE OS PRODUCTION" ||
-            "${ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED}" != "true" ||
             ! "${WORKFLOW_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
             echo "ERROR: bootstrap must be manually dispatched from protected master with exact confirmation" >&2
-            exit 1
-          fi
-          if [[ ("${ACTION}" == "prepare" || "${ACTION}" == "invoke-clerk" ||
-            "${ACTION}" == "apply-schema") &&
-            "${DATABASE_DDL_EXCLUSIVE_AUTHORITY_CONFIRMED}" != "true" ]]; then
-            echo "ERROR: database mutation actions require protected exclusive DDL authority" >&2
             exit 1
           fi
           case "${ACTION}" in
@@ -85,6 +77,109 @@ jobs:
             and .deployment_branch_policy.protected_branches == true
             and .deployment_branch_policy.custom_branch_policies == false
           ' >/dev/null <<<"${environment_json}"
+
+          read_environment_variable() {
+            local name=$1 variable_json
+            variable_json="$(gh api --method GET \
+              "repos/${GITHUB_REPOSITORY}/environments/workforce-os-production/variables/${name}")"
+            jq -e --arg name "${name}" '
+              .name == $name
+              and (.value | type == "string" and length > 0)
+            ' >/dev/null <<<"${variable_json}"
+            jq -er '.value' <<<"${variable_json}"
+          }
+          verify_environment_secret() {
+            local name=$1 secret_json
+            secret_json="$(gh api --method GET \
+              "repos/${GITHUB_REPOSITORY}/environments/workforce-os-production/secrets/${name}")"
+            jq -e --arg name "${name}" '.name == $name' >/dev/null <<<"${secret_json}"
+          }
+
+          azure_client_id="$(read_environment_variable "AZURE_CLIENT_ID")"
+          azure_tenant_id="$(read_environment_variable "AZURE_TENANT_ID")"
+          azure_subscription_id="$(read_environment_variable "AZURE_SUBSCRIPTION_ID")"
+          azure_principal_object_id="$(read_environment_variable "AZURE_PRINCIPAL_OBJECT_ID")"
+          exclusive_aca_authority="$(read_environment_variable \
+            "ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED")"
+          exclusive_ddl_authority="$(read_environment_variable \
+            "DATABASE_DDL_EXCLUSIVE_AUTHORITY_CONFIRMED")"
+          outstanding_delivery_review="$(read_environment_variable \
+            "OUTSTANDING_DELIVERY_REVIEW_CONFIRMED")"
+          provider_delivery_drain="$(read_environment_variable \
+            "PROVIDER_DELIVERY_DRAIN_CONFIRMED")"
+
+          uuid_pattern='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+          for value in \
+            "${azure_client_id}" \
+            "${azure_tenant_id}" \
+            "${azure_subscription_id}" \
+            "${azure_principal_object_id}"; do
+            if [[ ! "${value}" =~ ${uuid_pattern} ]]; then
+              echo "ERROR: protected production identity variables are incomplete" >&2
+              exit 1
+            fi
+          done
+          if [[ "${exclusive_aca_authority}" != "true" ]]; then
+            echo "ERROR: protected environment has no exclusive Container Apps authority attestation" >&2
+            exit 1
+          fi
+          for value in \
+            "${exclusive_ddl_authority}" \
+            "${outstanding_delivery_review}" \
+            "${provider_delivery_drain}"; do
+            if [[ "${value}" != "true" && "${value}" != "false" ]]; then
+              echo "ERROR: protected production evidence variables must be exact booleans" >&2
+              exit 1
+            fi
+          done
+          if [[ ("${ACTION}" == "prepare" || "${ACTION}" == "invoke-clerk" ||
+            "${ACTION}" == "apply-schema") && "${exclusive_ddl_authority}" != "true" ]]; then
+            echo "ERROR: database mutation actions require protected exclusive DDL authority" >&2
+            exit 1
+          fi
+
+          verify_environment_secret "PRODUCTION_BOOTSTRAP_REQUEST_B64"
+          if [[ "${ACTION}" != "audit" ]]; then
+            verify_environment_secret "PRODUCTION_DATABASE_URL"
+            verify_environment_secret "PRODUCTION_REDIS_URL"
+          fi
+          case "${ACTION}" in
+            prepare)
+              verify_environment_secret "PRODUCTION_MIGRATION_ALLOWED_SIGNERS_B64"
+              verify_environment_secret "PRODUCTION_BOOTSTRAP_CLERK_PLAN_B64"
+              verify_environment_secret "PRODUCTION_BOOTSTRAP_CLERK_PLAN_SIGNATURE_B64"
+              verify_environment_secret "PRODUCTION_BOOTSTRAP_CLERK_DRY_RUN_B64"
+              verify_environment_secret "PRODUCTION_BOOTSTRAP_CLERK_DRY_RUN_SIGNATURE_B64"
+              verify_environment_secret "PRODUCTION_BOOTSTRAP_OUTSTANDING_DELIVERY_REVIEW_B64"
+              verify_environment_secret "PRODUCTION_BOOTSTRAP_PROVIDER_DELIVERY_DRAIN_B64"
+              verify_environment_secret "PRODUCTION_BOOTSTRAP_DATABASE_DDL_AUTHORITY_B64"
+              verify_environment_secret "PRODUCTION_BOOTSTRAP_FAILED_LIST_SMOKE_EVIDENCE_B64"
+              verify_environment_secret "PRODUCTION_BOOTSTRAP_DASHBOARD_POLICY_SMOKE_EVIDENCE_B64"
+              ;;
+            invoke-clerk)
+              verify_environment_secret "PRODUCTION_BOOTSTRAP_RECEIPT_B64"
+              verify_environment_secret "PRODUCTION_BOOTSTRAP_RECEIPT_SIGNATURE_B64"
+              verify_environment_secret "PRODUCTION_MIGRATION_ALLOWED_SIGNERS_B64"
+              verify_environment_secret "PRODUCTION_BOOTSTRAP_PGPASS_B64"
+              ;;
+            apply-schema)
+              verify_environment_secret "PRODUCTION_BOOTSTRAP_PGPASS_B64"
+              ;;
+            deploy-compatible|activate-first-class|resume|complete)
+              verify_environment_secret "PRODUCTION_BOOTSTRAP_RECEIPT_B64"
+              verify_environment_secret "PRODUCTION_BOOTSTRAP_RECEIPT_SIGNATURE_B64"
+              verify_environment_secret "PRODUCTION_MIGRATION_ALLOWED_SIGNERS_B64"
+              ;;
+          esac
+
+          printf 'azure_client_id=%s\n' "${azure_client_id}" >>"${GITHUB_OUTPUT}"
+          printf 'azure_tenant_id=%s\n' "${azure_tenant_id}" >>"${GITHUB_OUTPUT}"
+          printf 'azure_subscription_id=%s\n' "${azure_subscription_id}" >>"${GITHUB_OUTPUT}"
+          printf 'azure_principal_object_id=%s\n' "${azure_principal_object_id}" >>"${GITHUB_OUTPUT}"
+          printf 'exclusive_aca_authority=%s\n' "${exclusive_aca_authority}" >>"${GITHUB_OUTPUT}"
+          printf 'exclusive_ddl_authority=%s\n' "${exclusive_ddl_authority}" >>"${GITHUB_OUTPUT}"
+          printf 'outstanding_delivery_review=%s\n' "${outstanding_delivery_review}" >>"${GITHUB_OUTPUT}"
+          printf 'provider_delivery_drain=%s\n' "${provider_delivery_drain}" >>"${GITHUB_OUTPUT}"
 
       - name: Checkout exact protected master source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -118,23 +213,23 @@ jobs:
       - name: Authenticate to Azure with protected OIDC
         uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5
         with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ steps.production_environment.outputs.azure_client_id }}
+          tenant-id: ${{ steps.production_environment.outputs.azure_tenant_id }}
+          subscription-id: ${{ steps.production_environment.outputs.azure_subscription_id }}
 
       - name: Run one exact-snapshot bootstrap action
         id: controller
         env:
           GH_TOKEN: ${{ github.token }}
           ACTION: ${{ inputs.action }}
-          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
-          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
-          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-          AZURE_PRINCIPAL_OBJECT_ID: ${{ vars.AZURE_PRINCIPAL_OBJECT_ID }}
-          ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED: ${{ vars.ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED }}
-          OUTSTANDING_DELIVERY_REVIEW_CONFIRMED: ${{ inputs.action == 'prepare' && vars.OUTSTANDING_DELIVERY_REVIEW_CONFIRMED || '' }}
-          PROVIDER_DELIVERY_DRAIN_CONFIRMED: ${{ inputs.action == 'prepare' && vars.PROVIDER_DELIVERY_DRAIN_CONFIRMED || '' }}
-          DATABASE_DDL_EXCLUSIVE_AUTHORITY_CONFIRMED: ${{ contains(fromJSON('["prepare","invoke-clerk","apply-schema"]'), inputs.action) && vars.DATABASE_DDL_EXCLUSIVE_AUTHORITY_CONFIRMED || '' }}
+          AZURE_CLIENT_ID: ${{ steps.production_environment.outputs.azure_client_id }}
+          AZURE_TENANT_ID: ${{ steps.production_environment.outputs.azure_tenant_id }}
+          AZURE_SUBSCRIPTION_ID: ${{ steps.production_environment.outputs.azure_subscription_id }}
+          AZURE_PRINCIPAL_OBJECT_ID: ${{ steps.production_environment.outputs.azure_principal_object_id }}
+          ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED: ${{ steps.production_environment.outputs.exclusive_aca_authority }}
+          OUTSTANDING_DELIVERY_REVIEW_CONFIRMED: ${{ inputs.action == 'prepare' && steps.production_environment.outputs.outstanding_delivery_review || '' }}
+          PROVIDER_DELIVERY_DRAIN_CONFIRMED: ${{ inputs.action == 'prepare' && steps.production_environment.outputs.provider_delivery_drain || '' }}
+          DATABASE_DDL_EXCLUSIVE_AUTHORITY_CONFIRMED: ${{ contains(fromJSON('["prepare","invoke-clerk","apply-schema"]'), inputs.action) && steps.production_environment.outputs.exclusive_ddl_authority || '' }}
           WORKFORCE_PRODUCTION_BOOTSTRAP_AUTHORITY_CONFIRMED: "true"
           REQUEST_B64: ${{ secrets.PRODUCTION_BOOTSTRAP_REQUEST_B64 }}
           RECEIPT_B64: ${{ contains(fromJSON('["invoke-clerk","deploy-compatible","activate-first-class","resume","complete"]'), inputs.action) && secrets.PRODUCTION_BOOTSTRAP_RECEIPT_B64 || '' }}
