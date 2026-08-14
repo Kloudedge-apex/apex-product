@@ -263,6 +263,17 @@ been independently reviewed. Until that bootstrap completes, this release
 remains production **NO-GO**; a signed quiescence snapshot alone does not close
 the time-of-check/time-of-use gap.
 
+Before requesting bootstrap admission, build the API/worker artifact through
+the protected, manual-only `.github/workflows/build-production-candidate.yml`
+lane on the exact protected `master` head. Build the console artifact through
+the equivalent workflow in the console repository. These lanes are distinct
+from `release-production.yml`: they only create immutable ACR artifacts and
+sanitized evidence, and must have no Container App authority. Review each
+completed run and bind its exact run ID, evidence hash, source commit, and
+verified digest into the bootstrap request. Do not use either release workflow
+to manufacture a pre-bootstrap artifact, and do not dispatch a build lane
+without separate authorization for the ACR write.
+
 Use this order and do not collapse the gates:
 
 1. Block API mutations, stop the legacy worker, pause all three queues, wait

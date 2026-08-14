@@ -51,6 +51,28 @@ the signed `bootstrap-complete` receipt, final live readback, and B8 tombstone
 all agree. An operator must investigate a retained lease; timeout or a green
 Container App health state is not authorization to break it.
 
+## Pre-bootstrap candidate artifacts
+
+B0 consumes already-built immutable artifacts; the bootstrap controller does
+not build source and the subsequent-rollout workflow is not an artifact
+factory. Build the backend candidate from the exact protected `master` head
+through `.github/workflows/build-production-candidate.yml`. That manual lane is
+bound to the separately protected `workforce-os-production-build` environment,
+requires exact-commit release CI, creates its context with `git archive`, and
+may write only the full-source-SHA and ACR-run-ID tags for `apex-api`. It
+refuses an existing source tag, resolves the completed run to one digest,
+verifies the pulled Linux/amd64 registry artifact and OCI revision, and emits a
+sanitized evidence artifact.
+
+The matching console repository build-only lane produces and verifies the
+console digest. Neither lane may read or update Container Apps, databases,
+storage, networking, DNS, or bootstrap state. Provision their OIDC principals
+with ACR build/pull access only, independently review a successful run, and
+bind the resulting exact run IDs, evidence hashes, commits, and digest
+references into `targetArtifacts`. Dispatching a candidate-build workflow is
+a registry mutation and requires separate operational authorization; merging
+its source or passing CI is not that authorization.
+
 ## Phase contract
 
 | Phase | Required proof and permitted effect |

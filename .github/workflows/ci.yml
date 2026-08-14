@@ -43,6 +43,9 @@ jobs:
       - name: Verify protected production release workflow
         run: scripts/verify-production-release-workflow.sh
 
+      - name: Verify protected production candidate-build workflow
+        run: scripts/verify-production-candidate-build-workflow.sh
+
       - name: Install pnpm
         uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
 
@@ -60,6 +63,7 @@ jobs:
 
       - name: Run production bootstrap controller contracts
         run: |
+          node --test scripts/tests/production-candidate-build-workflow.test.mjs
           node --test scripts/tests/production-bootstrap-workflow.test.mjs
           node --test scripts/tests/production-bootstrap-controller.test.mjs
           node --test scripts/tests/production-bootstrap-database-identity.test.mjs
