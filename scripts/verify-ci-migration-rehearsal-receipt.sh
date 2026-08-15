@@ -203,8 +203,13 @@ fi
   fail "postcondition fixture digest mismatch"
 
 for index in "${!MIGRATIONS[@]}"; do
-  source_hash="$(committed_digest "${EXPECTED_COMMIT}" "${MIGRATIONS[$index]}")" ||
-    fail "required committed migration is unavailable: ${MIGRATIONS[$index]}"
+  if [[ "${SOURCE_MODE}" == "committed-candidate" ]]; then
+    source_hash="$(committed_digest "${EXPECTED_COMMIT}" "${MIGRATIONS[$index]}")" ||
+      fail "required committed migration is unavailable: ${MIGRATIONS[$index]}"
+  else
+    source_hash="$(local_digest "${MIGRATIONS[$index]}")" ||
+      fail "required local migration is unavailable: ${MIGRATIONS[$index]}"
+  fi
   if ! jq -e \
     --argjson index "${index}" \
     --arg path "${MIGRATIONS[$index]}" \
@@ -216,4 +221,4 @@ for index in "${!MIGRATIONS[@]}"; do
   fi
 done
 
-echo "Synthetic CI migration receipt verified for ${EXPECTED_COMMIT} (non-authoritative; eight committed migrations)"
+echo "Synthetic CI migration receipt verified for ${EXPECTED_COMMIT} (non-authoritative; eight reviewed migrations)"

@@ -26,6 +26,42 @@ BEGIN
     RAISE EXCEPTION 'conversation expand postcondition failed';
   END IF;
 
+  IF to_regclass(format('%I.%I', current_schema(), 'LegacyConversation')) IS NULL
+    OR EXISTS (SELECT 1 FROM "LegacyConversation")
+  THEN
+    RAISE EXCEPTION 'empty legacy Conversation preservation postcondition failed';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_class AS idx
+    JOIN pg_index AS i ON i.indexrelid = idx.oid
+    JOIN pg_class AS rel ON rel.oid = i.indrelid
+    JOIN pg_namespace AS n ON n.oid = rel.relnamespace
+    WHERE n.nspname = current_schema()
+      AND idx.relname = 'LegacyConversation_pkey'
+      AND rel.relname = 'LegacyConversation'
+      AND i.indisprimary
+      AND i.indisvalid
+      AND i.indisready
+      AND i.indislive
+  ) OR NOT EXISTS (
+    SELECT 1
+    FROM pg_class AS idx
+    JOIN pg_index AS i ON i.indexrelid = idx.oid
+    JOIN pg_class AS rel ON rel.oid = i.indrelid
+    JOIN pg_namespace AS n ON n.oid = rel.relnamespace
+    WHERE n.nspname = current_schema()
+      AND idx.relname = 'Conversation_pkey'
+      AND rel.relname = 'Conversation'
+      AND i.indisprimary
+      AND i.indisvalid
+      AND i.indisready
+      AND i.indislive
+  ) THEN
+    RAISE EXCEPTION 'legacy/canonical Conversation primary-key postcondition failed';
+  END IF;
+
   IF NOT EXISTS (
     SELECT 1
     FROM pg_enum AS e

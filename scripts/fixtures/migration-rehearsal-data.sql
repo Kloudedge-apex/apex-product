@@ -6,6 +6,48 @@
 
 BEGIN;
 
+-- Reproduce the exact empty pre-release Conversation catalog found in the
+-- production database. The canonical migration must preserve this shape under
+-- LegacyConversation before creating its unrelated provider-thread model.
+CREATE TYPE "ConversationStatus" AS ENUM (
+  'ACTIVE',
+  'REPLIED',
+  'BOUNCED',
+  'CLOSED'
+);
+
+CREATE TABLE "Conversation" (
+  "id"               TEXT NOT NULL,
+  "orgId"            TEXT NOT NULL,
+  "provider"         TEXT NOT NULL,
+  "providerThreadId" TEXT,
+  "subject"          TEXT,
+  "personId"         TEXT,
+  "companyId"        TEXT,
+  "status"           "ConversationStatus" NOT NULL DEFAULT 'ACTIVE',
+  "messageCount"     INTEGER NOT NULL DEFAULT 0,
+  "replyCount"       INTEGER NOT NULL DEFAULT 0,
+  "lastActivityAt"   TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "createdAt"        TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "updatedAt"        TIMESTAMP(3) NOT NULL,
+
+  CONSTRAINT "Conversation_pkey" PRIMARY KEY ("id"),
+  CONSTRAINT "Conversation_orgId_fkey"
+    FOREIGN KEY ("orgId") REFERENCES "Org" ("id")
+    ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+CREATE INDEX "Conversation_orgId_idx"
+  ON "Conversation" ("orgId");
+CREATE INDEX "Conversation_orgId_lastActivityAt_idx"
+  ON "Conversation" ("orgId", "lastActivityAt");
+CREATE INDEX "Conversation_orgId_provider_providerThreadId_idx"
+  ON "Conversation" ("orgId", "provider", "providerThreadId");
+CREATE UNIQUE INDEX "Conversation_orgId_provider_providerThreadId_key"
+  ON "Conversation" ("orgId", "provider", "providerThreadId");
+CREATE INDEX "Conversation_orgId_status_idx"
+  ON "Conversation" ("orgId", "status");
+
 INSERT INTO "Org" ("id", "name", "slug", "updatedAt") VALUES
   ('ci_org_alpha', 'Synthetic Alpha', 'ci-synthetic-alpha', clock_timestamp()),
   ('ci_org_beta', 'Synthetic Beta', 'ci-synthetic-beta', clock_timestamp());

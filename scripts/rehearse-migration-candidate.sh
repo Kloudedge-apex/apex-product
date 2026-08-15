@@ -77,7 +77,7 @@ case "${VECTOR_MODE}" in
 esac
 
 case "${ADVERSARY}" in
-  none|artifact-duplicate|reply-duplicate|graph-run-duplicate|identity-count-mismatch|identity-cursor-after-cutoff|incompatible-fixed-index|backup-fingerprint-mismatch) ;;
+  none|artifact-duplicate|reply-duplicate|graph-run-duplicate|identity-count-mismatch|identity-cursor-after-cutoff|incompatible-fixed-index|backup-fingerprint-mismatch|legacy-conversation-nonempty) ;;
   *) fail "unsupported rehearsal test scenario: ${ADVERSARY}" ;;
 esac
 if [[ "${ADVERSARY}" != "none" && "${TESTING_MODE}" != "true" ]]; then
@@ -264,7 +264,7 @@ MIGRATION_FILES=()
 MIGRATION_HASHES=()
 for index in "${!MIGRATIONS[@]}"; do
   migration_file="${TEMP_DIR}/migration-${index}.sql"
-  materialize_committed "${MIGRATIONS[$index]}" "${migration_file}"
+  materialize_fixture "${MIGRATIONS[$index]}" "${migration_file}"
   MIGRATION_FILES+=("${migration_file}")
   MIGRATION_HASHES+=("$(hash_file "${migration_file}")")
 done
@@ -307,6 +307,12 @@ elif [[ "${ADVERSARY}" == "identity-cursor-after-cutoff" ]]; then
 fi
 
 for index in "${!MIGRATIONS[@]}"; do
+  if [[ "${index}" == "2" && "${ADVERSARY}" == "legacy-conversation-nonempty" ]]; then
+    psql --no-psqlrc --dbname="${DATABASE_URL}" --set=ON_ERROR_STOP=1 \
+      --command='INSERT INTO "Conversation" ("id", "orgId", "provider", "updatedAt") VALUES ('\''ci_legacy_conversation'\'', '\''ci_org_alpha'\'', '\''ci-synthetic'\'', clock_timestamp());' \
+      >/dev/null
+  fi
+
   if [[ "${index}" == "1" ]]; then
     if [[ "${ADVERSARY}" == "artifact-duplicate" ]]; then
       psql --no-psqlrc --dbname="${DATABASE_URL}" --set=ON_ERROR_STOP=1 \
