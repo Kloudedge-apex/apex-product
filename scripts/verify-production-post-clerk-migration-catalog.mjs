@@ -33,7 +33,7 @@ export const POST_CLERK_MIGRATION_CONTRACT = deepFreeze([
   },
   {
     path: POST_CLERK_MIGRATIONS[1],
-    sha256: "sha256:d8ce914d6fca829b9b35dd85afa50963ba02a2a85a1ae152ca55479fbc4d40f6",
+    sha256: "sha256:b27e2f5d0e23299404c9a423110d1e5af324037246d70e75e1cb46e59b90e49e",
   },
   {
     path: POST_CLERK_MIGRATIONS[2],
