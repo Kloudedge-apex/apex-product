@@ -75,6 +75,14 @@ node scripts/production-azure-mutation-authority-audit.mjs
 Do not replace a `NO-GO`, incomplete-coverage finding, or null controller
 evidence with a hand-authored attestation.
 
+The bootstrap request consumes both the report's `structuralEvidenceHash` and
+`controllerEvidenceHash`. Controller evidence is schema version 2 and binds the
+exact checkpoint blob identity, matching structural hash, Azure-controlled
+`lastModified` value, and ten-day minimum together with the current exact-scope
+role assignments. The controller reads that checkpoint again with Entra login;
+an assignment-only reconstruction, alternate subscription/storage account, or
+checkpoint reset fails admission.
+
 Only after the audit has no findings except credential-drain checkpoint
 findings, separately authorize one of these exact operations:
 

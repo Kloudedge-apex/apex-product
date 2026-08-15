@@ -204,6 +204,11 @@ of these exist and have been independently reviewed:
 - a server-timed authority-drain checkpoint bound to the audit's exact
   structural evidence hash, unchanged for at least 10 days, with the separately
   authorized create/reset receipt retained for review;
+- a bootstrap request that copies both the structural-evidence hash and the
+  version-2 controller-evidence hash from the same `GO` report. The controller
+  independently reads the exact `ledgrstorage/production-control` checkpoint,
+  revalidates its age and metadata, and hashes it with the current exact-scope
+  assignments before admitting any non-audit action;
 - explicit proof that no other principal, pipeline, autoscaler, or operator can
   mutate the three Container Apps or bootstrap blob during the attempt; the
   controller verifies exact assignment evidence, but exclusivity remains an

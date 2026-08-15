@@ -26,6 +26,7 @@ done
 
 TRUSTED_EXECUTABLES=(
   "scripts/production-bootstrap-controller.mjs"
+  "scripts/production-azure-mutation-authority-audit.mjs"
   "scripts/production-bootstrap-phase-ledger.mjs"
   "scripts/production-bootstrap-phase-receipt-contracts.mjs"
   "scripts/production-bootstrap-runtime-control.ts"
@@ -48,6 +49,12 @@ done
 require_literal() {
   local value=$1
   grep -Fq -- "${value}" "${WORKFLOW}" || fail "missing required workflow source: ${value}"
+}
+
+require_controller_literal() {
+  local value=$1
+  grep -Fq -- "${value}" "${CONTROLLER}" ||
+    fail "missing required controller source: ${value}"
 }
 
 reject_pattern() {
@@ -164,6 +171,11 @@ require_literal 'WORKFORCE_PRODUCTION_BOOTSTRAP_AUTHORITY_CONFIRMED: "true"'
 require_literal 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262'
 require_literal 'azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5'
 require_literal 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
+require_controller_literal 'azureMutationAuthorityStructuralEvidenceHash'
+require_controller_literal 'PRODUCTION_AUTHORITY_DRAIN_CONTRACT.blobName'
+require_controller_literal 'evaluateProductionAuthorityDrainCheckpoint('
+require_controller_literal 'schemaVersion: 2,'
+require_controller_literal 'request storage identity is not the fixed production control store'
 reject_pattern 'abort-before-schema' "removed abort action reappeared"
 reject_pattern 'continue-on-error[[:space:]]*:[[:space:]]*true' "continue-on-error is forbidden"
 reject_pattern 'uses:[[:space:]]+[^[:space:]@]+@(main|master|v[0-9]+)([[:space:]#]|$)' "mutable action references are forbidden"

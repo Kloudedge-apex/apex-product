@@ -52,6 +52,11 @@ import {
   REPLY_REPAIR_INDEXES,
   planPostClerkMigrationCatalog,
 } from "./verify-production-post-clerk-migration-catalog.mjs";
+import {
+  PRODUCTION_AUTHORITY_DRAIN_CONTRACT,
+  PRODUCTION_AZURE_AUTHORITY_CONTRACT,
+  evaluateProductionAuthorityDrainCheckpoint,
+} from "./production-azure-mutation-authority-audit.mjs";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const REPO_ROOT = realpathSync(resolve(dirname(SCRIPT_PATH), ".."));
@@ -111,6 +116,7 @@ const REQUIRED_HELPERS = Object.freeze([
   "scripts/production-bootstrap-phase-ledger.mjs",
   "scripts/production-bootstrap-phase-receipt-contracts.mjs",
   "scripts/production-bootstrap-runtime-control.ts",
+  "scripts/production-azure-mutation-authority-audit.mjs",
   DATABASE_IDENTITY_HELPER_PATH,
   MUTATION_AUTHORITY_HELPER_PATH,
   CLERK_EXECUTOR_PATH,
@@ -163,6 +169,7 @@ const BOOTSTRAP_EVIDENCE_KEYS = Object.freeze([
   "failedListSmokeEvidenceHash",
   "dashboardPolicySmokeEvidenceHash",
   "azureMutationAuthorityEvidenceHash",
+  "azureMutationAuthorityStructuralEvidenceHash",
   "databaseDdlAuthorityEvidenceHash",
   "outstandingDeliveryReviewEvidenceHash",
   "providerDeliveryDrainEvidenceHash",
@@ -377,6 +384,10 @@ export function validateRequest(value) {
   validateCandidate(value.consoleCandidate, "Kloudedge-apex/Workforce-OS", "consoleCandidate");
   exactKeys(value.authority, AUTHORITY_KEYS, "request.authority");
   string(value.authority.subscriptionId, /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/, "request.authority.subscriptionId");
+  if (value.authority.subscriptionId.toLowerCase() !==
+    PRODUCTION_AZURE_AUTHORITY_CONTRACT.subscriptionId) {
+    fail("request subscription is not the fixed production authority subscription");
+  }
   if (value.authority.resourceGroupName !== RESOURCE_GROUP) fail("request resource group is invalid");
   const rgSuffix = `/resourceGroups/${RESOURCE_GROUP}`;
   assertAbsoluteResourceId(value.authority.resourceGroupResourceId, rgSuffix, "request.authority.resourceGroupResourceId");
@@ -393,6 +404,17 @@ export function validateRequest(value) {
       fail("request Azure resources do not share the admitted subscription and resource group");
     }
   }
+  const expectedAuthorityResources = {
+    resourceGroupResourceId: PRODUCTION_AZURE_AUTHORITY_CONTRACT.resourceGroupId,
+    apiContainerAppResourceId: PRODUCTION_AZURE_AUTHORITY_CONTRACT.targets.api.resourceId,
+    workerContainerAppResourceId: PRODUCTION_AZURE_AUTHORITY_CONTRACT.targets.worker.resourceId,
+    consoleContainerAppResourceId: PRODUCTION_AZURE_AUTHORITY_CONTRACT.targets.console.resourceId,
+  };
+  for (const [key, expected] of Object.entries(expectedAuthorityResources)) {
+    if (value.authority[key].toLowerCase() !== expected.toLowerCase()) {
+      fail(`request authority ${key} is not the fixed production resource`);
+    }
+  }
   exactKeys(value.storage, STORAGE_KEYS, "request.storage");
   string(value.storage.accountName, /^[a-z0-9]{3,24}$/, "request.storage.accountName");
   string(value.storage.containerName, /^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?$/, "request.storage.containerName");
@@ -402,6 +424,12 @@ export function validateRequest(value) {
   assertAbsoluteResourceId(value.storage.resourceId, `/providers/Microsoft.Storage/storageAccounts/${value.storage.accountName}`, "request.storage.resourceId");
   if (!value.storage.resourceId.toLowerCase().startsWith(`/subscriptions/${value.authority.subscriptionId.toLowerCase()}/resourcegroups/`)) {
     fail("request storage account is outside the admitted subscription");
+  }
+  if (value.storage.accountName !== "ledgrstorage" ||
+    value.storage.containerName !== PRODUCTION_AUTHORITY_DRAIN_CONTRACT.containerName ||
+    value.storage.resourceId.toLowerCase() !==
+      PRODUCTION_AZURE_AUTHORITY_CONTRACT.targets.stateStorage.storageAccountResourceId.toLowerCase()) {
+    fail("request storage identity is not the fixed production control store");
   }
   exactKeys(value.targetArtifacts, TARGET_KEYS, "request.targetArtifacts");
   validateArtifact(value.targetArtifacts.api, "api", value.backendCandidate.commit);
@@ -1071,6 +1099,18 @@ function assertExactProtectedSnapshot(runner, request, action) {
   if (!controllerBytes.equals(committedController)) fail("executing controller bytes differ from the admitted commit");
 }
 
+export function productionAuthorityDrainCheckpointSnapshot(value) {
+  return {
+    exists: true,
+    blobName: value?.name ?? null,
+    lastModified: value?.properties?.lastModified ?? null,
+    contentLength: value?.properties?.contentLength ?? null,
+    leaseState: value?.properties?.lease?.state ?? null,
+    leaseStatus: value?.properties?.lease?.status ?? null,
+    metadata: value?.metadata ?? null,
+  };
+}
+
 function verifyAzureIdentity(runner, request) {
   const account = runner.json("az", ["account", "show", "--output", "json", "--only-show-errors"], { label: "Azure OIDC identity" });
   if (
@@ -1118,12 +1158,33 @@ function verifyAzureIdentity(runner, request) {
     }
     assignmentsByScope[label] = normalized;
   }
+  const checkpoint = runner.json("az", [
+    "storage", "blob", "show",
+    "--auth-mode", "login",
+    "--account-name", request.storage.accountName,
+    "--container-name", request.storage.containerName,
+    "--name", PRODUCTION_AUTHORITY_DRAIN_CONTRACT.blobName,
+    "--subscription", request.authority.subscriptionId,
+    "--output", "json",
+    "--only-show-errors",
+  ], { label: "production authority credential-drain checkpoint" });
+  const checkpointResult = evaluateProductionAuthorityDrainCheckpoint(
+    productionAuthorityDrainCheckpointSnapshot(checkpoint),
+    nowSecond(),
+    request.bootstrapEvidence.azureMutationAuthorityStructuralEvidenceHash,
+  );
+  if (checkpointResult.finding || !checkpointResult.evidence) {
+    fail(`production authority credential-drain checkpoint is not admitted: ${checkpointResult.finding?.code ?? "invalid"}`);
+  }
   const mutationAuthorityEvidence = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     clientId: process.env.AZURE_CLIENT_ID.toLowerCase(),
     principalObjectId,
     subscriptionId: request.authority.subscriptionId,
     protectedExclusiveAuthorityAttested: true,
+    structuralEvidenceHash:
+      request.bootstrapEvidence.azureMutationAuthorityStructuralEvidenceHash,
+    credentialDrainCheckpoint: checkpointResult.evidence,
     assignmentsByScope,
   };
   if (canonicalHash(mutationAuthorityEvidence) !==

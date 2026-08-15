@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  PRODUCTION_AUTHORITY_DRAIN_CONTRACT,
   PRODUCTION_AZURE_AUTHORITY_CONTRACT,
   assertReadOnlyAzureAuditCommand,
   canonicalJson,
+  evaluateProductionAuthorityDrainCheckpoint,
   evaluateProductionAzureMutationAuthority,
 } from "../production-azure-mutation-authority-audit.mjs";
 
@@ -214,6 +216,18 @@ test("an exact exclusive authority snapshot emits controller-compatible evidence
   assert.deepEqual(report.findings, []);
   assert.equal(report.controllerEvidence.clientId, CLIENTS.backendRelease);
   assert.equal(report.controllerEvidence.principalObjectId, PRINCIPALS.backendRelease);
+  assert.equal(report.controllerEvidence.schemaVersion, 2);
+  assert.equal(report.controllerEvidence.structuralEvidenceHash, report.structuralEvidenceHash);
+  assert.deepEqual(report.controllerEvidence.credentialDrainCheckpoint, {
+    schemaVersion: 1,
+    kind: PRODUCTION_AUTHORITY_DRAIN_CONTRACT.kind,
+    subscriptionId: CONTRACT.subscriptionId,
+    containerName: PRODUCTION_AUTHORITY_DRAIN_CONTRACT.containerName,
+    blobName: PRODUCTION_AUTHORITY_DRAIN_CONTRACT.blobName,
+    structuralEvidenceHash: report.structuralEvidenceHash,
+    checkpointLastModified: "2026-08-01T05:00:00Z",
+    minimumAgeSeconds: 864000,
+  });
   assert.match(report.controllerEvidenceHash, /^sha256:[0-9a-f]{64}$/u);
   assert.deepEqual(Object.keys(report.controllerEvidence.assignmentsByScope), [
     "api", "worker", "console", "stateStorage",
@@ -254,6 +268,35 @@ test("the controller evidence hash is deterministic across assignment ordering",
     evaluateProductionAzureMutationAuthority(first).controllerEvidenceHash,
     evaluateProductionAzureMutationAuthority(second).controllerEvidenceHash,
   );
+});
+
+test("the controller evidence hash changes when the checkpoint is reset", () => {
+  const first = exclusiveSnapshot();
+  const second = structuredClone(first);
+  second.credentialDrainCheckpoint.lastModified = "2026-08-02T05:00:00Z";
+  assert.notEqual(
+    evaluateProductionAzureMutationAuthority(first).controllerEvidenceHash,
+    evaluateProductionAzureMutationAuthority(second).controllerEvidenceHash,
+  );
+});
+
+test("standalone controller checkpoint evaluation requires the reviewed structural hash", () => {
+  const snapshot = exclusiveSnapshot();
+  const report = evaluateProductionAzureMutationAuthority(snapshot);
+  const valid = evaluateProductionAuthorityDrainCheckpoint(
+    snapshot.credentialDrainCheckpoint,
+    snapshot.observedAt,
+    report.structuralEvidenceHash,
+  );
+  assert.equal(valid.finding, null);
+  assert.equal(valid.evidence.structuralEvidenceHash, report.structuralEvidenceHash);
+  const mismatch = evaluateProductionAuthorityDrainCheckpoint(
+    snapshot.credentialDrainCheckpoint,
+    snapshot.observedAt,
+    `sha256:${"0".repeat(64)}`,
+  );
+  assert.equal(mismatch.evidence, null);
+  assert.equal(mismatch.finding.code, "credential-drain-structure-mismatch");
 });
 
 test("a missing expected identity fails closed", () => {

@@ -471,6 +471,18 @@ report contains no principal names or emails; retain the exact report bytes,
 checkpoint receipt, structural-evidence hash, and controller-evidence hash for
 independent review.
 
+The bootstrap request must copy both
+`bootstrapEvidence.azureMutationAuthorityStructuralEvidenceHash` and
+`bootstrapEvidence.azureMutationAuthorityEvidenceHash` from that same `GO`
+report. The controller admits only the fixed production subscription,
+`Ledgr-prod/ledgrstorage`, container `production-control`, and controller-state
+blob. On every non-audit action it reads the exact drain-checkpoint blob with
+Entra login, revalidates its shape, structural hash, unlocked state, zero-byte
+content, and minimum age, then includes that live checkpoint evidence in the
+version-2 mutation-authority evidence hash. A reset checkpoint, alternate
+storage target, or assignment-only evidence can no longer satisfy bootstrap
+admission.
+
 The controller re-reads all three apps immediately before the first
 write, immediately before each later or compensating write, and after every
 write. A manual-only, fail-closed workflow source now exists at

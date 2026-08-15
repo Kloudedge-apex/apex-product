@@ -18,6 +18,15 @@ const CREDENTIAL_DRAIN_CHECKPOINT_KIND =
   "workforce-os-production-authority-drain-checkpoint-v1";
 const MINIMUM_CREDENTIAL_DRAIN_AGE_SECONDS = 10 * 24 * 60 * 60;
 
+export const PRODUCTION_AUTHORITY_DRAIN_CONTRACT = Object.freeze({
+  schemaVersion: 1,
+  subscriptionId: SUBSCRIPTION_ID,
+  containerName: CONTROL_CONTAINER,
+  blobName: CREDENTIAL_DRAIN_CHECKPOINT_BLOB,
+  kind: CREDENTIAL_DRAIN_CHECKPOINT_KIND,
+  minimumAgeSeconds: MINIMUM_CREDENTIAL_DRAIN_AGE_SECONDS,
+});
+
 function resourceId(provider, type, name) {
   return `${RESOURCE_GROUP_ID}/providers/${provider}/${type}/${name}`;
 }
@@ -644,18 +653,27 @@ function structuralEvidenceHash(snapshot) {
   return sha256(Buffer.from(canonicalJson(evidence), "utf8"));
 }
 
-function validateCredentialDrain(snapshot, expectedStructuralHash, findings) {
-  const checkpoint = snapshot.credentialDrainCheckpoint;
+export function evaluateProductionAuthorityDrainCheckpoint(
+  checkpoint,
+  observedAt,
+  expectedStructuralHash,
+) {
+  const reject = (code, extra = {}) => ({
+    evidence: null,
+    finding: { code, target: "stateStorage", ...extra },
+  });
   if (checkpoint?.exists !== true) {
-    findings.push({ code: "credential-drain-checkpoint-missing", target: "stateStorage" });
-    return;
+    return reject("credential-drain-checkpoint-missing");
   }
   const metadata = checkpoint.metadata;
   const metadataKeys = metadata && typeof metadata === "object" && !Array.isArray(metadata)
     ? Object.keys(metadata).sort()
     : [];
   const exactMetadataKeys = ["kind", "structural_evidence_sha256", "subscription_id"];
-  const expectedHex = expectedStructuralHash.replace(/^sha256:/u, "");
+  const expectedHashValid = /^sha256:[0-9a-f]{64}$/u.test(expectedStructuralHash ?? "");
+  const expectedHex = expectedHashValid
+    ? expectedStructuralHash.replace(/^sha256:/u, "")
+    : null;
   const validShape = checkpoint.blobName === CREDENTIAL_DRAIN_CHECKPOINT_BLOB &&
     checkpoint.contentLength === 0 && checkpoint.leaseState === "available" &&
     checkpoint.leaseStatus === "unlocked" &&
@@ -663,27 +681,44 @@ function validateCredentialDrain(snapshot, expectedStructuralHash, findings) {
     metadata.kind === CREDENTIAL_DRAIN_CHECKPOINT_KIND &&
     lower(metadata.subscription_id) === SUBSCRIPTION_ID &&
     /^[0-9a-f]{64}$/u.test(metadata.structural_evidence_sha256 ?? "");
-  if (!validShape) {
-    findings.push({ code: "credential-drain-checkpoint-invalid", target: "stateStorage" });
-    return;
-  }
+  if (!validShape || !expectedHashValid) return reject("credential-drain-checkpoint-invalid");
   if (metadata.structural_evidence_sha256 !== expectedHex) {
-    findings.push({ code: "credential-drain-structure-mismatch", target: "stateStorage" });
-    return;
+    return reject("credential-drain-structure-mismatch");
   }
-  const observedAt = Date.parse(snapshot.observedAt ?? "");
+  const observedAtMillis = Date.parse(observedAt ?? "");
   const lastModified = Date.parse(checkpoint.lastModified ?? "");
-  if (!Number.isFinite(observedAt) || !Number.isFinite(lastModified) || lastModified > observedAt) {
-    findings.push({ code: "credential-drain-checkpoint-invalid", target: "stateStorage" });
-    return;
+  if (!Number.isFinite(observedAtMillis) || !Number.isFinite(lastModified) ||
+    lastModified > observedAtMillis) {
+    return reject("credential-drain-checkpoint-invalid");
   }
-  if ((observedAt - lastModified) / 1000 < MINIMUM_CREDENTIAL_DRAIN_AGE_SECONDS) {
-    findings.push({
-      code: "credential-drain-window-open",
-      target: "stateStorage",
+  if ((observedAtMillis - lastModified) / 1000 < MINIMUM_CREDENTIAL_DRAIN_AGE_SECONDS) {
+    return reject("credential-drain-window-open", {
       minimumAgeSeconds: MINIMUM_CREDENTIAL_DRAIN_AGE_SECONDS,
     });
   }
+  return {
+    finding: null,
+    evidence: {
+      schemaVersion: 1,
+      kind: CREDENTIAL_DRAIN_CHECKPOINT_KIND,
+      subscriptionId: SUBSCRIPTION_ID,
+      containerName: CONTROL_CONTAINER,
+      blobName: CREDENTIAL_DRAIN_CHECKPOINT_BLOB,
+      structuralEvidenceHash: expectedStructuralHash,
+      checkpointLastModified: checkpoint.lastModified,
+      minimumAgeSeconds: MINIMUM_CREDENTIAL_DRAIN_AGE_SECONDS,
+    },
+  };
+}
+
+function validateCredentialDrain(snapshot, expectedStructuralHash, findings) {
+  const result = evaluateProductionAuthorityDrainCheckpoint(
+    snapshot.credentialDrainCheckpoint,
+    snapshot.observedAt,
+    expectedStructuralHash,
+  );
+  if (result.finding) findings.push(result.finding);
+  return result.evidence;
 }
 
 export function evaluateProductionAzureMutationAuthority(snapshot) {
@@ -783,7 +818,9 @@ export function evaluateProductionAzureMutationAuthority(snapshot) {
     .sort((left, right) => canonicalJson(left).localeCompare(canonicalJson(right)));
   const structuralExclusive = structuralFindings.length === 0;
   const structuralHash = structuralExclusive ? structuralEvidenceHash(snapshot) : null;
-  if (structuralExclusive) validateCredentialDrain(snapshot, structuralHash, findings);
+  const credentialDrainEvidence = structuralExclusive
+    ? validateCredentialDrain(snapshot, structuralHash, findings)
+    : null;
   const sortedFindings = [...new Map(findings.map((finding) =>
     [canonicalJson(finding), finding])).values()]
     .sort((left, right) => canonicalJson(left).localeCompare(canonicalJson(right)));
@@ -798,11 +835,13 @@ export function evaluateProductionAzureMutationAuthority(snapshot) {
         .sort((left, right) => canonicalJson(left).localeCompare(canonicalJson(right)));
     }
     controllerEvidence = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       clientId: backendRelease.clientId,
       principalObjectId: backendRelease.principalId,
       subscriptionId: contract.subscriptionId,
       protectedExclusiveAuthorityAttested: true,
+      structuralEvidenceHash: structuralHash,
+      credentialDrainCheckpoint: credentialDrainEvidence,
       assignmentsByScope,
     };
     controllerEvidenceHash = sha256(Buffer.from(canonicalJson(controllerEvidence), "utf8"));

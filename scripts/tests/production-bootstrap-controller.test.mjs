@@ -16,6 +16,7 @@ import {
   azureInheritedRoleAssignmentListArgs,
   buildAdmissionContext,
   classifyPreOpenActionReplay,
+  productionAuthorityDrainCheckpointSnapshot,
   runReplayableMutationSteps,
   runReplayableOrderedSteps,
   validateRequest,
@@ -23,6 +24,9 @@ import {
   verifyDeliverySafetyEvidence,
   verifyOperationalSmokeEvidence,
 } from "../production-bootstrap-controller.mjs";
+import {
+  PRODUCTION_AZURE_AUTHORITY_CONTRACT,
+} from "../production-azure-mutation-authority-audit.mjs";
 import {
   POST_CLERK_CATALOG_CONTRACT_HASH,
   POST_CLERK_MIGRATION_CONTRACT,
@@ -39,8 +43,8 @@ const SHA_B = "b".repeat(40);
 const DIGEST_A = `sha256:${"1".repeat(64)}`;
 const DIGEST_B = `sha256:${"2".repeat(64)}`;
 const DIGEST_C = `sha256:${"3".repeat(64)}`;
-const SUBSCRIPTION = "12345678-1234-4234-9234-123456789abc";
-const RG = `/subscriptions/${SUBSCRIPTION}/resourceGroups/Ledgr-prod`;
+const SUBSCRIPTION = PRODUCTION_AZURE_AUTHORITY_CONTRACT.subscriptionId;
+const RG = PRODUCTION_AZURE_AUTHORITY_CONTRACT.resourceGroupId;
 
 function backendArtifact(role, digest = DIGEST_A) {
   const app = role === "api" ? "apex-gtm-api" : "apex-gtm-worker";
@@ -82,10 +86,10 @@ function validRequest() {
       consoleContainerAppResourceId: `${RG}/providers/Microsoft.App/containerApps/nikxius-web`,
     },
     storage: {
-      accountName: "workforcebootstrap",
+      accountName: "ledgrstorage",
       containerName: "production-control",
       blobName: "workforce-os/initial-production-bootstrap/state-v1.json",
-      resourceId: `${RG}/providers/Microsoft.Storage/storageAccounts/workforcebootstrap`,
+      resourceId: PRODUCTION_AZURE_AUTHORITY_CONTRACT.targets.stateStorage.storageAccountResourceId,
     },
     targetArtifacts: {
       api: backendArtifact("api", DIGEST_A),
@@ -110,6 +114,7 @@ function validRequest() {
       failedListSmokeEvidenceHash: DIGEST_C,
       dashboardPolicySmokeEvidenceHash: DIGEST_A,
       azureMutationAuthorityEvidenceHash: DIGEST_B,
+      azureMutationAuthorityStructuralEvidenceHash: DIGEST_C,
       databaseDdlAuthorityEvidenceHash: DIGEST_B,
       outstandingDeliveryReviewEvidenceHash: DIGEST_C,
       providerDeliveryDrainEvidenceHash: DIGEST_A,
@@ -173,6 +178,10 @@ test("request validator rejects authority drift across exact resources", () => {
     () => validateRequest(mutate(["authority", "resourceGroupName"], "Other-rg")),
     /resource group is invalid/,
   );
+  assert.throws(
+    () => validateRequest(mutate(["authority", "subscriptionId"], "12345678-1234-4234-9234-123456789abc")),
+    /fixed production authority subscription/,
+  );
 });
 
 test("request validator rejects alternate state blobs and storage identities", () => {
@@ -184,6 +193,38 @@ test("request validator rejects alternate state blobs and storage identities", (
     () => validateRequest(mutate(["storage", "resourceId"], `${RG}/providers/Microsoft.Storage/storageAccounts/otheraccount`)),
     /unexpected resource/,
   );
+  const alternateAccount = validRequest();
+  alternateAccount.storage.accountName = "otheraccount";
+  alternateAccount.storage.resourceId =
+    `${RG}/providers/Microsoft.Storage/storageAccounts/otheraccount`;
+  assert.throws(
+    () => validateRequest(alternateAccount),
+    /storage identity is not the fixed production control store/,
+  );
+  assert.throws(
+    () => validateRequest(mutate(["storage", "containerName"], "alternate-control")),
+    /storage identity is not the fixed production control store/,
+  );
+});
+
+test("Azure credential-drain readback is normalized from the exact blob response", () => {
+  assert.deepEqual(productionAuthorityDrainCheckpointSnapshot({
+    name: "workforce-os/initial-production-bootstrap/authority-drain-checkpoint-v1",
+    properties: {
+      lastModified: "2026-08-01T05:00:00Z",
+      contentLength: 0,
+      lease: { state: "available", status: "unlocked" },
+    },
+    metadata: { kind: "checkpoint" },
+  }), {
+    exists: true,
+    blobName: "workforce-os/initial-production-bootstrap/authority-drain-checkpoint-v1",
+    lastModified: "2026-08-01T05:00:00Z",
+    contentLength: 0,
+    leaseState: "available",
+    leaseStatus: "unlocked",
+    metadata: { kind: "checkpoint" },
+  });
 });
 
 test("request validator enforces independent operator and approver", () => {
