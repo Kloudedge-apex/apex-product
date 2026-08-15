@@ -404,6 +404,35 @@ argument() {
   return 1
 }
 
+if [[ "${1:-} ${2:-} ${3:-} ${4:-}" == "storage blob lease acquire" ]]; then
+  if [[ "${FAKE_AZURE_LEASE_ACQUIRE_STATUS:-0}" != "0" ]]; then
+    exit "${FAKE_AZURE_LEASE_ACQUIRE_STATUS}"
+  fi
+  argument --proposed-lease-id "$@"
+  exit 0
+fi
+if [[ "${1:-} ${2:-} ${3:-} ${4:-}" == "storage blob lease renew" ]]; then
+  if [[ "${FAKE_AZURE_LEASE_RENEW_STATUS:-0}" != "0" ]]; then
+    exit "${FAKE_AZURE_LEASE_RENEW_STATUS}"
+  fi
+  argument --lease-id "$@"
+  exit 0
+fi
+if [[ "${1:-} ${2:-} ${3:-} ${4:-}" == "storage blob lease release" ]]; then
+  exit "${FAKE_AZURE_LEASE_RELEASE_STATUS:-0}"
+fi
+if [[ "${1:-} ${2:-} ${3:-}" == "storage blob show" ]]; then
+  if [[ "${FAKE_AZURE_LEASE_SHOW_STATUS:-0}" != "0" ]]; then
+    exit "${FAKE_AZURE_LEASE_SHOW_STATUS}"
+  fi
+  if [[ -n "${FAKE_AZURE_LEASE_STATE:-}" ]]; then
+    printf '%s\n' "${FAKE_AZURE_LEASE_STATE}"
+  else
+    printf '%s\n' '{"status":"unlocked","state":"available"}'
+  fi
+  exit 0
+fi
+
 if [[ "${1:-} ${2:-}" == "acr build" ]]; then
   build_context="${!#}"
   build_context_mode="$(stat -c '%a' "${build_context}" 2>/dev/null || true)"
@@ -699,6 +728,11 @@ run_fake_deploy() {
     FAKE_MIGRATION_FRESH_EXPIRES_AFTER_CALL="${FAKE_MIGRATION_FRESH_EXPIRES_AFTER_CALL:-}" \
     FAKE_LOCK_STATUS="${FAKE_LOCK_STATUS:-0}" \
     FAKE_LOCK_CLEANUP_STATUS="${FAKE_LOCK_CLEANUP_STATUS:-0}" \
+    FAKE_AZURE_LEASE_ACQUIRE_STATUS="${FAKE_AZURE_LEASE_ACQUIRE_STATUS:-0}" \
+    FAKE_AZURE_LEASE_RENEW_STATUS="${FAKE_AZURE_LEASE_RENEW_STATUS:-0}" \
+    FAKE_AZURE_LEASE_RELEASE_STATUS="${FAKE_AZURE_LEASE_RELEASE_STATUS:-0}" \
+    FAKE_AZURE_LEASE_SHOW_STATUS="${FAKE_AZURE_LEASE_SHOW_STATUS:-0}" \
+    FAKE_AZURE_LEASE_STATE="${FAKE_AZURE_LEASE_STATE:-}" \
     FAKE_MUTATE_SOURCE_HELPER_ON_LOCK="${FAKE_MUTATE_SOURCE_HELPER_ON_LOCK:-false}" \
     FAKE_SWAP_SNAPSHOT_HELPER_ON_LOCK="${FAKE_SWAP_SNAPSHOT_HELPER_ON_LOCK:-false}" \
     FAKE_ESCAPED_HELPER="${HARNESS}/escaped-config-helper.sh" \
@@ -731,6 +765,11 @@ run_fake_deploy() {
     HTTPS_PROXY="http://127.0.0.1:1" \
     HTTP_PROXY="http://127.0.0.1:1" \
     ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED="${ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED-true}" \
+    AZURE_SUBSCRIPTION_ID="11111111-2222-3333-4444-555555555555" \
+    WORKFORCE_PRODUCTION_CONTROL_STORAGE_ACCOUNT="workforcebootstrap" \
+    WORKFORCE_PRODUCTION_CONTROL_STORAGE_CONTAINER="production-control" \
+    WORKFORCE_PRODUCTION_CONTROL_STORAGE_BLOB="${FAKE_CONTROL_BLOB:-workforce-os/initial-production-bootstrap/state-v1.json}" \
+    WORKFORCE_PRODUCTION_CONTROL_STORAGE_RESOURCE_ID="/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/production-control/providers/Microsoft.Storage/storageAccounts/workforcebootstrap" \
     FAKE_PREVIOUS_API_IMAGE="ledgracr.azurecr.io/apex-api@sha256:$(printf 'd%.0s' {1..64})" \
     FAKE_PREVIOUS_WORKER_IMAGE="ledgracr.azurecr.io/apex-api@sha256:$(printf 'e%.0s' {1..64})" \
     FAKE_PREVIOUS_CONSOLE_IMAGE="ledgracr.azurecr.io/workforceos-fe@sha256:$(printf 'f%.0s' {1..64})" \
@@ -746,6 +785,12 @@ reset_deploy_harness() {
   printf '0\n' >"${MIGRATION_CALL_COUNT}"
   FAKE_LOCK_STATUS=0
   FAKE_LOCK_CLEANUP_STATUS=0
+  FAKE_AZURE_LEASE_ACQUIRE_STATUS=0
+  FAKE_AZURE_LEASE_RENEW_STATUS=0
+  FAKE_AZURE_LEASE_RELEASE_STATUS=0
+  FAKE_AZURE_LEASE_SHOW_STATUS=0
+  FAKE_AZURE_LEASE_STATE='{"status":"unlocked","state":"available"}'
+  FAKE_CONTROL_BLOB="workforce-os/initial-production-bootstrap/state-v1.json"
   FAKE_MUTATE_SOURCE_HELPER_ON_LOCK=false
   FAKE_SWAP_SNAPSHOT_HELPER_ON_LOCK=false
   FAKE_BOOTSTRAP_SIGNAL_POINT=""
@@ -778,7 +823,7 @@ reset_deploy_harness() {
 }
 
 test_deploy_admission() {
-  local requested_image snapshot_context direct_token rollback_api rollback_worker exact_baseline_log guard_mutation
+  local azure_acquire azure_release requested_image snapshot_context direct_token rollback_api rollback_worker exact_baseline_log guard_mutation
   make_deploy_harness
   FAKE_BRANCH="release/go-live-test"
   FAKE_COMMIT="$(printf '1%.0s' {1..40})"
@@ -851,6 +896,17 @@ test_deploy_admission() {
     "push --force-with-lease=refs/heads/workforce-os-release-lock/production-gtm-platform: https://github.com/Kloudedge-apex/apex-product.git ${FAKE_LEASE_COMMIT}:refs/heads/workforce-os-release-lock/production-gtm-platform"
   assert_log_contains "${CALL_LOG}" \
     "push --force-with-lease=refs/heads/workforce-os-release-lock/production-gtm-platform:${FAKE_LEASE_COMMIT} https://github.com/Kloudedge-apex/apex-product.git :refs/heads/workforce-os-release-lock/production-gtm-platform"
+  azure_acquire="az storage blob lease acquire --account-name workforcebootstrap --container-name production-control --blob-name workforce-os/initial-production-bootstrap/state-v1.json --auth-mode login --subscription 11111111-2222-3333-4444-555555555555 --only-show-errors --lease-duration -1 --proposed-lease-id"
+  azure_release="az storage blob lease release --account-name workforcebootstrap --container-name production-control --blob-name workforce-os/initial-production-bootstrap/state-v1.json --auth-mode login --subscription 11111111-2222-3333-4444-555555555555 --only-show-errors --lease-id"
+  assert_log_contains "${CALL_LOG}" "${azure_acquire}"
+  assert_log_contains "${CALL_LOG}" "${azure_release}"
+  assert_before "${CALL_LOG}" "${azure_acquire}" \
+    "push --force-with-lease=refs/heads/workforce-os-release-lock/production-gtm-platform:"
+  assert_before "${CALL_LOG}" "${azure_acquire}" "az acr build"
+  assert_before "${CALL_LOG}" \
+    "push --force-with-lease=refs/heads/workforce-os-release-lock/production-gtm-platform:${FAKE_LEASE_COMMIT}" \
+    "${azure_release}"
+  assert_log_excludes "${CALL_LOG}" "storage blob lease break"
   assert_before "${CALL_LOG}" \
     "push --force-with-lease=refs/heads/workforce-os-release-lock/production-gtm-platform: https://github.com/Kloudedge-apex/apex-product.git ${FAKE_LEASE_COMMIT}" \
     "az containerapp show"
@@ -874,6 +930,36 @@ test_deploy_admission() {
   if [[ -z "${snapshot_context}" || -e "${snapshot_context}" ]]; then
     fail "bootstrap parent did not remove its exact private snapshot after release"
   fi
+  pass
+
+  reset_deploy_harness
+  FAKE_AZURE_LEASE_ACQUIRE_STATUS=1
+  FAKE_AZURE_LEASE_RENEW_STATUS=1
+  if run_fake_deploy >/dev/null 2>&1; then
+    fail "backend deploy continued while the shared Azure mutation lease was held"
+  fi
+  assert_log_excludes "${CALL_LOG}" "push --force-with-lease=refs/heads/workforce-os-release-lock/production-gtm-platform:"
+  assert_log_excludes "${CALL_LOG}" "az acr build"
+  assert_log_excludes "${CALL_LOG}" "az containerapp update"
+  assert_log_excludes "${CALL_LOG}" "storage blob lease break"
+  pass
+
+  reset_deploy_harness
+  FAKE_AZURE_LEASE_ACQUIRE_STATUS=1
+  FAKE_AZURE_LEASE_RENEW_STATUS=0
+  run_fake_deploy >/dev/null
+  assert_log_contains "${CALL_LOG}" "storage blob lease renew"
+  assert_log_contains "${CALL_LOG}" "storage blob lease release"
+  pass
+
+  reset_deploy_harness
+  FAKE_CONTROL_BLOB="workforce-os/backend-only/state-v1.json"
+  if run_fake_deploy >/dev/null 2>&1; then
+    fail "backend deploy accepted a repository-specific production-control blob"
+  fi
+  assert_log_excludes "${CALL_LOG}" "storage blob lease acquire"
+  assert_log_excludes "${CALL_LOG}" "push --force-with-lease=refs/heads/workforce-os-release-lock/production-gtm-platform:"
+  assert_log_excludes "${CALL_LOG}" "az acr build"
   pass
 
   for guard_mutation in missing attempt downgrade; do
@@ -917,6 +1003,21 @@ test_deploy_admission() {
   assert_log_contains "${CALL_LOG}" "az containerapp update --name apex-gtm-api"
   assert_log_contains "${CALL_LOG}" \
     "push --force-with-lease=refs/heads/workforce-os-release-lock/production-gtm-platform:${FAKE_LEASE_COMMIT} https://github.com/Kloudedge-apex/apex-product.git :refs/heads/workforce-os-release-lock/production-gtm-platform"
+  assert_log_excludes "${CALL_LOG}" "storage blob lease release"
+  pass
+
+  reset_deploy_harness
+  FAKE_AZURE_LEASE_RELEASE_STATUS=1
+  FAKE_AZURE_LEASE_STATE='{"status":"locked","state":"leased"}'
+  if run_fake_deploy >/dev/null 2>&1; then
+    fail "backend deploy reported success while shared Azure lease cleanup was uncertain"
+  fi
+  assert_log_contains "${CALL_LOG}" \
+    "push --force-with-lease=refs/heads/workforce-os-release-lock/production-gtm-platform:${FAKE_LEASE_COMMIT} https://github.com/Kloudedge-apex/apex-product.git :refs/heads/workforce-os-release-lock/production-gtm-platform"
+  assert_log_contains "${CALL_LOG}" "storage blob lease release"
+  assert_before "${CALL_LOG}" \
+    "push --force-with-lease=refs/heads/workforce-os-release-lock/production-gtm-platform:${FAKE_LEASE_COMMIT}" \
+    "storage blob lease release"
   pass
 
   reset_deploy_harness
@@ -1078,6 +1179,7 @@ test_deploy_rollback() {
   assert_log_contains "${CALL_LOG}" "verify-containerapps ${previous_api_image} ${previous_worker_image}"
   assert_log_excludes "${CALL_LOG}" \
     "push --force-with-lease=refs/heads/workforce-os-release-lock/production-gtm-platform:${FAKE_LEASE_COMMIT} https://github.com/Kloudedge-apex/apex-product.git :refs/heads/workforce-os-release-lock/production-gtm-platform"
+  assert_log_excludes "${CALL_LOG}" "storage blob lease release"
   pass
 
   # The immediately prior API revision must still exist before a worker write
@@ -1790,6 +1892,22 @@ test_production_release_workflow_verifier() {
     "${workflow}" >"${fixture}"
   if "${verifier}" "${fixture}" >/dev/null 2>&1; then
     fail "workflow verifier accepted repository-scoped OIDC variables"
+  fi
+  pass
+
+  fixture="${harness}/repository-specific-control-blob.yml"
+  sed 's#workforce-os/initial-production-bootstrap/state-v1.json#workforce-os/backend-only/state-v1.json#g' \
+    "${workflow}" >"${fixture}"
+  if "${verifier}" "${fixture}" >/dev/null 2>&1; then
+    fail "workflow verifier accepted a repository-specific production-control blob"
+  fi
+  pass
+
+  fixture="${harness}/fallback-control-variable.yml"
+  sed 's#${{ steps.production_environment.outputs.production_control_storage_blob }}#${{ vars.WORKFORCE_PRODUCTION_CONTROL_STORAGE_BLOB }}#' \
+    "${workflow}" >"${fixture}"
+  if "${verifier}" "${fixture}" >/dev/null 2>&1; then
+    fail "workflow verifier accepted fallback scope for the shared lease identity"
   fi
   pass
 

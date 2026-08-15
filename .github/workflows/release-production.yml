@@ -140,6 +140,14 @@ jobs:
           azure_subscription_id="$(read_environment_variable "AZURE_SUBSCRIPTION_ID")"
           exclusive_mutation_authority="$(read_environment_variable \
             "ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED")"
+          production_control_storage_account="$(read_environment_variable \
+            "WORKFORCE_PRODUCTION_CONTROL_STORAGE_ACCOUNT")"
+          production_control_storage_container="$(read_environment_variable \
+            "WORKFORCE_PRODUCTION_CONTROL_STORAGE_CONTAINER")"
+          production_control_storage_blob="$(read_environment_variable \
+            "WORKFORCE_PRODUCTION_CONTROL_STORAGE_BLOB")"
+          production_control_storage_resource_id="$(read_environment_variable \
+            "WORKFORCE_PRODUCTION_CONTROL_STORAGE_RESOURCE_ID")"
 
           uuid_pattern='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
           for value in \
@@ -153,6 +161,13 @@ jobs:
           done
           if [[ "${exclusive_mutation_authority}" != "true" ]]; then
             echo "ERROR: protected environment has no exclusive Container Apps authority attestation" >&2
+            exit 1
+          fi
+          if [[ ! "${production_control_storage_account}" =~ ^[a-z0-9]{3,24}$ ||
+            "${production_control_storage_container}" != "production-control" ||
+            "${production_control_storage_blob}" != "workforce-os/initial-production-bootstrap/state-v1.json" ||
+            ! "${production_control_storage_resource_id}" =~ ^/subscriptions/${azure_subscription_id}/resourceGroups/[A-Za-z0-9._()-]+/providers/Microsoft.Storage/storageAccounts/${production_control_storage_account}$ ]]; then
+            echo "ERROR: protected environment has no exact shared production-control lease identity" >&2
             exit 1
           fi
 
@@ -173,6 +188,14 @@ jobs:
           printf 'azure_subscription_id=%s\n' "${azure_subscription_id}" >>"${GITHUB_OUTPUT}"
           printf 'exclusive_mutation_authority=%s\n' \
             "${exclusive_mutation_authority}" >>"${GITHUB_OUTPUT}"
+          printf 'production_control_storage_account=%s\n' \
+            "${production_control_storage_account}" >>"${GITHUB_OUTPUT}"
+          printf 'production_control_storage_container=%s\n' \
+            "${production_control_storage_container}" >>"${GITHUB_OUTPUT}"
+          printf 'production_control_storage_blob=%s\n' \
+            "${production_control_storage_blob}" >>"${GITHUB_OUTPUT}"
+          printf 'production_control_storage_resource_id=%s\n' \
+            "${production_control_storage_resource_id}" >>"${GITHUB_OUTPUT}"
 
       - name: Checkout trusted master workflow source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -278,9 +301,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED: ${{ steps.production_environment.outputs.exclusive_mutation_authority }}
+          AZURE_SUBSCRIPTION_ID: ${{ steps.production_environment.outputs.azure_subscription_id }}
           MIGRATION_RECEIPT_B64: ${{ secrets.PRODUCTION_MIGRATION_RECEIPT_B64 }}
           MIGRATION_SIGNATURE_B64: ${{ secrets.PRODUCTION_MIGRATION_SIGNATURE_B64 }}
           MIGRATION_ALLOWED_SIGNERS_B64: ${{ secrets.PRODUCTION_MIGRATION_ALLOWED_SIGNERS_B64 }}
+          WORKFORCE_PRODUCTION_CONTROL_STORAGE_ACCOUNT: ${{ steps.production_environment.outputs.production_control_storage_account }}
+          WORKFORCE_PRODUCTION_CONTROL_STORAGE_CONTAINER: ${{ steps.production_environment.outputs.production_control_storage_container }}
+          WORKFORCE_PRODUCTION_CONTROL_STORAGE_BLOB: ${{ steps.production_environment.outputs.production_control_storage_blob }}
+          WORKFORCE_PRODUCTION_CONTROL_STORAGE_RESOURCE_ID: ${{ steps.production_environment.outputs.production_control_storage_resource_id }}
         run: |
           set -Eeuo pipefail
           receipt_b64="${MIGRATION_RECEIPT_B64}"

@@ -257,6 +257,13 @@ require_literal 'azure_tenant_id="$(read_environment_variable "AZURE_TENANT_ID")
 require_literal 'azure_subscription_id="$(read_environment_variable "AZURE_SUBSCRIPTION_ID")"'
 require_literal '"ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED")"'
 require_literal '[[ "${exclusive_mutation_authority}" != "true" ]]'
+require_literal '"WORKFORCE_PRODUCTION_CONTROL_STORAGE_ACCOUNT")"'
+require_literal '"WORKFORCE_PRODUCTION_CONTROL_STORAGE_CONTAINER")"'
+require_literal '"WORKFORCE_PRODUCTION_CONTROL_STORAGE_BLOB")"'
+require_literal '"WORKFORCE_PRODUCTION_CONTROL_STORAGE_RESOURCE_ID")"'
+require_literal '"${production_control_storage_container}" != "production-control"'
+require_literal '"${production_control_storage_blob}" != "workforce-os/initial-production-bootstrap/state-v1.json"'
+require_literal 'providers/Microsoft.Storage/storageAccounts/${production_control_storage_account}$'
 require_literal 'repos/${GITHUB_REPOSITORY}/environments/workforce-os-production/secrets/${name}'
 require_literal 'verify_environment_secret "PRODUCTION_MIGRATION_RECEIPT_B64"'
 require_literal 'verify_environment_secret "PRODUCTION_MIGRATION_SIGNATURE_B64"'
@@ -265,6 +272,10 @@ require_literal 'printf '\''azure_client_id=%s\n'\'' "${azure_client_id}" >>"${G
 require_literal 'printf '\''azure_tenant_id=%s\n'\'' "${azure_tenant_id}" >>"${GITHUB_OUTPUT}"'
 require_literal 'printf '\''azure_subscription_id=%s\n'\'' "${azure_subscription_id}" >>"${GITHUB_OUTPUT}"'
 require_literal 'printf '\''exclusive_mutation_authority=%s\n'\'' \'
+require_literal 'printf '\''production_control_storage_account=%s\n'\'' \'
+require_literal 'printf '\''production_control_storage_container=%s\n'\'' \'
+require_literal 'printf '\''production_control_storage_blob=%s\n'\'' \'
+require_literal 'printf '\''production_control_storage_resource_id=%s\n'\'' \'
 
 require_step_line "Checkout trusted master workflow source" \
   '        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262'
@@ -320,6 +331,15 @@ require_literal '(.user.name | ascii_downcase) == ($client | ascii_downcase)'
 require_step_line "Decode protected migration evidence and release" \
   '        working-directory: candidate'
 require_line '          ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED: ${{ steps.production_environment.outputs.exclusive_mutation_authority }}'
+require_line '          AZURE_SUBSCRIPTION_ID: ${{ steps.production_environment.outputs.azure_subscription_id }}'
+require_line '          WORKFORCE_PRODUCTION_CONTROL_STORAGE_ACCOUNT: ${{ steps.production_environment.outputs.production_control_storage_account }}'
+require_line '          WORKFORCE_PRODUCTION_CONTROL_STORAGE_CONTAINER: ${{ steps.production_environment.outputs.production_control_storage_container }}'
+require_line '          WORKFORCE_PRODUCTION_CONTROL_STORAGE_BLOB: ${{ steps.production_environment.outputs.production_control_storage_blob }}'
+require_line '          WORKFORCE_PRODUCTION_CONTROL_STORAGE_RESOURCE_ID: ${{ steps.production_environment.outputs.production_control_storage_resource_id }}'
+require_count '          WORKFORCE_PRODUCTION_CONTROL_STORAGE_ACCOUNT: ${{ steps.production_environment.outputs.production_control_storage_account }}' 1
+require_count '          WORKFORCE_PRODUCTION_CONTROL_STORAGE_CONTAINER: ${{ steps.production_environment.outputs.production_control_storage_container }}' 1
+require_count '          WORKFORCE_PRODUCTION_CONTROL_STORAGE_BLOB: ${{ steps.production_environment.outputs.production_control_storage_blob }}' 1
+require_count '          WORKFORCE_PRODUCTION_CONTROL_STORAGE_RESOURCE_ID: ${{ steps.production_environment.outputs.production_control_storage_resource_id }}' 1
 require_count '          ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED: ${{ steps.production_environment.outputs.exclusive_mutation_authority }}' 1
 reject_pattern 'ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED:[[:space:]]*(true|false)' \
   "exclusive authority must not be hardcoded"

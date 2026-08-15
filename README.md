@@ -215,6 +215,12 @@ the required `--yes` acknowledgement and set
 audit proves that identity is the exclusive production Container Apps writer;
 the default/unset state is NO-GO because the Container Apps update API does not
 publish an ETag/`If-Match` CAS contract.
+It must also expose the exact four
+`WORKFORCE_PRODUCTION_CONTROL_STORAGE_*` environment values for the fixed
+bootstrap state blob and grant the OIDC identity read/acquire/renew/release
+lease authority on that blob. Backend, console, and initial bootstrap all use
+that one Azure lease; repository-specific blobs and lease-break authority are
+not admitted.
 The script requires exact-commit green GitHub CI, validates the approver-signed
 production migration receipt against an external trust root whose exact bytes
 are SHA-256-pinned in reviewed source, verifies the

@@ -383,7 +383,22 @@ Never deploy `latest`, a timestamp tag, or a digest that lacks an exact
 40-character matching OCI revision label. Retain the verified digest and script
 receipt with the release evidence.
 
-The script atomically acquires the GitHub ref lease
+Before the repository-local ref, the script acquires an infinite Azure lease
+on the fixed `production-control/workforce-os/initial-production-bootstrap/state-v1.json`
+blob. This is the global provider-enforced mutation lease shared with the
+initial bootstrap and the console repository. It is acquired before any Git
+lock ref or ACR artifact write and released last. A post-mutation failure,
+lost ownership, or Git cleanup uncertainty retains it; no controller issues a
+lease break or deletes the state blob. The protected environment must provide
+the exact `WORKFORCE_PRODUCTION_CONTROL_STORAGE_ACCOUNT`,
+`WORKFORCE_PRODUCTION_CONTROL_STORAGE_CONTAINER`,
+`WORKFORCE_PRODUCTION_CONTROL_STORAGE_BLOB`, and
+`WORKFORCE_PRODUCTION_CONTROL_STORAGE_RESOURCE_ID` values through the audited
+environment API. Repository/org variable fallbacks and per-repository blob
+names fail closed. Its OIDC identity needs exact-blob lease/read data-plane
+authority in addition to the reviewed ACR and Container Apps permissions.
+
+The script then atomically acquires the secondary GitHub ref lease
 `refs/heads/workforce-os-release-lock/production-gtm-platform` before reading
 production state. Each attempt creates a unique commit with the candidate tree
 and source commit as its parent. Acquisition uses Git `--force-with-lease` with
@@ -419,9 +434,10 @@ CAS. It is fail-closed unless
 an RBAC audit proves the protected CI OIDC principal is the exclusive identity
 with `Microsoft.App/containerApps/write` across the exact `apex-gtm-api`,
 `apex-gtm-worker`, and `nikxius-web` resources, or proves all three are covered
-by one coordinated mutation lease that excludes every other writer. The Git
-lease serializes attempts by that principal, and the controller re-reads all
-three apps immediately before the first
+by one coordinated mutation lease that excludes every other writer. The global
+Azure lease serializes bootstrap, backend, and console attempts; the Git lease
+remains a repository-local compare-and-swap and incident marker. The controller
+re-reads all three apps immediately before the first
 write, immediately before each later or compensating write, and after every
 write. A manual-only, fail-closed workflow source now exists at
 `.github/workflows/release-production.yml` on the review branch, with its source

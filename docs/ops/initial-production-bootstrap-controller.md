@@ -17,6 +17,9 @@ The controller never treats a receipt as a live lock. The durable controls are:
 
 - a fixed, pre-provisioned Azure state blob with an infinite lease whose
   proposed lease ID is deterministically bound to the 32-hex bootstrap attempt;
+  this same blob is the provider-enforced global mutation lease used by the
+  backend and console subsequent-release controllers, so bootstrap and both
+  repositories cannot mutate production concurrently;
 - the GitHub production release-lock ref, used as a second serialization and
   incident marker;
 - the application writer fence at a monotonically increasing generation;
@@ -41,6 +44,16 @@ be limited to the protected workflow identity. Never copy its content to a
 workflow log or artifact: it includes the exact source restore configuration
 and the prior live-send allowlist, which may be exactly empty. Receipts contain
 only hashes of that private state.
+
+The shared lease identity is exact: container `production-control`, blob
+`workforce-os/initial-production-bootstrap/state-v1.json`, and the one reviewed
+storage-account resource ID. Do not create per-repository lock blobs. The
+protected release identities need only the data-plane permissions required to
+read the blob lease state and acquire, renew, and release this exact lease; no
+controller is authorized to break a lease or delete the blob. Bootstrap keeps
+its deterministic attempt lease across resumptions. Subsequent releases use a
+fresh UUID, acquire the same blob before creating their secondary Git ref or
+writing an ACR artifact, and release Azure last after conditional Git cleanup.
 
 Every uncertainty enters `HELD`. Before terminal OPEN, a held attempt retains
 the Azure lease, GitHub lock, closed writer fence, and queue pauses. After the

@@ -422,13 +422,118 @@ RELEASE_LOCK_COMMIT=""
 RELEASE_LOCK_ATTEMPT_ID=""
 LEASE_GIT_DIR=""
 BUILD_CONTEXT="${REPO_ROOT}"
+PRODUCTION_CONTROL_CONTAINER="production-control"
+PRODUCTION_CONTROL_BLOB="workforce-os/initial-production-bootstrap/state-v1.json"
+PRODUCTION_MUTATION_LEASE_ACQUIRED="false"
+PRODUCTION_MUTATION_LEASE_SAFE_TO_RELEASE="true"
+PRODUCTION_MUTATION_LEASE_ID=""
+
+validate_production_mutation_lease_configuration() {
+  if [[ ! "${AZURE_SUBSCRIPTION_ID:-}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ||
+    ! "${WORKFORCE_PRODUCTION_CONTROL_STORAGE_ACCOUNT:-}" =~ ^[a-z0-9]{3,24}$ ||
+    "${WORKFORCE_PRODUCTION_CONTROL_STORAGE_CONTAINER:-}" != "${PRODUCTION_CONTROL_CONTAINER}" ||
+    "${WORKFORCE_PRODUCTION_CONTROL_STORAGE_BLOB:-}" != "${PRODUCTION_CONTROL_BLOB}" ||
+    ! "${WORKFORCE_PRODUCTION_CONTROL_STORAGE_RESOURCE_ID:-}" =~ ^/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/[A-Za-z0-9._()-]+/providers/Microsoft.Storage/storageAccounts/${WORKFORCE_PRODUCTION_CONTROL_STORAGE_ACCOUNT}$ ]]; then
+    echo "ERROR: exact shared production-control lease identity is missing or invalid" >&2
+    return 1
+  fi
+}
+
+production_mutation_blob_lease() {
+  local operation=$1
+  shift
+  az storage blob lease "${operation}" \
+    --account-name "${WORKFORCE_PRODUCTION_CONTROL_STORAGE_ACCOUNT}" \
+    --container-name "${PRODUCTION_CONTROL_CONTAINER}" \
+    --blob-name "${PRODUCTION_CONTROL_BLOB}" \
+    --auth-mode login \
+    --subscription "${AZURE_SUBSCRIPTION_ID}" \
+    --only-show-errors \
+    "$@"
+}
+
+verify_production_mutation_lease() {
+  local returned_lease_id
+  returned_lease_id="$(production_mutation_blob_lease renew \
+    --lease-id "${PRODUCTION_MUTATION_LEASE_ID}" \
+    --query leaseId \
+    --output tsv)" || return 1
+  [[ "${returned_lease_id}" == "${PRODUCTION_MUTATION_LEASE_ID}" ]]
+}
+
+production_mutation_lease_is_released() {
+  local lease_json
+  lease_json="$(az storage blob show \
+    --account-name "${WORKFORCE_PRODUCTION_CONTROL_STORAGE_ACCOUNT}" \
+    --container-name "${PRODUCTION_CONTROL_CONTAINER}" \
+    --name "${PRODUCTION_CONTROL_BLOB}" \
+    --auth-mode login \
+    --subscription "${AZURE_SUBSCRIPTION_ID}" \
+    --only-show-errors \
+    --query properties.lease \
+    --output json)" || return 1
+  jq -e '
+    .status == "unlocked"
+    and (.state == "available" or .state == "expired" or .state == "broken")
+  ' >/dev/null <<<"${lease_json}"
+}
+
+acquire_production_mutation_lease() {
+  local returned_lease_id
+  returned_lease_id="$(production_mutation_blob_lease acquire \
+    --lease-duration -1 \
+    --proposed-lease-id "${PRODUCTION_MUTATION_LEASE_ID}" \
+    --query leaseId \
+    --output tsv)" || {
+      # A successful acquire can lose its acknowledgement. Exact-ID renewal
+      # adopts only this attempt; it never breaks or steals another lease.
+      verify_production_mutation_lease || return 1
+      PRODUCTION_MUTATION_LEASE_ACQUIRED="true"
+      return 0
+    }
+  if [[ "${returned_lease_id}" != "${PRODUCTION_MUTATION_LEASE_ID}" ]]; then
+    echo "ERROR: shared production mutation lease returned a different owner identity" >&2
+    return 1
+  fi
+  PRODUCTION_MUTATION_LEASE_ACQUIRED="true"
+}
+
+release_production_mutation_lease() {
+  if production_mutation_blob_lease release \
+    --lease-id "${PRODUCTION_MUTATION_LEASE_ID}" \
+    --output none; then
+    PRODUCTION_MUTATION_LEASE_ACQUIRED="false"
+    return 0
+  fi
+  # Adopt a lost release acknowledgement only from a provider readback that
+  # proves no lease is currently held. Never break or delete the state blob.
+  if production_mutation_lease_is_released; then
+    PRODUCTION_MUTATION_LEASE_ACQUIRED="false"
+    return 0
+  fi
+  return 1
+}
 
 cleanup_release_resources() {
   local status=$?
+  local azure_lease_owned="false"
   trap - EXIT
   set +e
+  if [[ "${PRODUCTION_MUTATION_LEASE_ACQUIRED:-false}" == "true" &&
+    "${PRODUCTION_MUTATION_LEASE_SAFE_TO_RELEASE:-false}" == "true" ]]; then
+    if verify_production_mutation_lease; then
+      azure_lease_owned="true"
+    else
+      echo "ERROR: shared production mutation lease ownership was lost during cleanup" >&2
+      echo "       retaining the repository lock as an incident marker" >&2
+      PRODUCTION_MUTATION_LEASE_SAFE_TO_RELEASE="false"
+      RELEASE_LOCK_SAFE_TO_RELEASE="false"
+      status=1
+    fi
+  fi
   if [[ "${RELEASE_LOCK_ACQUIRED:-false}" == "true" &&
-    "${RELEASE_LOCK_SAFE_TO_RELEASE:-false}" == "true" ]]; then
+    "${RELEASE_LOCK_SAFE_TO_RELEASE:-false}" == "true" &&
+    "${azure_lease_owned}" == "true" ]]; then
     # Git's force-with-lease deletion is a server-side compare-and-delete. It
     # cannot remove a successor ref whose unique target differs from this
     # attempt, avoiding the read-then-DELETE race in the GitHub REST API.
@@ -440,10 +545,26 @@ cleanup_release_resources() {
       if [[ ${status} -eq 0 ]]; then
         status=1
       fi
+      PRODUCTION_MUTATION_LEASE_SAFE_TO_RELEASE="false"
+    else
+      RELEASE_LOCK_ACQUIRED="false"
     fi
   elif [[ "${RELEASE_LOCK_ACQUIRED:-false}" == "true" ]]; then
     echo "ERROR: retaining the production release lease because rollout state is uncertain" >&2
     echo "       investigate Azure state before separately authorizing lease removal" >&2
+  fi
+  if [[ "${PRODUCTION_MUTATION_LEASE_ACQUIRED:-false}" == "true" &&
+    "${PRODUCTION_MUTATION_LEASE_SAFE_TO_RELEASE:-false}" == "true" &&
+    "${RELEASE_LOCK_ACQUIRED:-false}" == "false" &&
+    "${azure_lease_owned}" == "true" ]]; then
+    if ! release_production_mutation_lease; then
+      echo "ERROR: exact shared production mutation lease cleanup failed" >&2
+      echo "       do not break the lease; investigate its exact owner identity" >&2
+      status=1
+    fi
+  elif [[ "${PRODUCTION_MUTATION_LEASE_ACQUIRED:-false}" == "true" ]]; then
+    echo "ERROR: retaining the shared Azure production mutation lease because release state is uncertain" >&2
+    echo "       investigate both repositories and Azure before separately authorizing cleanup" >&2
   fi
   exit "${status}"
 }
@@ -570,6 +691,22 @@ if ! docker info >/dev/null 2>&1; then
   exit 1
 fi
 
+# The fixed bootstrap state blob is also the provider-enforced, cross-repo
+# production mutation lease. Acquire it before either repository creates its
+# secondary Git lock or writes an ACR artifact, and hold it through cleanup.
+validate_production_mutation_lease_configuration
+RELEASE_LOCK_ATTEMPT_ID="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+if [[ ! "${RELEASE_LOCK_ATTEMPT_ID}" =~ ^[0-9a-f]{32}$ ]]; then
+  echo "ERROR: could not generate a unique release lease attempt identity" >&2
+  exit 1
+fi
+PRODUCTION_MUTATION_LEASE_ID="${RELEASE_LOCK_ATTEMPT_ID:0:8}-${RELEASE_LOCK_ATTEMPT_ID:8:4}-${RELEASE_LOCK_ATTEMPT_ID:12:4}-${RELEASE_LOCK_ATTEMPT_ID:16:4}-${RELEASE_LOCK_ATTEMPT_ID:20:12}"
+if ! acquire_production_mutation_lease; then
+  echo "ERROR: shared Azure production mutation lease is held or could not be acquired" >&2
+  echo "       inspect the fixed production-control blob; never break it during an active release" >&2
+  exit 1
+fi
+
 # Use an isolated bare repository with no inherited Git configuration or hooks
 # for the lease protocol. The explicit GitHub URL and gh credential helper keep
 # mutable source-repository remotes, credential helpers, and push hooks outside
@@ -601,11 +738,6 @@ fi
 # The fixed ref provides atomic acquisition. Its target is a fresh Git commit
 # with the exact source tree and a cryptographically random attempt nonce, so
 # two attempts for the same source SHA never share a cleanup identity.
-RELEASE_LOCK_ATTEMPT_ID="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
-if [[ ! "${RELEASE_LOCK_ATTEMPT_ID}" =~ ^[0-9a-f]{32}$ ]]; then
-  echo "ERROR: could not generate a unique release lease attempt identity" >&2
-  exit 1
-fi
 RELEASE_SOURCE_TREE="$(GIT_NO_REPLACE_OBJECTS=1 lease_git rev-parse "${COMMIT}^{tree}")"
 if [[ ! "${RELEASE_SOURCE_TREE}" =~ ^[0-9a-f]{40}$ ]]; then
   echo "ERROR: Git returned an invalid source tree for the release lease" >&2
@@ -1510,6 +1642,7 @@ trap 'rollback_on_signal 143' TERM
 # can persist newly appended enum values such as FAILED. Rollback reverses this
 # order so the writer is disabled before an older reader is restored.
 RELEASE_LOCK_SAFE_TO_RELEASE="false"
+PRODUCTION_MUTATION_LEASE_SAFE_TO_RELEASE="false"
 echo "Rolling ${API_APP} -> ${IMAGE}"
 API_RESULT_STATE="${RUNTIME_STATE_DIR}/api-result.json"
 update_containerapp_image \
@@ -1569,6 +1702,7 @@ echo "API and worker are healthy on ${DIGEST}"
 
 trap - ERR HUP INT TERM
 RELEASE_LOCK_SAFE_TO_RELEASE="true"
+PRODUCTION_MUTATION_LEASE_SAFE_TO_RELEASE="true"
 
 cat <<EOF
 

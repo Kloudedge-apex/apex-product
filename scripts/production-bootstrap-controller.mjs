@@ -5,7 +5,8 @@
  *
  * This is deliberately separate from deploy-prod.sh. It advances one bounded
  * phase per protected workflow invocation and stores its private state under a
- * fixed infinite Azure blob lease. Any error after control acquisition leaves
+ * fixed infinite Azure blob lease shared by bootstrap and both repositories'
+ * subsequent production release controllers. Any error after control acquisition leaves
  * the lease and release lock in place. The only release path is B8 COMPLETE.
  */
 
