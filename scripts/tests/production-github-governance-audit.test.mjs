@@ -69,6 +69,14 @@ function compliantSnapshot() {
         full_name: repository.fullName,
         visibility: repository.visibility,
         default_branch: repository.defaultBranch,
+        security_and_analysis: {
+          secret_scanning: {
+            status: repository.securityAndAnalysis.secretScanning,
+          },
+          secret_scanning_push_protection: {
+            status: repository.securityAndAnalysis.secretScanningPushProtection,
+          },
+        },
       }),
       actions: apiResult({
         enabled: repository.actions.enabled,
@@ -112,8 +120,10 @@ function assertFinding(report, code) {
 test("fixed contract names both repositories, three branches, and four environments", () => {
   assert.deepEqual(Object.keys(CONTRACT.repositories), ["backend", "console"]);
   assert.equal(CONTRACT.repositories.backend.fullName, "Kloudedge-apex/apex-product");
+  assert.equal(CONTRACT.repositories.backend.visibility, "public");
   assert.equal(CONTRACT.repositories.backend.defaultBranch, "master");
   assert.equal(CONTRACT.repositories.console.fullName, "Kloudedge-apex/Workforce-OS");
+  assert.equal(CONTRACT.repositories.console.visibility, "public");
   assert.equal(CONTRACT.repositories.console.defaultBranch, "main");
   assert.deepEqual(Object.keys(CONTRACT.repositories.backend.branches), [
     "master",
@@ -137,6 +147,10 @@ test("fixed contract names both repositories, three branches, and four environme
     ]);
     assert.equal(repository.actions.allowedActions, "selected");
     assert.equal(repository.actions.shaPinningRequired, true);
+    assert.deepEqual(repository.securityAndAnalysis, {
+      secretScanning: "enabled",
+      secretScanningPushProtection: "enabled",
+    });
     assert.deepEqual(repository.actions.selectedActions.patternsAllowed, [
       "Azure/login@*",
       "pnpm/action-setup@*",
@@ -158,13 +172,23 @@ test("the canonical protected snapshot is GO and redacts identities", () => {
   assert.doesNotMatch(serialized, new RegExp(String(REVIEWER_ID), "u"));
 });
 
-test("a private-repository plan gate is explicit and fail closed", () => {
+test("a GitHub plan gate remains explicit and fail closed", () => {
   const report = evaluateMutation((snapshot) => {
     snapshot.repositories.backend.branches.master.protection =
       apiError("github-plan-insufficient", 403);
   });
   assertFinding(report, "github-plan-insufficient");
   assert.equal(report.summary.githubPlanInsufficient, true);
+});
+
+test("disabled secret scanning or push protection is rejected", () => {
+  const report = evaluateMutation((snapshot) => {
+    const security = snapshot.repositories.console.metadata
+      .value.security_and_analysis;
+    security.secret_scanning.status = "disabled";
+    security.secret_scanning_push_protection.status = "disabled";
+  });
+  assertFinding(report, "security-and-analysis-drift");
 });
 
 test("an unprotected branch is rejected", () => {

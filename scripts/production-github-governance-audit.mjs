@@ -182,6 +182,19 @@ function equalStringSets(left, right) {
   return canonicalJson(normalizedLeft) === canonicalJson(normalizedRight);
 }
 
+function inspectSecurityAndAnalysis(repositoryKey, expected, metadata, findings) {
+  const observed = metadata?.security_and_analysis;
+  if (!observed ||
+    observed.secret_scanning?.status !== expected.secretScanning ||
+    observed.secret_scanning_push_protection?.status !==
+      expected.secretScanningPushProtection) {
+    addFinding(findings, "security-and-analysis-drift", repositoryKey, "repository", {
+      expectedSecretScanning: expected.secretScanning,
+      expectedSecretScanningPushProtection: expected.secretScanningPushProtection,
+    });
+  }
+}
+
 function inspectActions(repositoryKey, expected, observed, findings) {
   const permissions = valueOrFinding(
     observed.actions,
@@ -392,6 +405,14 @@ export function evaluateProductionGitHubGovernance(
         expectedDefaultBranch: expected.defaultBranch,
         expectedVisibility: expected.visibility,
       });
+    }
+    if (metadata) {
+      inspectSecurityAndAnalysis(
+        repositoryKey,
+        expected.securityAndAnalysis,
+        metadata,
+        findings,
+      );
     }
     inspectActions(repositoryKey, expected.actions, observed, findings);
     for (const [branchName, branch] of Object.entries(expected.branches)) {

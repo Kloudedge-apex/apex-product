@@ -4,8 +4,12 @@
   "repositories": {
     "backend": {
       "fullName": "Kloudedge-apex/apex-product",
-      "visibility": "private",
+      "visibility": "public",
       "defaultBranch": "master",
+      "securityAndAnalysis": {
+        "secretScanning": "enabled",
+        "secretScanningPushProtection": "enabled"
+      },
       "actions": {
         "enabled": true,
         "allowedActions": "selected",
@@ -46,8 +50,12 @@
     },
     "console": {
       "fullName": "Kloudedge-apex/Workforce-OS",
-      "visibility": "private",
+      "visibility": "public",
       "defaultBranch": "main",
+      "securityAndAnalysis": {
+        "secretScanning": "enabled",
+        "secretScanningPushProtection": "enabled"
+      },
       "actions": {
         "enabled": true,
         "allowedActions": "selected",

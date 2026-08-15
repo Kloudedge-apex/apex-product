@@ -7,7 +7,10 @@ deployment is applied or the ten-day credential-drain checkpoint is created.
 
 The contract requires:
 
-- private backend and console repositories with their exact default branches;
+- explicitly authorized public backend and console repositories with their
+  exact default branches for the protected release and ten-day drain window;
+- GitHub secret scanning and push protection enabled in both public
+  repositories;
 - protected default/candidate branches with strict, exact CI checks, one or
   more approvals, stale-review dismissal, conversation resolution,
   administrator enforcement, and no force-push or deletion;
@@ -18,8 +21,8 @@ The contract requires:
   selected Actions only, and full-SHA pin enforcement.
 
 The audit is read-only. It never prints reviewer identities, environment
-variables, secrets, or API response bodies. A GitHub plan response that blocks
-private-repository protection is reported as `github-plan-insufficient`; it is
+variables, secrets, or API response bodies. Any GitHub plan response that
+blocks required protection is reported as `github-plan-insufficient`; it is
 not treated as missing evidence or silently ignored.
 
 Run the live audit from an authenticated `gh` session:
@@ -35,18 +38,20 @@ tests, pass a local snapshot without contacting GitHub:
 node scripts/production-github-governance-audit.mjs --fixture snapshot.json
 ```
 
-Provisioning order after the account plan supports protected private
-repositories:
+Provisioning order for the explicitly authorized public release window:
 
 1. add an independent reviewer to both repositories;
-2. set the Actions policy in the contract;
-3. protect every contract branch with the exact checks and review controls;
-4. create both protected environments in both repositories;
-5. run this audit and independently review its `GO` report;
-6. merge the reviewed release pull requests;
-7. apply and read back the Azure authority package;
-8. create the server-timed drain checkpoint, then wait the full ten days.
+2. enable secret scanning and push protection in both repositories;
+3. set the Actions policy in the contract;
+4. protect every contract branch with the exact checks and review controls;
+5. create both protected environments in both repositories;
+6. run this audit and independently review its `GO` report;
+7. merge the reviewed release pull requests;
+8. apply and read back the Azure authority package;
+9. create the server-timed drain checkpoint, then wait the full ten days.
 
-Do not make either repository public to avoid the plan gate. Do not start the
-drain clock from a local timestamp or before the protected GitHub authority is
-operational.
+Public clones, forks, and caches cannot be recalled by a later visibility
+change. Do not return either repository to private on GitHub Free while this
+release authority is active: the required protection and environment controls
+would no longer be available. Do not start the drain clock from a local
+timestamp or before the protected GitHub authority is operational.

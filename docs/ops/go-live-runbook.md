@@ -525,10 +525,13 @@ action-required environment-secret metadata, and passes only audited
 non-secret outputs to Azure login and the controller. Generic `${{ vars.* }}`
 fallback is rejected by the source contract.
 
-At this review point, the external GitHub `master` and
-`release/go-live-2026-06-01` refs are unprotected, so the workflow cannot be
-admitted and production remains **NO-GO**. The environment protections above
-must also be provisioned. A `protected: true` branch response alone is not
+Both repositories were explicitly made public on 2026-08-15 for the protected
+release and ten-day drain window, removing the GitHub Free private-plan gate.
+At this review point, external GitHub `master`,
+`release/go-live-2026-06-01`, and console `main` are still unprotected, so the
+workflow cannot be admitted and production remains **NO-GO**. Both protected
+environments, secret scanning, and push protection must also be provisioned.
+A `protected: true` branch response alone is not
 sufficient evidence: the retained ruleset review must require pull-request
 approval and the exact CI checks, enforce the rule for administrators, dismiss
 stale approval, and forbid force-push and deletion.
