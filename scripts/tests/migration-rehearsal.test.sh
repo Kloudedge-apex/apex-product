@@ -162,6 +162,7 @@ SCENARIOS=(
   "identity-cursor-after-cutoff"
   "incompatible-fixed-index"
   "backup-fingerprint-mismatch"
+  "legacy-conversation-nonempty"
 )
 EXPECTED_ERRORS=(
   "OutreachArtifact idempotency preflight failed"
@@ -171,6 +172,7 @@ EXPECTED_ERRORS=(
   "Clerk identity lifecycle cursor is invalid or newer"
   "valid index OutreachArtifact_idempotency_uniq exists with an incompatible definition"
   "backup/restore fingerprint mismatch"
+  "legacy Conversation compatibility failed: expected zero rows, found 1"
 )
 
 for index in "${!SCENARIOS[@]}"; do

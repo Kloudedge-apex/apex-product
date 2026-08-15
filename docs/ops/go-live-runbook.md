@@ -576,6 +576,16 @@ Required dependency order:
 7. `docs/migrations/2026-08-12_graph-run-activity-expand.sql`
 8. `docs/migrations/2026-08-12_graph-run-lifecycle-expand.sql`
 
+Before migration 3, retain the read-only legacy `Conversation` catalog
+inventory and row count with the change record. The reviewed migration accepts
+either no existing relation or the exact empty pre-release production shape.
+For that exact shape only, it verifies columns and defaults, index definitions,
+constraints, and `ConversationStatus` labels, then preserves the table as
+`LegacyConversation` before creating the canonical conversation store. Any
+row, prior archive relation, or catalog drift aborts the transaction. Do not
+drop, truncate, rename, or manually coerce the legacy table to make the guard
+pass.
+
 The Clerk identity migration is intentionally fail-closed: it sets every
 legacy `User.membershipActive` value to `false`. Keep identity writers paused
 after applying it. Export the current Clerk organization and membership
