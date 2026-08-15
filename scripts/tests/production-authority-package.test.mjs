@@ -117,6 +117,12 @@ rejected("a nonexact blob condition is rejected", "resources.bicep", (source) =>
 rejected("a nonexact drain checkpoint condition is rejected", "resources.bicep", (source) =>
   source.replace("StringEquals '{2}'", "StringEquals 'other-checkpoint'"));
 
+rejected("unescaped ABAC ActionMatches braces are rejected", "resources.bicep", (source) =>
+  source.replace(
+    "ActionMatches{{'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read'}}",
+    "ActionMatches{'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read'}",
+  ));
+
 rejected("build identity Container App authority is rejected", "resources.bicep", (source) =>
   source.replace(
     "resource backendApiRelease 'Microsoft.Authorization/roleAssignments@2022-04-01' = {\n" +

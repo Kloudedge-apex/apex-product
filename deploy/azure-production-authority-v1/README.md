@@ -1,6 +1,6 @@
 # Workforce OS Azure production authority v1
 
-Status: source-only, compiled, and unapplied.
+Status: source-only, compiled, Azure-validated, what-if reviewed, and unapplied.
 
 This source-only package has two compiled Bicep entry points. `main.bicep` is
 subscription scoped and defines four user-assigned managed identities with exact
@@ -21,6 +21,11 @@ identity may mutate only `nikxius-web`. Both release identities use the same
 ABAC-conditioned read/write role restricted by exact container name and two
 exact blob paths: the controller state blob and the zero-byte authority-drain
 checkpoint. No other blob path is granted.
+
+The `ActionMatches{...}` braces in that ABAC expression are emitted from an ARM
+`format()` expression and therefore remain doubled in Bicep source. Removing
+that escaping still compiles locally but fails Azure deployment validation; the
+package verifier rejects that regression.
 
 The release identities also receive two explicit read-only audit roles. The
 subscription role can read only the Container Apps, managed identities and
@@ -78,6 +83,32 @@ node --test scripts/tests/production-azure-mutation-authority-audit.test.mjs
 az bicep build --file deploy/azure-production-authority-v1/main.bicep --stdout >/dev/null
 az bicep build --file deploy/azure-production-authority-v1/management-group-audit-reader.bicep --stdout >/dev/null
 ```
+
+An authenticated subscription validation and what-if can then run without
+applying the package:
+
+```bash
+az deployment sub validate \
+  --subscription 3171575e-f164-425c-9ee0-2fb10cf93884 \
+  --location eastus \
+  --name workforce-os-production-authority-v1-validate \
+  --template-file deploy/azure-production-authority-v1/main.bicep
+
+az deployment sub what-if \
+  --subscription 3171575e-f164-425c-9ee0-2fb10cf93884 \
+  --location eastus \
+  --name workforce-os-production-authority-v1-whatif \
+  --template-file deploy/azure-production-authority-v1/main.bicep \
+  --result-format ResourceIdOnly \
+  --no-pretty-print
+```
+
+On 2026-08-15 the exact candidate passed Azure subscription validation and the
+what-if returned `Succeeded`, 29 creates, no modify/delete operation, and no
+error. No apply operation was run. The management-group entry point must be
+validated and reviewed with the two real release principal IDs after the
+ordered subscription phase creates them and before its separately authorized
+apply.
 
 After an independently authorized apply and cleanup, an authorized reviewer may
 run the live read-only audit with an Azure session that can enumerate RBAC,

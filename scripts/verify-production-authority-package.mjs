@@ -432,8 +432,12 @@ function verifyNestedTemplate(template) {
   }
   const condition = nested.variables?.controlBlobCondition;
   if (typeof condition !== "string" ||
-    !condition.includes("blobs/read") ||
-    !condition.includes("blobs/write") ||
+    !condition.includes(
+      "ActionMatches{{''Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read''}}",
+    ) ||
+    !condition.includes(
+      "ActionMatches{{''Microsoft.Storage/storageAccounts/blobServices/containers/blobs/write''}}",
+    ) ||
     !condition.includes("containers:name") ||
     !condition.includes("blobs:path") ||
     !condition.includes("StringEquals ''{1}''") ||
@@ -585,6 +589,8 @@ export function verifyProductionAuthorityPackage(packagePath = DEFAULT_PACKAGE) 
     "backendReleaseIdentity",
     "consoleReleaseIdentity",
     "controlBlobCondition",
+    "!(ActionMatches{{'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read'}})",
+    "!(ActionMatches{{'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/write'}})",
     "StringEquals '{0}'",
     "StringEquals '{1}'",
     "StringEquals '{2}'",

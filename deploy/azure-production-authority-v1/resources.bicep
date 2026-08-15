@@ -25,9 +25,9 @@ var consoleAppName = 'nikxius-web'
 var controlBlobCondition = format('''
 (
   (
-    !(ActionMatches{'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read'})
+    !(ActionMatches{{'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read'}})
     AND
-    !(ActionMatches{'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/write'})
+    !(ActionMatches{{'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/write'}})
   )
   OR
   (
