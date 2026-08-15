@@ -127,7 +127,7 @@ case "${1:-}" in
       if [[ "${previous}" == "--name" ]]; then
         name="${value}"
       elif [[ "${previous}" == "--env" &&
-        "${value}" == "CLERK_WEBHOOK_SECRET=whsec_BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=" ]]; then
+        "${value}" == "CLERK_WEBHOOK_SECRET=ci-synthetic-clerk-webhook-secret-0001" ]]; then
         clerk_webhook_secret_seen=true
       elif [[ "${previous}" == "--env" &&
         "${value}" == "WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID=${EXPECTED_COMMIT:0:32}" ]]; then

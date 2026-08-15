@@ -306,7 +306,7 @@ COMMON_ENV=(
   --env GMAIL_PUSH_PUBLISHER_SA=gmail-push@workforce-ci.iam.gserviceaccount.com
   --env CLERK_ISSUER=https://clerk.ci.workforce-os.example.com
   --env CLERK_AUTHORIZED_PARTIES=https://console.ci.workforce-os.example.com
-  --env CLERK_WEBHOOK_SECRET=whsec_BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=
+  --env CLERK_WEBHOOK_SECRET=ci-synthetic-clerk-webhook-secret-0001
   --env LANGSMITH_TRACING=false
   --env LANGSMITH_CAPTURE_PROMPTS=false
   --env EVIDENCE_LEDGER_ENABLED=false
