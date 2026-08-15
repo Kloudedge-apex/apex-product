@@ -8,6 +8,7 @@
   "controlStorageAccountName": "ledgrstorage",
   "controlContainerName": "production-control",
   "controlBlobName": "workforce-os/initial-production-bootstrap/state-v1.json",
+  "authorityDrainCheckpointBlobName": "workforce-os/initial-production-bootstrap/authority-drain-checkpoint-v1",
   "github": {
     "issuer": "https://token.actions.githubusercontent.com",
     "audience": "api://AzureADTokenExchange",
@@ -64,7 +65,11 @@
     "consoleBuild": []
   },
   "blobLeaseBoundary": {
-    "readWriteRestrictedToExactPath": true,
+    "readWriteRestrictedToExactPaths": true,
+    "allowedBlobPaths": [
+      "workforce-os/initial-production-bootstrap/state-v1.json",
+      "workforce-os/initial-production-bootstrap/authority-drain-checkpoint-v1"
+    ],
     "deleteGranted": false,
     "leaseBreakSeparableByRbac": false,
     "controllerBreakCommandForbidden": true

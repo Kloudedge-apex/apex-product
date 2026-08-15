@@ -454,10 +454,22 @@ It must return `GO` and non-null controller evidence. Its live collection covers
 exact OIDC federations, active role assignments, resolved wildcard and exclusion
 semantics, active and eligible PIM schedules at management-group through exact
 resource scopes, authority delegators, ACR admin/token/task paths, and Storage
-shared-key/SFTP/local-user paths. A collection error, unsupported condition,
-unknown role, unexpected writer, or alternate credential path is `NO-GO`. The
-sanitized report contains no principal names or emails; retain the exact report
-bytes and controller-evidence hash for independent review.
+shared-key/SFTP/local-user paths. It also rejects lifecycle rules that can act
+on the exact control blob and object replication into the control container.
+A collection error, unsupported condition, unknown role, unexpected writer,
+alternate credential path, or autonomous Storage writer is `NO-GO`.
+
+Structural exclusivity alone is not `GO`: already-issued cloud credentials may
+outlive the assignment that created them. A structurally clean report exposes a
+sanitized structural evidence hash. After separate authorization, use the
+source-reviewed authority-drain checkpoint initializer documented in
+`deploy/azure-production-authority-v1/README.md`. The checkpoint must bind that
+exact hash, remain unchanged for at least 10 days, and still match a fresh live
+audit. Missing Blob Data Reader coverage, a missing or malformed checkpoint, a
+fresh checkpoint, or any later structural change is `NO-GO`. The sanitized
+report contains no principal names or emails; retain the exact report bytes,
+checkpoint receipt, structural-evidence hash, and controller-evidence hash for
+independent review.
 
 The controller re-reads all three apps immediately before the first
 write, immediately before each later or compensating write, and after every

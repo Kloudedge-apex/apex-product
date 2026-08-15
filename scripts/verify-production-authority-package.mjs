@@ -67,6 +67,8 @@ const EXPECTED_CONTRACT = {
   controlStorageAccountName: "ledgrstorage",
   controlContainerName: "production-control",
   controlBlobName: "workforce-os/initial-production-bootstrap/state-v1.json",
+  authorityDrainCheckpointBlobName:
+    "workforce-os/initial-production-bootstrap/authority-drain-checkpoint-v1",
   github: {
     issuer: "https://token.actions.githubusercontent.com",
     audience: "api://AzureADTokenExchange",
@@ -123,7 +125,11 @@ const EXPECTED_CONTRACT = {
     consoleBuild: [],
   },
   blobLeaseBoundary: {
-    readWriteRestrictedToExactPath: true,
+    readWriteRestrictedToExactPaths: true,
+    allowedBlobPaths: [
+      "workforce-os/initial-production-bootstrap/state-v1.json",
+      "workforce-os/initial-production-bootstrap/authority-drain-checkpoint-v1",
+    ],
     deleteGranted: false,
     leaseBreakSeparableByRbac: false,
     controllerBreakCommandForbidden: true,
@@ -315,8 +321,11 @@ function verifyNestedTemplate(template) {
     !condition.includes("blobs/write") ||
     !condition.includes("containers:name") ||
     !condition.includes("blobs:path") ||
+    !condition.includes("StringEquals ''{1}''") ||
+    !condition.includes("StringEquals ''{2}''") ||
     !condition.includes("parameters('controlContainerName')") ||
     !condition.includes("parameters('controlBlobName')") ||
+    !condition.includes("parameters('authorityDrainCheckpointBlobName')") ||
     condition.includes("blobs/delete")) {
     fail("compiled exact-path blob condition is invalid");
   }
@@ -331,6 +340,7 @@ function verifyDefaults(template, contract) {
     controlStorageAccountName: contract.controlStorageAccountName,
     controlContainerName: contract.controlContainerName,
     controlBlobName: contract.controlBlobName,
+    authorityDrainCheckpointBlobName: contract.authorityDrainCheckpointBlobName,
     githubOwner: "Kloudedge-apex",
     backendRepository: "apex-product",
     consoleRepository: "Workforce-OS",
@@ -370,6 +380,49 @@ function verifyInitializer(source) {
   }
 }
 
+function verifyDrainCheckpointInitializer(source) {
+  for (const literal of [
+    'SUBSCRIPTION_ID="3171575e-f164-425c-9ee0-2fb10cf93884"',
+    'STORAGE_ACCOUNT="ledgrstorage"',
+    'CONTAINER="production-control"',
+    'BLOB="workforce-os/initial-production-bootstrap/authority-drain-checkpoint-v1"',
+    'CHECKPOINT_KIND="workforce-os-production-authority-drain-checkpoint-v1"',
+    'CREATE WORKFORCE OS AUTHORITY DRAIN CHECKPOINT',
+    'RESET WORKFORCE OS AUTHORITY DRAIN CHECKPOINT',
+    'production-azure-mutation-authority-audit.mjs',
+    '.summary.structuralExclusive == true',
+    '.summary.minimumCredentialDrainAgeSeconds == 864000',
+    '.structuralEvidenceHash | test("^sha256:[0-9a-f]{64}$")',
+    '.identities.backendRelease.clientId',
+    '.identities.consoleRelease.clientId',
+    '.user.type == "servicePrincipal"',
+    '--auth-mode login',
+    '--overwrite false',
+    "--if-none-match '*'",
+    'az storage blob metadata update',
+    '--if-match "${checkpoint_etag}"',
+    '.properties.contentLength == 0',
+    '.properties.lease.state == "available"',
+    '.properties.lease.status == "unlocked"',
+  ]) {
+    requireLiteral(source, literal, "authority-drain initializer invariant");
+  }
+  for (const forbidden of [
+    "--overwrite true",
+    "--auth-mode key",
+    "storage blob delete",
+    "storage container delete",
+    "storage account keys list",
+    "storage account revoke-delegation-keys",
+    "storage blob lease break",
+    "storage blob lease acquire",
+  ]) {
+    if (source.includes(forbidden)) {
+      fail("authority-drain initializer contains forbidden operation: " + forbidden);
+    }
+  }
+}
+
 export function verifyProductionAuthorityPackage(packagePath = DEFAULT_PACKAGE) {
   const root = resolve(packagePath);
   const contract = parseJson(
@@ -383,6 +436,10 @@ export function verifyProductionAuthorityPackage(packagePath = DEFAULT_PACKAGE) 
     resolve(root, "initialize-control-blob.sh"),
     "control-blob initializer",
   );
+  const drainCheckpointInitializer = read(
+    resolve(root, "initialize-authority-drain-checkpoint.sh"),
+    "authority-drain checkpoint initializer",
+  );
 
   for (const literal of [
     "param productionResourceGroupName string = 'Ledgr-prod'",
@@ -391,6 +448,7 @@ export function verifyProductionAuthorityPackage(packagePath = DEFAULT_PACKAGE) 
     "param controlStorageAccountName string = 'ledgrstorage'",
     "param controlContainerName string = 'production-control'",
     "param controlBlobName string = 'workforce-os/initial-production-bootstrap/state-v1.json'",
+    "param authorityDrainCheckpointBlobName string = 'workforce-os/initial-production-bootstrap/authority-drain-checkpoint-v1'",
     "param githubOwner string = 'Kloudedge-apex'",
     "param backendRepository string = 'apex-product'",
     "param consoleRepository string = 'Workforce-OS'",
@@ -408,6 +466,7 @@ export function verifyProductionAuthorityPackage(packagePath = DEFAULT_PACKAGE) 
     "controlBlobCondition",
     "StringEquals '{0}'",
     "StringEquals '{1}'",
+    "StringEquals '{2}'",
     "conditionVersion: '2.0'",
     "backendApiRelease",
     "backendWorkerRelease",
@@ -436,6 +495,7 @@ export function verifyProductionAuthorityPackage(packagePath = DEFAULT_PACKAGE) 
     .filter((action) => /\/(?:read|write|action)$/u.test(action));
   sameArray(sourceActions, reviewedActions, "Bicep permission literals");
   verifyInitializer(initializer);
+  verifyDrainCheckpointInitializer(drainCheckpointInitializer);
 
   const template = compile(resolve(root, "main.bicep"));
   verifyDefaults(template, contract);

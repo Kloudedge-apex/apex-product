@@ -5,6 +5,7 @@ param registryName string
 param controlStorageAccountName string
 param controlContainerName string
 param controlBlobName string
+param authorityDrainCheckpointBlobName string
 param identityNamePrefix string
 param githubOwner string
 param backendRepository string
@@ -33,11 +34,16 @@ var controlBlobCondition = format('''
     @Resource[Microsoft.Storage/storageAccounts/blobServices/containers:name]
       StringEquals '{0}'
     AND
-    @Resource[Microsoft.Storage/storageAccounts/blobServices/containers/blobs:path]
-      StringEquals '{1}'
+    (
+      @Resource[Microsoft.Storage/storageAccounts/blobServices/containers/blobs:path]
+        StringEquals '{1}'
+      OR
+      @Resource[Microsoft.Storage/storageAccounts/blobServices/containers/blobs:path]
+        StringEquals '{2}'
+    )
   )
 )
-''', controlContainerName, controlBlobName)
+''', controlContainerName, controlBlobName, authorityDrainCheckpointBlobName)
 
 resource registry 'Microsoft.ContainerRegistry/registries@2023-07-01' existing = {
   name: registryName
@@ -233,7 +239,7 @@ resource consoleReleaseAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-
 }
 
 resource backendControlBlob 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(controlStorage.id, backendReleaseIdentity.name, controlBlobOperatorRoleDefinitionId, controlBlobName)
+  name: guid(controlStorage.id, backendReleaseIdentity.name, controlBlobOperatorRoleDefinitionId, controlBlobName, authorityDrainCheckpointBlobName)
   scope: controlStorage
   properties: {
     principalId: backendReleaseIdentity.properties.principalId
@@ -245,7 +251,7 @@ resource backendControlBlob 'Microsoft.Authorization/roleAssignments@2022-04-01'
 }
 
 resource consoleControlBlob 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(controlStorage.id, consoleReleaseIdentity.name, controlBlobOperatorRoleDefinitionId, controlBlobName)
+  name: guid(controlStorage.id, consoleReleaseIdentity.name, controlBlobOperatorRoleDefinitionId, controlBlobName, authorityDrainCheckpointBlobName)
   scope: controlStorage
   properties: {
     principalId: consoleReleaseIdentity.properties.principalId
@@ -321,5 +327,6 @@ output authority object = {
   controlStorageResourceId: controlStorage.id
   controlContainerResourceId: controlContainer.id
   controlBlobName: controlBlobName
+  authorityDrainCheckpointBlobName: authorityDrainCheckpointBlobName
   leaseBreakSeparableByRbac: false
 }

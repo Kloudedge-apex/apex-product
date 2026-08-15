@@ -78,6 +78,9 @@ rejected("a nonexact container condition is rejected", "resources.bicep", (sourc
 rejected("a nonexact blob condition is rejected", "resources.bicep", (source) =>
   source.replace("StringEquals '{1}'", "StringEquals 'other.json'"));
 
+rejected("a nonexact drain checkpoint condition is rejected", "resources.bicep", (source) =>
+  source.replace("StringEquals '{2}'", "StringEquals 'other-checkpoint'"));
+
 rejected("build identity Container App authority is rejected", "resources.bicep", (source) =>
   source.replace(
     "resource backendApiRelease 'Microsoft.Authorization/roleAssignments@2022-04-01' = {\n" +
@@ -103,3 +106,33 @@ rejected("false no-break RBAC capability is rejected", "authority-contract.json"
 
 rejected("control blob overwrite is rejected", "initialize-control-blob.sh", (source) =>
   source.replace("--overwrite false", "--overwrite true"));
+
+rejected(
+  "authority-drain checkpoint overwrite is rejected",
+  "initialize-authority-drain-checkpoint.sh",
+  (source) => source.replace("--overwrite false", "--overwrite true"),
+);
+
+rejected(
+  "authority-drain account-key fallback is rejected",
+  "initialize-authority-drain-checkpoint.sh",
+  (source) => source.replace("--auth-mode login", "--auth-mode key"),
+);
+
+rejected(
+  "authority-drain structural exclusivity bypass is rejected",
+  "initialize-authority-drain-checkpoint.sh",
+  (source) => source.replace(
+    ".summary.structuralExclusive == true",
+    ".summary.structuralExclusive != true",
+  ),
+);
+
+rejected(
+  "authority-drain human Azure session bypass is rejected",
+  "initialize-authority-drain-checkpoint.sh",
+  (source) => source.replace(
+    '.user.type == "servicePrincipal"',
+    '.user.type != "servicePrincipal"',
+  ),
+);

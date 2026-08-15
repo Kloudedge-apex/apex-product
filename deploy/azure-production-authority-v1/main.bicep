@@ -14,6 +14,7 @@ param controlStorageAccountName string = 'ledgrstorage'
 
 param controlContainerName string = 'production-control'
 param controlBlobName string = 'workforce-os/initial-production-bootstrap/state-v1.json'
+param authorityDrainCheckpointBlobName string = 'workforce-os/initial-production-bootstrap/authority-drain-checkpoint-v1'
 param identityNamePrefix string = 'workforce-os'
 param githubOwner string = 'Kloudedge-apex'
 param backendRepository string = 'apex-product'
@@ -76,7 +77,7 @@ resource controlBlobOperatorRole 'Microsoft.Authorization/roleDefinitions@2022-0
   name: guid(subscription().id, 'workforce-os-control-blob-operator-v1')
   properties: {
     roleName: 'Workforce OS Control Blob Operator v1'
-    description: 'May read and write only the condition-bound production control blob; deletion is excluded.'
+    description: 'May read and write only the condition-bound production state and authority-drain checkpoint blobs; deletion is excluded.'
     type: 'CustomRole'
     assignableScopes: [subscription().id]
     permissions: [
@@ -105,6 +106,7 @@ module authorityResources './resources.bicep' = {
     controlStorageAccountName: controlStorageAccountName
     controlContainerName: controlContainerName
     controlBlobName: controlBlobName
+    authorityDrainCheckpointBlobName: authorityDrainCheckpointBlobName
     identityNamePrefix: identityNamePrefix
     githubOwner: githubOwner
     backendRepository: backendRepository

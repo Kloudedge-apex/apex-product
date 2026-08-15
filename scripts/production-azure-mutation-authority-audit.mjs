@@ -11,6 +11,12 @@ const ISSUER = "https://token.actions.githubusercontent.com";
 const AUDIENCE = "api://AzureADTokenExchange";
 const CONTROL_CONTAINER = "production-control";
 const CONTROL_BLOB = "workforce-os/initial-production-bootstrap/state-v1.json";
+const CONTROL_OBJECT_PATH = `${CONTROL_CONTAINER}/${CONTROL_BLOB}`;
+const CREDENTIAL_DRAIN_CHECKPOINT_BLOB =
+  "workforce-os/initial-production-bootstrap/authority-drain-checkpoint-v1";
+const CREDENTIAL_DRAIN_CHECKPOINT_KIND =
+  "workforce-os-production-authority-drain-checkpoint-v1";
+const MINIMUM_CREDENTIAL_DRAIN_AGE_SECONDS = 10 * 24 * 60 * 60;
 
 function resourceId(provider, type, name) {
   return `${RESOURCE_GROUP_ID}/providers/${provider}/${type}/${name}`;
@@ -204,6 +210,17 @@ function stableUnique(values) {
   return [...new Set(values)].sort();
 }
 
+function stableValue(value) {
+  if (Array.isArray(value)) {
+    return value.map(stableValue)
+      .sort((left, right) => canonicalJson(left).localeCompare(canonicalJson(right)));
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stableValue(value[key])]));
+  }
+  return value ?? null;
+}
+
 function globMatches(pattern, operation) {
   if (typeof pattern !== "string" || pattern.length < 1 || pattern.length > 512) return false;
   const expression = `^${pattern.replace(/[.+?^${}()|[\]\\]/gu, "\\$&").replace(/\*/gu, ".*")}$`;
@@ -259,8 +276,13 @@ function expectedBlobCondition() {
     @Resource[Microsoft.Storage/storageAccounts/blobServices/containers:name]
       StringEquals '${CONTROL_CONTAINER}'
     AND
-    @Resource[Microsoft.Storage/storageAccounts/blobServices/containers/blobs:path]
-      StringEquals '${CONTROL_BLOB}'
+    (
+      @Resource[Microsoft.Storage/storageAccounts/blobServices/containers/blobs:path]
+        StringEquals '${CONTROL_BLOB}'
+      OR
+      @Resource[Microsoft.Storage/storageAccounts/blobServices/containers/blobs:path]
+        StringEquals '${CREDENTIAL_DRAIN_CHECKPOINT_BLOB}'
+    )
   )
 )`;
 }
@@ -470,6 +492,200 @@ function validateResources(snapshot, contract, findings) {
   }
 }
 
+function configuredAction(value) {
+  if (Array.isArray(value)) return value.some(configuredAction);
+  if (value && typeof value === "object") return Object.values(value).some(configuredAction);
+  return value !== null && value !== undefined;
+}
+
+function inspectStorageAutomation(snapshot, findings) {
+  const lifecycleRules = snapshot.nonRbacAuthority?.storageManagementPolicyRules;
+  if (!Array.isArray(lifecycleRules)) {
+    findings.push({
+      code: "invalid-non-rbac-inventory",
+      target: "stateStorage",
+      inventory: "storageManagementPolicyRules",
+    });
+  } else {
+    let affectingRuleCount = 0;
+    let invalidRuleCount = 0;
+    for (const rule of lifecycleRules) {
+      if (!rule || typeof rule !== "object" || Array.isArray(rule) ||
+        typeof rule.enabled !== "boolean" ||
+        !rule.definition || typeof rule.definition !== "object" ||
+        Array.isArray(rule.definition)) {
+        invalidRuleCount += 1;
+        continue;
+      }
+      if (!rule.enabled) continue;
+      const filters = rule.definition.filters;
+      const actions = rule.definition.actions;
+      const blobTypes = filters?.blobTypes;
+      const prefixes = filters?.prefixMatch;
+      if (!filters || typeof filters !== "object" || Array.isArray(filters) ||
+        !Array.isArray(blobTypes) || blobTypes.some((value) => typeof value !== "string") ||
+        (prefixes !== undefined &&
+          (!Array.isArray(prefixes) || prefixes.some((value) => typeof value !== "string"))) ||
+        !actions || typeof actions !== "object" || Array.isArray(actions)) {
+        invalidRuleCount += 1;
+        continue;
+      }
+      const appliesToBlockBlobs = blobTypes.some((value) => lower(value) === "blockblob");
+      const appliesToControlObject = prefixes === undefined || prefixes.length === 0 ||
+        prefixes.some((prefix) => CONTROL_OBJECT_PATH.startsWith(prefix));
+      if (appliesToBlockBlobs && appliesToControlObject && configuredAction(actions)) {
+        affectingRuleCount += 1;
+      }
+    }
+    if (invalidRuleCount > 0) {
+      findings.push({
+        code: "invalid-storage-management-policy-inventory",
+        target: "stateStorage",
+        count: invalidRuleCount,
+      });
+    }
+    if (affectingRuleCount > 0) {
+      findings.push({
+        code: "storage-control-blob-lifecycle-authority-present",
+        target: "stateStorage",
+        count: affectingRuleCount,
+      });
+    }
+  }
+
+  const replicationPolicies = snapshot.nonRbacAuthority?.storageObjectReplicationPolicies;
+  if (!Array.isArray(replicationPolicies)) {
+    findings.push({
+      code: "invalid-non-rbac-inventory",
+      target: "stateStorage",
+      inventory: "storageObjectReplicationPolicies",
+    });
+    return;
+  }
+  let affectingRuleCount = 0;
+  let invalidPolicyCount = 0;
+  for (const policy of replicationPolicies) {
+    const rules = policy?.rules;
+    if (!Array.isArray(rules)) {
+      invalidPolicyCount += 1;
+      continue;
+    }
+    for (const rule of rules) {
+      const destination = rule?.destinationContainer;
+      if (typeof destination !== "string") {
+        invalidPolicyCount += 1;
+      } else if (lower(destination) === CONTROL_CONTAINER) {
+        affectingRuleCount += 1;
+      }
+    }
+  }
+  if (invalidPolicyCount > 0) {
+    findings.push({
+      code: "invalid-storage-object-replication-inventory",
+      target: "stateStorage",
+      count: invalidPolicyCount,
+    });
+  }
+  if (affectingRuleCount > 0) {
+    findings.push({
+      code: "storage-control-container-object-replication-authority-present",
+      target: "stateStorage",
+      count: affectingRuleCount,
+    });
+  }
+}
+
+function structuralEvidenceHash(snapshot) {
+  const activeAssignmentsByScope = Object.fromEntries(Object.entries(
+    snapshot.activeAssignmentsByScope ?? {},
+  ).map(([scope, assignments]) => [
+    scope,
+    Array.isArray(assignments) ? assignments.map(normalizeAssignment) : null,
+  ]));
+  const roleDefinitions = Object.fromEntries(Object.entries(snapshot.roleDefinitions ?? {})
+    .map(([key, role]) => [lower(role?.id ?? key), rolePermissionInventory(role)]));
+  const identities = Object.fromEntries(Object.entries(snapshot.identities ?? {}).map(([key, value]) => [
+    key,
+    {
+      exists: value?.exists ?? null,
+      resourceId: lower(value?.resourceId),
+      clientId: lower(value?.clientId),
+      principalId: lower(value?.principalId),
+      federatedCredentials: Array.isArray(value?.federatedCredentials)
+        ? value.federatedCredentials.map((credential) => ({
+          issuer: credential?.issuer ?? null,
+          audiences: credential?.audiences ?? null,
+          subject: credential?.subject ?? null,
+        }))
+        : null,
+    },
+  ]));
+  const pim = {
+    managementGroupScopes: snapshot.pim?.managementGroupScopes ?? null,
+    eligibilityQueriedScopes: snapshot.pim?.eligibilityQueriedScopes ?? null,
+    activeQueriedScopes: snapshot.pim?.activeQueriedScopes ?? null,
+    eligible: Array.isArray(snapshot.pim?.eligible)
+      ? snapshot.pim.eligible.map(normalizeAssignment)
+      : null,
+    active: Array.isArray(snapshot.pim?.active)
+      ? snapshot.pim.active.map(normalizeAssignment)
+      : null,
+  };
+  const evidence = stableValue({
+    schemaVersion: snapshot.schemaVersion,
+    subscriptionId: snapshot.subscriptionId,
+    resources: snapshot.resources ?? null,
+    identities,
+    activeAssignmentsByScope,
+    roleDefinitions,
+    pim,
+    nonRbacAuthority: snapshot.nonRbacAuthority ?? null,
+  });
+  return sha256(Buffer.from(canonicalJson(evidence), "utf8"));
+}
+
+function validateCredentialDrain(snapshot, expectedStructuralHash, findings) {
+  const checkpoint = snapshot.credentialDrainCheckpoint;
+  if (checkpoint?.exists !== true) {
+    findings.push({ code: "credential-drain-checkpoint-missing", target: "stateStorage" });
+    return;
+  }
+  const metadata = checkpoint.metadata;
+  const metadataKeys = metadata && typeof metadata === "object" && !Array.isArray(metadata)
+    ? Object.keys(metadata).sort()
+    : [];
+  const exactMetadataKeys = ["kind", "structural_evidence_sha256", "subscription_id"];
+  const expectedHex = expectedStructuralHash.replace(/^sha256:/u, "");
+  const validShape = checkpoint.blobName === CREDENTIAL_DRAIN_CHECKPOINT_BLOB &&
+    checkpoint.contentLength === 0 && checkpoint.leaseState === "available" &&
+    checkpoint.leaseStatus === "unlocked" &&
+    canonicalJson(metadataKeys) === canonicalJson(exactMetadataKeys) &&
+    metadata.kind === CREDENTIAL_DRAIN_CHECKPOINT_KIND &&
+    lower(metadata.subscription_id) === SUBSCRIPTION_ID &&
+    /^[0-9a-f]{64}$/u.test(metadata.structural_evidence_sha256 ?? "");
+  if (!validShape) {
+    findings.push({ code: "credential-drain-checkpoint-invalid", target: "stateStorage" });
+    return;
+  }
+  if (metadata.structural_evidence_sha256 !== expectedHex) {
+    findings.push({ code: "credential-drain-structure-mismatch", target: "stateStorage" });
+    return;
+  }
+  const observedAt = Date.parse(snapshot.observedAt ?? "");
+  const lastModified = Date.parse(checkpoint.lastModified ?? "");
+  if (!Number.isFinite(observedAt) || !Number.isFinite(lastModified) || lastModified > observedAt) {
+    findings.push({ code: "credential-drain-checkpoint-invalid", target: "stateStorage" });
+    return;
+  }
+  if ((observedAt - lastModified) / 1000 < MINIMUM_CREDENTIAL_DRAIN_AGE_SECONDS) {
+    findings.push({
+      code: "credential-drain-window-open",
+      target: "stateStorage",
+      minimumAgeSeconds: MINIMUM_CREDENTIAL_DRAIN_AGE_SECONDS,
+    });
+  }
+}
+
 export function evaluateProductionAzureMutationAuthority(snapshot) {
   if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
     fail("snapshot is invalid");
@@ -484,6 +700,7 @@ export function evaluateProductionAzureMutationAuthority(snapshot) {
     findings.push({ code: "collection-incomplete", target: "azure", issue: String(issue).slice(0, 80) });
   }
   validateResources(snapshot, contract, findings);
+  inspectStorageAutomation(snapshot, findings);
 
   const identities = {};
   for (const [key, expected] of Object.entries(contract.identities)) {
@@ -561,6 +778,12 @@ export function evaluateProductionAzureMutationAuthority(snapshot) {
   inspectPim(snapshot.pim?.active, "active", contract, identities,
     managementGroupScopes, roleDefinitions, findings);
 
+  const structuralFindings = [...new Map(findings.map((finding) =>
+    [canonicalJson(finding), finding])).values()]
+    .sort((left, right) => canonicalJson(left).localeCompare(canonicalJson(right)));
+  const structuralExclusive = structuralFindings.length === 0;
+  const structuralHash = structuralExclusive ? structuralEvidenceHash(snapshot) : null;
+  if (structuralExclusive) validateCredentialDrain(snapshot, structuralHash, findings);
   const sortedFindings = [...new Map(findings.map((finding) =>
     [canonicalJson(finding), finding])).values()]
     .sort((left, right) => canonicalJson(left).localeCompare(canonicalJson(right)));
@@ -596,11 +819,16 @@ export function evaluateProductionAzureMutationAuthority(snapshot) {
     findings: sortedFindings,
     summary: {
       exclusive,
+      structuralExclusive,
+      credentialDrainComplete: exclusive,
+      minimumCredentialDrainAgeSeconds: MINIMUM_CREDENTIAL_DRAIN_AGE_SECONDS,
       findingCount: sortedFindings.length,
       activeScopeCount: Object.keys(activeByScope).length,
       eligiblePimCount: Array.isArray(snapshot.pim?.eligible) ? snapshot.pim.eligible.length : 0,
       activePimCount: Array.isArray(snapshot.pim?.active) ? snapshot.pim.active.length : 0,
     },
+    structuralEvidenceHash: structuralHash,
+    credentialDrainCheckpointBlob: CREDENTIAL_DRAIN_CHECKPOINT_BLOB,
     controllerEvidence,
     controllerEvidenceHash,
   };
@@ -619,6 +847,9 @@ export function assertReadOnlyAzureAuditCommand(args) {
     ["acr", "task", "list"],
     ["storage", "account", "show"],
     ["storage", "account", "local-user", "list"],
+    ["storage", "account", "management-policy", "show"],
+    ["storage", "account", "or-policy", "list"],
+    ["storage", "blob", "show"],
     ["resource", "show"],
     ["role", "assignment", "list"],
     ["role", "definition", "list"],
@@ -657,11 +888,13 @@ function runAz(args) {
     maxBuffer: 8 * 1024 * 1024,
     stdio: ["ignore", "pipe", "pipe"],
   });
-  if (result.error || result.status !== 0) return { ok: false };
+  if (result.error || result.status !== 0) {
+    return { ok: false, status: result.status, stderr: result.stderr ?? "" };
+  }
   try {
     return { ok: true, value: JSON.parse(result.stdout) };
   } catch {
-    return { ok: false };
+    return { ok: false, status: result.status, stderr: result.stderr ?? "" };
   }
 }
 
@@ -672,6 +905,16 @@ function azJson(args, issues, issueCode) {
     return null;
   }
   return result.value;
+}
+
+function azJsonOptionalNotFound(args, issues, issueCode, notFoundCodes) {
+  const result = runAz([...args, "--only-show-errors", "--output", "json"]);
+  if (result.ok) return { exists: true, value: result.value };
+  if (notFoundCodes.some((code) => result.stderr.includes(code))) {
+    return { exists: false, value: null };
+  }
+  issues.push(issueCode);
+  return { exists: null, value: null };
 }
 
 function identityResourceId(name) {
@@ -835,6 +1078,21 @@ export function collectProductionAzureMutationAuthoritySnapshot() {
     "storage", "account", "local-user", "list", "--account-name", "ledgrstorage",
     "--resource-group", RESOURCE_GROUP, "--subscription", SUBSCRIPTION_ID,
   ], issues, "storage-local-user-query-failed");
+  const managementPolicy = azJsonOptionalNotFound([
+    "storage", "account", "management-policy", "show",
+    "--account-name", "ledgrstorage", "--resource-group", RESOURCE_GROUP,
+    "--subscription", SUBSCRIPTION_ID,
+  ], issues, "storage-management-policy-query-failed", ["ManagementPolicyNotFound"]);
+  const objectReplicationPolicies = azJson([
+    "storage", "account", "or-policy", "list",
+    "--account-name", "ledgrstorage", "--resource-group", RESOURCE_GROUP,
+    "--subscription", SUBSCRIPTION_ID,
+  ], issues, "storage-object-replication-query-failed");
+  const drainCheckpoint = azJsonOptionalNotFound([
+    "storage", "blob", "show", "--auth-mode", "login",
+    "--account-name", "ledgrstorage", "--container-name", CONTROL_CONTAINER,
+    "--name", CREDENTIAL_DRAIN_CHECKPOINT_BLOB, "--subscription", SUBSCRIPTION_ID,
+  ], issues, "credential-drain-checkpoint-query-failed", ["BlobNotFound"]);
 
   const activeAssignmentsByScope = {};
   const assignmentScopes = {
@@ -909,6 +1167,19 @@ export function collectProductionAzureMutationAuthoritySnapshot() {
         ? registryTasks.filter((item) => lower(item.status) !== "disabled").length
         : -1,
       storageLocalUserCount: Array.isArray(localUsers) ? localUsers.length : -1,
+      storageManagementPolicyRules: managementPolicy.exists === false
+        ? []
+        : managementPolicy.value?.policy?.rules,
+      storageObjectReplicationPolicies: objectReplicationPolicies,
+    },
+    credentialDrainCheckpoint: {
+      exists: drainCheckpoint.exists === true,
+      blobName: drainCheckpoint.value?.name ?? CREDENTIAL_DRAIN_CHECKPOINT_BLOB,
+      lastModified: drainCheckpoint.value?.properties?.lastModified ?? null,
+      contentLength: drainCheckpoint.value?.properties?.contentLength ?? null,
+      leaseState: drainCheckpoint.value?.properties?.lease?.state ?? null,
+      leaseStatus: drainCheckpoint.value?.properties?.lease?.status ?? null,
+      metadata: drainCheckpoint.value?.metadata ?? null,
     },
     collectionIssues: stableUnique(issues),
   };

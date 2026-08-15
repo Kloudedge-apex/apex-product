@@ -49,8 +49,9 @@ The shared lease identity is exact: container `production-control`, blob
 `workforce-os/initial-production-bootstrap/state-v1.json`, and the one reviewed
 storage-account resource ID. Do not create per-repository lock blobs. The
 protected release identities need only the data-plane permissions required to
-read the blob lease state and acquire, renew, and release this exact lease. The
-exact-container and exact-path read/write role excludes blob deletion, but
+read the blob lease state, acquire/renew/release this exact lease, and maintain
+the fixed authority-drain checkpoint. The exact-container and two-exact-path
+read/write role excludes blob deletion, but
 Azure maps lease break to the same write action as acquire, renew, and release.
 RBAC therefore cannot remove only break; the controllers contain no break
 command, and protected source review enforces that prohibition. Bootstrap keeps
@@ -197,7 +198,12 @@ of these exist and have been independently reviewed:
   `scripts/production-azure-mutation-authority-audit.mjs`, with complete active
   and eligible PIM coverage, no alternate federation, delegator, wildcard,
   child-scope, shared-key, SFTP, local-user, ACR admin, token, or persistent-task
-  authority, and non-null controller evidence whose hash is copied unchanged;
+  authority, no lifecycle rule affecting the exact control blob, no object
+  replication into the control container, and non-null controller evidence
+  whose hash is copied unchanged;
+- a server-timed authority-drain checkpoint bound to the audit's exact
+  structural evidence hash, unchanged for at least 10 days, with the separately
+  authorized create/reset receipt retained for review;
 - explicit proof that no other principal, pipeline, autoscaler, or operator can
   mutate the three Container Apps or bootstrap blob during the attempt; the
   controller verifies exact assignment evidence, but exclusivity remains an

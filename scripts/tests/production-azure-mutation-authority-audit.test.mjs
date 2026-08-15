@@ -65,8 +65,13 @@ function blobCondition() {
     @Resource[Microsoft.Storage/storageAccounts/blobServices/containers:name]
       StringEquals 'production-control'
     AND
-    @Resource[Microsoft.Storage/storageAccounts/blobServices/containers/blobs:path]
-      StringEquals 'workforce-os/initial-production-bootstrap/state-v1.json'
+    (
+      @Resource[Microsoft.Storage/storageAccounts/blobServices/containers/blobs:path]
+        StringEquals 'workforce-os/initial-production-bootstrap/state-v1.json'
+      OR
+      @Resource[Microsoft.Storage/storageAccounts/blobServices/containers/blobs:path]
+        StringEquals 'workforce-os/initial-production-bootstrap/authority-drain-checkpoint-v1'
+    )
   )
 )`;
 }
@@ -85,6 +90,27 @@ function requiredPimScopes() {
     CONTRACT.targets.stateStorage.blobServiceResourceId.toLowerCase(),
     ...Object.keys(CONTRACT.identities).map((key) => identityId(key).toLowerCase()),
   ])].sort();
+}
+
+function checkpointStructuralSnapshot(snapshot, lastModified = "2026-08-01T05:00:00Z") {
+  delete snapshot.credentialDrainCheckpoint;
+  const preDrain = evaluateProductionAzureMutationAuthority(snapshot);
+  assert.equal(preDrain.summary.structuralExclusive, true);
+  assert.match(preDrain.structuralEvidenceHash, /^sha256:[0-9a-f]{64}$/u);
+  snapshot.credentialDrainCheckpoint = {
+    exists: true,
+    blobName: preDrain.credentialDrainCheckpointBlob,
+    lastModified,
+    contentLength: 0,
+    leaseState: "available",
+    leaseStatus: "unlocked",
+    metadata: {
+      kind: "workforce-os-production-authority-drain-checkpoint-v1",
+      structural_evidence_sha256: preDrain.structuralEvidenceHash.replace("sha256:", ""),
+      subscription_id: CONTRACT.subscriptionId,
+    },
+  };
+  return snapshot;
 }
 
 function exclusiveSnapshot() {
@@ -117,7 +143,7 @@ function exclusiveSnapshot() {
       CONTRACT.targets.stateStorage.expectedAssignmentScope,
       blobCondition(),
     ));
-  return {
+  const snapshot = {
     schemaVersion: 1,
     subscriptionId: CONTRACT.subscriptionId,
     observedAt: "2026-08-15T05:00:00Z",
@@ -167,9 +193,12 @@ function exclusiveSnapshot() {
       enabledRegistryTokenCount: 0,
       enabledRegistryTaskCount: 0,
       storageLocalUserCount: 0,
+      storageManagementPolicyRules: [],
+      storageObjectReplicationPolicies: [],
     },
     collectionIssues: [],
   };
+  return checkpointStructuralSnapshot(snapshot);
 }
 
 function codes(report) {
@@ -180,6 +209,8 @@ test("an exact exclusive authority snapshot emits controller-compatible evidence
   const report = evaluateProductionAzureMutationAuthority(exclusiveSnapshot());
   assert.equal(report.status, "GO");
   assert.equal(report.summary.exclusive, true);
+  assert.equal(report.summary.structuralExclusive, true);
+  assert.equal(report.summary.credentialDrainComplete, true);
   assert.deepEqual(report.findings, []);
   assert.equal(report.controllerEvidence.clientId, CLIENTS.backendRelease);
   assert.equal(report.controllerEvidence.principalObjectId, PRINCIPALS.backendRelease);
@@ -187,6 +218,32 @@ test("an exact exclusive authority snapshot emits controller-compatible evidence
   assert.deepEqual(Object.keys(report.controllerEvidence.assignmentsByScope), [
     "api", "worker", "console", "stateStorage",
   ]);
+});
+
+test("a structurally exclusive snapshot without a server-timed checkpoint remains NO-GO", () => {
+  const snapshot = exclusiveSnapshot();
+  delete snapshot.credentialDrainCheckpoint;
+  const report = evaluateProductionAzureMutationAuthority(snapshot);
+  assert.equal(report.status, "NO-GO");
+  assert.equal(report.summary.structuralExclusive, true);
+  assert.match(report.structuralEvidenceHash, /^sha256:[0-9a-f]{64}$/u);
+  assert(codes(report).has("credential-drain-checkpoint-missing"));
+  assert.equal(report.controllerEvidence, null);
+});
+
+test("a checkpoint younger than the ten-day credential drain remains NO-GO", () => {
+  const snapshot = exclusiveSnapshot();
+  snapshot.credentialDrainCheckpoint.lastModified = "2026-08-10T05:00:01Z";
+  const report = evaluateProductionAzureMutationAuthority(snapshot);
+  assert(codes(report).has("credential-drain-window-open"));
+  assert.equal(report.summary.minimumCredentialDrainAgeSeconds, 864000);
+});
+
+test("a checkpoint for a different structural authority snapshot fails closed", () => {
+  const snapshot = exclusiveSnapshot();
+  snapshot.credentialDrainCheckpoint.metadata.structural_evidence_sha256 = "0".repeat(64);
+  assert(codes(evaluateProductionAzureMutationAuthority(snapshot))
+    .has("credential-drain-structure-mismatch"));
 });
 
 test("the controller evidence hash is deterministic across assignment ordering", () => {
@@ -245,6 +302,7 @@ test("NotActions exclusions are honored when classifying a wildcard role", () =>
     ROLE_IDS.excluded,
     CONTRACT.targets.api.resourceId,
   ));
+  checkpointStructuralSnapshot(snapshot);
   assert.equal(evaluateProductionAzureMutationAuthority(snapshot).status, "GO");
 });
 
@@ -313,6 +371,53 @@ test("non-RBAC credential and task channels fail closed", () => {
   ]) assert(found.has(code), code);
 });
 
+test("a lifecycle rule that can tier or delete the exact control blob fails closed", () => {
+  const snapshot = exclusiveSnapshot();
+  snapshot.nonRbacAuthority.storageManagementPolicyRules.push({
+    enabled: true,
+    definition: {
+      filters: {
+        blobTypes: ["blockBlob"],
+        prefixMatch: ["production-control/workforce-os/initial-production-bootstrap/"],
+      },
+      actions: { baseBlob: { delete: { daysAfterModificationGreaterThan: 30 } } },
+    },
+  });
+  assert(codes(evaluateProductionAzureMutationAuthority(snapshot))
+    .has("storage-control-blob-lifecycle-authority-present"));
+});
+
+test("a lifecycle rule scoped away from the control blob is permitted", () => {
+  const snapshot = exclusiveSnapshot();
+  snapshot.nonRbacAuthority.storageManagementPolicyRules.push({
+    enabled: true,
+    definition: {
+      filters: { blobTypes: ["blockBlob"], prefixMatch: ["unrelated-container/"] },
+      actions: { baseBlob: { delete: { daysAfterModificationGreaterThan: 30 } } },
+    },
+  });
+  checkpointStructuralSnapshot(snapshot);
+  assert.equal(evaluateProductionAzureMutationAuthority(snapshot).status, "GO");
+});
+
+test("object replication into the control container fails closed", () => {
+  const snapshot = exclusiveSnapshot();
+  snapshot.nonRbacAuthority.storageObjectReplicationPolicies.push({
+    rules: [{ sourceContainer: "incoming", destinationContainer: "production-control" }],
+  });
+  assert(codes(evaluateProductionAzureMutationAuthority(snapshot))
+    .has("storage-control-container-object-replication-authority-present"));
+});
+
+test("malformed autonomous storage policy inventory fails closed", () => {
+  const snapshot = exclusiveSnapshot();
+  snapshot.nonRbacAuthority.storageManagementPolicyRules = [{ enabled: true }];
+  snapshot.nonRbacAuthority.storageObjectReplicationPolicies = [{ rules: [{}] }];
+  const found = codes(evaluateProductionAzureMutationAuthority(snapshot));
+  assert(found.has("invalid-storage-management-policy-inventory"));
+  assert(found.has("invalid-storage-object-replication-inventory"));
+});
+
 test("the report never retains principal names, role names, or email addresses", () => {
   const snapshot = exclusiveSnapshot();
   snapshot.roleDefinitions[ROLE_IDS.owner] = role(ROLE_IDS.owner, ["*"]);
@@ -333,6 +438,9 @@ test("the live collector command boundary permits queries and rejects mutations"
     "role", "assignment", "list", "--scope", CONTRACT.targets.api.resourceId,
   ]), true);
   assert.equal(assertReadOnlyAzureAuditCommand([
+    "storage", "blob", "show", "--auth-mode", "login",
+  ]), true);
+  assert.equal(assertReadOnlyAzureAuditCommand([
     "rest", "--method", "post",
     "--url", "https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=2022-10-01",
     "--body", JSON.stringify({
@@ -346,6 +454,10 @@ test("the live collector command boundary permits queries and rejects mutations"
   );
   assert.throws(
     () => assertReadOnlyAzureAuditCommand(["storage", "blob", "delete"]),
+    /read-only audit allowlist/u,
+  );
+  assert.throws(
+    () => assertReadOnlyAzureAuditCommand(["storage", "blob", "metadata", "update"]),
     /read-only audit allowlist/u,
   );
   assert.throws(
