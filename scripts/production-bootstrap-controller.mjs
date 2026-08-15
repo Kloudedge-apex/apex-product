@@ -722,6 +722,10 @@ export function azureInheritedRoleAssignmentListArgs(request, scope) {
   ]);
 }
 
+export function azureControlContainerRoleAssignmentScope(request) {
+  return `${request.storage.resourceId}/blobServices/default/containers/${request.storage.containerName}`;
+}
+
 function blobLeaseArgs(request) {
   return [
     "--account-name", request.storage.accountName,
@@ -1088,7 +1092,10 @@ function verifyAzureIdentity(runner, request) {
     api: request.authority.apiContainerAppResourceId,
     worker: request.authority.workerContainerAppResourceId,
     console: request.authority.consoleContainerAppResourceId,
-    stateStorage: request.storage.resourceId,
+    // Query the exact container so --include-inherited captures both the
+    // expected conditioned storage-account assignments and any direct child-
+    // scope assignment that could bypass the account-level inventory.
+    stateStorage: azureControlContainerRoleAssignmentScope(request),
   };
   const assignmentsByScope = {};
   for (const [label, scope] of Object.entries(scopes)) {

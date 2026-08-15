@@ -62,6 +62,7 @@ resource containerAppReleaseRole 'Microsoft.Authorization/roleDefinitions@2022-0
           'Microsoft.App/containerApps/write'
           'Microsoft.App/containerApps/revisions/read'
           'Microsoft.App/containerApps/revisions/activate/action'
+          'Microsoft.Authorization/roleAssignments/read'
         ]
         notActions: []
         dataActions: []
@@ -80,7 +81,10 @@ resource controlBlobOperatorRole 'Microsoft.Authorization/roleDefinitions@2022-0
     assignableScopes: [subscription().id]
     permissions: [
       {
-        actions: []
+        actions: [
+          'Microsoft.Storage/storageAccounts/read'
+          'Microsoft.Authorization/roleAssignments/read'
+        ]
         notActions: []
         dataActions: [
           'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read'

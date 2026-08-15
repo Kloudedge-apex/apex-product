@@ -441,7 +441,25 @@ with `Microsoft.App/containerApps/write` across the exact `apex-gtm-api`,
 by one coordinated mutation lease that excludes every other writer. The global
 Azure lease serializes bootstrap, backend, and console attempts; the Git lease
 remains a repository-local compare-and-swap and incident marker. The controller
-re-reads all three apps immediately before the first
+queries the bootstrap-state role assignments at the exact
+`production-control` container child scope with inherited assignments included,
+so a direct container assignment cannot hide below a storage-account-only
+inventory. The independent read-only audit is:
+
+```bash
+node scripts/production-azure-mutation-authority-audit.mjs
+```
+
+It must return `GO` and non-null controller evidence. Its live collection covers
+exact OIDC federations, active role assignments, resolved wildcard and exclusion
+semantics, active and eligible PIM schedules at management-group through exact
+resource scopes, authority delegators, ACR admin/token/task paths, and Storage
+shared-key/SFTP/local-user paths. A collection error, unsupported condition,
+unknown role, unexpected writer, or alternate credential path is `NO-GO`. The
+sanitized report contains no principal names or emails; retain the exact report
+bytes and controller-evidence hash for independent review.
+
+The controller re-reads all three apps immediately before the first
 write, immediately before each later or compensating write, and after every
 write. A manual-only, fail-closed workflow source now exists at
 `.github/workflows/release-production.yml` on the review branch, with its source

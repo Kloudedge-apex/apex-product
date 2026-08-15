@@ -12,6 +12,7 @@ import {
   assertNextCatalogPlan,
   assertPostClerkCatalogPlan,
   attemptLeaseId,
+  azureControlContainerRoleAssignmentScope,
   azureInheritedRoleAssignmentListArgs,
   buildAdmissionContext,
   classifyPreOpenActionReplay,
@@ -203,6 +204,14 @@ test("Azure inherited role-assignment reads use the supported scoped CLI contrac
     "--subscription", SUBSCRIPTION,
     "--only-show-errors",
   ]);
+});
+
+test("Azure state authority reads target the exact control-container child scope", () => {
+  const request = validRequest();
+  assert.equal(
+    azureControlContainerRoleAssignmentScope(request),
+    `${request.storage.resourceId}/blobServices/default/containers/production-control`,
+  );
 });
 
 test("request validator rejects an activation revision reused as disabled baseline", () => {

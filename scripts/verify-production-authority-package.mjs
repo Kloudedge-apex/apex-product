@@ -93,11 +93,15 @@ const EXPECTED_CONTRACT = {
         "Microsoft.App/containerApps/write",
         "Microsoft.App/containerApps/revisions/read",
         "Microsoft.App/containerApps/revisions/activate/action",
+        "Microsoft.Authorization/roleAssignments/read",
       ],
       dataActions: [],
     },
     controlBlobOperator: {
-      actions: [],
+      actions: [
+        "Microsoft.Storage/storageAccounts/read",
+        "Microsoft.Authorization/roleAssignments/read",
+      ],
       dataActions: [
         "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read",
         "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/write",

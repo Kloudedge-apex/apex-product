@@ -60,6 +60,12 @@ rejected("blob deletion authority is rejected", "main.bicep", (source) =>
     "'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/delete'",
   ));
 
+rejected("Container App live RBAC audit read is required", "main.bicep", (source) =>
+  source.replace("          'Microsoft.Authorization/roleAssignments/read'\n", ""));
+
+rejected("storage identity read is required", "main.bicep", (source) =>
+  source.replace("          'Microsoft.Storage/storageAccounts/read'\n", ""));
+
 rejected("a wrong console repository OIDC subject is rejected", "main.bicep", (source) =>
   source.replace(
     "param consoleRepository string = 'Workforce-OS'",

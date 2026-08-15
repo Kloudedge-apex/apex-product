@@ -57,6 +57,13 @@ command, and protected source review enforces that prohibition. Bootstrap keeps
 its deterministic attempt lease across resumptions. Subsequent releases use a
 fresh UUID, acquire the same blob before creating their secondary Git ref or
 writing an ACR artifact, and release Azure last after conditional Git cleanup.
+The backend release identity also needs read-only storage-resource and inherited
+role-assignment access because the controller binds those exact live bytes into
+the independently reviewed mutation-authority evidence before any mutation.
+The state assignment query is made at the exact `production-control` container
+scope with inherited assignments included. That captures both the expected
+conditioned storage-account assignments and any direct container-scope writer;
+an account-only query would miss the latter.
 
 Every uncertainty enters `HELD`. Before terminal OPEN, a held attempt retains
 the Azure lease, GitHub lock, closed writer fence, and queue pauses. After the
@@ -186,6 +193,11 @@ of these exist and have been independently reviewed:
   administrator bypass;
 - exact environment-subject Azure OIDC federation and exclusive RBAC across
   all three Container Apps and the bootstrap state blob;
+- a current `GO` report from
+  `scripts/production-azure-mutation-authority-audit.mjs`, with complete active
+  and eligible PIM coverage, no alternate federation, delegator, wildcard,
+  child-scope, shared-key, SFTP, local-user, ACR admin, token, or persistent-task
+  authority, and non-null controller evidence whose hash is copied unchanged;
 - explicit proof that no other principal, pipeline, autoscaler, or operator can
   mutate the three Container Apps or bootstrap blob during the attempt; the
   controller verifies exact assignment evidence, but exclusivity remains an

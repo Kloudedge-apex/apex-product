@@ -18,6 +18,19 @@ identity may mutate only `nikxius-web`. Both release identities use the same
 ABAC-conditioned read/write role restricted by both exact container name and
 exact blob path to
 `production-control/workforce-os/initial-production-bootstrap/state-v1.json`.
+The release roles retain only the read-only management actions required by the
+controller to verify the storage resource identity and enumerate inherited role
+assignments at each protected resource; they cannot create, update, or delete
+role assignments.
+
+`scripts/production-azure-mutation-authority-audit.mjs` is the separate
+read-only exclusivity gate. It resolves active role definitions, wildcard and
+`NotActions` behavior, direct and inherited assignments, active and eligible
+PIM schedules, exact OIDC federations, control-container child-scope authority,
+ACR admin/token/task channels, and Storage shared-key/SFTP/local-user channels.
+Its report retains only opaque IDs, counts, condition hashes, and stable reason
+codes. It emits controller-compatible assignment evidence only when every gate
+is exclusive; otherwise it emits `NO-GO` and exits 2.
 
 Azure Storage authorizes lease acquire, renew, release, and break through the
 same blob `write` data action. RBAC can remove blob deletion and restrict
@@ -38,7 +51,19 @@ Run only local source verification:
 ```bash
 node scripts/verify-production-authority-package.mjs
 node --test scripts/tests/production-authority-package.test.mjs
+node --test scripts/tests/production-azure-mutation-authority-audit.test.mjs
 ```
+
+After an independently authorized apply and cleanup, an authorized reviewer may
+run the live read-only audit with an Azure session that can enumerate RBAC,
+PIM, identities, ACR configuration, and Storage configuration:
+
+```bash
+node scripts/production-azure-mutation-authority-audit.mjs
+```
+
+Do not replace a `NO-GO`, incomplete-coverage finding, or null controller
+evidence with a hand-authored attestation.
 
 The verifier compiles the Bicep and rejects wildcard roles, destructive
 actions, wrong OIDC subjects, missing exact-path conditions, build-to-app

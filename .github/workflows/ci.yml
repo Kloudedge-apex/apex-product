@@ -56,7 +56,9 @@ jobs:
           cache: "pnpm"
 
       - name: Verify source-only Azure production authority package
-        run: node --test scripts/tests/production-authority-package.test.mjs
+        run: |
+          node --test scripts/tests/production-authority-package.test.mjs
+          node --test scripts/tests/production-azure-mutation-authority-audit.test.mjs
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
