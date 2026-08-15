@@ -219,8 +219,13 @@ It must also expose the exact four
 `WORKFORCE_PRODUCTION_CONTROL_STORAGE_*` environment values for the fixed
 bootstrap state blob and grant the OIDC identity read/acquire/renew/release
 lease authority on that blob. Backend, console, and initial bootstrap all use
-that one Azure lease; repository-specific blobs and lease-break authority are
-not admitted.
+that one Azure lease. The reviewed custom role restricts read/write to the
+exact container and path and grants no blob-delete action. Azure maps acquire,
+renew, release, and break to the same blob-write data action, so RBAC cannot
+deny only break; the protected controllers themselves contain no break command.
+The compiled, unapplied authority source and its fail-closed verifier live in
+`deploy/azure-production-authority-v1/` and
+`scripts/verify-production-authority-package.mjs`.
 The script requires exact-commit green GitHub CI, validates the approver-signed
 production migration receipt against an external trust root whose exact bytes
 are SHA-256-pinned in reviewed source, verifies the

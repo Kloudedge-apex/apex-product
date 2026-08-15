@@ -395,8 +395,12 @@ the exact `WORKFORCE_PRODUCTION_CONTROL_STORAGE_ACCOUNT`,
 `WORKFORCE_PRODUCTION_CONTROL_STORAGE_BLOB`, and
 `WORKFORCE_PRODUCTION_CONTROL_STORAGE_RESOURCE_ID` values through the audited
 environment API. Repository/org variable fallbacks and per-repository blob
-names fail closed. Its OIDC identity needs exact-blob lease/read data-plane
-authority in addition to the reviewed ACR and Container Apps permissions.
+names fail closed. Its OIDC identity needs ABAC-conditioned exact-container-
+and-path blob read/write data-plane authority, with blob deletion excluded, in
+addition to the reviewed ACR and Container Apps permissions. Azure authorizes acquire,
+renew, release, and break through the same blob-write action; RBAC cannot deny
+only break, so the protected controller's absence of a break command is part
+of the trusted-invoker boundary.
 
 The script then atomically acquires the secondary GitHub ref lease
 `refs/heads/workforce-os-release-lock/production-gtm-platform` before reading

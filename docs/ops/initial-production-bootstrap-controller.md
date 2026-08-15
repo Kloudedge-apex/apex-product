@@ -49,8 +49,11 @@ The shared lease identity is exact: container `production-control`, blob
 `workforce-os/initial-production-bootstrap/state-v1.json`, and the one reviewed
 storage-account resource ID. Do not create per-repository lock blobs. The
 protected release identities need only the data-plane permissions required to
-read the blob lease state and acquire, renew, and release this exact lease; no
-controller is authorized to break a lease or delete the blob. Bootstrap keeps
+read the blob lease state and acquire, renew, and release this exact lease. The
+exact-container and exact-path read/write role excludes blob deletion, but
+Azure maps lease break to the same write action as acquire, renew, and release.
+RBAC therefore cannot remove only break; the controllers contain no break
+command, and protected source review enforces that prohibition. Bootstrap keeps
 its deterministic attempt lease across resumptions. Subsequent releases use a
 fresh UUID, acquire the same blob before creating their secondary Git ref or
 writing an ACR artifact, and release Azure last after conditional Git cleanup.
