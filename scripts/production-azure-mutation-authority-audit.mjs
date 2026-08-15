@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 const SUBSCRIPTION_ID = "3171575e-f164-425c-9ee0-2fb10cf93884";
 const RESOURCE_GROUP = "Ledgr-prod";
 const RESOURCE_GROUP_ID = `/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}`;
+const AUTHORITY_AUDIT_MANAGEMENT_GROUP_SCOPE =
+  "/providers/Microsoft.Management/managementGroups/d4b3813d-146f-4d03-96b8-d6e5862d58a2";
 const ISSUER = "https://token.actions.githubusercontent.com";
 const AUDIENCE = "api://AzureADTokenExchange";
 const CONTROL_CONTAINER = "production-control";
@@ -36,6 +38,7 @@ export const PRODUCTION_AZURE_AUTHORITY_CONTRACT = Object.freeze({
   subscriptionId: SUBSCRIPTION_ID,
   resourceGroup: RESOURCE_GROUP,
   resourceGroupId: RESOURCE_GROUP_ID,
+  authorityAuditManagementGroupScopes: [AUTHORITY_AUDIT_MANAGEMENT_GROUP_SCOPE],
   identities: {
     backendBuild: {
       name: "workforce-os-backend-build",
@@ -796,8 +799,12 @@ export function evaluateProductionAzureMutationAuthority(snapshot) {
   }
 
   const managementGroupScopes = Array.isArray(snapshot.pim?.managementGroupScopes)
-    ? snapshot.pim.managementGroupScopes
+    ? stableUnique(snapshot.pim.managementGroupScopes.map(lower))
     : [];
+  if (canonicalJson(managementGroupScopes) !==
+      canonicalJson(contract.authorityAuditManagementGroupScopes.map(lower))) {
+    findings.push({ code: "management-group-ancestry-mismatch", target: "azure" });
+  }
   const requiredScopes = requiredPimScopes(contract, identities, managementGroupScopes);
   for (const [field, code] of [
     ["eligibilityQueriedScopes", "pim-eligibility-coverage-incomplete"],

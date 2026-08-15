@@ -18,6 +18,9 @@ const ROLE_IDS = {
   storage: `${ROLE_ROOT}/33333333-3333-4333-8333-333333333333`,
   owner: `${ROLE_ROOT}/44444444-4444-4444-8444-444444444444`,
   excluded: `${ROLE_ROOT}/55555555-5555-4555-8555-555555555555`,
+  auditSubscription: `${ROLE_ROOT}/66666666-6666-4666-8666-666666666666`,
+  auditManagementGroup:
+    `${CONTRACT.authorityAuditManagementGroupScopes[0]}/providers/Microsoft.Authorization/roleDefinitions/77777777-7777-4777-8777-777777777777`,
 };
 
 const PRINCIPALS = {
@@ -85,6 +88,7 @@ function identityId(key) {
 
 function requiredPimScopes() {
   return [...new Set([
+    ...CONTRACT.authorityAuditManagementGroupScopes.map((scope) => scope.toLowerCase()),
     `/subscriptions/${CONTRACT.subscriptionId}`.toLowerCase(),
     CONTRACT.resourceGroupId.toLowerCase(),
     ...Object.values(CONTRACT.targets).map((target) => target.resourceId.toLowerCase()),
@@ -185,7 +189,7 @@ function exclusiveSnapshot() {
       ]),
     },
     pim: {
-      managementGroupScopes: [],
+      managementGroupScopes: [...CONTRACT.authorityAuditManagementGroupScopes],
       eligibilityQueriedScopes: requiredPimScopes(),
       activeQueriedScopes: requiredPimScopes(),
       eligible: [],
@@ -332,6 +336,44 @@ test("an inherited wildcard writer and delegator fails closed", () => {
   assert(codes(report).has("unexpected-authority-delegator"));
 });
 
+test("the exact read-only subscription and management-group audit roles are permitted", () => {
+  const snapshot = exclusiveSnapshot();
+  snapshot.roleDefinitions[ROLE_IDS.auditSubscription] = role(
+    ROLE_IDS.auditSubscription,
+    [
+      "Microsoft.ManagedIdentity/userAssignedIdentities/read",
+      "Microsoft.ContainerRegistry/registries/tokens/read",
+      "Microsoft.Storage/storageAccounts/managementPolicies/read",
+    ],
+  );
+  snapshot.roleDefinitions[ROLE_IDS.auditManagementGroup] = role(
+    ROLE_IDS.auditManagementGroup,
+    [
+      "Microsoft.Authorization/roleAssignments/read",
+      "Microsoft.Authorization/roleDefinitions/read",
+      "Microsoft.Authorization/roleAssignmentScheduleInstances/read",
+      "Microsoft.Authorization/roleEligibilityScheduleInstances/read",
+      "Microsoft.ResourceGraph/resources/read",
+    ],
+  );
+  for (const assignments of Object.values(snapshot.activeAssignmentsByScope)) {
+    for (const principal of [PRINCIPALS.backendRelease, PRINCIPALS.consoleRelease]) {
+      assignments.push(assignment(
+        principal,
+        ROLE_IDS.auditSubscription,
+        `/subscriptions/${CONTRACT.subscriptionId}`,
+      ));
+      assignments.push(assignment(
+        principal,
+        ROLE_IDS.auditManagementGroup,
+        CONTRACT.authorityAuditManagementGroupScopes[0],
+      ));
+    }
+  }
+  checkpointStructuralSnapshot(snapshot);
+  assert.equal(evaluateProductionAzureMutationAuthority(snapshot).status, "GO");
+});
+
 test("NotActions exclusions are honored when classifying a wildcard role", () => {
   const snapshot = exclusiveSnapshot();
   snapshot.roleDefinitions[ROLE_IDS.excluded] = role(
@@ -387,6 +429,17 @@ test("incomplete PIM coverage fails closed", () => {
   snapshot.pim.eligibilityQueriedScopes.pop();
   assert(codes(evaluateProductionAzureMutationAuthority(snapshot))
     .has("pim-eligibility-coverage-incomplete"));
+});
+
+test("a changed management-group ancestry fails closed", () => {
+  const snapshot = exclusiveSnapshot();
+  snapshot.pim.managementGroupScopes = [
+    "/providers/Microsoft.Management/managementGroups/other-production-parent",
+  ];
+  snapshot.pim.eligibilityQueriedScopes = requiredPimScopes();
+  snapshot.pim.activeQueriedScopes = requiredPimScopes();
+  assert(codes(evaluateProductionAzureMutationAuthority(snapshot))
+    .has("management-group-ancestry-mismatch"));
 });
 
 test("an unresolved role definition fails closed", () => {

@@ -194,6 +194,10 @@ of these exist and have been independently reviewed:
   administrator bypass;
 - exact environment-subject Azure OIDC federation and exclusive RBAC across
   all three Container Apps and the bootstrap state blob;
+- the exact release identities have both source-reviewed read-only audit roles:
+  subscription-scoped resource-configuration reads and authorization/PIM plus
+  Resource Graph reads at the fixed management-group ancestor; build identities
+  have neither role;
 - a current `GO` report from
   `scripts/production-azure-mutation-authority-audit.mjs`, with complete active
   and eligible PIM coverage, no alternate federation, delegator, wildcard,

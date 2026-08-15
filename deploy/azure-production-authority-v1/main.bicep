@@ -3,6 +3,9 @@ targetScope = 'subscription'
 @description('Existing Workforce OS production resource group.')
 param productionResourceGroupName string = 'Ledgr-prod'
 
+@description('Exact management-group ancestor whose authorization and PIM state affects the production subscription.')
+param authorityAuditManagementGroupId string = 'd4b3813d-146f-4d03-96b8-d6e5862d58a2'
+
 @description('Location for the four user-assigned OIDC identities.')
 param location string = 'eastus'
 
@@ -97,6 +100,39 @@ resource controlBlobOperatorRole 'Microsoft.Authorization/roleDefinitions@2022-0
   }
 }
 
+resource authorityAuditSubscriptionReaderRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
+  name: guid(subscription().id, 'workforce-os-authority-audit-subscription-reader-v1')
+  properties: {
+    roleName: 'Workforce OS Authority Audit Subscription Reader v1'
+    description: 'May read only the production resource configuration required by the fail-closed authority audit; authorization and PIM visibility are granted separately at the exact management group.'
+    type: 'CustomRole'
+    assignableScopes: [subscription().id]
+    permissions: [
+      {
+        actions: [
+          'Microsoft.Resources/subscriptions/read'
+          'Microsoft.Resources/subscriptions/resourceGroups/read'
+          'Microsoft.App/containerApps/read'
+          'Microsoft.ManagedIdentity/userAssignedIdentities/read'
+          'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials/read'
+          'Microsoft.ContainerRegistry/registries/read'
+          'Microsoft.ContainerRegistry/registries/tokens/read'
+          'Microsoft.ContainerRegistry/registries/tasks/read'
+          'Microsoft.Storage/storageAccounts/read'
+          'Microsoft.Storage/storageAccounts/blobServices/read'
+          'Microsoft.Storage/storageAccounts/blobServices/containers/read'
+          'Microsoft.Storage/storageAccounts/localusers/read'
+          'Microsoft.Storage/storageAccounts/managementPolicies/read'
+          'Microsoft.Storage/storageAccounts/objectReplicationPolicies/read'
+        ]
+        notActions: []
+        dataActions: []
+        notDataActions: []
+      }
+    ]
+  }
+}
+
 module authorityResources './resources.bicep' = {
   name: 'workforce-os-production-authority-v1'
   scope: productionResourceGroup
@@ -123,4 +159,25 @@ module authorityResources './resources.bicep' = {
   }
 }
 
-output authority object = authorityResources.outputs.authority
+resource backendAuthorityAuditSubscriptionRead 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(subscription().id, 'workforce-os-backend-release', authorityAuditSubscriptionReaderRole.id)
+  properties: {
+    principalId: authorityResources.outputs.authority.backendRelease.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: authorityAuditSubscriptionReaderRole.id
+  }
+}
+
+resource consoleAuthorityAuditSubscriptionRead 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(subscription().id, 'workforce-os-console-release', authorityAuditSubscriptionReaderRole.id)
+  properties: {
+    principalId: authorityResources.outputs.authority.consoleRelease.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: authorityAuditSubscriptionReaderRole.id
+  }
+}
+
+output authority object = union(authorityResources.outputs.authority, {
+  authorityAuditManagementGroupId: authorityAuditManagementGroupId
+  authorityAuditSubscriptionReaderRoleId: authorityAuditSubscriptionReaderRole.id
+})

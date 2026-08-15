@@ -62,6 +62,7 @@ const EXPECTED_CONTRACT = {
   status: "source-only-no-apply",
   subscriptionId: "3171575e-f164-425c-9ee0-2fb10cf93884",
   resourceGroup: "Ledgr-prod",
+  authorityAuditManagementGroupId: "d4b3813d-146f-4d03-96b8-d6e5862d58a2",
   location: "eastus",
   registryName: "ledgracr",
   controlStorageAccountName: "ledgrstorage",
@@ -114,6 +115,38 @@ const EXPECTED_CONTRACT = {
         "Microsoft.Storage/storageAccounts/blobServices/containers/blobs:path",
       ],
     },
+    authorityAuditSubscriptionReader: {
+      actions: [
+        "Microsoft.Resources/subscriptions/read",
+        "Microsoft.Resources/subscriptions/resourceGroups/read",
+        "Microsoft.App/containerApps/read",
+        "Microsoft.ManagedIdentity/userAssignedIdentities/read",
+        "Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials/read",
+        "Microsoft.ContainerRegistry/registries/read",
+        "Microsoft.ContainerRegistry/registries/tokens/read",
+        "Microsoft.ContainerRegistry/registries/tasks/read",
+        "Microsoft.Storage/storageAccounts/read",
+        "Microsoft.Storage/storageAccounts/blobServices/read",
+        "Microsoft.Storage/storageAccounts/blobServices/containers/read",
+        "Microsoft.Storage/storageAccounts/localusers/read",
+        "Microsoft.Storage/storageAccounts/managementPolicies/read",
+        "Microsoft.Storage/storageAccounts/objectReplicationPolicies/read",
+      ],
+      dataActions: [],
+    },
+    authorityAuditManagementGroupReader: {
+      actions: [
+        "Microsoft.Authorization/roleAssignments/read",
+        "Microsoft.Authorization/roleDefinitions/read",
+        "Microsoft.Authorization/roleAssignmentScheduleInstances/read",
+        "Microsoft.Authorization/roleEligibilityScheduleInstances/read",
+        "Microsoft.ResourceGraph/resources/read",
+        "Microsoft.Management/managementGroups/read",
+        "Microsoft.Management/managementGroups/subscriptions/read",
+        "Microsoft.Resources/subscriptions/read",
+      ],
+      dataActions: [],
+    },
   },
   builtInRoles: {
     acrPull: "7f951dda-4ed3-4680-a7ca-43fe172d538d",
@@ -123,6 +156,10 @@ const EXPECTED_CONTRACT = {
     consoleRelease: ["nikxius-web"],
     backendBuild: [],
     consoleBuild: [],
+  },
+  authorityAuditAssignments: {
+    subscription: ["backendRelease", "consoleRelease"],
+    managementGroup: ["backendRelease", "consoleRelease"],
   },
   blobLeaseBoundary: {
     readWriteRestrictedToExactPaths: true,
@@ -140,6 +177,8 @@ const ROLE_NAMES = {
   "Workforce OS ACR Build Runner v1": "acrBuildRunner",
   "Workforce OS Container App Release v1": "containerAppRelease",
   "Workforce OS Control Blob Operator v1": "controlBlobOperator",
+  "Workforce OS Authority Audit Subscription Reader v1":
+    "authorityAuditSubscriptionReader",
 };
 
 function compile(mainPath) {
@@ -158,7 +197,7 @@ function verifyRoleDefinitions(template, contract) {
   const roles = template.resources.filter(
     (resource) => resource.type === "Microsoft.Authorization/roleDefinitions",
   );
-  if (roles.length !== 3) fail("compiled custom-role count is not three");
+  if (roles.length !== 4) fail("compiled subscription custom-role count is not four");
   for (const role of roles) {
     const key = ROLE_NAMES[role.properties?.roleName];
     if (!key) fail("compiled an unreviewed custom role");
@@ -177,6 +216,82 @@ function verifyRoleDefinitions(template, contract) {
     if (permission.actions.some((action) => action.includes("*")) ||
       permission.dataActions.some((action) => action.includes("*"))) {
       fail(key + " contains a wildcard permission");
+    }
+  }
+}
+
+function verifySubscriptionAuditAssignments(template) {
+  const assignments = template.resources.filter(
+    (resource) => resource.type === "Microsoft.Authorization/roleAssignments",
+  );
+  if (assignments.length !== 2) {
+    fail("subscription authority-audit assignment count is not two");
+  }
+  const expectedRole =
+    "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', " +
+    "guid(subscription().id, 'workforce-os-authority-audit-subscription-reader-v1'))]";
+  for (const identity of ["backendRelease", "consoleRelease"]) {
+    const marker = identity === "backendRelease" ? "backend-release" : "console-release";
+    const assignment = assignments.find((resource) => resource.name?.includes(marker));
+    if (!assignment || assignment.scope !== undefined ||
+      assignment.properties?.principalType !== "ServicePrincipal" ||
+      assignment.properties?.roleDefinitionId !== expectedRole ||
+      !assignment.properties?.principalId?.includes(`.${identity}.principalId`)) {
+      fail(`subscription authority-audit assignment is invalid for ${identity}`);
+    }
+  }
+}
+
+function verifyManagementGroupAuditTemplate(template, contract) {
+  const expectedScope =
+    `/providers/Microsoft.Management/managementGroups/${contract.authorityAuditManagementGroupId}`;
+  if (template.variables?.authorityAuditManagementGroupScope !== expectedScope) {
+    fail("management-group audit-reader fixed scope is invalid");
+  }
+  const roles = template.resources.filter(
+    (resource) => resource.type === "Microsoft.Authorization/roleDefinitions",
+  );
+  if (roles.length !== 1) fail("management-group audit role count is not one");
+  const role = roles[0];
+  if (role.properties?.roleName !==
+      "Workforce OS Authority Audit Management Group Reader v1" ||
+    JSON.stringify(role.properties?.assignableScopes) !==
+      JSON.stringify(["[variables('authorityAuditManagementGroupScope')]"])) {
+    fail("management-group audit role identity or scope is invalid");
+  }
+  const permission = role.properties?.permissions?.[0];
+  if (!permission || role.properties.permissions.length !== 1) {
+    fail("management-group audit role has an invalid permission block");
+  }
+  sameArray(
+    permission.actions,
+    contract.customRoles.authorityAuditManagementGroupReader.actions,
+    "management-group audit-reader actions",
+  );
+  sameArray(permission.dataActions, [], "management-group audit-reader data actions");
+  sameArray(permission.notActions, [], "management-group audit-reader notActions");
+  sameArray(permission.notDataActions, [], "management-group audit-reader notDataActions");
+  if (permission.actions.some((action) => action.includes("*"))) {
+    fail("management-group audit reader contains a wildcard permission");
+  }
+
+  const assignments = template.resources.filter(
+    (resource) => resource.type === "Microsoft.Authorization/roleAssignments",
+  );
+  if (assignments.length !== 2) {
+    fail("management-group authority-audit assignment count is not two");
+  }
+  const expectedRole =
+    "[extensionResourceId(managementGroup().id, 'Microsoft.Authorization/roleDefinitions', " +
+    "guid(variables('authorityAuditManagementGroupScope'), " +
+    "'workforce-os-authority-audit-management-group-reader-v1'))]";
+  for (const identity of contract.authorityAuditAssignments.managementGroup) {
+    const parameter = `${identity}PrincipalId`;
+    const assignment = assignments.find((resource) =>
+      resource.properties?.principalId === `[parameters('${parameter}')]`);
+    if (!assignment || assignment.properties?.principalType !== "ServicePrincipal" ||
+      assignment.properties?.roleDefinitionId !== expectedRole) {
+      fail(`management-group authority-audit assignment is invalid for ${identity}`);
     }
   }
 }
@@ -335,6 +450,7 @@ function verifyNestedTemplate(template) {
 function verifyDefaults(template, contract) {
   const expected = {
     productionResourceGroupName: contract.resourceGroup,
+    authorityAuditManagementGroupId: contract.authorityAuditManagementGroupId,
     location: contract.location,
     registryName: contract.registryName,
     controlStorageAccountName: contract.controlStorageAccountName,
@@ -432,6 +548,10 @@ export function verifyProductionAuthorityPackage(packagePath = DEFAULT_PACKAGE) 
   same(contract, EXPECTED_CONTRACT, "authority contract");
   const main = read(resolve(root, "main.bicep"), "main Bicep");
   const resources = read(resolve(root, "resources.bicep"), "resource Bicep");
+  const managementGroupAuditReader = read(
+    resolve(root, "management-group-audit-reader.bicep"),
+    "management-group audit-reader Bicep",
+  );
   const initializer = read(
     resolve(root, "initialize-control-blob.sh"),
     "control-blob initializer",
@@ -443,6 +563,7 @@ export function verifyProductionAuthorityPackage(packagePath = DEFAULT_PACKAGE) 
 
   for (const literal of [
     "param productionResourceGroupName string = 'Ledgr-prod'",
+    "param authorityAuditManagementGroupId string = 'd4b3813d-146f-4d03-96b8-d6e5862d58a2'",
     "param location string = 'eastus'",
     "param registryName string = 'ledgracr'",
     "param controlStorageAccountName string = 'ledgrstorage'",
@@ -472,8 +593,20 @@ export function verifyProductionAuthorityPackage(packagePath = DEFAULT_PACKAGE) 
     "backendWorkerRelease",
     "backendConsoleRelease",
     "consoleConsoleRelease",
+    "authorityAuditSubscriptionReaderRole",
+    "backendAuthorityAuditSubscriptionRead",
+    "consoleAuthorityAuditSubscriptionRead",
   ]) {
-    requireLiteral(resources, literal, "resource Bicep invariant");
+    requireLiteral(main + resources, literal, "authority Bicep invariant");
+  }
+  for (const literal of [
+    "targetScope = 'managementGroup'",
+    "var authorityAuditManagementGroupScope = '/providers/Microsoft.Management/managementGroups/d4b3813d-146f-4d03-96b8-d6e5862d58a2'",
+    "authorityAuditManagementGroupReaderRole",
+    "backendAuthorityAuditManagementGroupRead",
+    "consoleAuthorityAuditManagementGroupRead",
+  ]) {
+    requireLiteral(managementGroupAuditReader, literal, "management-group audit Bicep invariant");
   }
   for (const forbidden of [
     "containerApps/delete",
@@ -484,13 +617,14 @@ export function verifyProductionAuthorityPackage(packagePath = DEFAULT_PACKAGE) 
     "listCredentials/action",
     "regenerateCredential/action",
   ]) {
-    if ((main + resources).includes(forbidden)) {
+    if ((main + resources + managementGroupAuditReader).includes(forbidden)) {
       fail("Bicep contains forbidden authority: " + forbidden);
     }
   }
   const reviewedActions = Object.values(contract.customRoles)
     .flatMap((role) => [...role.actions, ...role.dataActions]);
   const sourceActions = [...main.matchAll(/'(Microsoft\.[^']+)'/gu)]
+    .concat([...managementGroupAuditReader.matchAll(/'(Microsoft\.[^']+)'/gu)])
     .map((match) => match[1])
     .filter((action) => /\/(?:read|write|action)$/u.test(action));
   sameArray(sourceActions, reviewedActions, "Bicep permission literals");
@@ -498,9 +632,14 @@ export function verifyProductionAuthorityPackage(packagePath = DEFAULT_PACKAGE) 
   verifyDrainCheckpointInitializer(drainCheckpointInitializer);
 
   const template = compile(resolve(root, "main.bicep"));
+  const managementGroupTemplate = compile(
+    resolve(root, "management-group-audit-reader.bicep"),
+  );
   verifyDefaults(template, contract);
   verifyRoleDefinitions(template, contract);
+  verifySubscriptionAuditAssignments(template);
   verifyNestedTemplate(template);
+  verifyManagementGroupAuditTemplate(managementGroupTemplate, contract);
   return true;
 }
 

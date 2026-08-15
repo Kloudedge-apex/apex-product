@@ -66,6 +66,42 @@ rejected("Container App live RBAC audit read is required", "main.bicep", (source
 rejected("storage identity read is required", "main.bicep", (source) =>
   source.replace("          'Microsoft.Storage/storageAccounts/read'\n", ""));
 
+rejected("authority audit federation read is required", "main.bicep", (source) =>
+  source.replace(
+    "          'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials/read'\n",
+    "",
+  ));
+
+rejected("the exact authority-audit management group is required", "main.bicep", (source) =>
+  source.replace(
+    "param authorityAuditManagementGroupId string = 'd4b3813d-146f-4d03-96b8-d6e5862d58a2'",
+    "param authorityAuditManagementGroupId string = 'other-management-group'",
+  ));
+
+rejected(
+  "management-group eligible-PIM read is required",
+  "management-group-audit-reader.bicep",
+  (source) => source.replace(
+    "          'Microsoft.Authorization/roleEligibilityScheduleInstances/read'\n",
+    "",
+  ),
+);
+
+rejected(
+  "management-group assignable scope is fixed",
+  "management-group-audit-reader.bicep",
+  (source) => source.replace(
+    "var authorityAuditManagementGroupScope = '/providers/Microsoft.Management/managementGroups/d4b3813d-146f-4d03-96b8-d6e5862d58a2'",
+    "var authorityAuditManagementGroupScope = '/providers/Microsoft.Management/managementGroups/other-management-group'",
+  ),
+);
+
+rejected("build identity audit-reader authority is rejected", "main.bicep", (source) =>
+  source.replace(
+    "principalId: authorityResources.outputs.authority.backendRelease.principalId",
+    "principalId: authorityResources.outputs.authority.backendBuild.principalId",
+  ));
+
 rejected("a wrong console repository OIDC subject is rejected", "main.bicep", (source) =>
   source.replace(
     "param consoleRepository string = 'Workforce-OS'",

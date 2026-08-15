@@ -458,6 +458,12 @@ shared-key/SFTP/local-user paths. It also rejects lifecycle rules that can act
 on the exact control blob and object replication into the control container.
 A collection error, unsupported condition, unknown role, unexpected writer,
 alternate credential path, or autonomous Storage writer is `NO-GO`.
+The exact release identity running this audit must inherit the source-reviewed
+management-group authorization/PIM reader and the subscription resource-
+configuration reader from `deploy/azure-production-authority-v1`. The package
+has separate subscription and management-group entry points; omission, wrong
+ancestry, build-identity assignment, or partial apply leaves collection
+incomplete and cannot be replaced by a human-session report.
 
 Structural exclusivity alone is not `GO`: already-issued cloud credentials may
 outlive the assignment that created them. A structurally clean report exposes a

@@ -2,8 +2,11 @@
 
 Status: source-only, compiled, and unapplied.
 
-This subscription-scope Bicep package defines four user-assigned managed
-identities with exact GitHub environment OIDC subjects:
+This source-only package has two compiled Bicep entry points. `main.bicep` is
+subscription scoped and defines four user-assigned managed identities with exact
+GitHub environment OIDC subjects. `management-group-audit-reader.bicep` is a
+separate management-group deployment because Azure does not allow a subscription-
+scope deployment to create resources at its parent management-group scope:
 
 - backend and console candidate-build identities for
   `workforce-os-production-build`;
@@ -19,10 +22,20 @@ ABAC-conditioned read/write role restricted by exact container name and two
 exact blob paths: the controller state blob and the zero-byte authority-drain
 checkpoint. No other blob path is granted.
 
-The release roles retain only the read-only management actions required by the
-controller to verify the storage resource identity and enumerate inherited role
-assignments at each protected resource; they cannot create, update, or delete
-role assignments.
+The release identities also receive two explicit read-only audit roles. The
+subscription role can read only the Container Apps, managed identities and
+federations, ACR registry/token/task configuration, and Storage account,
+container, local-user, lifecycle, and object-replication configuration used by
+the audit. The management-group companion grants only authorization/PIM role
+reads, Resource Graph reads, and ancestry reads at the one reviewed ancestor
+`d4b3813d-146f-4d03-96b8-d6e5862d58a2`. Neither role contains a wildcard,
+write/action permission, or data-plane permission. Build identities receive
+neither audit role.
+
+The management-group entry point requires the two release principal IDs emitted
+by `main.bicep`, so an authorized apply is ordered: subscription package first,
+then the exact management-group companion. Omitting or mis-scoping either phase
+makes the live audit incomplete and therefore `NO-GO`.
 
 `scripts/production-azure-mutation-authority-audit.mjs` is the separate
 read-only exclusivity gate. It resolves active role definitions, wildcard and
@@ -62,6 +75,8 @@ Run only local source verification:
 node scripts/verify-production-authority-package.mjs
 node --test scripts/tests/production-authority-package.test.mjs
 node --test scripts/tests/production-azure-mutation-authority-audit.test.mjs
+az bicep build --file deploy/azure-production-authority-v1/main.bicep --stdout >/dev/null
+az bicep build --file deploy/azure-production-authority-v1/management-group-audit-reader.bicep --stdout >/dev/null
 ```
 
 After an independently authorized apply and cleanup, an authorized reviewer may
@@ -111,12 +126,12 @@ separated from the required blob write action.
 
 ## External apply boundary
 
-Do not run `az deployment sub create`, either initializer, GitHub environment
+Do not run `az deployment sub create`, `az deployment mg create`, either initializer, GitHub environment
 configuration, role removal, checkpoint creation/reset, or any other apply
 operation without separate explicit authorization. Before any future apply:
 
-1. independently review a subscription-scope what-if and the exact custom-role
-   actions;
+1. independently review subscription-scope and exact-management-group what-if
+   output, the ordered principal-ID handoff, and every custom-role action;
 2. identify every inherited user, group, service principal, pipeline, and
    break-glass writer;
 3. provision protected GitHub environments and branch controls;

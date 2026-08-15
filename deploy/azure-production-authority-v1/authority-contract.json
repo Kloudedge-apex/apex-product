@@ -3,6 +3,7 @@
   "status": "source-only-no-apply",
   "subscriptionId": "3171575e-f164-425c-9ee0-2fb10cf93884",
   "resourceGroup": "Ledgr-prod",
+  "authorityAuditManagementGroupId": "d4b3813d-146f-4d03-96b8-d6e5862d58a2",
   "location": "eastus",
   "registryName": "ledgracr",
   "controlStorageAccountName": "ledgrstorage",
@@ -53,6 +54,38 @@
         "Microsoft.Storage/storageAccounts/blobServices/containers:name",
         "Microsoft.Storage/storageAccounts/blobServices/containers/blobs:path"
       ]
+    },
+    "authorityAuditSubscriptionReader": {
+      "actions": [
+        "Microsoft.Resources/subscriptions/read",
+        "Microsoft.Resources/subscriptions/resourceGroups/read",
+        "Microsoft.App/containerApps/read",
+        "Microsoft.ManagedIdentity/userAssignedIdentities/read",
+        "Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials/read",
+        "Microsoft.ContainerRegistry/registries/read",
+        "Microsoft.ContainerRegistry/registries/tokens/read",
+        "Microsoft.ContainerRegistry/registries/tasks/read",
+        "Microsoft.Storage/storageAccounts/read",
+        "Microsoft.Storage/storageAccounts/blobServices/read",
+        "Microsoft.Storage/storageAccounts/blobServices/containers/read",
+        "Microsoft.Storage/storageAccounts/localusers/read",
+        "Microsoft.Storage/storageAccounts/managementPolicies/read",
+        "Microsoft.Storage/storageAccounts/objectReplicationPolicies/read"
+      ],
+      "dataActions": []
+    },
+    "authorityAuditManagementGroupReader": {
+      "actions": [
+        "Microsoft.Authorization/roleAssignments/read",
+        "Microsoft.Authorization/roleDefinitions/read",
+        "Microsoft.Authorization/roleAssignmentScheduleInstances/read",
+        "Microsoft.Authorization/roleEligibilityScheduleInstances/read",
+        "Microsoft.ResourceGraph/resources/read",
+        "Microsoft.Management/managementGroups/read",
+        "Microsoft.Management/managementGroups/subscriptions/read",
+        "Microsoft.Resources/subscriptions/read"
+      ],
+      "dataActions": []
     }
   },
   "builtInRoles": {
@@ -63,6 +96,10 @@
     "consoleRelease": ["nikxius-web"],
     "backendBuild": [],
     "consoleBuild": []
+  },
+  "authorityAuditAssignments": {
+    "subscription": ["backendRelease", "consoleRelease"],
+    "managementGroup": ["backendRelease", "consoleRelease"]
   },
   "blobLeaseBoundary": {
     "readWriteRestrictedToExactPaths": true,
