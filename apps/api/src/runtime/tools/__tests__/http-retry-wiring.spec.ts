@@ -8,6 +8,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { circuitBreakerRegistry } from "../../../common/http-retry.util";
 import type { ToolContext, IntegrationCredentials } from "../tool.interface";
 
+const pinnedFetchMock = vi.hoisted(() =>
+  vi.fn((input: string | URL, init?: RequestInit) => fetch(input, init)),
+);
+
 // Bypass the SSRF guard's DNS check for these retry-wiring tests. The guard's
 // real-world behavior is exercised by its own spec (ssrf-guard.spec.ts) — here
 // we only care that `fetchWithRetry` is wired through the tool surface, not
@@ -16,10 +20,20 @@ vi.mock("../../util/ssrf-guard", async () => {
   const actual = await vi.importActual<typeof import("../../util/ssrf-guard")>("../../util/ssrf-guard");
   return {
     ...actual,
-    ssrfGuardedFetch: (input: string | URL, init: RequestInit, opts: { fetcher?: (u: URL, i: RequestInit) => Promise<Response> } = {}) => {
+    ssrfGuardedFetch: (
+      input: string | URL,
+      init: RequestInit,
+      opts: {
+        fetcher?: (
+          u: URL,
+          i: RequestInit,
+          pinnedFetch: typeof pinnedFetchMock,
+        ) => Promise<Response>;
+      } = {},
+    ) => {
       const url = typeof input === "string" ? new URL(input) : input;
-      const fetcher = opts.fetcher ?? ((u: URL, i: RequestInit) => fetch(u, i));
-      return fetcher(url, init);
+      const fetcher = opts.fetcher ?? ((u: URL, i: RequestInit) => pinnedFetchMock(u, i));
+      return fetcher(url, init, pinnedFetchMock);
     },
     assertUrlIsPublicHttp: async (input: string | URL) => (typeof input === "string" ? new URL(input) : input),
   };
@@ -48,6 +62,7 @@ function buildContext(
 
 beforeEach(() => {
   circuitBreakerRegistry._resetForTests();
+  pinnedFetchMock.mockClear();
 });
 
 afterEach(() => {
@@ -98,6 +113,7 @@ describe("WebScrapeTool — retry wiring", () => {
 
     expect(result.success).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(pinnedFetchMock).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -127,7 +143,7 @@ describe("HubSpotTool — retry wiring", () => {
 });
 
 describe("SendEmailTool — retry wiring", () => {
-  it("retries on 429 from Gmail", async () => {
+  it("does not automatically retry a non-idempotent Gmail POST after 429", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(mockResponse(429, {}))
@@ -138,15 +154,19 @@ describe("SendEmailTool — retry wiring", () => {
       ["gmail", { provider: "gmail", accessToken: "real_token" }],
     ]);
 
-    const { SendEmailTool } = await import("../send-email.tool");
+    const { EMAIL_DISPATCH_OUTCOME, SendEmailTool, getEmailDispatchOutcome } =
+      await import("../send-email.tool");
     const tool = new SendEmailTool();
     const result = await tool.execute(
       { to: "a@b.com", subject: "Hi", body: "body" },
       buildContext(integrations),
     );
 
-    expect(result.success).toBe(true);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.success).toBe(false);
+    expect(getEmailDispatchOutcome(result)).toBe(
+      EMAIL_DISPATCH_OUTCOME.CONFIRMED_NOT_SENT,
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain("gmail.googleapis.com");
   });
 });

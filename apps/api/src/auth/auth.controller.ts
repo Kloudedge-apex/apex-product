@@ -78,13 +78,17 @@ export class AuthController {
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
       throw new UnauthorizedException("Missing Authorization header");
     }
+    let payload: Awaited<ReturnType<typeof verifyClerkToken>>;
     try {
-      const payload = await verifyClerkToken(authHeader.slice(7).trim());
-      return this.authService.getUserByClerkId(payload.sub);
+      payload = await verifyClerkToken(authHeader.slice(7).trim());
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Invalid token";
       throw new UnauthorizedException(msg);
     }
+    return this.authService.getUserByClerkId(payload.sub, {
+      clerkOrgId: payload.org_id,
+      clerkOrgRole: payload.org_role,
+    });
   }
 
   /**
@@ -117,7 +121,7 @@ export class AuthController {
     // Defense-in-depth recency check: enforced BEFORE svix.verify so a stolen
     // signed payload can't be replayed weeks later.
     const ts = Number(svixTimestamp);
-    if (!Number.isFinite(ts)) {
+    if (!Number.isSafeInteger(ts) || ts <= 0) {
       throw new UnauthorizedException("Invalid svix-timestamp");
     }
     const ageSec = Math.abs(Date.now() / 1000 - ts);
@@ -142,7 +146,10 @@ export class AuthController {
     }
 
     const body = JSON.parse(req.rawBody.toString("utf8")) as unknown;
-    return this.authService.handleWebhook(body);
+    return this.authService.handleWebhook(body, {
+      id: svixId,
+      timestampSeconds: ts,
+    });
   }
 }
 

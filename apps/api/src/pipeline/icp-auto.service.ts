@@ -3,6 +3,10 @@ import { PrismaService } from "../prisma/prisma.service";
 import { LLMService } from "../runtime/llm.service";
 import { chatJsonWithRetry } from "../common/json-output.util";
 import { ssrfGuardedFetch } from "../runtime/util/ssrf-guard";
+import {
+  drainResponseBodyWithLimit,
+  readResponseTextWithLimit,
+} from "../common/http-body.util";
 
 const FETCH_TIMEOUT_MS = 15_000;
 const MAX_HTML_BYTES = 500_000;
@@ -67,7 +71,7 @@ export class IcpAutoService {
       );
     }
 
-    const extracted = await this.extractIcpWithLlm(websiteUrl, text);
+    const extracted = await this.extractIcpWithLlm(orgId, websiteUrl, text);
 
     const org = await this.prisma.org.findUnique({
       where: { id: orgId },
@@ -132,24 +136,10 @@ export class IcpAutoService {
         { maxRedirects: 5 },
       );
       if (!res.ok) {
+        await drainResponseBodyWithLimit(res);
         throw new Error(`Homepage fetch returned ${res.status}`);
       }
-      const reader = res.body?.getReader();
-      if (!reader) return "";
-      let total = 0;
-      const chunks: Uint8Array[] = [];
-      while (total < MAX_HTML_BYTES) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value);
-        total += value.byteLength;
-      }
-      try {
-        await reader.cancel();
-      } catch {
-        /* ignore */
-      }
-      const html = Buffer.concat(chunks.map((c) => Buffer.from(c))).toString("utf-8");
+      const html = await readResponseTextWithLimit(res, MAX_HTML_BYTES);
       return htmlToText(html).slice(0, MAX_TEXT_CHARS);
     } catch (err) {
       this.logger.warn(
@@ -164,6 +154,7 @@ export class IcpAutoService {
   }
 
   private async extractIcpWithLlm(
+    orgId: string,
     url: string,
     text: string,
   ): Promise<ExtractedIcp> {
@@ -195,7 +186,8 @@ export class IcpAutoService {
         temperature: 0,
         agent: "icp_auto_extractor.extract",
         tags: ["pipeline", "icp_auto_extractor"],
-        metadata: { source_url: url },
+        orgId,
+        metadata: { source_url: url, org_id: orgId },
       },
       guard: isIcpLlmPayload,
       schemaDescription:

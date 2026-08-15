@@ -2,6 +2,7 @@ import {
   Injectable,
   Logger,
   ConflictException,
+  NotFoundException,
   Inject,
   forwardRef,
 } from "@nestjs/common";
@@ -23,7 +24,22 @@ import {
   isLikelyHumanName,
   isLikelyJobTitle,
 } from "./quality/lead-quality.validators";
-import type { Seniority, Department, ScrapeStage } from "@prisma/client";
+import type {
+  Seniority,
+  Department,
+  ScrapeStage,
+  Prisma,
+  EmailSource,
+} from "@prisma/client";
+import { OutreachArtifactStatus } from "@prisma/client";
+
+const SOURCE_CONFIRMED_EMAIL_SOURCES = new Set<EmailSource>([
+  "TEAM_PAGE",
+  "GITHUB_COMMIT",
+  "SEC_FILING",
+  "PRESS_RELEASE",
+]);
+const EMAIL_VERIFICATION_BATCH_LIMIT = 2;
 
 interface CompanyFilters {
   page: number;
@@ -69,8 +85,8 @@ export class LeadsService {
       targetTitles?: string[];
       targetIndustries?: string[];
       targetGeos?: string[];
-      minEmployees?: number;
-      maxEmployees?: number;
+      minEmployees?: number | null;
+      maxEmployees?: number | null;
       techStackSignals?: string[];
       intentKeywords?: string[];
       seedDomains?: string[];
@@ -89,6 +105,61 @@ export class LeadsService {
         intentKeywords: data.intentKeywords ?? [],
         seedDomains: data.seedDomains ?? [],
       },
+    });
+  }
+
+  async upsertCurrentIcpProfile(
+    orgId: string,
+    data: {
+      name: string;
+      targetTitles?: string[];
+      targetIndustries?: string[];
+      targetGeos?: string[];
+      minEmployees?: number | null;
+      maxEmployees?: number | null;
+      techStackSignals?: string[];
+      intentKeywords?: string[];
+      seedDomains?: string[];
+    },
+  ) {
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`
+        SELECT pg_advisory_xact_lock(
+          hashtextextended(${`workforce-current-icp:${orgId}`}, 0::bigint)
+        )
+      `;
+      const current = await tx.icpProfile.findFirst({
+        where: { orgId },
+        orderBy: { updatedAt: "desc" },
+        select: { id: true },
+      });
+      const createProfile = {
+        name: data.name,
+        targetTitles: data.targetTitles ?? [],
+        targetIndustries: data.targetIndustries ?? [],
+        targetGeos: data.targetGeos ?? [],
+        minEmployees: data.minEmployees ?? null,
+        maxEmployees: data.maxEmployees ?? null,
+        techStackSignals: data.techStackSignals ?? [],
+        intentKeywords: data.intentKeywords ?? [],
+        seedDomains: data.seedDomains ?? [],
+      };
+      if (current) {
+        const update: Prisma.IcpProfileUpdateInput = { name: data.name };
+        if (data.targetTitles !== undefined) update.targetTitles = data.targetTitles;
+        if (data.targetIndustries !== undefined) update.targetIndustries = data.targetIndustries;
+        if (data.targetGeos !== undefined) update.targetGeos = data.targetGeos;
+        if (data.minEmployees !== undefined) update.minEmployees = data.minEmployees;
+        if (data.maxEmployees !== undefined) update.maxEmployees = data.maxEmployees;
+        if (data.techStackSignals !== undefined) update.techStackSignals = data.techStackSignals;
+        if (data.intentKeywords !== undefined) update.intentKeywords = data.intentKeywords;
+        if (data.seedDomains !== undefined) update.seedDomains = data.seedDomains;
+        return tx.icpProfile.update({
+          where: { id: current.id },
+          data: update,
+        });
+      }
+      return tx.icpProfile.create({ data: { orgId, ...createProfile } });
     });
   }
 
@@ -342,11 +413,17 @@ export class LeadsService {
     icp?: { targetTitles: string[]; targetIndustries: string[]; targetGeos: string[]; minEmployees?: number | null; maxEmployees?: number | null },
     scopedCompanyIds?: string[],
   ): Promise<{ count: number; personIds: string[] }> {
+    if (scopedCompanyIds !== undefined && scopedCompanyIds.length === 0) {
+      // An explicit empty per-run scope is a completed no-op. In particular,
+      // do not spend a SERP request that can never match an eligible company.
+      return { count: 0, personIds: [] };
+    }
+
     // per-run only: when scopedCompanyIds is provided we restrict people
     // discovery to companies sourced in THIS pipeline run. Falling back to
     // the org-wide set is reserved for ad-hoc calls (e.g. manual reruns).
     const companies = await this.prisma.company.findMany({
-      where: scopedCompanyIds && scopedCompanyIds.length > 0
+      where: scopedCompanyIds !== undefined
         ? { orgId, id: { in: scopedCompanyIds } }
         : { orgId },
       select: { id: true, domain: true, atsProvider: true, atsSlug: true, teamPageUrl: true },
@@ -373,17 +450,32 @@ export class LeadsService {
           // Try to match to an existing company or skip
           if (sp.companyName) {
             // Try exact match first, then startsWith, then contains (skip if name too short)
+            const companyScope = scopedCompanyIds !== undefined
+              ? { id: { in: scopedCompanyIds } }
+              : {};
             let company = await this.prisma.company.findFirst({
-              where: { orgId, name: { equals: sp.companyName, mode: 'insensitive' } },
+              where: {
+                orgId,
+                ...companyScope,
+                name: { equals: sp.companyName, mode: 'insensitive' },
+              },
             });
             if (!company) {
               company = await this.prisma.company.findFirst({
-                where: { orgId, name: { startsWith: sp.companyName, mode: 'insensitive' } },
+                where: {
+                  orgId,
+                  ...companyScope,
+                  name: { startsWith: sp.companyName, mode: 'insensitive' },
+                },
               });
             }
             if (!company && sp.companyName.length >= 5) {
               company = await this.prisma.company.findFirst({
-                where: { orgId, name: { contains: sp.companyName, mode: 'insensitive' } },
+                where: {
+                  orgId,
+                  ...companyScope,
+                  name: { contains: sp.companyName, mode: 'insensitive' },
+                },
               });
             }
             if (company) {
@@ -404,7 +496,11 @@ export class LeadsService {
 
     const processCompany = async (co: typeof companies[number]) => {
       try {
-        const teamPeople = await this.teamPageScraper.scrapeTeamPage(co.domain, co.teamPageUrl);
+        const teamPeople = await this.teamPageScraper.scrapeTeamPage(
+          orgId,
+          co.domain,
+          co.teamPageUrl,
+        );
         for (const p of teamPeople) {
           await trackUpsert(co.id, p);
         }
@@ -584,7 +680,7 @@ export class LeadsService {
     // to people sourced in THIS pipeline run. Falling back to org-wide is
     // reserved for ad-hoc reruns invoked outside the graph.
     const people = await this.prisma.person.findMany({
-      where: scopedPersonIds && scopedPersonIds.length > 0
+      where: scopedPersonIds !== undefined
         ? { company: { orgId }, id: { in: scopedPersonIds } }
         : { company: { orgId } },
       include: { company: { select: { domain: true } }, emails: true },
@@ -594,35 +690,141 @@ export class LeadsService {
     const touched = new Set<string>();
 
     const processPerson = async (person: typeof people[number]) => {
-      if (person.emails.length > 0) return;
+      if (person.emails.some((email) => isEligibleOutreachEmail(email))) {
+        return;
+      }
 
       try {
-        const candidates = await this.emailPatternService.generateCandidates(
+        const generatedCandidates = await this.emailPatternService.generateCandidates(
           person.firstName,
           person.lastName,
           person.company.domain,
         );
 
-        // Verify top 2 candidates via SMTP
-        const top2 = candidates.slice(0, 2);
-        const verifyResults = await this.emailPatternService.verifyBatch(top2.map((c) => c.email));
+        // Existing UNKNOWN/INVALID guesses must be eligible for re-checking;
+        // the previous `emails.length > 0` shortcut made their upsert update
+        // path unreachable forever.
+        type EnrichmentCandidate = {
+          email: string;
+          pattern: string | null;
+          source: EmailSource;
+          confidence: number;
+        };
+        const candidatesByAddress = new Map<string, EnrichmentCandidate>();
+        const existingToRetry = person.emails
+          .filter((email) => !isEligibleOutreachEmail(email))
+          .sort(
+            (a, b) =>
+              b.confidence - a.confidence || a.email.localeCompare(b.email),
+          );
+        for (const existing of existingToRetry) {
+          candidatesByAddress.set(existing.email.trim().toLowerCase(), {
+            email: existing.email,
+            pattern: existing.pattern,
+            source: existing.source,
+            confidence: existing.confidence,
+          });
+        }
+        for (const generated of generatedCandidates) {
+          const key = generated.email.trim().toLowerCase();
+          if (!candidatesByAddress.has(key)) {
+            candidatesByAddress.set(key, generated);
+          }
+        }
+        const candidates = [...candidatesByAddress.values()];
 
-        for (const c of candidates) {
+        // Keep the SMTP batch bounded while preventing either retry work or
+        // candidates generated in this run from starving the other category.
+        // Reserve one slot for the highest-ranked existing retry and one for
+        // the first new generated address, then fill any vacancy in the stable
+        // combined order above. Only attempted candidates are persisted. That
+        // keeps an untried generated address "new" on the next run, so the
+        // bounded second slot advances instead of retrying the same UNKNOWN
+        // pair forever.
+        const verificationCandidates: EnrichmentCandidate[] = [];
+        const selectedAddresses = new Set<string>();
+        const selectForVerification = (
+          candidate: EnrichmentCandidate | undefined,
+        ) => {
+          if (
+            !candidate ||
+            verificationCandidates.length >= EMAIL_VERIFICATION_BATCH_LIMIT
+          ) {
+            return;
+          }
+          const key = candidate.email.trim().toLowerCase();
+          if (selectedAddresses.has(key)) return;
+          selectedAddresses.add(key);
+          verificationCandidates.push(candidate);
+        };
+
+        const existingAddresses = new Set(
+          existingToRetry.map((candidate) =>
+            candidate.email.trim().toLowerCase(),
+          ),
+        );
+        const highestRankedExisting = existingToRetry[0];
+        selectForVerification(
+          highestRankedExisting
+            ? candidatesByAddress.get(
+                highestRankedExisting.email.trim().toLowerCase(),
+              )
+            : undefined,
+        );
+
+        const firstNewGenerated = generatedCandidates.find(
+          (candidate) =>
+            !existingAddresses.has(candidate.email.trim().toLowerCase()),
+        );
+        const rankedGenerated = generatedCandidates
+          .map(
+            (candidate) =>
+              candidatesByAddress.get(candidate.email.trim().toLowerCase()) ??
+              candidate,
+          )
+          .sort(
+            (a, b) =>
+              b.confidence - a.confidence || a.email.localeCompare(b.email),
+          );
+        selectForVerification(
+          firstNewGenerated
+            ? candidatesByAddress.get(
+                firstNewGenerated.email.trim().toLowerCase(),
+              )
+            : rankedGenerated[0],
+        );
+
+        for (const candidate of candidates) {
+          selectForVerification(candidate);
+        }
+
+        const verifyResults = await this.emailPatternService.verifyBatch(
+          verificationCandidates.map((candidate) => candidate.email),
+        );
+
+        for (const c of verificationCandidates) {
           const verification = verifyResults.get(c.email);
           let adjustedConfidence = c.confidence;
-          let verified = false;
 
           if (verification) {
             if (verification.result === "VALID") {
               adjustedConfidence = Math.min(0.98, c.confidence + 0.3);
-              verified = true;
-            } else if (verification.result === "INVALID") {
-              adjustedConfidence = 0.05;
-            } else if (verification.result === "CATCH_ALL") {
-              // Catch-all: keep original confidence, can't confirm
-              adjustedConfidence = Math.min(c.confidence, 0.5);
+            } else {
+              // An attempted but still-ineligible address must yield to
+              // untried candidates on the next bounded pass. Persisting zero
+              // confidence provides durable deterministic rotation without a
+              // schema-only "last verification attempt" column.
+              adjustedConfidence = 0;
             }
           }
+
+          const verificationFields = verification
+            ? {
+                verified: verification.result === "VALID",
+                verificationResult: verification.result,
+                verifiedAt: verification.result === "VALID" ? new Date() : null,
+              }
+            : { verified: false };
 
           await this.prisma.emailCandidate.upsert({
             where: {
@@ -634,11 +836,11 @@ export class LeadsService {
               pattern: c.pattern,
               source: c.source,
               confidence: adjustedConfidence,
-              verified,
+              ...verificationFields,
             },
             update: {
               confidence: adjustedConfidence,
-              verified,
+              ...(verification ? verificationFields : {}),
             },
           });
           count++;
@@ -676,7 +878,7 @@ export class LeadsService {
     // people sourced+enriched in THIS pipeline run. Falling back to org-wide
     // is reserved for ad-hoc reruns invoked outside the graph.
     const people = await this.prisma.person.findMany({
-      where: scopedPersonIds && scopedPersonIds.length > 0
+      where: scopedPersonIds !== undefined
         ? { company: { orgId }, id: { in: scopedPersonIds } }
         : { company: { orgId } },
       include: {
@@ -840,6 +1042,18 @@ export class LeadsService {
   // ─── Job Helpers ─────────────────────────────────────
 
   private async createJob(orgId: string, icpProfileId: string, stage: ScrapeStage): Promise<string> {
+    // Defense in depth for every job-producing path, including legacy/direct
+    // callers that do not enter through GraphService. ScrapeJob currently has
+    // independent orgId and icpProfileId foreign keys, so validate the pair
+    // before creating a row and never allow a cross-tenant relation.
+    const ownedProfile = await this.prisma.icpProfile.findFirst({
+      where: { id: icpProfileId, orgId },
+      select: { id: true },
+    });
+    if (!ownedProfile) {
+      throw new NotFoundException("ICP profile not found");
+    }
+
     const job = await this.prisma.scrapeJob.create({
       data: { orgId, icpProfileId, stage, status: "QUEUED" },
     });
@@ -1089,7 +1303,7 @@ export class LeadsService {
       industry: string;
       companySize: string;
       techStack: string[];
-      score: number;
+      score: number | null;
       scoreBreakdown: Array<{ label: string; value: number }>;
       stage: "sourced" | "enriched" | "qualified" | "in_crm" | "contacted" | "replied" | "meeting";
       source: string;
@@ -1135,11 +1349,27 @@ export class LeadsService {
     ]);
 
     const personIds = raw.map((p) => p.id);
+    const recipientToPersonId = new Map<string, string>();
+    const recipientRefs = new Set<string>();
+    for (const person of raw) {
+      recipientToPersonId.set(person.id, person.id);
+      recipientRefs.add(person.id);
+      const email = person.emails[0]?.email?.trim();
+      if (email) {
+        recipientRefs.add(email);
+        recipientToPersonId.set(email, person.id);
+        recipientToPersonId.set(email.toLowerCase(), person.id);
+      }
+    }
 
     const [artifactsByRecipient, meetingsByPerson] = await Promise.all([
-      personIds.length
+      recipientRefs.size
         ? this.prisma.outreachArtifact.findMany({
-            where: { orgId, recipientRef: { in: personIds } },
+            where: {
+              orgId,
+              status: OutreachArtifactStatus.SENT,
+              recipientRef: { in: [...recipientRefs] },
+            },
             select: { recipientRef: true, status: true, sentAt: true },
           })
         : Promise.resolve([]),
@@ -1153,7 +1383,11 @@ export class LeadsService {
 
     const contactedSet = new Set<string>();
     for (const a of artifactsByRecipient) {
-      if (a.recipientRef && a.sentAt) contactedSet.add(a.recipientRef);
+      const recipientRef = a.recipientRef?.trim();
+      const personId = recipientRef
+        ? recipientToPersonId.get(recipientRef) ?? recipientToPersonId.get(recipientRef.toLowerCase())
+        : undefined;
+      if (personId && a.sentAt) contactedSet.add(personId);
     }
     const meetingSet = new Set<string>();
     for (const m of meetingsByPerson) {
@@ -1200,7 +1434,7 @@ export class LeadsService {
 
     const leads = raw.map((p) => {
       const email = p.emails[0]?.email ?? "";
-      const score = p.scores[0]?.score ?? 0;
+      const score = p.scores[0]?.score ?? null;
       const stage = deriveStage(p.id, !!email, p.scores[0]?.qualifiedAt);
       return {
         id: p.id,
@@ -1269,4 +1503,21 @@ async function batchProcess<T>(items: T[], batchSize: number, fn: (item: T) => P
     await Promise.all(batch.map(fn));
     if (i + batchSize < items.length) await delay(500);
   }
+}
+
+function isEligibleOutreachEmail(candidate: {
+  verified: boolean;
+  verificationResult: string;
+  source: EmailSource;
+}): boolean {
+  if (
+    candidate.verified &&
+    candidate.verificationResult === "VALID"
+  ) {
+    return true;
+  }
+  return (
+    candidate.verificationResult !== "INVALID" &&
+    SOURCE_CONFIRMED_EMAIL_SOURCES.has(candidate.source)
+  );
 }

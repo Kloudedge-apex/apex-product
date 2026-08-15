@@ -1,0 +1,298 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://workforceos.xyz/schemas/production-migration-receipt-v3.json",
+  "title": "Workforce OS production migration receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "environment",
+    "candidateCommit",
+    "status",
+    "verifiedAt",
+    "expiresAt",
+    "operator",
+    "approver",
+    "changeTicket",
+    "databaseIdentityHash",
+    "stagingRehearsalEvidenceHash",
+    "productionApplyEvidenceHash",
+    "rollbackRehearsalEvidenceHash",
+    "rollbackBaseline",
+    "migrations"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 3
+    },
+    "environment": {
+      "const": "production"
+    },
+    "candidateCommit": {
+      "$ref": "#/$defs/gitSha"
+    },
+    "status": {
+      "const": "applied-and-verified"
+    },
+    "verifiedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expiresAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "operator": {
+      "type": "string",
+      "minLength": 1
+    },
+    "approver": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}$"
+    },
+    "changeTicket": {
+      "type": "string",
+      "minLength": 1
+    },
+    "databaseIdentityHash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "stagingRehearsalEvidenceHash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "productionApplyEvidenceHash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "rollbackRehearsalEvidenceHash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "rollbackBaseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiImage",
+        "apiRevision",
+        "workerImage",
+        "workerRevision",
+        "consoleImage",
+        "consoleRevision",
+        "compatibilityAttestation",
+        "compatibilityEpoch",
+        "deliveryUnknownWriteMode",
+        "attestation"
+      ],
+      "properties": {
+        "apiImage": {
+          "$ref": "#/$defs/immutableImage"
+        },
+        "apiRevision": {
+          "$ref": "#/$defs/containerAppRevision"
+        },
+        "workerImage": {
+          "$ref": "#/$defs/immutableImage"
+        },
+        "workerRevision": {
+          "$ref": "#/$defs/containerAppRevision"
+        },
+        "consoleImage": {
+          "$ref": "#/$defs/immutableImage"
+        },
+        "consoleRevision": {
+          "$ref": "#/$defs/containerAppRevision"
+        },
+        "compatibilityAttestation": {
+          "const": "enum-aware-api-worker-console-baseline-v1"
+        },
+        "compatibilityEpoch": {
+          "const": "outreach-delivery-unknown-v1"
+        },
+        "deliveryUnknownWriteMode": {
+          "enum": ["disabled", "first-class"]
+        },
+        "attestation": {
+          "enum": [
+            "delivery-unknown-writes-disabled-v1",
+            "delivery-unknown-readers-drained-rollback-baselines-verified-v1"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "deliveryUnknownWriteMode": { "const": "disabled" }
+            }
+          },
+          "then": {
+            "properties": {
+              "attestation": {
+                "const": "delivery-unknown-writes-disabled-v1"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "deliveryUnknownWriteMode": { "const": "first-class" }
+            }
+          },
+          "then": {
+            "properties": {
+              "attestation": {
+                "const": "delivery-unknown-readers-drained-rollback-baselines-verified-v1"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "outreachQuiescence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiMutationsBlocked",
+        "legacyWorkerStopped",
+        "queuesPaused",
+        "activeJobs",
+        "sendingRows",
+        "firstClassDeliveryUnknownRows",
+        "legacyDeliveryUnknownMarkerRows",
+        "replySlotDuplicateRows",
+        "liveSendAllowlistEmpty",
+        "evidenceHash"
+      ],
+      "properties": {
+        "apiMutationsBlocked": {
+          "const": true
+        },
+        "legacyWorkerStopped": {
+          "const": true
+        },
+        "queuesPaused": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["agentRuns", "graphRuns", "outreachSend"],
+          "properties": {
+            "agentRuns": { "const": true },
+            "graphRuns": { "const": true },
+            "outreachSend": { "const": true }
+          }
+        },
+        "activeJobs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["agentRuns", "graphRuns", "outreachSend"],
+          "properties": {
+            "agentRuns": { "const": 0 },
+            "graphRuns": { "const": 0 },
+            "outreachSend": { "const": 0 }
+          }
+        },
+        "sendingRows": {
+          "const": 0
+        },
+        "firstClassDeliveryUnknownRows": {
+          "const": 0
+        },
+        "legacyDeliveryUnknownMarkerRows": {
+          "const": 0
+        },
+        "replySlotDuplicateRows": {
+          "const": 0
+        },
+        "liveSendAllowlistEmpty": {
+          "const": true
+        },
+        "evidenceHash": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "migrations": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "sha256",
+          "preflightPassed",
+          "applied",
+          "postconditionsPassed",
+          "writerPause",
+          "duplicateInventoryHash",
+          "postconditionEvidenceHash"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sha256": {
+            "$ref": "#/$defs/sha256"
+          },
+          "preflightPassed": {
+            "const": true
+          },
+          "applied": {
+            "const": true
+          },
+          "postconditionsPassed": {
+            "const": true
+          },
+          "writerPause": {
+            "enum": ["observed", "not-required"]
+          },
+          "duplicateInventoryHash": {
+            "$ref": "#/$defs/sha256"
+          },
+          "postconditionEvidenceHash": {
+            "$ref": "#/$defs/sha256"
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "rollbackBaseline": {
+            "properties": {
+              "deliveryUnknownWriteMode": { "const": "disabled" }
+            }
+          }
+        }
+      },
+      "then": {
+        "required": ["outreachQuiescence"]
+      },
+      "else": {
+        "not": {
+          "required": ["outreachQuiescence"]
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "gitSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "immutableImage": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9.-]*/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$"
+    },
+    "containerAppRevision": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{1,62}$"
+    }
+  }
+}

@@ -1,7 +1,11 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable, Logger, Optional } from "@nestjs/common";
 import { Cron, CronExpression } from "@nestjs/schedule";
 import { PrismaService } from "../prisma/prisma.service";
 import { LeadsService } from "./leads.service";
+import {
+  ProductionBootstrapWriterFenceService,
+  runWithProductionBootstrapWriterFenceOrSkipClosed,
+} from "../ops/production-bootstrap-writer-fence";
 
 @Injectable()
 export class LeadsSchedulerService {
@@ -11,6 +15,8 @@ export class LeadsSchedulerService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly leadsService: LeadsService,
+    @Optional()
+    private readonly productionBootstrapWriterFence?: ProductionBootstrapWriterFenceService,
   ) {}
 
   /**
@@ -24,6 +30,14 @@ export class LeadsSchedulerService {
    */
   @Cron(CronExpression.EVERY_HOUR)
   async handleScheduledDiscovery(): Promise<void> {
+    await runWithProductionBootstrapWriterFenceOrSkipClosed(
+      this.productionBootstrapWriterFence,
+      "scheduler",
+      () => this.handleScheduledDiscoveryWithLease(),
+    );
+  }
+
+  private async handleScheduledDiscoveryWithLease(): Promise<void> {
     if (process.env.LEGACY_TRIGGER_DISCOVERY_ENABLED !== "true") {
       this.logger.warn(
         "triggerDiscovery is deprecated — set LEGACY_TRIGGER_DISCOVERY_ENABLED=true to opt back in; graph supervisor is now the single entry point",

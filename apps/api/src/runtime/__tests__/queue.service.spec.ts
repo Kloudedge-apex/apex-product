@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { QueueService } from "../queue.service";
+import { buildRedisConnectionOptions, QueueService } from "../queue.service";
 
 /**
  * These tests exercise the in-memory fallback (REDIS_URL must not be set).
@@ -101,5 +101,27 @@ describe("QueueService (in-memory fallback)", () => {
     it("returns null for unknown job", async () => {
       expect(await queue.getStatus("nonexistent")).toBeNull();
     });
+  });
+
+  it("preserves the Redis username in host-mode connection options", () => {
+    process.env.REDIS_HOST = "redis.internal";
+    process.env.REDIS_PORT = "6380";
+    process.env.REDIS_USERNAME = "workforce";
+    process.env.REDIS_PASSWORD = "not-a-real-secret";
+    process.env.REDIS_TLS = "false";
+    try {
+      expect(buildRedisConnectionOptions()).toMatchObject({
+        host: "redis.internal",
+        port: 6380,
+        username: "workforce",
+        password: "not-a-real-secret",
+      });
+    } finally {
+      delete process.env.REDIS_HOST;
+      delete process.env.REDIS_PORT;
+      delete process.env.REDIS_USERNAME;
+      delete process.env.REDIS_PASSWORD;
+      delete process.env.REDIS_TLS;
+    }
   });
 });

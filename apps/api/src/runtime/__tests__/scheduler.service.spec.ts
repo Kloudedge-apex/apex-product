@@ -1,7 +1,12 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
-import { SchedulerService } from "../scheduler.service";
+import { isSchedulerEnabled, SchedulerService } from "../scheduler.service";
 import { PrismaService } from "../../prisma/prisma.service";
 import { RuntimeService } from "../runtime.service";
+import {
+  ProductionBootstrapWriterFenceClosedError,
+  ProductionBootstrapWriterFenceUnavailableError,
+  type ProductionBootstrapWriterFenceService,
+} from "../../ops/production-bootstrap-writer-fence";
 
 function createMockPrisma() {
   return {
@@ -24,9 +29,12 @@ describe("SchedulerService", () => {
   let scheduler: SchedulerService;
   let mockPrisma: ReturnType<typeof createMockPrisma>;
   let mockRuntime: ReturnType<typeof createMockRuntime>;
+  let previousSchedulerEnabled: string | undefined;
 
   beforeEach(() => {
     vi.useFakeTimers();
+    previousSchedulerEnabled = process.env.SCHEDULER_ENABLED;
+    process.env.SCHEDULER_ENABLED = "true";
     mockPrisma = createMockPrisma();
     mockRuntime = createMockRuntime();
     scheduler = new SchedulerService(mockPrisma, mockRuntime);
@@ -34,7 +42,23 @@ describe("SchedulerService", () => {
 
   afterEach(() => {
     scheduler.onModuleDestroy();
+    if (previousSchedulerEnabled === undefined) {
+      delete process.env.SCHEDULER_ENABLED;
+    } else {
+      process.env.SCHEDULER_ENABLED = previousSchedulerEnabled;
+    }
     vi.useRealTimers();
+  });
+
+  it("is fail-closed unless explicitly enabled", () => {
+    expect(isSchedulerEnabled({})).toBe(false);
+    expect(isSchedulerEnabled({ SCHEDULER_ENABLED: "false" })).toBe(false);
+    expect(isSchedulerEnabled({ SCHEDULER_ENABLED: "TRUE" })).toBe(false);
+    expect(isSchedulerEnabled({ SCHEDULER_ENABLED: "true" })).toBe(true);
+
+    scheduler.onModuleInit({});
+    vi.advanceTimersByTime(120000);
+    expect(mockPrisma.agent.findMany).not.toHaveBeenCalled();
   });
 
   it("should start interval on module init", () => {
@@ -57,6 +81,52 @@ describe("SchedulerService", () => {
         }),
       }),
     );
+  });
+
+  it("keeps its timer healthy and skips ticks while bootstrap is CLOSED", async () => {
+    const fence = {
+      runWriter: vi.fn(async () => {
+        throw new ProductionBootstrapWriterFenceClosedError();
+      }),
+    } as unknown as ProductionBootstrapWriterFenceService;
+    scheduler = new SchedulerService(mockPrisma, mockRuntime, fence);
+    scheduler.onModuleInit();
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(mockPrisma.agent.findMany).not.toHaveBeenCalled();
+    expect(fence.runWriter).toHaveBeenCalledOnce();
+  });
+
+  it("contains and logs writer-fence rejection from its periodic timer", async () => {
+    const fence = {
+      runWriter: vi.fn(async () => {
+        throw new ProductionBootstrapWriterFenceUnavailableError();
+      }),
+    } as unknown as ProductionBootstrapWriterFenceService;
+    scheduler = new SchedulerService(mockPrisma, mockRuntime, fence);
+    const errorLog = vi
+      .spyOn(
+        (scheduler as unknown as {
+          logger: { error: (...args: unknown[]) => void };
+        }).logger,
+        "error",
+      )
+      .mockImplementation(() => undefined);
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+
+    try {
+      scheduler.onModuleInit();
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(errorLog).toHaveBeenCalledWith(
+        expect.stringContaining("Scheduler schedule poll failed"),
+      );
+      expect(unhandled).not.toHaveBeenCalled();
+      expect(mockPrisma.agent.findMany).not.toHaveBeenCalled();
+    } finally {
+      process.off("unhandledRejection", unhandled);
+    }
   });
 
   it("should trigger run for agent due for execution (every_hour, no previous run)", async () => {

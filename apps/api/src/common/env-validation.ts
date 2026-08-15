@@ -1,6 +1,13 @@
 import * as crypto from "crypto";
+import { isIP } from "node:net";
 import { Logger } from "@nestjs/common";
 import { isWorkerEnabled } from "../runtime/worker.service";
+import { resolveApiPublicOrigin } from "../outreach/unsubscribe-token.util";
+import {
+  DELIVERY_UNKNOWN_COMPATIBILITY_EPOCH,
+  DELIVERY_UNKNOWN_FIRST_CLASS_WRITE_ACK,
+  DELIVERY_UNKNOWN_WRITE_MODE,
+} from "../outreach/outreach-delivery-unknown-compatibility";
 
 /**
  * Fail-fast startup config validator.
@@ -24,6 +31,7 @@ import { isWorkerEnabled } from "../runtime/worker.service";
  *   When NODE_ENV="production" (i.e. running as a deployed image):
  *     - At least one LLM provider key (OPENAI_API_KEY | AZURE_OPENAI_KEY | ANTHROPIC_API_KEY)
  *     - GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET (Gmail OAuth, needed by api + worker)
+ *     - METRICS_AUTH_TOKEN (protects the public Prometheus endpoint)
  *
  * Missing prod secrets are collected and reported in a single throw so the
  * operator can fix everything in one redeploy instead of bouncing the pod
@@ -81,20 +89,80 @@ export function validateEnv(
     }
   }
 
+  const bootstrapAttemptId =
+    env.WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID;
+  const bootstrapMinimumGeneration =
+    env.WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION;
+  const bootstrapGuardPartial =
+    (bootstrapAttemptId === undefined) !==
+    (bootstrapMinimumGeneration === undefined);
+  if (bootstrapGuardPartial) {
+    issues.push(
+      "production bootstrap deployment guard requires both attempt id and minimum generation",
+    );
+  } else if (
+    bootstrapAttemptId !== undefined &&
+    bootstrapMinimumGeneration !== undefined
+  ) {
+    if (!/^[0-9a-f]{32}$/.test(bootstrapAttemptId)) {
+      issues.push(
+        "WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID must be exactly 32 lowercase hexadecimal characters",
+      );
+    }
+    if (!/^[1-9][0-9]*$/.test(bootstrapMinimumGeneration)) {
+      issues.push(
+        "WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION must be a positive safe integer",
+      );
+    } else if (!Number.isSafeInteger(Number(bootstrapMinimumGeneration))) {
+      issues.push(
+        "WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION must be a positive safe integer",
+      );
+    }
+  }
+  if (
+    isProd &&
+    bootstrapAttemptId === undefined &&
+    bootstrapMinimumGeneration === undefined
+  ) {
+    issues.push(
+      "production bootstrap deployment guard is required when NODE_ENV=production",
+    );
+  }
+
   if (isProd) {
-    // Hard-fail only on credentials whose absence would crash the very
-    // first request and which BOTH the api and the worker need at boot.
-    // Anything else is warned-not-thrown so a partial config doesn't take
-    // the whole pod down.
+    if (!env.METRICS_AUTH_TOKEN?.trim()) {
+      issues.push("METRICS_AUTH_TOKEN is required when NODE_ENV=production");
+    }
+
+    let apiPublicOrigin: string | null = null;
+    try {
+      apiPublicOrigin = resolveApiPublicOrigin(env);
+    } catch (err) {
+      issues.push(
+        err instanceof Error
+          ? err.message
+          : "API_PUBLIC_URL is invalid for production",
+      );
+    }
+
+    validateProductionGmailConfiguration(env, apiPublicOrigin, issues);
+    validateProductionOAuthConfiguration(env, issues);
+
+    // The remaining required credentials are needed by both the api and the
+    // worker. Anything role-specific remains warned-not-thrown so a partial
+    // integration config does not take the whole pod down.
     //
     // LLM provider: at least one of OPENAI_API_KEY / AZURE_OPENAI_KEY /
     // ANTHROPIC_API_KEY must be set. Prod uses Azure OpenAI today, but the
     // codepath chooses dynamically.
-    const hasAnyLlmKey = ["OPENAI_API_KEY", "AZURE_OPENAI_KEY", "ANTHROPIC_API_KEY"]
-      .some((k) => {
-        const v = env[k];
-        return typeof v === "string" && v.length > 0;
-      });
+    const hasAnyLlmKey = [
+      "OPENAI_API_KEY",
+      "AZURE_OPENAI_KEY",
+      "ANTHROPIC_API_KEY",
+    ].some((k) => {
+      const v = env[k];
+      return typeof v === "string" && v.length > 0;
+    });
     if (!hasAnyLlmKey) {
       issues.push(
         "At least one of OPENAI_API_KEY / AZURE_OPENAI_KEY / ANTHROPIC_API_KEY must be set when NODE_ENV=production",
@@ -109,9 +177,244 @@ export function validateEnv(
         issues.push(`${name} is required when NODE_ENV=production`);
       }
     }
+
+    // Outreach wildcard guard (GL8c). OUTREACH_LIVE_FOR_ORGS="*" arms live
+    // outbound email for EVERY org — refuse to boot a production container
+    // with it unless OUTREACH_ALLOW_WILDCARD="true" is set as an explicit,
+    // auditable escape hatch. Deployed-env reality check: only the worker
+    // Container App carries OUTREACH_LIVE_FOR_ORGS, so this never REQUIRES
+    // the var (the api app stays valid with it unset) — it only rejects the
+    // wildcard value. Runtime mirror lives in outreach-allowlist.util.ts.
+    if (
+      env.OUTREACH_LIVE_FOR_ORGS?.trim() === "*" &&
+      env.OUTREACH_ALLOW_WILDCARD !== "true"
+    ) {
+      issues.push(
+        'OUTREACH_LIVE_FOR_ORGS="*" enables live outreach for ALL orgs and is refused when NODE_ENV=production. ' +
+          "List org ids explicitly, or set OUTREACH_ALLOW_WILDCARD=true to override deliberately.",
+      );
+    }
+
+    const failedWrites = env.OUTREACH_FAILED_STATUS_WRITES_ENABLED;
+    if (
+      failedWrites !== undefined &&
+      failedWrites !== "true" &&
+      failedWrites !== "false"
+    ) {
+      issues.push(
+        "OUTREACH_FAILED_STATUS_WRITES_ENABLED must be exactly true or false when set",
+      );
+    }
+    if (
+      failedWrites === "true" &&
+      env.OUTREACH_FAILED_STATUS_WRITES_ACK !==
+        "readers-drained-legacy-inventory-reviewed-v1"
+    ) {
+      issues.push(
+        "OUTREACH_FAILED_STATUS_WRITES_ENABLED=true requires " +
+          "OUTREACH_FAILED_STATUS_WRITES_ACK=readers-drained-legacy-inventory-reviewed-v1",
+      );
+    }
+
+    const deliveryUnknownMode = env.OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE;
+    const deliveryUnknownAck = env.OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK;
+    const rollbackCompatibilityEpoch =
+      env.OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH;
+    const configuredDeliveryUnknownMode =
+      deliveryUnknownMode ?? DELIVERY_UNKNOWN_WRITE_MODE.DISABLED;
+
+    if (
+      deliveryUnknownMode !== undefined &&
+      deliveryUnknownMode !== DELIVERY_UNKNOWN_WRITE_MODE.DISABLED &&
+      deliveryUnknownMode !== DELIVERY_UNKNOWN_WRITE_MODE.FIRST_CLASS
+    ) {
+      issues.push(
+        "OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE must be disabled or first-class when set",
+      );
+    }
+    if (
+      configuredDeliveryUnknownMode ===
+        DELIVERY_UNKNOWN_WRITE_MODE.FIRST_CLASS &&
+      deliveryUnknownAck !== DELIVERY_UNKNOWN_FIRST_CLASS_WRITE_ACK
+    ) {
+      issues.push(
+        "OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE=first-class requires " +
+          `OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK=${DELIVERY_UNKNOWN_FIRST_CLASS_WRITE_ACK}`,
+      );
+    }
+    if (
+      configuredDeliveryUnknownMode === DELIVERY_UNKNOWN_WRITE_MODE.FIRST_CLASS &&
+      rollbackCompatibilityEpoch !== DELIVERY_UNKNOWN_COMPATIBILITY_EPOCH
+    ) {
+      issues.push(
+        `OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE=${configuredDeliveryUnknownMode} requires ` +
+          `OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH=${DELIVERY_UNKNOWN_COMPATIBILITY_EPOCH}`,
+      );
+    }
+    if (
+      configuredDeliveryUnknownMode === DELIVERY_UNKNOWN_WRITE_MODE.DISABLED &&
+      (deliveryUnknownAck?.trim() || rollbackCompatibilityEpoch?.trim())
+    ) {
+      issues.push(
+        "OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE=disabled requires OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK and OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH to be empty",
+      );
+    }
+    if (
+      env.OUTREACH_DELIVERY_UNKNOWN_STATUS_WRITES_ENABLED !== undefined ||
+      env.OUTREACH_DELIVERY_UNKNOWN_STATUS_WRITES_ACK !== undefined
+    ) {
+      issues.push(
+        "OUTREACH_DELIVERY_UNKNOWN_STATUS_WRITES_ENABLED and OUTREACH_DELIVERY_UNKNOWN_STATUS_WRITES_ACK are unsupported; use the explicit OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE contract",
+      );
+    }
   }
 
   return { issues, encryptionKeyFingerprint };
+}
+
+function validateProductionOAuthConfiguration(
+  env: NodeJS.ProcessEnv,
+  issues: string[],
+): void {
+  const stateSecret = env.OAUTH_STATE_SECRET;
+  if (!stateSecret?.trim()) {
+    issues.push("OAUTH_STATE_SECRET is required when NODE_ENV=production");
+  } else if (stateSecret !== stateSecret.trim() || stateSecret.length < 32) {
+    issues.push(
+      "OAUTH_STATE_SECRET must be at least 32 characters with no surrounding whitespace in production",
+    );
+  }
+
+  const frontendUrl = env.FRONTEND_URL?.trim();
+  if (!frontendUrl) {
+    issues.push("FRONTEND_URL is required when NODE_ENV=production");
+    return;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(frontendUrl);
+  } catch {
+    issues.push("FRONTEND_URL must be a valid absolute URL");
+    return;
+  }
+
+  if (parsed.protocol !== "https:") {
+    issues.push("FRONTEND_URL must use https in production");
+  }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    issues.push(
+      "FRONTEND_URL must not contain credentials, a query, or a fragment",
+    );
+  }
+  if (parsed.pathname !== "/") {
+    issues.push("FRONTEND_URL path must be empty");
+  }
+  if (frontendUrl !== parsed.origin) {
+    issues.push(
+      "FRONTEND_URL must be a canonical origin without a trailing slash",
+    );
+  }
+  if (isNonPublicHostname(parsed.hostname)) {
+    issues.push("FRONTEND_URL must use a public DNS hostname in production");
+  }
+}
+
+function isNonPublicHostname(hostname: string): boolean {
+  const normalized = hostname
+    .toLowerCase()
+    .replace(/\.$/, "")
+    .replace(/^\[|\]$/g, "");
+  if (!normalized || isIP(normalized) !== 0 || !normalized.includes(".")) {
+    return true;
+  }
+
+  const reservedSuffixes = [
+    "arpa",
+    "corp",
+    "example",
+    "home",
+    "internal",
+    "invalid",
+    "lan",
+    "local",
+    "localhost",
+    "onion",
+    "test",
+  ];
+  if (
+    reservedSuffixes.some(
+      (suffix) => normalized === suffix || normalized.endsWith(`.${suffix}`),
+    )
+  ) {
+    return true;
+  }
+
+  if (normalized.length > 253) return true;
+  return normalized
+    .split(".")
+    .some(
+      (label) =>
+        label.length === 0 ||
+        label.length > 63 ||
+        !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label),
+    );
+}
+
+function validateProductionGmailConfiguration(
+  env: NodeJS.ProcessEnv,
+  apiPublicOrigin: string | null,
+  issues: string[],
+): void {
+  const expectedRedirectUri = apiPublicOrigin
+    ? `${apiPublicOrigin}/api/integrations/gmail/callback`
+    : null;
+  const redirectUri = env.GOOGLE_REDIRECT_URI?.trim();
+  if (!redirectUri) {
+    issues.push("GOOGLE_REDIRECT_URI is required when NODE_ENV=production");
+  } else if (expectedRedirectUri && redirectUri !== expectedRedirectUri) {
+    issues.push(
+      `GOOGLE_REDIRECT_URI must equal ${expectedRedirectUri} in production`,
+    );
+  }
+
+  const topic = env.GMAIL_PUBSUB_TOPIC?.trim();
+  if (!topic) {
+    issues.push("GMAIL_PUBSUB_TOPIC is required when NODE_ENV=production");
+  } else if (
+    !/^projects\/[a-z][a-z0-9-]{4,28}[a-z0-9]\/topics\/[A-Za-z][A-Za-z0-9._~+%-]{2,254}$/.test(
+      topic,
+    )
+  ) {
+    issues.push(
+      "GMAIL_PUBSUB_TOPIC must be a canonical projects/<project-id>/topics/<topic-id> resource name",
+    );
+  }
+
+  const expectedPushAudience = apiPublicOrigin
+    ? `${apiPublicOrigin}/api/integrations/gmail/push`
+    : null;
+  const pushAudience = env.GMAIL_PUSH_AUDIENCE?.trim();
+  if (!pushAudience) {
+    issues.push("GMAIL_PUSH_AUDIENCE is required when NODE_ENV=production");
+  } else if (expectedPushAudience && pushAudience !== expectedPushAudience) {
+    issues.push(
+      `GMAIL_PUSH_AUDIENCE must equal ${expectedPushAudience} in production`,
+    );
+  }
+
+  const publisherServiceAccount = env.GMAIL_PUSH_PUBLISHER_SA?.trim();
+  if (!publisherServiceAccount) {
+    issues.push("GMAIL_PUSH_PUBLISHER_SA is required when NODE_ENV=production");
+  } else if (
+    !/^[a-z][a-z0-9-]{0,62}@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$/.test(
+      publisherServiceAccount,
+    )
+  ) {
+    issues.push(
+      "GMAIL_PUSH_PUBLISHER_SA must be a canonical Google service-account email",
+    );
+  }
 }
 
 function checkEncryptionKey(

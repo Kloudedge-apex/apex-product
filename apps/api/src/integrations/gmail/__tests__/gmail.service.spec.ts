@@ -1,10 +1,25 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
-import { UnauthorizedException, BadRequestException } from "@nestjs/common";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import {
+  UnauthorizedException,
+  BadRequestException,
+  ServiceUnavailableException,
+  ConflictException,
+} from "@nestjs/common";
+import { google } from "googleapis";
 import { GmailService } from "../gmail.service";
 import { PrismaService } from "../../../prisma/prisma.service";
-import { RuntimeService } from "../../../runtime/runtime.service";
+import { SuppressionService } from "../../../outreach/suppression.service";
+import { ConversationStoreService } from "../../../conversation-store/conversation-store.service";
 import { ConfigService } from "@nestjs/config";
 import { encrypt } from "../../crypto.util";
+
+const ORIGINAL_NODE_ENV = process.env.NODE_ENV;
+const ORIGINAL_API_PUBLIC_URL = process.env.API_PUBLIC_URL;
+
+const { getProfileFn, watchFn } = vi.hoisted(() => ({
+  getProfileFn: vi.fn(),
+  watchFn: vi.fn(),
+}));
 
 // Mock google-auth-library (OAuth2Client used for OIDC verification)
 vi.mock("google-auth-library", () => {
@@ -33,12 +48,8 @@ vi.mock("googleapis", () => {
 
   const mockGmail = {
     users: {
-      getProfile: vi.fn().mockResolvedValue({
-        data: { emailAddress: "owner@example.com" },
-      }),
-      watch: vi.fn().mockResolvedValue({
-        data: { historyId: "12345", expiration: "1234567890" },
-      }),
+      getProfile: getProfileFn,
+      watch: watchFn,
       history: {
         list: vi.fn().mockResolvedValue({
           data: {
@@ -128,31 +139,51 @@ vi.mock("googleapis", () => {
 });
 
 function createMockPrisma() {
+  const integration = {
+    findUnique: vi.fn(),
+    findFirst: vi.fn().mockResolvedValue(null),
+    findMany: vi.fn().mockResolvedValue([]),
+    upsert: vi.fn().mockResolvedValue({ id: "int_1" }),
+    update: vi.fn().mockResolvedValue({ id: "int_1" }),
+    updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+    create: vi.fn().mockResolvedValue({ id: "int_1" }),
+  };
+  const transactionClient = {
+    integration,
+    $queryRaw: vi.fn().mockResolvedValue([{ pg_advisory_xact_lock: null }]),
+  };
   return {
-    integration: {
-      findUnique: vi.fn(),
-      findFirst: vi.fn(),
-      findMany: vi.fn().mockResolvedValue([]),
-      upsert: vi.fn().mockResolvedValue({ id: "int_1" }),
-      update: vi.fn().mockResolvedValue({ id: "int_1" }),
-      create: vi.fn().mockResolvedValue({ id: "int_1" }),
-    },
-    agent: {
-      findFirst: vi.fn(),
-    },
-    agentLog: {
-      create: vi.fn().mockResolvedValue({ id: "log_1" }),
-    },
+    integration,
+    $transaction: vi
+      .fn()
+      .mockImplementation(
+        (callback: (tx: typeof transactionClient) => Promise<unknown>) =>
+          callback(transactionClient),
+      ),
+    $queryRaw: transactionClient.$queryRaw,
   } as unknown as PrismaService;
 }
 
-function createMockRuntime() {
+function createMockConversationStore() {
   return {
-    triggerRun: vi.fn().mockResolvedValue({ id: "run_1" }),
-  } as unknown as RuntimeService;
+    recordInboundGmailMessage: vi.fn().mockResolvedValue({
+      correlated: true,
+      created: true,
+      conversation: { id: "conv_1" },
+      message: { id: "cmsg_1" },
+    }),
+  } as unknown as ConversationStoreService & {
+    recordInboundGmailMessage: ReturnType<typeof vi.fn>;
+  };
 }
 
-function createMockConfig() {
+function createMockSuppression() {
+  return {
+    suppress: vi.fn().mockResolvedValue({ created: true }),
+  } as unknown as SuppressionService;
+}
+
+function createMockConfig(overrides: Record<string, string> = {}) {
   const configMap: Record<string, string> = {
     GOOGLE_CLIENT_ID: "mock_client_id",
     GOOGLE_CLIENT_SECRET: "mock_client_secret",
@@ -161,6 +192,7 @@ function createMockConfig() {
     GMAIL_PUSH_AUDIENCE: "https://api.example.com/api/integrations/gmail/push",
     GMAIL_PUSH_PUBLISHER_SA: "gmail-push-publisher@example.iam.gserviceaccount.com",
     GMAIL_PUBSUB_TOPIC: "projects/example/topics/gmail-inbound",
+    ...overrides,
   };
   return {
     get: vi.fn().mockImplementation((key: string, defaultValue?: string) => {
@@ -183,7 +215,12 @@ function createConnectedIntegration() {
     provider: "gmail",
     status: "CONNECTED",
     encryptedCredentials: encrypt(JSON.stringify(tokens)),
-    credentials: {},
+    credentials: {
+      accountEmail: "owner@example.com",
+      watchExpiration: String(Date.now() + 7 * 24 * 60 * 60 * 1000),
+    },
+    lastHistoryId: "1000",
+    lastSyncAt: new Date(),
   };
 }
 
@@ -191,14 +228,35 @@ describe("GmailService", () => {
   let service: GmailService;
   let mockPrisma: ReturnType<typeof createMockPrisma>;
   let mockConfig: ReturnType<typeof createMockConfig>;
-  let mockRuntime: ReturnType<typeof createMockRuntime>;
+  let mockConversationStore: ReturnType<typeof createMockConversationStore>;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    getProfileFn.mockReset().mockResolvedValue({
+      data: { emailAddress: "owner@example.com" },
+    });
+    watchFn.mockReset().mockResolvedValue({
+      data: {
+        historyId: "12345",
+        expiration: String(Date.now() + 7 * 24 * 60 * 60 * 1000),
+      },
+    });
     mockPrisma = createMockPrisma();
     mockConfig = createMockConfig();
-    mockRuntime = createMockRuntime();
-    service = new GmailService(mockPrisma, mockConfig, mockRuntime);
+    mockConversationStore = createMockConversationStore();
+    service = new GmailService(
+      mockPrisma,
+      mockConfig,
+      createMockSuppression(),
+      mockConversationStore,
+    );
+  });
+
+  afterEach(() => {
+    if (ORIGINAL_NODE_ENV === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = ORIGINAL_NODE_ENV;
+    if (ORIGINAL_API_PUBLIC_URL === undefined) delete process.env.API_PUBLIC_URL;
+    else process.env.API_PUBLIC_URL = ORIGINAL_API_PUBLIC_URL;
   });
 
   describe("getAuthUrl", () => {
@@ -209,18 +267,223 @@ describe("GmailService", () => {
   });
 
   describe("handleCallback", () => {
-    it("should exchange code for tokens and upsert integration", async () => {
+    function callbackWrites(): Array<{
+      create: Record<string, unknown>;
+      update: Record<string, unknown>;
+    }> {
+      return (
+        mockPrisma.integration.upsert as unknown as ReturnType<typeof vi.fn>
+      ).mock.calls.map((call) => call[0]);
+    }
+
+    it("activates only after profile identity and watch cursor are durable", async () => {
       await service.handleCallback("auth_code_123", "org_1");
 
-      expect(mockPrisma.integration.upsert).toHaveBeenCalledWith(
+      expect(getProfileFn).toHaveBeenCalledWith({ userId: "me" });
+      expect(watchFn).toHaveBeenCalledWith({
+        userId: "me",
+        requestBody: {
+          topicName: "projects/example/topics/gmail-inbound",
+        },
+      });
+      const writes = callbackWrites();
+      expect(writes).toHaveLength(2);
+      expect(writes[0].update).toEqual(
         expect.objectContaining({
-          where: { orgId_provider: { orgId: "org_1", provider: "gmail" } },
-          create: expect.objectContaining({
-            orgId: "org_1",
-            provider: "gmail",
-            status: "CONNECTED",
-          }),
+          credentials: { accountEmail: "owner@example.com" },
+          status: "PENDING",
+          lastHistoryId: null,
+          lastErrorMessage: null,
         }),
+      );
+      expect(writes[1].update).toEqual(
+        expect.objectContaining({
+          credentials: {
+            accountEmail: "owner@example.com",
+            watchExpiration: expect.any(String),
+          },
+          status: "CONNECTED",
+          lastHistoryId: "12345",
+          lastErrorAt: null,
+          lastErrorMessage: null,
+        }),
+      );
+      expect(mockPrisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(mockPrisma.integration.findFirst).toHaveBeenCalledWith({
+        where: {
+          orgId: { not: "org_1" },
+          provider: "gmail",
+          status: "CONNECTED",
+          credentials: {
+            path: ["accountEmail"],
+            equals: "owner@example.com",
+          },
+        },
+        select: { id: true },
+      });
+    });
+
+    it("rejects activation when the normalized mailbox is active in another org", async () => {
+      (
+        mockPrisma.integration.findFirst as unknown as ReturnType<typeof vi.fn>
+      ).mockResolvedValue({ id: "int_other" });
+
+      await expect(
+        service.handleCallback("auth_code_123", "org_1"),
+      ).rejects.toBeInstanceOf(ConflictException);
+
+      expect(callbackWrites().map((write) => write.update.status)).toEqual([
+        "PENDING",
+        "ERROR",
+      ]);
+    });
+
+    it("keeps a usable mock OAuth callback in non-production", async () => {
+      process.env.NODE_ENV = "development";
+
+      await service.handleCallback("mock_code", "Org_1");
+
+      expect(getProfileFn).not.toHaveBeenCalled();
+      expect(watchFn).not.toHaveBeenCalled();
+      expect(callbackWrites()).toHaveLength(1);
+      expect(callbackWrites()[0].update).toEqual(
+        expect.objectContaining({
+          credentials: {
+            accountEmail: "mock+org_1@local.invalid",
+            watchExpiration: expect.any(String),
+          },
+          status: "CONNECTED",
+          lastHistoryId: expect.stringMatching(/^mock-history-/),
+          lastSyncAt: expect.any(Date),
+        }),
+      );
+    });
+
+    it("rejects mock OAuth callbacks in production", async () => {
+      process.env.NODE_ENV = "production";
+
+      await expect(
+        service.handleCallback("mock_code", "org_1"),
+      ).rejects.toThrow("mock callbacks are disabled in production");
+
+      expect(callbackWrites()).toHaveLength(0);
+      expect(getProfileFn).not.toHaveBeenCalled();
+      expect(watchFn).not.toHaveBeenCalled();
+    });
+
+    it("stores ERROR and rejects when mailbox profile resolution fails", async () => {
+      getProfileFn.mockRejectedValue(new Error("profile unavailable"));
+
+      await expect(
+        service.handleCallback("auth_code_123", "org_1"),
+      ).rejects.toBeInstanceOf(ServiceUnavailableException);
+
+      expect(watchFn).not.toHaveBeenCalled();
+      const writes = callbackWrites();
+      expect(writes).toHaveLength(1);
+      expect(writes[0].update).toEqual(
+        expect.objectContaining({
+          credentials: { accountEmail: "" },
+          status: "ERROR",
+          lastHistoryId: null,
+          lastErrorMessage: expect.stringContaining("profile unavailable"),
+        }),
+      );
+    });
+
+    it("stores PENDING and rejects when push infrastructure is absent", async () => {
+      service = new GmailService(
+        mockPrisma,
+        createMockConfig({ GMAIL_PUBSUB_TOPIC: "" }),
+        createMockSuppression(),
+        mockConversationStore,
+      );
+
+      await expect(
+        service.handleCallback("auth_code_123", "org_1"),
+      ).rejects.toThrow("Gmail inbound watch is not configured");
+
+      expect(watchFn).not.toHaveBeenCalled();
+      const writes = callbackWrites();
+      expect(writes).toHaveLength(1);
+      expect(writes[0].update).toEqual(
+        expect.objectContaining({
+          credentials: { accountEmail: "owner@example.com" },
+          status: "PENDING",
+          lastHistoryId: null,
+          lastErrorMessage: "GMAIL_PUBSUB_TOPIC is not configured",
+        }),
+      );
+    });
+
+    it("stores ERROR and rejects when users.watch fails", async () => {
+      watchFn.mockRejectedValue(new Error("topic permission denied"));
+
+      await expect(
+        service.handleCallback("auth_code_123", "org_1"),
+      ).rejects.toThrow("Gmail inbound watch registration failed");
+
+      const writes = callbackWrites();
+      expect(writes).toHaveLength(2);
+      expect(writes[0].update).toEqual(
+        expect.objectContaining({ status: "PENDING", lastHistoryId: null }),
+      );
+      expect(writes[1].update).toEqual(
+        expect.objectContaining({
+          status: "ERROR",
+          lastHistoryId: null,
+          lastErrorMessage: expect.stringContaining("topic permission denied"),
+        }),
+      );
+      expect(writes.some((write) => write.update.status === "CONNECTED")).toBe(
+        false,
+      );
+    });
+
+    it("stores ERROR and rejects when users.watch returns no historyId", async () => {
+      watchFn.mockResolvedValue({
+        data: {
+          expiration: String(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        },
+      });
+
+      await expect(
+        service.handleCallback("auth_code_123", "org_1"),
+      ).rejects.toThrow("Gmail inbound watch returned no history cursor");
+
+      const writes = callbackWrites();
+      expect(writes.at(-1)?.update).toEqual(
+        expect.objectContaining({
+          status: "ERROR",
+          lastHistoryId: null,
+          lastErrorMessage: "gmail.users.watch returned no initial historyId",
+        }),
+      );
+      expect(writes.some((write) => write.update.status === "CONNECTED")).toBe(
+        false,
+      );
+    });
+
+    it("stores ERROR and rejects when users.watch omits a valid future expiration", async () => {
+      watchFn.mockResolvedValue({
+        data: { historyId: "12345", expiration: "1234567890" },
+      });
+
+      await expect(
+        service.handleCallback("auth_code_123", "org_1"),
+      ).rejects.toThrow("no valid future expiration");
+
+      const writes = callbackWrites();
+      expect(writes.at(-1)?.update).toEqual(
+        expect.objectContaining({
+          status: "ERROR",
+          lastHistoryId: null,
+          lastErrorMessage:
+            "gmail.users.watch returned no valid future expiration",
+        }),
+      );
+      expect(writes.some((write) => write.update.status === "CONNECTED")).toBe(
+        false,
       );
     });
   });
@@ -243,6 +506,18 @@ describe("GmailService", () => {
       (mockPrisma.integration.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(null);
 
       await expect(service.listMessages("org_1")).rejects.toThrow(UnauthorizedException);
+    });
+
+    it("rejects provider access when the provider watch is expired", async () => {
+      const stale = createConnectedIntegration();
+      stale.credentials.watchExpiration = "1";
+      (
+        mockPrisma.integration.findUnique as ReturnType<typeof vi.fn>
+      ).mockResolvedValue(stale);
+
+      await expect(service.listMessages("org_1")).rejects.toThrow(
+        "not initialized or active",
+      );
     });
   });
 
@@ -299,6 +574,44 @@ describe("GmailService", () => {
       });
 
       expect(result.id).toBe("sent_msg_1");
+    });
+
+    it("advertises only the public HTTPS one-click unsubscribe URL", async () => {
+      process.env.NODE_ENV = "production";
+      process.env.API_PUBLIC_URL = "https://api.workforceos.xyz";
+      const integration = createConnectedIntegration();
+      (mockPrisma.integration.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(integration);
+
+      await service.sendEmail("org_1", {
+        to: "recipient@example.com",
+        subject: "Test Email",
+        body: "Hello, this is a test.",
+        unsubscribeContext: {
+          orgId: "org_1",
+          recipientRef: "recipient@example.com",
+        },
+      });
+
+      const gmailFactory = google.gmail as unknown as ReturnType<typeof vi.fn>;
+      const gmailClient = gmailFactory.mock.results.at(-1)?.value as {
+        users: {
+          messages: { send: ReturnType<typeof vi.fn> };
+        };
+      };
+      const request = gmailClient.users.messages.send.mock.calls.at(-1)?.[0] as {
+        requestBody?: { raw?: string };
+      };
+      const decoded = Buffer.from(
+        request.requestBody?.raw ?? "",
+        "base64url",
+      ).toString("utf8");
+      expect(decoded).toMatch(
+        /List-Unsubscribe: <https:\/\/api\.workforceos\.xyz\/api\/u\/[A-Za-z0-9_.~%-]+>/,
+      );
+      expect(decoded).toContain(
+        "List-Unsubscribe-Post: List-Unsubscribe=One-Click",
+      );
+      expect(decoded).not.toContain("mailto:");
     });
   });
 
@@ -369,7 +682,8 @@ describe("GmailService", () => {
       const blankService = new GmailService(
         createMockPrisma(),
         blankConfig,
-        createMockRuntime(),
+        createMockSuppression(),
+        createMockConversationStore(),
       );
       expect(await blankService.verifyPushAuth("Bearer anything")).toBe(false);
     });
@@ -379,21 +693,21 @@ describe("GmailService", () => {
     function setupConnectedIntegration() {
       const integration = createConnectedIntegration();
       // findIntegrationByEmail
-      (mockPrisma.integration.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({
-        orgId: "org_1",
-      });
+      (mockPrisma.integration.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([
+        {
+          id: "int_1",
+          orgId: "org_1",
+          lastHistoryId: null,
+        },
+      ]);
       // getTokens
       (mockPrisma.integration.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(
         integration,
       );
     }
 
-    it("dispatches a Reply Handler run for a new inbound message", async () => {
+    it("materializes a correlated new inbound message", async () => {
       setupConnectedIntegration();
-      (mockPrisma.agent.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({
-        id: "agent_reply",
-        orgId: "org_1",
-      });
 
       // Override message metadata: inbound, not sent by us.
       const { google } = await import("googleapis");
@@ -428,26 +742,20 @@ describe("GmailService", () => {
         historyId: "12345",
       });
 
-      expect(mockRuntime.triggerRun).toHaveBeenCalledWith("agent_reply", "org_1");
-      expect(mockPrisma.agentLog.create).toHaveBeenCalledWith(
+      expect(mockConversationStore.recordInboundGmailMessage).toHaveBeenCalledWith(
         expect.objectContaining({
-          data: expect.objectContaining({
-            runId: "run_1",
-            level: "INFO",
-            metadata: expect.objectContaining({
-              gmailMessageId: "msg_new_1",
-              threadId: "thread_new",
-              from: "prospect@acme.com",
-              subject: "Re: quick question",
-            }),
-          }),
+          orgId: "org_1",
+          integrationId: "int_1",
+          providerMessageId: "msg_new_1",
+          providerThreadId: "thread_new",
+          senderEmail: "prospect@acme.com",
+          subject: "Re: quick question",
         }),
       );
     });
 
-    it("returns silently when no Reply Handler is configured for the org", async () => {
+    it("materializes without any agent lookup or runtime trigger", async () => {
       setupConnectedIntegration();
-      (mockPrisma.agent.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue(null);
 
       const { google } = await import("googleapis");
       type GmailMockShape = {
@@ -480,15 +788,11 @@ describe("GmailService", () => {
         }),
       ).resolves.not.toThrow();
 
-      expect(mockRuntime.triggerRun).not.toHaveBeenCalled();
+      expect(mockConversationStore.recordInboundGmailMessage).toHaveBeenCalledOnce();
     });
 
     it("skips messages sent by us (SENT label)", async () => {
       setupConnectedIntegration();
-      (mockPrisma.agent.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({
-        id: "agent_reply",
-        orgId: "org_1",
-      });
 
       const { google } = await import("googleapis");
       type GmailMockShape = {
@@ -517,12 +821,12 @@ describe("GmailService", () => {
         historyId: "55555",
       });
 
-      expect(mockRuntime.triggerRun).not.toHaveBeenCalled();
+      expect(mockConversationStore.recordInboundGmailMessage).not.toHaveBeenCalled();
     });
 
     it("returns silently when no integration matches the emailAddress", async () => {
-      (mockPrisma.integration.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue(
-        null,
+      (mockPrisma.integration.findMany as ReturnType<typeof vi.fn>).mockResolvedValue(
+        [],
       );
 
       await expect(
@@ -532,7 +836,7 @@ describe("GmailService", () => {
         }),
       ).resolves.not.toThrow();
 
-      expect(mockRuntime.triggerRun).not.toHaveBeenCalled();
+      expect(mockConversationStore.recordInboundGmailMessage).not.toHaveBeenCalled();
     });
   });
 

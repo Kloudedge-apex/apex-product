@@ -8,6 +8,7 @@ import helmet from "helmet";
 import { AppModule } from "./app.module";
 import { GlobalExceptionFilter } from "./common/http-exception.filter";
 import { validateEnvOrExit } from "./common/env-validation";
+import { isTrustedProxyAddress } from "./common/trusted-proxy.util";
 
 async function bootstrap() {
   const logger = new Logger("Bootstrap");
@@ -24,6 +25,11 @@ async function bootstrap() {
     rawBody: true,
   });
 
+  // Honor forwarded client addresses only when the immediate network peer is
+  // an internal/loopback ingress proxy. Controllers and audit logs may consume
+  // req.ip; application code never parses X-Forwarded-For directly.
+  app.set("trust proxy", isTrustedProxyAddress);
+
   app.setGlobalPrefix("api");
 
   // ── Security headers ────────────────────────────────────────────────────
@@ -37,8 +43,8 @@ async function bootstrap() {
   // ── Swagger / OpenAPI docs (dev only) ───────────────────────────────────
   if (!isProd) {
     const swaggerConfig = new DocumentBuilder()
-      .setTitle("Apex AI Workforce Platform")
-      .setDescription("REST API for Apex.")
+      .setTitle("Workforce OS API")
+      .setDescription("REST API for the Workforce OS guarded GTM platform.")
       .setVersion("1.0")
       .addBearerAuth({ type: "http", scheme: "bearer", bearerFormat: "JWT" })
       .build();
@@ -89,6 +95,12 @@ async function bootstrap() {
     credentials: true,
     maxAge: 600,
   });
+
+  // ── Graceful shutdown ───────────────────────────────────────────────────
+  // Wire SIGTERM/SIGINT into Nest's lifecycle so OnModuleDestroy hooks run on
+  // deploy. Without this, BullMQ workers (graph-runs, outreach-send) are
+  // hard-killed mid-job and their Worker.close() drains never execute.
+  app.enableShutdownHooks();
 
   const port = process.env.API_PORT || 4000;
   await app.listen(port);

@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://workforceos.xyz/schemas/ci-migration-rehearsal-receipt-v1.json",
+  "title": "Workforce OS synthetic CI migration rehearsal receipt",
+  "description": "Non-authoritative evidence from a hermetic two-tenant CI database. This is never staging or production migration evidence.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "environment",
+    "authority",
+    "status",
+    "sourceMode",
+    "candidateCommit",
+    "baselineCommit",
+    "baselineSchemaSha256",
+    "fixtureSha256",
+    "reconciliationFixtureSha256",
+    "postconditionFixtureSha256",
+    "verifiedAt",
+    "postgresMajor",
+    "vectorMode",
+    "tenantFixtureCount",
+    "backupRestore",
+    "identity",
+    "postconditions",
+    "migrations"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "environment": { "const": "ci-synthetic" },
+    "authority": { "const": "non-authoritative" },
+    "status": { "const": "passed" },
+    "sourceMode": {
+      "enum": ["committed-candidate", "local-working-tree-test"]
+    },
+    "candidateCommit": { "$ref": "#/$defs/gitSha" },
+    "baselineCommit": { "const": "324f831f31ca903f851b3e697ee94cc25af04217" },
+    "baselineSchemaSha256": { "$ref": "#/$defs/sha256" },
+    "fixtureSha256": { "$ref": "#/$defs/sha256" },
+    "reconciliationFixtureSha256": { "$ref": "#/$defs/sha256" },
+    "postconditionFixtureSha256": { "$ref": "#/$defs/sha256" },
+    "verifiedAt": { "type": "string", "format": "date-time" },
+    "postgresMajor": { "type": "integer", "minimum": 14 },
+    "vectorMode": {
+      "enum": ["native", "synthetic-array-stub"]
+    },
+    "tenantFixtureCount": { "const": 2 },
+    "backupRestore": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "archiveFormat",
+        "schemaFingerprintBefore",
+        "schemaFingerprintAfter",
+        "dataFingerprintBefore",
+        "dataFingerprintAfter",
+        "matched"
+      ],
+      "properties": {
+        "archiveFormat": { "const": "postgres-custom" },
+        "schemaFingerprintBefore": { "$ref": "#/$defs/sha256" },
+        "schemaFingerprintAfter": { "$ref": "#/$defs/sha256" },
+        "dataFingerprintBefore": { "$ref": "#/$defs/sha256" },
+        "dataFingerprintAfter": { "$ref": "#/$defs/sha256" },
+        "matched": { "const": true }
+      }
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cutoverReady",
+        "expectedActiveOrganizationCount",
+        "expectedActiveMembershipCount",
+        "expectedActiveUserCount",
+        "projectionMismatchCount",
+        "orphanActiveAuthorityCount",
+        "readinessViolationCount"
+      ],
+      "properties": {
+        "cutoverReady": { "const": true },
+        "expectedActiveOrganizationCount": { "const": 1 },
+        "expectedActiveMembershipCount": { "const": 1 },
+        "expectedActiveUserCount": { "const": 1 },
+        "projectionMismatchCount": { "const": 0 },
+        "orphanActiveAuthorityCount": { "const": 0 },
+        "readinessViolationCount": { "const": 0 }
+      }
+    },
+    "postconditions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fixedIndexCount",
+        "fixedIndexesPassed",
+        "migrationPostconditionsPassed",
+        "tenantIsolationPassed"
+      ],
+      "properties": {
+        "fixedIndexCount": { "const": 6 },
+        "fixedIndexesPassed": { "const": true },
+        "migrationPostconditionsPassed": { "const": true },
+        "tenantIsolationPassed": { "const": true }
+      }
+    },
+    "migrations": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "sha256", "applied", "postconditionsPassed"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "sha256": { "$ref": "#/$defs/sha256" },
+          "applied": { "const": true },
+          "postconditionsPassed": { "const": true }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "gitSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}

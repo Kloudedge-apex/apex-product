@@ -1,8 +1,22 @@
-import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from "@nestjs/common";
+import {
+  Injectable,
+  Logger,
+  OnModuleInit,
+  OnModuleDestroy,
+  Optional,
+} from "@nestjs/common";
 import { Job, Worker } from "bullmq";
 import { PrismaService } from "../prisma/prisma.service";
 import { QueueService, RUN_QUEUE_NAME } from "./queue.service";
 import { ExecutorService } from "./executor.service";
+import {
+  productionBootstrapWorkerMayActivate,
+  ProductionBootstrapWriterFenceService,
+  runWithProductionBootstrapWriterFence,
+  runWithProductionBootstrapWriterFenceOrSkipClosed,
+} from "../ops/production-bootstrap-writer-fence";
+
+const PRODUCTION_BOOTSTRAP_ACTIVATION_POLL_MS = 1_000;
 
 interface RunJobData {
   agentId: string;
@@ -25,6 +39,8 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
 
   // BullMQ worker (used when REDIS_URL is configured)
   private bullWorker: Worker<RunJobData> | null = null;
+  private activationIntervalHandle: ReturnType<typeof setInterval> | null = null;
+  private activationProbeInFlight = false;
 
   // In-memory polling (used when no Redis is configured)
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
@@ -35,6 +51,8 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
     private prisma: PrismaService,
     private queue: QueueService,
     private executor: ExecutorService,
+    @Optional()
+    private readonly productionBootstrapWriterFence?: ProductionBootstrapWriterFenceService,
   ) {}
 
   async onModuleInit() {
@@ -43,32 +61,34 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    await this.recoverOrphanedRuns();
+    const startup = await runWithProductionBootstrapWriterFenceOrSkipClosed(
+      this.productionBootstrapWriterFence,
+      "recovery",
+      () => this.recoverOrphanedRuns(),
+    );
+    if (!startup.ran) {
+      this.logger.log(
+        "Worker startup recovery skipped by the production bootstrap writer fence",
+      );
+    }
 
     if (this.queue.isBullMode()) {
-      const connection = this.queue.getConnection();
-      if (!connection) {
+      if (!this.queue.getConnection()) {
         throw new Error("BullMQ mode reported true but Redis connection missing");
       }
-      this.bullWorker = new Worker<RunJobData>(
-        RUN_QUEUE_NAME,
-        async (job) => this.handleJob(job),
-        {
-          connection,
-          concurrency: this.maxConcurrency,
-        },
-      );
-      this.bullWorker.on("failed", (job, err) => {
-        this.logger.error(`Job ${job?.id} failed: ${err.message}`);
-      });
-      this.bullWorker.on("error", (err) => {
-        this.logger.error(`BullMQ worker error: ${err.message}`);
-      });
-      this.logger.log(
-        `Worker enabled with concurrency=${this.maxConcurrency} (BullMQ, queue=${RUN_QUEUE_NAME})`,
-      );
+      if (!startup.ran) {
+        this.logger.log(
+          "Worker remains dormant until the guarded production bootstrap epoch is OPEN",
+        );
+        this.scheduleActivationProbe();
+      } else {
+        this.startBullWorker();
+      }
     } else {
-      this.intervalHandle = setInterval(() => this.processNext(), 2000);
+      this.intervalHandle = setInterval(
+        () => this.runTimerTask("in-memory poll", () => this.processNext()),
+        2000,
+      );
       this.logger.log(
         `Worker enabled with concurrency=${this.maxConcurrency} (in-memory polling, no Redis)`,
       );
@@ -76,6 +96,10 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleDestroy() {
+    if (this.activationIntervalHandle) {
+      clearInterval(this.activationIntervalHandle);
+      this.activationIntervalHandle = null;
+    }
     if (this.intervalHandle) {
       clearInterval(this.intervalHandle);
       this.intervalHandle = null;
@@ -84,6 +108,89 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
       await this.bullWorker.close();
       this.bullWorker = null;
     }
+  }
+
+  private scheduleActivationProbe(): void {
+    if (this.activationIntervalHandle) return;
+    this.activationIntervalHandle = setInterval(
+      () =>
+        this.runTimerTask("bootstrap activation probe", () =>
+          this.probeBullWorkerActivation(),
+        ),
+      PRODUCTION_BOOTSTRAP_ACTIVATION_POLL_MS,
+    );
+    this.activationIntervalHandle.unref?.();
+  }
+
+  private runTimerTask(
+    label: string,
+    operation: () => Promise<unknown>,
+  ): void {
+    void operation().catch((error) => {
+      this.logger.error(
+        `Worker ${label} failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
+  }
+
+  private async probeBullWorkerActivation(): Promise<void> {
+    if (this.bullWorker || this.activationProbeInFlight) return;
+    this.activationProbeInFlight = true;
+    try {
+      if (
+        !(await productionBootstrapWorkerMayActivate(
+          this.productionBootstrapWriterFence,
+        ))
+      ) {
+        return;
+      }
+      const recovery = await runWithProductionBootstrapWriterFenceOrSkipClosed(
+        this.productionBootstrapWriterFence,
+        "recovery",
+        () => this.recoverOrphanedRuns(),
+      );
+      if (!recovery.ran) return;
+      this.startBullWorker();
+      if (this.activationIntervalHandle) {
+        clearInterval(this.activationIntervalHandle);
+        this.activationIntervalHandle = null;
+      }
+    } catch (error) {
+      this.logger.warn(
+        `Worker activation remains fail-closed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    } finally {
+      this.activationProbeInFlight = false;
+    }
+  }
+
+  private startBullWorker(): void {
+    if (this.bullWorker) return;
+    const connection = this.queue.getConnection();
+    if (!connection) {
+      throw new Error("BullMQ mode reported true but Redis connection missing");
+    }
+    this.bullWorker = new Worker<RunJobData>(
+      RUN_QUEUE_NAME,
+      async (job) => this.handleJob(job),
+      {
+        connection,
+        concurrency: this.maxConcurrency,
+      },
+    );
+    this.bullWorker.on("failed", (job, err) => {
+      this.logger.error(`Job ${job?.id} failed: ${err.message}`);
+    });
+    this.bullWorker.on("error", (err) => {
+      this.logger.error(`BullMQ worker error: ${err.message}`);
+    });
+    this.logger.log(
+      `Worker enabled with concurrency=${this.maxConcurrency} (BullMQ, queue=${RUN_QUEUE_NAME})`,
+    );
   }
 
   /** Re-enqueue any AgentRun rows stuck in QUEUED state (worker crash recovery). */
@@ -113,7 +220,11 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
   /** BullMQ job handler. Throws on failure so BullMQ records the error and retries. */
   private async handleJob(job: Job<RunJobData>): Promise<void> {
     const { agentId, runId } = job.data;
-    await this.runAgent(agentId, runId);
+    await runWithProductionBootstrapWriterFence(
+      this.productionBootstrapWriterFence,
+      "agent-worker",
+      () => this.runAgent(agentId, runId),
+    );
   }
 
   /** Shared execution path used by both BullMQ worker and in-memory poller. */
@@ -175,7 +286,11 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
 
     this.activeJobs++;
     try {
-      await this.runAgent(job.agentId, job.runId);
+      await runWithProductionBootstrapWriterFence(
+        this.productionBootstrapWriterFence,
+        "agent-worker",
+        () => this.runAgent(job.agentId, job.runId),
+      );
       this.queue.complete(job.id);
     } catch (error) {
       this.queue.fail(job.id, error instanceof Error ? error.message : "unknown");

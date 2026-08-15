@@ -2,6 +2,7 @@ import {
   Controller,
   Get,
   Post,
+  Patch,
   Body,
   Param,
   Query,
@@ -34,6 +35,18 @@ const LEAD_UI_STAGES: ReadonlySet<LeadsUiStage> = new Set([
   "replied",
   "meeting",
 ]);
+
+interface IcpProfileBody {
+  name: string;
+  targetTitles?: string[];
+  targetIndustries?: string[];
+  targetGeos?: string[];
+  minEmployees?: number | null;
+  maxEmployees?: number | null;
+  techStackSignals?: string[];
+  intentKeywords?: string[];
+  seedDomains?: string[];
+}
 
 @Controller("leads")
 export class LeadsController {
@@ -71,38 +84,26 @@ export class LeadsController {
   createIcp(
     @OrgId() orgId: string | undefined,
     @Body()
-    body: {
-      name: string;
-      targetTitles?: string[];
-      targetIndustries?: string[];
-      targetGeos?: string[];
-      minEmployees?: number;
-      maxEmployees?: number;
-      techStackSignals?: string[];
-      intentKeywords?: string[];
-      seedDomains?: string[];
-    },
+    body: IcpProfileBody,
   ) {
     if (!orgId) throw new BadRequestException("orgId required");
-    if (!body.name || typeof body.name !== "string" || body.name.length > 200)
-      throw new BadRequestException("name is required (max 200 chars)");
+    return this.leads.createIcpProfile(orgId, normalizeIcpProfileBody(body));
+  }
 
-    // Cap array sizes to prevent abuse
-    const cap = (arr: string[] | undefined, max: number) =>
-      arr ? arr.slice(0, max).map((s) => String(s).slice(0, 200)) : [];
-
-    return this.leads.createIcpProfile(orgId, {
-      ...body,
-      name: body.name.slice(0, 200),
-      targetTitles: cap(body.targetTitles, 20),
-      targetIndustries: cap(body.targetIndustries, 10),
-      targetGeos: cap(body.targetGeos, 10),
-      techStackSignals: cap(body.techStackSignals, 20),
-      intentKeywords: cap(body.intentKeywords, 30),
-      seedDomains: cap(body.seedDomains, 50),
-      minEmployees: body.minEmployees ? Math.max(0, Math.min(body.minEmployees, 1000000)) : undefined,
-      maxEmployees: body.maxEmployees ? Math.max(0, Math.min(body.maxEmployees, 1000000)) : undefined,
-    });
+  /**
+   * Guided setup owns one current ICP. This endpoint updates the newest row
+   * in place, or creates it once for a clean tenant, under an org-scoped lock.
+   */
+  @Patch("icp/current")
+  upsertCurrentIcp(
+    @OrgId() orgId: string | undefined,
+    @Body() body: IcpProfileBody,
+  ) {
+    if (!orgId) throw new BadRequestException("orgId required");
+    return this.leads.upsertCurrentIcpProfile(
+      orgId,
+      normalizeIcpProfileBody(body, true),
+    );
   }
 
   @Get("icp")
@@ -237,4 +238,41 @@ export class LeadsController {
     if (!orgId) throw new BadRequestException("orgId required");
     return this.leads.getStats(orgId);
   }
+}
+
+function normalizeIcpProfileBody(body: IcpProfileBody, preserveOmitted = false) {
+  if (!body.name || typeof body.name !== "string" || body.name.length > 200) {
+    throw new BadRequestException("name is required (max 200 chars)");
+  }
+  const cap = (arr: string[] | undefined, max: number, field: string) => {
+    if (arr === undefined) return preserveOmitted ? undefined : [];
+    if (!Array.isArray(arr) || arr.some((item) => typeof item !== "string")) {
+      throw new BadRequestException(`${field} must be an array of strings`);
+    }
+    return arr.slice(0, max).map((s) => s.trim().slice(0, 200)).filter(Boolean);
+  };
+  const bound = (value: number | null | undefined, field: string) => {
+    if (value === undefined) return undefined;
+    if (value === null) return null;
+    if (!Number.isSafeInteger(value) || value < 0 || value > 1_000_000) {
+      throw new BadRequestException(`${field} must be an integer from 0 to 1000000 or null`);
+    }
+    return value;
+  };
+  const minEmployees = bound(body.minEmployees, "minEmployees");
+  const maxEmployees = bound(body.maxEmployees, "maxEmployees");
+  if (typeof minEmployees === "number" && typeof maxEmployees === "number" && minEmployees > maxEmployees) {
+    throw new BadRequestException("minEmployees must not exceed maxEmployees");
+  }
+  return {
+    name: body.name.slice(0, 200),
+    targetTitles: cap(body.targetTitles, 20, "targetTitles"),
+    targetIndustries: cap(body.targetIndustries, 10, "targetIndustries"),
+    targetGeos: cap(body.targetGeos, 10, "targetGeos"),
+    techStackSignals: cap(body.techStackSignals, 20, "techStackSignals"),
+    intentKeywords: cap(body.intentKeywords, 30, "intentKeywords"),
+    seedDomains: cap(body.seedDomains, 50, "seedDomains"),
+    minEmployees,
+    maxEmployees,
+  };
 }

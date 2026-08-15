@@ -6,7 +6,6 @@ import { LLMService } from "./llm.service";
 import { LlmBudgetService } from "./llm-budget.service";
 import { ExecutorService } from "./executor.service";
 import { SchedulerService } from "./scheduler.service";
-import { RuntimeController } from "./runtime.controller";
 import { MemoryService } from "./memory.service";
 import { IntegrationsModule } from "../integrations/integrations.module";
 import { OutreachModule } from "../outreach/outreach.module";
@@ -16,7 +15,6 @@ import { callJudge } from "../observability/evaluators/judge";
 
 @Module({
   imports: [IntegrationsModule, OutreachModule, ObservabilityModule],
-  controllers: [RuntimeController],
   providers: [
     RuntimeService,
     QueueService,

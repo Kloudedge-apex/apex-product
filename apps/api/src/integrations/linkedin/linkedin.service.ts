@@ -1,7 +1,12 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
 import { IntegrationsService } from "../integrations.service";
-import { fetchWithRetry, withCircuitBreaker } from "../../common/http-retry.util";
+import {
+  CircuitOpenError,
+  RateLimitedError,
+  fetchWithRetry,
+  withCircuitBreaker,
+} from "../../common/http-retry.util";
 
 /**
  * Result shape for any LinkedIn message send attempt. Distinct from a plain
@@ -179,17 +184,30 @@ export class LinkedInService {
             },
             body: JSON.stringify(body),
           },
-          { provider: "linkedin" },
+          // POST /messages has no caller-supplied idempotency key. One wire
+          // attempt only: a lost response is ambiguous and the outreach
+          // worker must quarantine its SENDING claim instead of retrying.
+          { provider: "linkedin", maxAttempts: 1 },
         ),
       );
     } catch (err) {
-      // RateLimitedError or CircuitOpenError after retries exhausted, or any
-      // transient network failure that escaped the retry loop. We report this
-      // as a soft failure so the worker can flip the artifact to a terminal
-      // rejected state rather than blow up the job.
+      // Circuit-open proves no request was attempted. A RateLimitedError with
+      // lastStatus proves the provider returned a rejection. A status-less
+      // transport error is intentionally left ambiguous; the outreach worker
+      // recognizes that shape and persists DELIVERY_UNKNOWN.
+      if (err instanceof CircuitOpenError) {
+        return {
+          ok: false,
+          error: "linkedin_circuit_open",
+          details: err.message,
+        };
+      }
       return {
         ok: false,
         error: "linkedin_send_failed",
+        ...(err instanceof RateLimitedError && err.lastStatus !== null
+          ? { status: err.lastStatus }
+          : {}),
         details: err instanceof Error ? err.message : String(err),
       };
     }

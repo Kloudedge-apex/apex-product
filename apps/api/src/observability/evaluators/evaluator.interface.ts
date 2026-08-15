@@ -29,6 +29,8 @@ export interface EvaluatorDeps {
     readonly systemPrompt: string;
     readonly userPrompt: string;
     readonly model?: string;
+    /** Tenant charged for this evaluator call; absent only for system runs. */
+    readonly orgId?: string;
   }) => Promise<{ score: number; label: string; rationale: string } | null>;
 }
 

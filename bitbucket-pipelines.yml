@@ -1,24 +1,27 @@
 # Apex backend CI/CD
 #
 # Pull requests → install, lint, type-check, test.
-# Push to master → tests, then build image via `az acr build`, then roll
-# apex-gtm-api and apex-gtm-worker in parallel.
+# Push to master → tests, then build image via `az acr build` and freeze its
+# manifest digest. Production rollout is only through `scripts/deploy-prod.sh`,
+# which pulls the exact digest and runs the image contract before changing
+# either Container App.
 #
-# Required Bitbucket repository variables (Repository settings → Pipelines
-# → Repository variables):
+# Required variables in a deployment environment named
+# `production-image-build` (not repository/workspace variables):
 #
-#   AZURE_SP_APP_ID         Service Principal client ID
-#   AZURE_SP_PASSWORD       Service Principal secret (mark "Secured")
-#   AZURE_TENANT_ID         Azure AD tenant id
+#   AZURE_ACR_BUILD_CLIENT_ID   Federated application client ID
+#   AZURE_TENANT_ID             Azure AD tenant ID
 #
-# The SP needs:
-#   - AcrPush on ledgracr (for `az acr build`)
-#   - Contributor on resource group Ledgr-prod (for `az containerapp update`)
+# Configure Bitbucket OIDC federation and restrict this deployment environment
+# to trusted master builds. The identity receives only the ACR data/task roles
+# needed to queue a build and push its output to ledgracr. It must not receive
+# Container Apps Contributor or any production runtime permission. No client
+# secret is stored in Bitbucket, and pull-request steps receive no Azure token.
 #
 # DB schema changes are NOT touched by CI — keep the existing
 # firewall-open → diff → approve → push → close workflow manual.
 
-image: node:20-bookworm
+image: node:24-bookworm
 
 definitions:
   caches:
@@ -29,6 +32,7 @@ definitions:
         caches:
           - pnpm-store
         script:
+          - apt-get update && apt-get install -y --no-install-recommends jq openssl openssh-client && rm -rf /var/lib/apt/lists/*
           - corepack enable
           - corepack prepare pnpm@10.28.2 --activate
           - pnpm config set store-dir $BITBUCKET_CLONE_DIR/.pnpm-store
@@ -36,62 +40,52 @@ definitions:
           - pnpm --filter @apex/db exec prisma generate
           - pnpm lint
           - pnpm type-check
-          # FIXME: executor.service.spec.ts and runtime-integration.spec.ts
-          # have pre-existing prisma.$transaction mock incompleteness from
-          # Phase 2.5. Excluded here so CI is green; fix the mocks and remove
-          # these exclusions.
-          - >
-            pnpm --filter @apex/api exec vitest run
-            --reporter=default
-            --exclude='**/runtime/__tests__/executor.service.spec.ts'
-            --exclude='**/runtime/__tests__/runtime-integration.spec.ts'
+          - pnpm --filter @apex/api exec vitest run --reporter=default
+          - bash scripts/tests/release-scripts.test.sh
 
     - step: &build-image
         name: Build image and push to ACR
-        image: mcr.microsoft.com/azure-cli:latest
+        image: mcr.microsoft.com/azure-cli:2.89.1@sha256:f2e73db53c04ca82a675f1ecaa7051c42886932d45656789f90038673a42db9a
+        oidc: true
+        deployment: production-image-build
         script:
-          - az login --service-principal -u $AZURE_SP_APP_ID -p $AZURE_SP_PASSWORD --tenant $AZURE_TENANT_ID --output none
-          # Tag scheme:
-          #   :$BITBUCKET_COMMIT  — immutable SHA tag, what deploys roll forward to
-          #   :v$STAMP            — human-readable timestamp, matches manual `az acr build` provenance
-          #   :latest             — moving pointer, used by the manual redeploy fallback
-          - export STAMP=$(date -u +%Y%m%d%H%M%S)
+          - test -n "$AZURE_ACR_BUILD_CLIENT_ID" && test -n "$AZURE_TENANT_ID" && test -n "$BITBUCKET_STEP_OIDC_TOKEN"
+          - az login --service-principal --username "$AZURE_ACR_BUILD_CLIENT_ID" --tenant "$AZURE_TENANT_ID" --federated-token "$BITBUCKET_STEP_OIDC_TOKEN" --output none
+          # Full-SHA traceability only. Mutable timestamp/latest aliases are
+          # not deployment inputs. This fresh Bitbucket step receives the
+          # immutable clone for BITBUCKET_COMMIT and no prior build artifacts.
           - >
-            az acr build
+            export ACR_RUN_ID="$(az acr build
             --registry ledgracr
+            --image 'apex-api:{{.Run.ID}}'
             --image apex-api:$BITBUCKET_COMMIT
-            --image apex-api:v$STAMP
-            --image apex-api:latest
+            --build-arg VCS_REF=$BITBUCKET_COMMIT
             --file apps/api/Dockerfile
-            .
-
-    - step: &deploy-api
-        name: Roll apex-gtm-api
-        image: mcr.microsoft.com/azure-cli:latest
-        deployment: production-api
-        script:
-          - az login --service-principal -u $AZURE_SP_APP_ID -p $AZURE_SP_PASSWORD --tenant $AZURE_TENANT_ID --output none
+            --platform linux/amd64
+            --no-logs
+            --query runId
+            --output tsv
+            "$BITBUCKET_CLONE_DIR")"
+          - printf '%s\n' "$ACR_RUN_ID" | grep -Eq '^[a-z0-9]+$'
+          - test "$(az acr task show-run --registry ledgracr --run-id "$ACR_RUN_ID" --query status --output tsv)" = Succeeded
           - >
-            az containerapp update
-            --name apex-gtm-api
-            --resource-group Ledgr-prod
-            --image ledgracr.azurecr.io/apex-api:$BITBUCKET_COMMIT
-            --output none
-          - echo "Rolled apex-gtm-api to $BITBUCKET_COMMIT"
-
-    - step: &deploy-worker
-        name: Roll apex-gtm-worker
-        image: mcr.microsoft.com/azure-cli:latest
-        deployment: production-worker
-        script:
-          - az login --service-principal -u $AZURE_SP_APP_ID -p $AZURE_SP_PASSWORD --tenant $AZURE_TENANT_ID --output none
+            export IMAGE_DIGEST="$(az acr task show-run
+            --registry ledgracr
+            --run-id "$ACR_RUN_ID"
+            --query "outputImages[?repository=='apex-api' && tag=='$ACR_RUN_ID'].digest | [0]"
+            --output tsv)"
+          - printf '%s\n' "$IMAGE_DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'
           - >
-            az containerapp update
-            --name apex-gtm-worker
-            --resource-group Ledgr-prod
-            --image ledgracr.azurecr.io/apex-api:$BITBUCKET_COMMIT
-            --output none
-          - echo "Rolled apex-gtm-worker to $BITBUCKET_COMMIT"
+            test "$(az acr task show-run
+            --registry ledgracr
+            --run-id "$ACR_RUN_ID"
+            --query "outputImages[?repository=='apex-api' && tag=='$BITBUCKET_COMMIT'].digest | [0]"
+            --output tsv)" = "$IMAGE_DIGEST"
+          - printf '%s\n' "$ACR_RUN_ID" > image-run-id.txt
+          - printf '%s\n' "$IMAGE_DIGEST" > image-digest.txt
+        artifacts:
+          - image-run-id.txt
+          - image-digest.txt
 
 pipelines:
   pull-requests:
@@ -102,28 +96,12 @@ pipelines:
     master:
       - step: *install-and-test
       - step: *build-image
-      - parallel:
-          - step: *deploy-api
-          - step: *deploy-worker
 
     'phase-2.5-*':
       - step: *install-and-test
 
-  # Manual: trigger from Bitbucket UI when you want to roll without a push
-  # (e.g. re-deploy current master image, or roll back to a specific SHA /
-  # timestamp tag). Set IMAGE_TAG in the "Run pipeline" dialog — defaults to
-  # `latest`, which matches what the most recent successful master build
-  # pushed.
-  custom:
-    redeploy-current-master:
-      - variables:
-          - name: IMAGE_TAG
-            default: latest
-      - step:
-          name: Roll API + worker to apex-api:$IMAGE_TAG
-          image: mcr.microsoft.com/azure-cli:latest
-          script:
-            - az login --service-principal -u $AZURE_SP_APP_ID -p $AZURE_SP_PASSWORD --tenant $AZURE_TENANT_ID --output none
-            - echo "Rolling to ledgracr.azurecr.io/apex-api:$IMAGE_TAG"
-            - az containerapp update -n apex-gtm-api -g Ledgr-prod --image ledgracr.azurecr.io/apex-api:$IMAGE_TAG --output none
-            - az containerapp update -n apex-gtm-worker -g Ledgr-prod --image ledgracr.azurecr.io/apex-api:$IMAGE_TAG --output none
+    # Prod ships from release/go-live-* (manual `az acr build` + containerapp
+    # roll — see scripts/deploy-prod.sh), so the release branch gets the same
+    # blocking test gate as master. Build/deploy stays manual on purpose.
+    'release/go-live-*':
+      - step: *install-and-test

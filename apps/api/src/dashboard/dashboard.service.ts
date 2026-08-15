@@ -1,12 +1,20 @@
 import { Injectable } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import { OutreachArtifactStatus, MeetingStatus } from "@prisma/client";
+import {
+  artifactFailedAt,
+  effectiveArtifactStatus,
+  hasLegacyAutoFailedMarker,
+  isFailedArtifact,
+  isLegacyAutoFailedArtifact,
+} from "../outreach/outreach-artifact-failure";
 
 export interface DashboardStats {
   leadsSourced: number;
   leadsQualified: number;
   emailsSent: number;
-  replyRate: number;
+  /** Null until a durable, time-windowed reply-rate definition is available. */
+  replyRate: number | null;
   meetingsBooked: number;
 }
 
@@ -20,6 +28,9 @@ export interface ActivityEvent {
     | "draft_created"
     | "draft_approved"
     | "draft_rejected"
+    | "draft_failed"
+    | "draft_sent"
+    | "delivery_unknown"
     | "meeting_proposed"
     | "meeting_confirmed";
   text: string;
@@ -32,32 +43,28 @@ export class DashboardService {
   constructor(private readonly prisma: PrismaService) {}
 
   async stats(orgId: string): Promise<DashboardStats> {
-    const [
-      leadsSourced,
-      leadsQualified,
-      emailsSent,
-      meetingsBooked,
-    ] = await Promise.all([
-      this.prisma.leadScore.count({ where: { orgId } }),
-      this.prisma.leadScore.count({
-        where: { orgId, qualifiedAt: { not: null } },
-      }),
-      this.prisma.outreachArtifact.count({
-        where: { orgId, sentAt: { not: null } },
-      }),
-      this.prisma.meetingLedger.count({
-        where: {
-          orgId,
-          status: { in: [MeetingStatus.CONFIRMED, MeetingStatus.COMPLETED] },
-        },
-      }),
-    ]);
+    const [leadsSourced, leadsQualified, emailsSent, meetingsBooked] =
+      await Promise.all([
+        this.prisma.leadScore.count({ where: { orgId } }),
+        this.prisma.leadScore.count({
+          where: { orgId, qualifiedAt: { not: null } },
+        }),
+        this.prisma.outreachArtifact.count({
+          where: { orgId, sentAt: { not: null } },
+        }),
+        this.prisma.meetingLedger.count({
+          where: {
+            orgId,
+            status: { in: [MeetingStatus.CONFIRMED, MeetingStatus.COMPLETED] },
+          },
+        }),
+      ]);
 
     return {
       leadsSourced,
       leadsQualified,
       emailsSent,
-      replyRate: 0,
+      replyRate: null,
       meetingsBooked,
     };
   }
@@ -88,6 +95,9 @@ export class DashboardService {
           createdAt: true,
           updatedAt: true,
           reviewedAt: true,
+          reviewerNote: true,
+          failureReason: true,
+          failedAt: true,
         },
       }),
       this.prisma.meetingLedger.findMany({
@@ -145,6 +155,22 @@ export class DashboardService {
     }
 
     for (const a of artifacts) {
+      const failed = isFailedArtifact(a);
+      const effectiveStatus = effectiveArtifactStatus(a);
+      const deliveryUnknown =
+        effectiveStatus === OutreachArtifactStatus.DELIVERY_UNKNOWN;
+      const reliableLegacyApproval =
+        isLegacyAutoFailedArtifact(a) && a.failedAt !== null;
+      const preservesApproval = (
+        [
+          OutreachArtifactStatus.APPROVED,
+          OutreachArtifactStatus.SENDING,
+          OutreachArtifactStatus.SENT,
+          OutreachArtifactStatus.SIMULATED,
+          OutreachArtifactStatus.DELIVERY_UNKNOWN,
+          OutreachArtifactStatus.FAILED,
+        ] as readonly OutreachArtifactStatus[]
+      ).includes(effectiveStatus);
       events.push({
         id: `artifact:${a.id}:created`,
         kind: "draft_created",
@@ -152,7 +178,7 @@ export class DashboardService {
         at: a.createdAt.toISOString(),
         leadId: "",
       });
-      if (a.status === OutreachArtifactStatus.APPROVED && a.reviewedAt) {
+      if (a.reviewedAt && (preservesApproval || reliableLegacyApproval)) {
         events.push({
           id: `artifact:${a.id}:approved`,
           kind: "draft_approved",
@@ -161,12 +187,45 @@ export class DashboardService {
           leadId: "",
         });
       }
-      if (a.status === OutreachArtifactStatus.REJECTED && a.reviewedAt) {
+      if (
+        !failed &&
+        !hasLegacyAutoFailedMarker(a) &&
+        !deliveryUnknown &&
+        a.status === OutreachArtifactStatus.REJECTED &&
+        a.reviewedAt
+      ) {
         events.push({
           id: `artifact:${a.id}:rejected`,
           kind: "draft_rejected",
           text: `Rejected outreach draft`,
           at: a.reviewedAt.toISOString(),
+          leadId: "",
+        });
+      }
+      if (failed) {
+        events.push({
+          id: `artifact:${a.id}:failed`,
+          kind: "draft_failed",
+          text: "Outreach dispatch failed without provider acceptance",
+          at: (artifactFailedAt(a) ?? a.updatedAt).toISOString(),
+          leadId: "",
+        });
+      }
+      if (a.status === OutreachArtifactStatus.SENT) {
+        events.push({
+          id: `artifact:${a.id}:sent`,
+          kind: "draft_sent",
+          text: "Sent approved outreach",
+          at: a.updatedAt.toISOString(),
+          leadId: "",
+        });
+      }
+      if (deliveryUnknown) {
+        events.push({
+          id: `artifact:${a.id}:delivery_unknown`,
+          kind: "delivery_unknown",
+          text: "Outreach delivery requires reconciliation",
+          at: a.updatedAt.toISOString(),
           leadId: "",
         });
       }

@@ -1,0 +1,114 @@
+{
+  "schemaVersion": 1,
+  "status": "source-only-no-apply",
+  "subscriptionId": "3171575e-f164-425c-9ee0-2fb10cf93884",
+  "resourceGroup": "Ledgr-prod",
+  "authorityAuditManagementGroupId": "d4b3813d-146f-4d03-96b8-d6e5862d58a2",
+  "location": "eastus",
+  "registryName": "ledgracr",
+  "controlStorageAccountName": "ledgrstorage",
+  "controlContainerName": "production-control",
+  "controlBlobName": "workforce-os/initial-production-bootstrap/state-v1.json",
+  "authorityDrainCheckpointBlobName": "workforce-os/initial-production-bootstrap/authority-drain-checkpoint-v1",
+  "github": {
+    "issuer": "https://token.actions.githubusercontent.com",
+    "audience": "api://AzureADTokenExchange",
+    "subjects": {
+      "backendBuild": "repo:Kloudedge-apex/apex-product:environment:workforce-os-production-build",
+      "consoleBuild": "repo:Kloudedge-apex/Workforce-OS:environment:workforce-os-production-build",
+      "backendRelease": "repo:Kloudedge-apex/apex-product:environment:workforce-os-production",
+      "consoleRelease": "repo:Kloudedge-apex/Workforce-OS:environment:workforce-os-production"
+    }
+  },
+  "customRoles": {
+    "acrBuildRunner": {
+      "actions": [
+        "Microsoft.ContainerRegistry/registries/read",
+        "Microsoft.ContainerRegistry/registries/listBuildSourceUploadUrl/action",
+        "Microsoft.ContainerRegistry/registries/scheduleRun/action",
+        "Microsoft.ContainerRegistry/registries/runs/read"
+      ],
+      "dataActions": []
+    },
+    "containerAppRelease": {
+      "actions": [
+        "Microsoft.App/containerApps/read",
+        "Microsoft.App/containerApps/write",
+        "Microsoft.App/containerApps/revisions/read",
+        "Microsoft.App/containerApps/revisions/activate/action",
+        "Microsoft.Authorization/roleAssignments/read"
+      ],
+      "dataActions": []
+    },
+    "controlBlobOperator": {
+      "actions": [
+        "Microsoft.Storage/storageAccounts/read",
+        "Microsoft.Authorization/roleAssignments/read"
+      ],
+      "dataActions": [
+        "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read",
+        "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/write"
+      ],
+      "conditionVersion": "2.0",
+      "conditionResourceAttributes": [
+        "Microsoft.Storage/storageAccounts/blobServices/containers:name",
+        "Microsoft.Storage/storageAccounts/blobServices/containers/blobs:path"
+      ]
+    },
+    "authorityAuditSubscriptionReader": {
+      "actions": [
+        "Microsoft.Resources/subscriptions/read",
+        "Microsoft.Resources/subscriptions/resourceGroups/read",
+        "Microsoft.App/containerApps/read",
+        "Microsoft.ManagedIdentity/userAssignedIdentities/read",
+        "Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials/read",
+        "Microsoft.ContainerRegistry/registries/read",
+        "Microsoft.ContainerRegistry/registries/tokens/read",
+        "Microsoft.ContainerRegistry/registries/tasks/read",
+        "Microsoft.Storage/storageAccounts/read",
+        "Microsoft.Storage/storageAccounts/blobServices/read",
+        "Microsoft.Storage/storageAccounts/blobServices/containers/read",
+        "Microsoft.Storage/storageAccounts/localusers/read",
+        "Microsoft.Storage/storageAccounts/managementPolicies/read",
+        "Microsoft.Storage/storageAccounts/objectReplicationPolicies/read"
+      ],
+      "dataActions": []
+    },
+    "authorityAuditManagementGroupReader": {
+      "actions": [
+        "Microsoft.Authorization/roleAssignments/read",
+        "Microsoft.Authorization/roleDefinitions/read",
+        "Microsoft.Authorization/roleAssignmentScheduleInstances/read",
+        "Microsoft.Authorization/roleEligibilityScheduleInstances/read",
+        "Microsoft.ResourceGraph/resources/read",
+        "Microsoft.Management/managementGroups/read",
+        "Microsoft.Management/managementGroups/subscriptions/read",
+        "Microsoft.Resources/subscriptions/read"
+      ],
+      "dataActions": []
+    }
+  },
+  "builtInRoles": {
+    "acrPull": "7f951dda-4ed3-4680-a7ca-43fe172d538d"
+  },
+  "containerAppAssignments": {
+    "backendRelease": ["apex-gtm-api", "apex-gtm-worker", "nikxius-web"],
+    "consoleRelease": ["nikxius-web"],
+    "backendBuild": [],
+    "consoleBuild": []
+  },
+  "authorityAuditAssignments": {
+    "subscription": ["backendRelease", "consoleRelease"],
+    "managementGroup": ["backendRelease", "consoleRelease"]
+  },
+  "blobLeaseBoundary": {
+    "readWriteRestrictedToExactPaths": true,
+    "allowedBlobPaths": [
+      "workforce-os/initial-production-bootstrap/state-v1.json",
+      "workforce-os/initial-production-bootstrap/authority-drain-checkpoint-v1"
+    ],
+    "deleteGranted": false,
+    "leaseBreakSeparableByRbac": false,
+    "controllerBreakCommandForbidden": true
+  }
+}

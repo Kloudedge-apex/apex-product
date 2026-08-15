@@ -1,0 +1,349 @@
+name: One-time Workforce OS production bootstrap
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "One bounded bootstrap controller action"
+        required: true
+        type: choice
+        options:
+          - audit
+          - prepare
+          - invoke-clerk
+          - apply-schema
+          - deploy-compatible
+          - activate-first-class
+          - resume
+          - complete
+          - hold
+          - renew-hold
+      confirmation:
+        description: "Type BOOTSTRAP WORKFORCE OS PRODUCTION"
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  checks: read
+  contents: write
+  deployments: read
+  id-token: write
+  statuses: read
+
+concurrency:
+  group: workforce-os-production
+  cancel-in-progress: false
+
+jobs:
+  bootstrap:
+    name: ${{ inputs.action }} production bootstrap
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    environment: workforce-os-production
+
+    steps:
+      - name: Validate protected manual authority
+        id: production_environment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTION: ${{ inputs.action }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          REF_PROTECTED: ${{ github.ref_protected }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ||
+            "${GITHUB_REF}" != "refs/heads/master" || "${REF_PROTECTED}" != "true" ||
+            "${CONFIRMATION}" != "BOOTSTRAP WORKFORCE OS PRODUCTION" ||
+            ! "${WORKFLOW_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "ERROR: bootstrap must be manually dispatched from protected master with exact confirmation" >&2
+            exit 1
+          fi
+          case "${ACTION}" in
+            audit|prepare|invoke-clerk|apply-schema|deploy-compatible|activate-first-class|resume|complete|hold|renew-hold) ;;
+            *) echo "ERROR: unsupported bootstrap action" >&2; exit 1 ;;
+          esac
+          repository_json="$(gh api "repos/${GITHUB_REPOSITORY}")"
+          jq -e '.default_branch == "master"' >/dev/null <<<"${repository_json}"
+          master_json="$(gh api "repos/${GITHUB_REPOSITORY}/branches/master")"
+          jq -e --arg sha "${WORKFLOW_SHA}" '.protected == true and .commit.sha == $sha' >/dev/null <<<"${master_json}"
+          environment_json="$(gh api "repos/${GITHUB_REPOSITORY}/environments/workforce-os-production")"
+          jq -e '
+            .can_admins_bypass == false
+            and any(.protection_rules[]?;
+              .type == "required_reviewers" and .prevent_self_review == true
+              and (.reviewers | type == "array" and length > 0))
+            and .deployment_branch_policy.protected_branches == true
+            and .deployment_branch_policy.custom_branch_policies == false
+          ' >/dev/null <<<"${environment_json}"
+
+          read_environment_variable() {
+            local name=$1 variable_json
+            variable_json="$(gh api --method GET \
+              "repos/${GITHUB_REPOSITORY}/environments/workforce-os-production/variables/${name}")"
+            jq -e --arg name "${name}" '
+              .name == $name
+              and (.value | type == "string" and length > 0)
+            ' >/dev/null <<<"${variable_json}"
+            jq -er '.value' <<<"${variable_json}"
+          }
+          verify_environment_secret() {
+            local name=$1 secret_json
+            secret_json="$(gh api --method GET \
+              "repos/${GITHUB_REPOSITORY}/environments/workforce-os-production/secrets/${name}")"
+            jq -e --arg name "${name}" '.name == $name' >/dev/null <<<"${secret_json}"
+          }
+
+          azure_client_id="$(read_environment_variable "AZURE_CLIENT_ID")"
+          azure_tenant_id="$(read_environment_variable "AZURE_TENANT_ID")"
+          azure_subscription_id="$(read_environment_variable "AZURE_SUBSCRIPTION_ID")"
+          azure_principal_object_id="$(read_environment_variable "AZURE_PRINCIPAL_OBJECT_ID")"
+          exclusive_aca_authority="$(read_environment_variable \
+            "ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED")"
+          exclusive_ddl_authority="$(read_environment_variable \
+            "DATABASE_DDL_EXCLUSIVE_AUTHORITY_CONFIRMED")"
+          outstanding_delivery_review="$(read_environment_variable \
+            "OUTSTANDING_DELIVERY_REVIEW_CONFIRMED")"
+          provider_delivery_drain="$(read_environment_variable \
+            "PROVIDER_DELIVERY_DRAIN_CONFIRMED")"
+
+          uuid_pattern='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+          for value in \
+            "${azure_client_id}" \
+            "${azure_tenant_id}" \
+            "${azure_subscription_id}" \
+            "${azure_principal_object_id}"; do
+            if [[ ! "${value}" =~ ${uuid_pattern} ]]; then
+              echo "ERROR: protected production identity variables are incomplete" >&2
+              exit 1
+            fi
+          done
+          if [[ "${exclusive_aca_authority}" != "true" ]]; then
+            echo "ERROR: protected environment has no exclusive Container Apps authority attestation" >&2
+            exit 1
+          fi
+          for value in \
+            "${exclusive_ddl_authority}" \
+            "${outstanding_delivery_review}" \
+            "${provider_delivery_drain}"; do
+            if [[ "${value}" != "true" && "${value}" != "false" ]]; then
+              echo "ERROR: protected production evidence variables must be exact booleans" >&2
+              exit 1
+            fi
+          done
+          if [[ ("${ACTION}" == "prepare" || "${ACTION}" == "invoke-clerk" ||
+            "${ACTION}" == "apply-schema") && "${exclusive_ddl_authority}" != "true" ]]; then
+            echo "ERROR: database mutation actions require protected exclusive DDL authority" >&2
+            exit 1
+          fi
+
+          verify_environment_secret "PRODUCTION_BOOTSTRAP_REQUEST_B64"
+          if [[ "${ACTION}" != "audit" ]]; then
+            verify_environment_secret "PRODUCTION_DATABASE_URL"
+            verify_environment_secret "PRODUCTION_REDIS_URL"
+          fi
+          case "${ACTION}" in
+            prepare)
+              verify_environment_secret "PRODUCTION_MIGRATION_ALLOWED_SIGNERS_B64"
+              verify_environment_secret "PRODUCTION_BOOTSTRAP_CLERK_PLAN_B64"
+              verify_environment_secret "PRODUCTION_BOOTSTRAP_CLERK_PLAN_SIGNATURE_B64"
+              verify_environment_secret "PRODUCTION_BOOTSTRAP_CLERK_DRY_RUN_B64"
+              verify_environment_secret "PRODUCTION_BOOTSTRAP_CLERK_DRY_RUN_SIGNATURE_B64"
+              verify_environment_secret "PRODUCTION_BOOTSTRAP_OUTSTANDING_DELIVERY_REVIEW_B64"
+              verify_environment_secret "PRODUCTION_BOOTSTRAP_PROVIDER_DELIVERY_DRAIN_B64"
+              verify_environment_secret "PRODUCTION_BOOTSTRAP_DATABASE_DDL_AUTHORITY_B64"
+              verify_environment_secret "PRODUCTION_BOOTSTRAP_FAILED_LIST_SMOKE_EVIDENCE_B64"
+              verify_environment_secret "PRODUCTION_BOOTSTRAP_DASHBOARD_POLICY_SMOKE_EVIDENCE_B64"
+              ;;
+            invoke-clerk)
+              verify_environment_secret "PRODUCTION_BOOTSTRAP_RECEIPT_B64"
+              verify_environment_secret "PRODUCTION_BOOTSTRAP_RECEIPT_SIGNATURE_B64"
+              verify_environment_secret "PRODUCTION_MIGRATION_ALLOWED_SIGNERS_B64"
+              verify_environment_secret "PRODUCTION_BOOTSTRAP_PGPASS_B64"
+              ;;
+            apply-schema)
+              verify_environment_secret "PRODUCTION_BOOTSTRAP_PGPASS_B64"
+              ;;
+            deploy-compatible|activate-first-class|resume|complete)
+              verify_environment_secret "PRODUCTION_BOOTSTRAP_RECEIPT_B64"
+              verify_environment_secret "PRODUCTION_BOOTSTRAP_RECEIPT_SIGNATURE_B64"
+              verify_environment_secret "PRODUCTION_MIGRATION_ALLOWED_SIGNERS_B64"
+              ;;
+          esac
+
+          printf 'azure_client_id=%s\n' "${azure_client_id}" >>"${GITHUB_OUTPUT}"
+          printf 'azure_tenant_id=%s\n' "${azure_tenant_id}" >>"${GITHUB_OUTPUT}"
+          printf 'azure_subscription_id=%s\n' "${azure_subscription_id}" >>"${GITHUB_OUTPUT}"
+          printf 'azure_principal_object_id=%s\n' "${azure_principal_object_id}" >>"${GITHUB_OUTPUT}"
+          printf 'exclusive_aca_authority=%s\n' "${exclusive_aca_authority}" >>"${GITHUB_OUTPUT}"
+          printf 'exclusive_ddl_authority=%s\n' "${exclusive_ddl_authority}" >>"${GITHUB_OUTPUT}"
+          printf 'outstanding_delivery_review=%s\n' "${outstanding_delivery_review}" >>"${GITHUB_OUTPUT}"
+          printf 'provider_delivery_drain=%s\n' "${provider_delivery_drain}" >>"${GITHUB_OUTPUT}"
+
+      - name: Checkout exact protected master source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Materialize private exact-commit runtime without production secrets
+        id: snapshot
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          snapshot_root="$(mktemp -d "${RUNNER_TEMP}/workforce-bootstrap-source.XXXXXX")"
+          snapshot_repository="${snapshot_root}/repository"
+          chmod 700 "${snapshot_root}"
+          GIT_NO_REPLACE_OBJECTS=1 git -c core.hooksPath=/dev/null \
+            worktree add --detach "${snapshot_repository}" "${WORKFLOW_SHA}"
+          chmod 700 "${snapshot_repository}"
+          if [[ "$(git -C "${snapshot_repository}" rev-parse HEAD)" != "${WORKFLOW_SHA}" ||
+            -n "$(git -C "${snapshot_repository}" status --porcelain --untracked-files=all)" ]]; then
+            echo "ERROR: private bootstrap runtime is not the exact clean protected commit" >&2
+            exit 1
+          fi
+          (cd "${snapshot_repository}" && corepack pnpm install --frozen-lockfile --ignore-scripts)
+          (cd "${snapshot_repository}" && corepack pnpm --filter @apex/db db:generate)
+          printf 'root=%s\nrepository=%s\n' "${snapshot_root}" "${snapshot_repository}" >>"${GITHUB_OUTPUT}"
+
+      - name: Authenticate to Azure with protected OIDC
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5
+        with:
+          client-id: ${{ steps.production_environment.outputs.azure_client_id }}
+          tenant-id: ${{ steps.production_environment.outputs.azure_tenant_id }}
+          subscription-id: ${{ steps.production_environment.outputs.azure_subscription_id }}
+
+      - name: Run one exact-snapshot bootstrap action
+        id: controller
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTION: ${{ inputs.action }}
+          AZURE_CLIENT_ID: ${{ steps.production_environment.outputs.azure_client_id }}
+          AZURE_TENANT_ID: ${{ steps.production_environment.outputs.azure_tenant_id }}
+          AZURE_SUBSCRIPTION_ID: ${{ steps.production_environment.outputs.azure_subscription_id }}
+          AZURE_PRINCIPAL_OBJECT_ID: ${{ steps.production_environment.outputs.azure_principal_object_id }}
+          ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED: ${{ steps.production_environment.outputs.exclusive_aca_authority }}
+          OUTSTANDING_DELIVERY_REVIEW_CONFIRMED: ${{ inputs.action == 'prepare' && steps.production_environment.outputs.outstanding_delivery_review || '' }}
+          PROVIDER_DELIVERY_DRAIN_CONFIRMED: ${{ inputs.action == 'prepare' && steps.production_environment.outputs.provider_delivery_drain || '' }}
+          DATABASE_DDL_EXCLUSIVE_AUTHORITY_CONFIRMED: ${{ contains(fromJSON('["prepare","invoke-clerk","apply-schema"]'), inputs.action) && steps.production_environment.outputs.exclusive_ddl_authority || '' }}
+          WORKFORCE_PRODUCTION_BOOTSTRAP_AUTHORITY_CONFIRMED: "true"
+          REQUEST_B64: ${{ secrets.PRODUCTION_BOOTSTRAP_REQUEST_B64 }}
+          RECEIPT_B64: ${{ contains(fromJSON('["invoke-clerk","deploy-compatible","activate-first-class","resume","complete"]'), inputs.action) && secrets.PRODUCTION_BOOTSTRAP_RECEIPT_B64 || '' }}
+          RECEIPT_SIGNATURE_B64: ${{ contains(fromJSON('["invoke-clerk","deploy-compatible","activate-first-class","resume","complete"]'), inputs.action) && secrets.PRODUCTION_BOOTSTRAP_RECEIPT_SIGNATURE_B64 || '' }}
+          ALLOWED_SIGNERS_B64: ${{ (inputs.action == 'prepare' || contains(fromJSON('["invoke-clerk","deploy-compatible","activate-first-class","resume","complete"]'), inputs.action)) && secrets.PRODUCTION_MIGRATION_ALLOWED_SIGNERS_B64 || '' }}
+          CLERK_PLAN_B64: ${{ inputs.action == 'prepare' && secrets.PRODUCTION_BOOTSTRAP_CLERK_PLAN_B64 || '' }}
+          CLERK_PLAN_SIGNATURE_B64: ${{ inputs.action == 'prepare' && secrets.PRODUCTION_BOOTSTRAP_CLERK_PLAN_SIGNATURE_B64 || '' }}
+          CLERK_DRY_RUN_B64: ${{ inputs.action == 'prepare' && secrets.PRODUCTION_BOOTSTRAP_CLERK_DRY_RUN_B64 || '' }}
+          CLERK_DRY_RUN_SIGNATURE_B64: ${{ inputs.action == 'prepare' && secrets.PRODUCTION_BOOTSTRAP_CLERK_DRY_RUN_SIGNATURE_B64 || '' }}
+          OUTSTANDING_DELIVERY_REVIEW_B64: ${{ inputs.action == 'prepare' && secrets.PRODUCTION_BOOTSTRAP_OUTSTANDING_DELIVERY_REVIEW_B64 || '' }}
+          PROVIDER_DELIVERY_DRAIN_B64: ${{ inputs.action == 'prepare' && secrets.PRODUCTION_BOOTSTRAP_PROVIDER_DELIVERY_DRAIN_B64 || '' }}
+          DATABASE_DDL_AUTHORITY_B64: ${{ inputs.action == 'prepare' && secrets.PRODUCTION_BOOTSTRAP_DATABASE_DDL_AUTHORITY_B64 || '' }}
+          FAILED_LIST_SMOKE_EVIDENCE_B64: ${{ inputs.action == 'prepare' && secrets.PRODUCTION_BOOTSTRAP_FAILED_LIST_SMOKE_EVIDENCE_B64 || '' }}
+          DASHBOARD_POLICY_SMOKE_EVIDENCE_B64: ${{ inputs.action == 'prepare' && secrets.PRODUCTION_BOOTSTRAP_DASHBOARD_POLICY_SMOKE_EVIDENCE_B64 || '' }}
+          PGPASS_B64: ${{ contains(fromJSON('["invoke-clerk","apply-schema"]'), inputs.action) && secrets.PRODUCTION_BOOTSTRAP_PGPASS_B64 || '' }}
+          PGHOST: ${{ contains(fromJSON('["invoke-clerk","apply-schema"]'), inputs.action) && vars.PRODUCTION_PGHOST || '' }}
+          PGPORT: ${{ contains(fromJSON('["invoke-clerk","apply-schema"]'), inputs.action) && vars.PRODUCTION_PGPORT || '' }}
+          PGDATABASE: ${{ contains(fromJSON('["invoke-clerk","apply-schema"]'), inputs.action) && vars.PRODUCTION_PGDATABASE || '' }}
+          PGUSER: ${{ contains(fromJSON('["invoke-clerk","apply-schema"]'), inputs.action) && vars.PRODUCTION_PGUSER || '' }}
+          PGSSLMODE: ${{ contains(fromJSON('["invoke-clerk","apply-schema"]'), inputs.action) && 'verify-full' || '' }}
+          DATABASE_URL: ${{ inputs.action != 'audit' && secrets.PRODUCTION_DATABASE_URL || '' }}
+          REDIS_URL: ${{ inputs.action != 'audit' && secrets.PRODUCTION_REDIS_URL || '' }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          evidence_dir="$(mktemp -d "${RUNNER_TEMP}/workforce-bootstrap-evidence.XXXXXX")"
+          chmod 700 "${evidence_dir}"
+          cleanup() {
+            local status=$?
+            trap - EXIT HUP INT TERM
+            set +e
+            find "${evidence_dir}" -type f -exec sh -c ': > "$1"' _ {} \;
+            find "${evidence_dir}" -type f -delete
+            find "${evidence_dir}" -depth -type d -empty -delete
+            exit "${status}"
+          }
+          trap cleanup EXIT
+          trap 'exit 129' HUP
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+
+          decode_required() {
+            local encoded=$1 path=$2 label=$3
+            if [[ -z "${encoded}" ]]; then echo "ERROR: ${label} is absent" >&2; exit 1; fi
+            printf '%s' "${encoded}" | base64 --decode >"${path}"
+            chmod 600 "${path}"
+            if [[ ! -s "${path}" ]]; then echo "ERROR: ${label} decoded empty" >&2; exit 1; fi
+          }
+
+          request="${evidence_dir}/request.json"
+          output="${RUNNER_TEMP}/workforce-bootstrap-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+          decode_required "${REQUEST_B64}" "${request}" "bootstrap request"
+          unset REQUEST_B64
+          request_backend="$(jq -er '.backendCandidate.branch' "${request}")"
+          request_backend_sha="$(jq -er '.backendCandidate.commit' "${request}")"
+          request_console="$(jq -er '.consoleCandidate.branch' "${request}")"
+          if [[ "${request_backend}" != "master" || "${request_backend_sha}" != "${GITHUB_SHA}" ||
+            "${request_console}" != "main" ]]; then
+            echo "ERROR: request is not exact protected backend master and console main" >&2
+            exit 1
+          fi
+
+          args=(--action "${ACTION}" --request "${request}" --state-dir "${evidence_dir}" --output "${output}" --yes)
+          case "${ACTION}" in
+            prepare)
+              decode_required "${ALLOWED_SIGNERS_B64}" "${evidence_dir}/allowed-signers" "allowed signers"
+              decode_required "${CLERK_PLAN_B64}" "${evidence_dir}/clerk-plan.json" "private Clerk plan"
+              decode_required "${CLERK_PLAN_SIGNATURE_B64}" "${evidence_dir}/clerk-plan.sig" "Clerk plan signature"
+              decode_required "${CLERK_DRY_RUN_B64}" "${evidence_dir}/clerk-dry-run.json" "Clerk dry-run evidence"
+              decode_required "${CLERK_DRY_RUN_SIGNATURE_B64}" "${evidence_dir}/clerk-dry-run.sig" "Clerk dry-run signature"
+              decode_required "${OUTSTANDING_DELIVERY_REVIEW_B64}" "${evidence_dir}/outstanding-delivery-review.json" "outstanding delivery review evidence"
+              decode_required "${PROVIDER_DELIVERY_DRAIN_B64}" "${evidence_dir}/provider-delivery-drain.json" "provider delivery drain evidence"
+              decode_required "${DATABASE_DDL_AUTHORITY_B64}" "${evidence_dir}/database-ddl-authority.json" "database DDL authority evidence"
+              decode_required "${FAILED_LIST_SMOKE_EVIDENCE_B64}" "${evidence_dir}/failed-list-smoke.json" "failed-list smoke evidence"
+              decode_required "${DASHBOARD_POLICY_SMOKE_EVIDENCE_B64}" "${evidence_dir}/dashboard-policy-smoke.json" "dashboard-policy smoke evidence"
+              args+=(--allowed-signers "${evidence_dir}/allowed-signers" --clerk-plan "${evidence_dir}/clerk-plan.json" --clerk-plan-signature "${evidence_dir}/clerk-plan.sig" --clerk-plan-dry-run "${evidence_dir}/clerk-dry-run.json" --clerk-plan-dry-run-signature "${evidence_dir}/clerk-dry-run.sig" --outstanding-delivery-review "${evidence_dir}/outstanding-delivery-review.json" --provider-delivery-drain "${evidence_dir}/provider-delivery-drain.json" --database-ddl-authority-evidence "${evidence_dir}/database-ddl-authority.json" --failed-list-smoke-evidence "${evidence_dir}/failed-list-smoke.json" --dashboard-policy-smoke-evidence "${evidence_dir}/dashboard-policy-smoke.json")
+              ;;
+            invoke-clerk|deploy-compatible|activate-first-class|resume|complete)
+              decode_required "${RECEIPT_B64}" "${evidence_dir}/receipt.json" "phase receipt"
+              decode_required "${RECEIPT_SIGNATURE_B64}" "${evidence_dir}/receipt.sig" "phase receipt signature"
+              decode_required "${ALLOWED_SIGNERS_B64}" "${evidence_dir}/allowed-signers" "allowed signers"
+              args+=(--receipt "${evidence_dir}/receipt.json" --signature "${evidence_dir}/receipt.sig" --allowed-signers "${evidence_dir}/allowed-signers")
+              ;;
+          esac
+          if [[ "${ACTION}" == "invoke-clerk" || "${ACTION}" == "apply-schema" ]]; then
+            decode_required "${PGPASS_B64}" "${evidence_dir}/pgpass" "PostgreSQL password file"
+            export PGPASSFILE="${evidence_dir}/pgpass"
+          fi
+          unset RECEIPT_B64 RECEIPT_SIGNATURE_B64 ALLOWED_SIGNERS_B64
+          unset CLERK_PLAN_B64 CLERK_PLAN_SIGNATURE_B64 CLERK_DRY_RUN_B64 CLERK_DRY_RUN_SIGNATURE_B64
+          unset OUTSTANDING_DELIVERY_REVIEW_B64 PROVIDER_DELIVERY_DRAIN_B64 PGPASS_B64
+          unset DATABASE_DDL_AUTHORITY_B64 FAILED_LIST_SMOKE_EVIDENCE_B64 DASHBOARD_POLICY_SMOKE_EVIDENCE_B64
+
+          export WORKFORCE_BOOTSTRAP_EXACT_SNAPSHOT=true
+          export WORKFORCE_BOOTSTRAP_SNAPSHOT_ROOT="${{ steps.snapshot.outputs.root }}"
+          export WORKFORCE_BOOTSTRAP_SNAPSHOT_COMMIT="${GITHUB_SHA}"
+          (cd "${{ steps.snapshot.outputs.repository }}" && node scripts/production-bootstrap-controller.mjs "${args[@]}")
+          printf 'evidence=%s\n' "${output}" >>"${GITHUB_OUTPUT}"
+
+      - name: Upload sanitized controller evidence
+        if: ${{ always() && steps.controller.outputs.evidence != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: workforce-bootstrap-${{ inputs.action }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.controller.outputs.evidence }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Remove private exact-commit runtime
+        if: ${{ always() && steps.snapshot.outputs.repository != '' }}
+        env:
+          SNAPSHOT_REPOSITORY: ${{ steps.snapshot.outputs.repository }}
+          SNAPSHOT_ROOT: ${{ steps.snapshot.outputs.root }}
+        run: |
+          set -Eeuo pipefail
+          git -c core.hooksPath=/dev/null worktree remove --force "${SNAPSHOT_REPOSITORY}"
+          rmdir -- "${SNAPSHOT_ROOT}"

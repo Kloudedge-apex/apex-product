@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://workforceos.xyz/schemas/production-bootstrap-phase-context-v1.json",
+  "title": "Workforce OS protected controller phase context",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "environment", "kind", "generatedBy", "receiptKind", "phase",
+    "attemptId", "candidate", "databaseIdentityHash", "redisIdentityHash",
+    "azureIdentityHash", "admissionContextHash", "fencingGeneration",
+    "previousReceiptSha256", "observedAt", "rollbackPolicy", "evidence"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "environment": { "const": "production" },
+    "kind": { "const": "production-bootstrap-phase-context" },
+    "generatedBy": { "const": "workforce-production-bootstrap-controller-v1" },
+    "receiptKind": {
+      "enum": [
+        "production-schema-result", "enum-aware-disabled-baseline",
+        "first-class-activation", "bootstrap-complete"
+      ]
+    },
+    "phase": {
+      "enum": ["B4_SCHEMA_VERIFIED", "B5_COMPATIBLE_BASELINE", "B6_FIRST_CLASS_ARMED", "B8_COMPLETE"]
+    },
+    "attemptId": {
+      "$ref": "https://workforceos.xyz/schemas/production-bootstrap-phase-receipt-v1.json#/$defs/attemptId"
+    },
+    "candidate": {
+      "$ref": "https://workforceos.xyz/schemas/production-bootstrap-phase-receipt-v1.json#/$defs/candidate"
+    },
+    "databaseIdentityHash": {
+      "$ref": "https://workforceos.xyz/schemas/production-bootstrap-phase-receipt-v1.json#/$defs/sha256"
+    },
+    "redisIdentityHash": {
+      "$ref": "https://workforceos.xyz/schemas/production-bootstrap-phase-receipt-v1.json#/$defs/sha256"
+    },
+    "azureIdentityHash": {
+      "$ref": "https://workforceos.xyz/schemas/production-bootstrap-phase-receipt-v1.json#/$defs/sha256"
+    },
+    "admissionContextHash": {
+      "$ref": "https://workforceos.xyz/schemas/production-bootstrap-phase-receipt-v1.json#/$defs/sha256"
+    },
+    "fencingGeneration": {
+      "$ref": "https://workforceos.xyz/schemas/production-bootstrap-phase-receipt-v1.json#/$defs/positiveInteger"
+    },
+    "previousReceiptSha256": {
+      "$ref": "https://workforceos.xyz/schemas/production-bootstrap-phase-receipt-v1.json#/$defs/sha256"
+    },
+    "observedAt": {
+      "$ref": "https://workforceos.xyz/schemas/production-bootstrap-phase-receipt-v1.json#/$defs/utcSecond"
+    },
+    "rollbackPolicy": {
+      "$ref": "https://workforceos.xyz/schemas/production-bootstrap-phase-receipt-v1.json#/$defs/rollbackPolicy"
+    },
+    "evidence": { "type": "object" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "receiptKind": { "const": "production-schema-result" } }, "required": ["receiptKind"] },
+      "then": { "properties": {
+        "phase": { "const": "B4_SCHEMA_VERIFIED" },
+        "rollbackPolicy": {
+          "$ref": "https://workforceos.xyz/schemas/production-bootstrap-phase-receipt-v1.json#/$defs/forwardOnlyPolicy"
+        },
+        "evidence": {
+          "$ref": "https://workforceos.xyz/schemas/production-bootstrap-phase-receipt-v1.json#/$defs/schemaResultEvidence"
+        }
+      } }
+    },
+    {
+      "if": { "properties": { "receiptKind": { "const": "enum-aware-disabled-baseline" } }, "required": ["receiptKind"] },
+      "then": { "properties": {
+        "phase": { "const": "B5_COMPATIBLE_BASELINE" },
+        "rollbackPolicy": {
+          "$ref": "https://workforceos.xyz/schemas/production-bootstrap-phase-receipt-v1.json#/$defs/disabledPolicy"
+        },
+        "evidence": {
+          "$ref": "https://workforceos.xyz/schemas/production-bootstrap-phase-receipt-v1.json#/$defs/disabledBaselineEvidence"
+        }
+      } }
+    },
+    {
+      "if": { "properties": { "receiptKind": { "const": "first-class-activation" } }, "required": ["receiptKind"] },
+      "then": { "properties": {
+        "phase": { "const": "B6_FIRST_CLASS_ARMED" },
+        "rollbackPolicy": {
+          "$ref": "https://workforceos.xyz/schemas/production-bootstrap-phase-receipt-v1.json#/$defs/activationPolicy"
+        },
+        "evidence": {
+          "$ref": "https://workforceos.xyz/schemas/production-bootstrap-phase-receipt-v1.json#/$defs/activationEvidence"
+        }
+      } }
+    },
+    {
+      "if": { "properties": { "receiptKind": { "const": "bootstrap-complete" } }, "required": ["receiptKind"] },
+      "then": { "properties": {
+        "phase": { "const": "B8_COMPLETE" },
+        "rollbackPolicy": {
+          "$ref": "https://workforceos.xyz/schemas/production-bootstrap-phase-receipt-v1.json#/$defs/activationPolicy"
+        },
+        "evidence": {
+          "$ref": "https://workforceos.xyz/schemas/production-bootstrap-phase-receipt-v1.json#/$defs/completeEvidence"
+        }
+      } }
+    }
+  ]
+}

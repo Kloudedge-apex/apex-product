@@ -1,0 +1,281 @@
+name: Build Workforce OS backend production candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: "Type BUILD WORKFORCE OS BACKEND CANDIDATE"
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  deployments: read
+  id-token: write
+
+concurrency:
+  group: workforce-os-production-build-backend
+  cancel-in-progress: false
+
+jobs:
+  build-candidate:
+    name: Build immutable backend candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment: workforce-os-production-build
+
+    steps:
+      - name: Audit protected build authority
+        id: build_environment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          REF_PROTECTED: ${{ github.ref_protected }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ||
+            "${GITHUB_REF}" != "refs/heads/master" || "${REF_PROTECTED}" != "true" ||
+            "${CONFIRMATION}" != "BUILD WORKFORCE OS BACKEND CANDIDATE" ||
+            ! "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "ERROR: candidate build requires protected master and exact confirmation" >&2
+            exit 1
+          fi
+
+          repository_json="$(gh api --method GET "repos/${GITHUB_REPOSITORY}")"
+          jq -e '.default_branch == "master"' >/dev/null <<<"${repository_json}"
+          master_json="$(gh api --method GET \
+            "repos/${GITHUB_REPOSITORY}/branches/master")"
+          jq -e --arg sha "${SOURCE_SHA}" \
+            '.protected == true and .commit.sha == $sha' >/dev/null <<<"${master_json}"
+
+          environment_json="$(gh api --method GET \
+            "repos/${GITHUB_REPOSITORY}/environments/workforce-os-production-build")"
+          jq -e '
+            .name == "workforce-os-production-build"
+            and .can_admins_bypass == false
+            and any(.protection_rules[]?;
+              .type == "required_reviewers" and .prevent_self_review == true
+              and (.reviewers | type == "array" and length > 0))
+            and .deployment_branch_policy.protected_branches == true
+            and .deployment_branch_policy.custom_branch_policies == false
+          ' >/dev/null <<<"${environment_json}"
+
+          read_environment_variable() {
+            local name=$1 variable_json
+            variable_json="$(gh api --method GET \
+              "repos/${GITHUB_REPOSITORY}/environments/workforce-os-production-build/variables/${name}")"
+            jq -e --arg name "${name}" '
+              .name == $name
+              and (.value | type == "string" and length > 0)
+            ' >/dev/null <<<"${variable_json}"
+            jq -er '.value' <<<"${variable_json}"
+          }
+
+          azure_client_id="$(read_environment_variable "AZURE_CLIENT_ID")"
+          azure_tenant_id="$(read_environment_variable "AZURE_TENANT_ID")"
+          azure_subscription_id="$(read_environment_variable "AZURE_SUBSCRIPTION_ID")"
+          azure_principal_object_id="$(read_environment_variable "AZURE_PRINCIPAL_OBJECT_ID")"
+          build_only_authority="$(read_environment_variable \
+            "ACR_BUILD_ONLY_AUTHORITY_CONFIRMED")"
+          uuid_pattern='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+          for value in \
+            "${azure_client_id}" \
+            "${azure_tenant_id}" \
+            "${azure_subscription_id}" \
+            "${azure_principal_object_id}"; do
+            if [[ ! "${value}" =~ ${uuid_pattern} ]]; then
+              echo "ERROR: protected build identity variables are incomplete" >&2
+              exit 1
+            fi
+          done
+          if [[ "${build_only_authority}" != "true" ]]; then
+            echo "ERROR: protected environment has no exclusive ACR build-only authority" >&2
+            exit 1
+          fi
+
+          printf 'azure_client_id=%s\n' "${azure_client_id}" >>"${GITHUB_OUTPUT}"
+          printf 'azure_tenant_id=%s\n' "${azure_tenant_id}" >>"${GITHUB_OUTPUT}"
+          printf 'azure_subscription_id=%s\n' "${azure_subscription_id}" >>"${GITHUB_OUTPUT}"
+          printf 'azure_principal_object_id=%s\n' "${azure_principal_object_id}" >>"${GITHUB_OUTPUT}"
+          printf 'build_only_authority=%s\n' "${build_only_authority}" >>"${GITHUB_OUTPUT}"
+
+      - name: Checkout exact protected source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify candidate-build workflow source
+        run: scripts/verify-production-candidate-build-workflow.sh
+
+      - name: Verify exact-commit GitHub CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: scripts/verify-github-release-ci.sh "${SOURCE_SHA}"
+
+      - name: Materialize private exact-commit build context
+        id: snapshot
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          snapshot_root="$(mktemp -d "${RUNNER_TEMP}/workforce-backend-candidate.XXXXXX")"
+          snapshot_repository="${snapshot_root}/repository"
+          mkdir -m 700 "${snapshot_repository}"
+          git -c core.hooksPath=/dev/null archive --format=tar "${SOURCE_SHA}" |
+            tar -xf - -C "${snapshot_repository}"
+          if [[ ! -f "${snapshot_repository}/apps/api/Dockerfile" ||
+            -e "${snapshot_repository}/.git" ]]; then
+            echo "ERROR: private candidate build context is incomplete" >&2
+            exit 1
+          fi
+          printf 'root=%s\nrepository=%s\n' \
+            "${snapshot_root}" "${snapshot_repository}" >>"${GITHUB_OUTPUT}"
+
+      - name: Authenticate build-only Azure identity
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5
+        with:
+          client-id: ${{ steps.build_environment.outputs.azure_client_id }}
+          tenant-id: ${{ steps.build_environment.outputs.azure_tenant_id }}
+          subscription-id: ${{ steps.build_environment.outputs.azure_subscription_id }}
+
+      - name: Verify build-only Azure identity
+        env:
+          AZURE_CLIENT_ID: ${{ steps.build_environment.outputs.azure_client_id }}
+          AZURE_TENANT_ID: ${{ steps.build_environment.outputs.azure_tenant_id }}
+          AZURE_SUBSCRIPTION_ID: ${{ steps.build_environment.outputs.azure_subscription_id }}
+          ACR_BUILD_ONLY_AUTHORITY_CONFIRMED: ${{ steps.build_environment.outputs.build_only_authority }}
+        run: |
+          set -Eeuo pipefail
+          account_json="$(az account show --output json --only-show-errors)"
+          jq -e \
+            --arg client "${AZURE_CLIENT_ID}" \
+            --arg tenant "${AZURE_TENANT_ID}" \
+            --arg subscription "${AZURE_SUBSCRIPTION_ID}" '
+              (.id | ascii_downcase) == ($subscription | ascii_downcase)
+              and (.tenantId | ascii_downcase) == ($tenant | ascii_downcase)
+              and .state == "Enabled"
+              and .user.type == "servicePrincipal"
+              and (.user.name | ascii_downcase) == ($client | ascii_downcase)
+            ' >/dev/null <<<"${account_json}"
+          if [[ "${ACR_BUILD_ONLY_AUTHORITY_CONFIRMED}" != "true" ]]; then
+            echo "ERROR: ACR build-only authority is not protected-environment attested" >&2
+            exit 1
+          fi
+
+      - name: Build and verify immutable backend artifact
+        id: artifact
+        env:
+          ACR_BUILD_ONLY_AUTHORITY_CONFIRMED: ${{ steps.build_environment.outputs.build_only_authority }}
+          AZURE_PRINCIPAL_OBJECT_ID: ${{ steps.build_environment.outputs.azure_principal_object_id }}
+          BUILD_CONTEXT: ${{ steps.snapshot.outputs.repository }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          if [[ "${ACR_BUILD_ONLY_AUTHORITY_CONFIRMED}" != "true" ||
+            ! "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "ERROR: protected build admission is absent" >&2
+            exit 1
+          fi
+          existing="$(az acr repository show-tags \
+            --name ledgracr \
+            --repository apex-api \
+            --query "length([?@=='${SOURCE_SHA}'])" \
+            --output tsv \
+            --only-show-errors)"
+          if [[ "${existing}" != "0" ]]; then
+            echo "ERROR: immutable source tag already exists; refusing to overwrite it" >&2
+            exit 1
+          fi
+
+          acr_run_id="$(az acr build \
+            --registry ledgracr \
+            --image 'apex-api:{{.Run.ID}}' \
+            --image "apex-api:${SOURCE_SHA}" \
+            --build-arg "VCS_REF=${SOURCE_SHA}" \
+            --file apps/api/Dockerfile \
+            --platform linux/amd64 \
+            --no-logs \
+            --query runId \
+            --output tsv \
+            "${BUILD_CONTEXT}")"
+          if [[ ! "${acr_run_id}" =~ ^[a-z0-9]+$ ]]; then
+            echo "ERROR: ACR returned an invalid build run ID" >&2
+            exit 1
+          fi
+          run_status="$(az acr task show-run \
+            --registry ledgracr --run-id "${acr_run_id}" \
+            --query status --output tsv --only-show-errors)"
+          if [[ "${run_status}" != "Succeeded" ]]; then
+            echo "ERROR: ACR candidate build did not succeed" >&2
+            exit 1
+          fi
+          digest="$(az acr task show-run \
+            --registry ledgracr --run-id "${acr_run_id}" \
+            --query "outputImages[?repository=='apex-api' && tag=='${acr_run_id}'].digest | [0]" \
+            --output tsv --only-show-errors)"
+          commit_digest="$(az acr task show-run \
+            --registry ledgracr --run-id "${acr_run_id}" \
+            --query "outputImages[?repository=='apex-api' && tag=='${SOURCE_SHA}'].digest | [0]" \
+            --output tsv --only-show-errors)"
+          if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ||
+            "${commit_digest}" != "${digest}" ]]; then
+            echo "ERROR: ACR run and immutable source tags do not bind one digest" >&2
+            exit 1
+          fi
+
+          image="ledgracr.azurecr.io/apex-api@${digest}"
+          "${BUILD_CONTEXT}/scripts/verify-registry-api-image.sh" \
+            "${image}" "${SOURCE_SHA}"
+          evidence="${RUNNER_TEMP}/workforce-backend-candidate-${GITHUB_RUN_ID}.json"
+          jq -n \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg sourceCommit "${SOURCE_SHA}" \
+            --arg githubRunId "${GITHUB_RUN_ID}" \
+            --arg githubRunAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg azurePrincipalObjectId "${AZURE_PRINCIPAL_OBJECT_ID}" \
+            --arg acrRunId "${acr_run_id}" \
+            --arg image "${image}" \
+            --arg manifestDigest "${digest}" '
+              {
+                schemaVersion: 1,
+                kind: "workforce-production-candidate-artifact",
+                role: "api-worker",
+                repository: $repository,
+                sourceCommit: $sourceCommit,
+                githubRunId: $githubRunId,
+                githubRunAttempt: $githubRunAttempt,
+                azurePrincipalObjectId: $azurePrincipalObjectId,
+                acrRunId: $acrRunId,
+                image: $image,
+                manifestDigest: $manifestDigest,
+                platform: "linux/amd64",
+                verified: true
+              }
+            ' >"${evidence}"
+          chmod 600 "${evidence}"
+          printf 'evidence=%s\n' "${evidence}" >>"${GITHUB_OUTPUT}"
+
+      - name: Upload sanitized backend artifact evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: workforce-backend-candidate-${{ github.sha }}-${{ github.run_id }}
+          path: ${{ steps.artifact.outputs.evidence }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Remove private build context
+        if: ${{ always() && steps.snapshot.outputs.root != '' }}
+        env:
+          SNAPSHOT_ROOT: ${{ steps.snapshot.outputs.root }}
+        run: |
+          set -Eeuo pipefail
+          find "${SNAPSHOT_ROOT}" -type f -exec sh -c ': > "$1"' _ {} \;
+          find "${SNAPSHOT_ROOT}" -depth -type f -delete
+          find "${SNAPSHOT_ROOT}" -depth -type d -empty -delete

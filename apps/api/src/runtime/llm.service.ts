@@ -119,7 +119,7 @@ interface LlmAttribution {
   node?: string;
   tags?: readonly string[];
   metadata?: Readonly<Record<string, unknown>>;
-  onRunStart?: (runId: string) => void;
+  onRunStart?: (runId: string) => void | Promise<void>;
 }
 
 export interface ChatOptions {
@@ -146,7 +146,7 @@ export interface ChatOptions {
   /** Extra metadata merged into the LangSmith run. */
   metadata?: Readonly<Record<string, unknown>>;
   /** Fires after the LangSmith run is created on the server, with the runId. */
-  onRunStart?: (runId: string) => void;
+  onRunStart?: (runId: string) => void | Promise<void>;
   /**
    * Org owning this call. When set, the LLM budget service charges this org
    * before the call is dispatched and refuses the call if the daily cap is

@@ -172,7 +172,7 @@ describe("LinkedInService.sendMessage", () => {
   });
 
   describe("error handling", () => {
-    it("retries on 429 then succeeds", async () => {
+    it("does not retry the non-idempotent message POST after a 429 response", async () => {
       const prisma = mockPrisma();
       const integrations = mockIntegrations();
       const fetchMock = vi
@@ -187,9 +187,11 @@ describe("LinkedInService.sendMessage", () => {
         body: "hi",
       });
 
-      expect(result.ok).toBe(true);
-      expect(fetchMock).toHaveBeenCalledTimes(2);
-    }, 15000);
+      expect(result.ok).toBe(false);
+      expect(result.error).toBe("linkedin_send_failed");
+      expect(result.status).toBe(429);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
 
     it("classifies 403 as linkedin_api_not_available", async () => {
       const prisma = mockPrisma();
@@ -246,12 +248,13 @@ describe("LinkedInService.sendMessage", () => {
       expect(result.error).toBe("linkedin_invalid_request");
     });
 
-    it("returns linkedin_send_failed when network error escapes retry loop", async () => {
+    it("makes one attempt and returns status-less ambiguity on network failure", async () => {
       const prisma = mockPrisma();
       const integrations = mockIntegrations();
-      globalThis.fetch = vi
+      const fetchMock = vi
         .fn()
         .mockRejectedValue(new Error("ECONNRESET")) as unknown as typeof fetch;
+      globalThis.fetch = fetchMock;
 
       const svc = new LinkedInService(prisma, integrations);
       const result = await svc.sendMessage("org_1", null, {
@@ -261,7 +264,9 @@ describe("LinkedInService.sendMessage", () => {
 
       expect(result.ok).toBe(false);
       expect(result.error).toBe("linkedin_send_failed");
+      expect(result.status).toBeUndefined();
       expect(result.details).toContain("ECONNRESET");
-    }, 20000);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
   });
 });

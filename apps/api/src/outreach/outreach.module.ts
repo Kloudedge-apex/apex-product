@@ -3,24 +3,31 @@ import { OutreachArtifactsService } from "./outreach-artifacts.service";
 import { OutreachArtifactsController } from "./outreach-artifacts.controller";
 import { OutreachSendQueueService } from "./outreach-send-queue.service";
 import { SendOutreachWorker } from "./send-outreach.worker";
-import { SuppressionService } from "./suppression.service";
+import { SuppressionModule } from "./suppression.module";
 import { SuppressionController } from "./suppression.controller";
 import { UnsubscribeController } from "./unsubscribe.controller";
 import { IntegrationsModule } from "../integrations/integrations.module";
 import { ObservabilityModule } from "../observability/observability.module";
+import { ConversationStoreModule } from "../conversation-store/conversation-store.module";
 
 @Module({
   // ObservabilityModule is @Global so LangSmithService is already injectable,
   // but importing it here makes the dependency explicit and survives any
-  // future de-globalization.
-  imports: [IntegrationsModule, ObservabilityModule],
+  // future de-globalization. SuppressionService lives in SuppressionModule
+  // (re-exported below) so GmailModule can consume it without importing this
+  // module — see suppression.module.ts for the boot-cycle rationale.
+  imports: [
+    IntegrationsModule,
+    ObservabilityModule,
+    SuppressionModule,
+    ConversationStoreModule,
+  ],
   controllers: [OutreachArtifactsController, UnsubscribeController, SuppressionController],
   providers: [
     OutreachArtifactsService,
     OutreachSendQueueService,
     SendOutreachWorker,
-    SuppressionService,
   ],
-  exports: [OutreachArtifactsService, OutreachSendQueueService, SuppressionService],
+  exports: [OutreachArtifactsService, OutreachSendQueueService, SuppressionModule],
 })
 export class OutreachModule {}

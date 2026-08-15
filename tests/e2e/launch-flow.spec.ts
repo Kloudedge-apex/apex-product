@@ -49,15 +49,16 @@ interface OutreachArtifactPayload {
     | "APPROVED"
     | "REJECTED"
     | "SENT"
-    | "SUPPRESSED";
+    | "SUPPRESSED"
+    | "SENDING"
+    | "SIMULATED"
+    | "DELIVERY_UNKNOWN"
+    | "FAILED";
 }
 
-const ACCEPTABLE_ARTIFACT_STATES: ReadonlyArray<OutreachArtifactPayload["status"]> = [
-  "PENDING_REVIEW",
-  "APPROVED",
-  "SENT",
-  "SUPPRESSED",
-];
+const ACCEPTABLE_ARTIFACT_STATES: ReadonlyArray<
+  OutreachArtifactPayload["status"]
+> = ["PENDING_REVIEW", "APPROVED", "SENT", "SUPPRESSED"];
 
 interface IcpResponse {
   id: string;
@@ -130,7 +131,10 @@ async function deleteOrg(orgId: string): Promise<void> {
  * `String[]` column on `IcpProfile`, so we always send an array (matches the
  * recent `seedDomains must be String[] not String` hotfix).
  */
-async function createIcp(api: APIRequestContext, name: string): Promise<string> {
+async function createIcp(
+  api: APIRequestContext,
+  name: string,
+): Promise<string> {
   const res = await api.post("/api/leads/icp", {
     data: {
       name,
@@ -236,12 +240,7 @@ async function runLaunchFlow(
   exclusions: string | string[],
 ): Promise<void> {
   await createIcp(api, rand(`icp-${scenarioTag}`));
-  await createSdrAgent(
-    api,
-    templateId,
-    rand(`sdr-${scenarioTag}`),
-    exclusions,
-  );
+  await createSdrAgent(api, templateId, rand(`sdr-${scenarioTag}`), exclusions);
 
   const runId = await triggerPipelineRun(api);
 
@@ -272,14 +271,11 @@ async function runLaunchFlow(
   // grab the value out of `poll` because Playwright's API returns void —
   // re-fetching is cheaper than threading state through a shared variable.
   await expect
-    .poll(
-      async () => (await fetchArtifacts(api, runId)).length,
-      {
-        timeout: ARTIFACT_TIMEOUT_MS,
-        intervals: [POLL_INTERVAL_MS],
-        message: `No outreach artifacts surfaced for run ${runId}`,
-      },
-    )
+    .poll(async () => (await fetchArtifacts(api, runId)).length, {
+      timeout: ARTIFACT_TIMEOUT_MS,
+      intervals: [POLL_INTERVAL_MS],
+      message: `No outreach artifacts surfaced for run ${runId}`,
+    })
     .toBeGreaterThan(0);
 
   const finalArtifacts = await fetchArtifacts(api, runId);

@@ -1,0 +1,914 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://workforceos.xyz/schemas/production-bootstrap-entry-receipt-v2.json",
+  "title": "Workforce OS production initial-bootstrap entry receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "environment",
+    "kind",
+    "authorizationScope",
+    "bootstrapAttemptId",
+    "backendCandidateCommit",
+    "consoleCandidateCommit",
+    "status",
+    "preparedAt",
+    "expiresAt",
+    "operator",
+    "approver",
+    "changeTicket",
+    "admissionContextHash",
+    "authority",
+    "releaseLock",
+    "redisIdentityHash",
+    "databaseIdentityHash",
+    "lease",
+    "targetArtifacts",
+    "clerkReconciliationPlan",
+    "sourceRollbackBaseline",
+    "quiescedState",
+    "migrations"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "environment": { "const": "production" },
+    "kind": { "const": "initial-bootstrap-entry" },
+    "authorizationScope": { "const": "bootstrap-entry-admission-only" },
+    "bootstrapAttemptId": { "$ref": "#/$defs/attemptId" },
+    "backendCandidateCommit": { "$ref": "#/$defs/gitSha" },
+    "consoleCandidateCommit": { "$ref": "#/$defs/gitSha" },
+    "status": { "const": "prepared-and-quiesced" },
+    "preparedAt": { "$ref": "#/$defs/timestamp" },
+    "expiresAt": { "$ref": "#/$defs/timestamp" },
+    "operator": { "$ref": "#/$defs/principal" },
+    "approver": { "$ref": "#/$defs/principal" },
+    "changeTicket": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "admissionContextHash": { "$ref": "#/$defs/sha256" },
+    "authority": { "$ref": "#/$defs/authority" },
+    "releaseLock": { "$ref": "#/$defs/releaseLock" },
+    "redisIdentityHash": { "$ref": "#/$defs/sha256" },
+    "databaseIdentityHash": { "$ref": "#/$defs/sha256" },
+    "lease": { "$ref": "#/$defs/lease" },
+    "targetArtifacts": { "$ref": "#/$defs/targetArtifacts" },
+    "clerkReconciliationPlan": { "$ref": "#/$defs/clerkReconciliationPlan" },
+    "sourceRollbackBaseline": { "$ref": "#/$defs/sourceRollbackBaseline" },
+    "quiescedState": { "$ref": "#/$defs/quiescedState" },
+    "migrations": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "prefixItems": [
+        {
+          "allOf": [
+            { "$ref": "#/$defs/migrationEntry" },
+            {
+              "properties": {
+                "path": { "const": "docs/migrations/2026-08-13_clerk-identity-lifecycle-expand.sql" },
+                "sha256": { "const": "sha256:356f4b660edd6aab07b523785e3cbc9b962a0f3f07b97e3dcfc155e1ea7fefdc" },
+                "writerPause": { "const": "observed" },
+                "writerScopes": { "const": ["api:clerk-webhooks", "api:identity-membership"] }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            { "$ref": "#/$defs/migrationEntry" },
+            {
+              "properties": {
+                "path": { "const": "docs/migrations/2026-06-01_outreach-artifact-unique.sql" },
+                "sha256": { "const": "sha256:5653818552e1e52bf71229fa3c485dd284da331ee50a69669e98bc65e1a35fb2" },
+                "writerPause": { "const": "observed" },
+                "writerScopes": { "const": ["api:outreach-artifacts", "worker:outreach-artifacts"] }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            { "$ref": "#/$defs/migrationEntry" },
+            {
+              "properties": {
+                "path": { "const": "docs/migrations/2026-08-12_conversation-store-expand.sql" },
+                "sha256": { "const": "sha256:d8ce914d6fca829b9b35dd85afa50963ba02a2a85a1ae152ca55479fbc4d40f6" },
+                "writerPause": { "const": "not-required" },
+                "writerScopes": { "const": [] }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            { "$ref": "#/$defs/migrationEntry" },
+            {
+              "properties": {
+                "path": { "const": "docs/migrations/2026-08-12_outreach-delivery-unknown-expand.sql" },
+                "sha256": { "const": "sha256:4f5b687b4dad2969e554432b4812c0f57c1b07a6549eecf469997da45a44d14a" },
+                "writerPause": { "const": "not-required" },
+                "writerScopes": { "const": [] }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            { "$ref": "#/$defs/migrationEntry" },
+            {
+              "properties": {
+                "path": { "const": "docs/migrations/2026-08-13_outreach-artifact-failed-expand.sql" },
+                "sha256": { "const": "sha256:4d51befaa3ac27824ba15ae503a63051cbcb716d2da6e0fd1c49010b2a846d14" },
+                "writerPause": { "const": "not-required" },
+                "writerScopes": { "const": [] }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            { "$ref": "#/$defs/migrationEntry" },
+            {
+              "properties": {
+                "path": { "const": "docs/migrations/2026-08-12_conversation-reply-single-flight-expand.sql" },
+                "sha256": { "const": "sha256:6cbfa5769455220d1b7341bef566cd1258286e8456fde1ad45266a2d8d2be999" },
+                "writerPause": { "const": "observed" },
+                "writerScopes": { "const": ["worker:gmail-reply-sync"] }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            { "$ref": "#/$defs/migrationEntry" },
+            {
+              "properties": {
+                "path": { "const": "docs/migrations/2026-08-12_graph-run-activity-expand.sql" },
+                "sha256": { "const": "sha256:8f18edbde210e3520a5bc49d02cd7fb618205edfdf0e0f08f70ee80614530056" },
+                "writerPause": { "const": "not-required" },
+                "writerScopes": { "const": [] }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            { "$ref": "#/$defs/migrationEntry" },
+            {
+              "properties": {
+                "path": { "const": "docs/migrations/2026-08-12_graph-run-lifecycle-expand.sql" },
+                "sha256": { "const": "sha256:a502874d67c222332b253859b40699a679daf24c27c9b0bbedbd3c63e8254e2b" },
+                "writerPause": { "const": "observed" },
+                "writerScopes": { "const": ["api:graph-start", "scheduler:graph-start", "worker:graph-run"] }
+              }
+            }
+          ]
+        }
+      ],
+      "items": false
+    }
+  },
+  "$defs": {
+    "attemptId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "gitSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "principal": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "nonnegativeInteger": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "positiveInteger": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "backendImage": {
+      "type": "string",
+      "pattern": "^ledgracr\\.azurecr\\.io/apex-api@sha256:[0-9a-f]{64}$"
+    },
+    "consoleImage": {
+      "type": "string",
+      "pattern": "^ledgracr\\.azurecr\\.io/workforceos-fe@sha256:[0-9a-f]{64}$"
+    },
+    "apiRevision": {
+      "type": "string",
+      "pattern": "^apex-gtm-api--[a-z0-9][a-z0-9-]{0,62}$"
+    },
+    "workerRevision": {
+      "type": "string",
+      "pattern": "^apex-gtm-worker--[a-z0-9][a-z0-9-]{0,62}$"
+    },
+    "consoleRevision": {
+      "type": "string",
+      "pattern": "^nikxius-web--[a-z0-9][a-z0-9-]{0,62}$"
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "subscriptionId",
+        "resourceGroupName",
+        "resourceGroupResourceId",
+        "apiContainerAppResourceId",
+        "workerContainerAppResourceId",
+        "consoleContainerAppResourceId"
+      ],
+      "properties": {
+        "subscriptionId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "resourceGroupName": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._()-]{0,89}$"
+        },
+        "resourceGroupResourceId": { "$ref": "#/$defs/azureResourceId" },
+        "apiContainerAppResourceId": { "$ref": "#/$defs/azureResourceId" },
+        "workerContainerAppResourceId": { "$ref": "#/$defs/azureResourceId" },
+        "consoleContainerAppResourceId": { "$ref": "#/$defs/azureResourceId" }
+      }
+    },
+    "azureResourceId": {
+      "type": "string",
+      "pattern": "^/subscriptions/[0-9a-f-]{36}/resourceGroups/[A-Za-z0-9._()-]+(?:/providers/Microsoft\\.App/containerApps/[a-z0-9-]+)?$"
+    },
+    "releaseLock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "ref", "objectSha"],
+      "properties": {
+        "repository": { "const": "https://github.com/Kloudedge-apex/apex-product.git" },
+        "ref": { "const": "refs/heads/workforce-os-release-lock/production-gtm-platform" },
+        "objectSha": { "$ref": "#/$defs/gitSha" }
+      }
+    },
+    "lease": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["token", "generation", "observedAt", "expiresAt"],
+      "properties": {
+        "token": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "generation": { "type": "integer", "minimum": 1 },
+        "observedAt": { "$ref": "#/$defs/timestamp" },
+        "expiresAt": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "targetArtifactCommon": {
+      "type": "object"
+    },
+    "targetBackendArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "image",
+        "manifestDigest",
+        "platformDigest",
+        "ociRevision",
+        "platform",
+        "plannedRevision",
+        "buildRunId",
+        "buildEvidenceHash",
+        "rehearsalEvidenceHash"
+      ],
+      "properties": {
+        "image": { "$ref": "#/$defs/backendImage" },
+        "manifestDigest": { "$ref": "#/$defs/sha256" },
+        "platformDigest": { "$ref": "#/$defs/sha256" },
+        "ociRevision": { "$ref": "#/$defs/gitSha" },
+        "platform": { "const": "linux/amd64" },
+        "plannedRevision": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "buildRunId": { "$ref": "#/$defs/buildRunId" },
+        "buildEvidenceHash": { "$ref": "#/$defs/sha256" },
+        "rehearsalEvidenceHash": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "targetConsoleArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "image",
+        "manifestDigest",
+        "platformDigest",
+        "ociRevision",
+        "platform",
+        "plannedRevision",
+        "buildRunId",
+        "buildEvidenceHash",
+        "rehearsalEvidenceHash",
+        "clientConfigEvidenceHash",
+        "smokeEvidenceHash"
+      ],
+      "properties": {
+        "image": { "$ref": "#/$defs/consoleImage" },
+        "manifestDigest": { "$ref": "#/$defs/sha256" },
+        "platformDigest": { "$ref": "#/$defs/sha256" },
+        "ociRevision": { "$ref": "#/$defs/gitSha" },
+        "platform": { "const": "linux/amd64" },
+        "plannedRevision": { "$ref": "#/$defs/consoleRevision" },
+        "buildRunId": { "$ref": "#/$defs/buildRunId" },
+        "buildEvidenceHash": { "$ref": "#/$defs/sha256" },
+        "rehearsalEvidenceHash": { "$ref": "#/$defs/sha256" },
+        "clientConfigEvidenceHash": { "$ref": "#/$defs/sha256" },
+        "smokeEvidenceHash": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "buildRunId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "targetArtifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["api", "worker", "console"],
+      "properties": {
+        "api": {
+          "allOf": [
+            { "$ref": "#/$defs/targetBackendArtifact" },
+            { "properties": { "plannedRevision": { "$ref": "#/$defs/apiRevision" } } }
+          ]
+        },
+        "worker": {
+          "allOf": [
+            { "$ref": "#/$defs/targetBackendArtifact" },
+            { "properties": { "plannedRevision": { "$ref": "#/$defs/workerRevision" } } }
+          ]
+        },
+        "console": { "$ref": "#/$defs/targetConsoleArtifact" }
+      }
+    },
+    "sourceAppCommon": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "image",
+        "manifestDigest",
+        "platformDigest",
+        "ociRevision",
+        "platform",
+        "revision",
+        "configHash",
+        "templateHash",
+        "secretReferencesHash",
+        "activeRevisionsMode",
+        "maxInactiveRevisions",
+        "healthy"
+      ],
+      "properties": {
+        "image": { "type": "string" },
+        "manifestDigest": { "$ref": "#/$defs/sha256" },
+        "platformDigest": { "$ref": "#/$defs/sha256" },
+        "ociRevision": { "$ref": "#/$defs/gitSha" },
+        "platform": { "const": "linux/amd64" },
+        "revision": { "type": "string" },
+        "configHash": { "$ref": "#/$defs/sha256" },
+        "templateHash": { "$ref": "#/$defs/sha256" },
+        "secretReferencesHash": { "$ref": "#/$defs/sha256" },
+        "activeRevisionsMode": { "const": "Single" },
+        "maxInactiveRevisions": { "type": "integer", "minimum": 1 },
+        "healthy": { "const": true }
+      }
+    },
+    "sourceBackendApp": {
+      "allOf": [
+        { "$ref": "#/$defs/sourceAppCommon" },
+        { "properties": { "image": { "$ref": "#/$defs/backendImage" } } }
+      ]
+    },
+    "sourceConsoleApp": {
+      "allOf": [
+        { "$ref": "#/$defs/sourceAppCommon" },
+        { "properties": { "image": { "$ref": "#/$defs/consoleImage" } } }
+      ]
+    },
+    "databaseDdlAuthorityEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion", "environment", "kind", "bootstrapAttemptId",
+        "backendCandidateCommit", "databaseIdentityHash", "evidenceHash", "reviewer",
+        "reviewedAt", "expiresAt", "authorityScope",
+        "exclusiveDdlAuthorityConfirmed", "verifiedFromProtectedBytes"
+      ],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "environment": { "const": "production" },
+        "kind": { "const": "production-database-ddl-exclusive-authority" },
+        "bootstrapAttemptId": { "$ref": "#/$defs/attemptId" },
+        "backendCandidateCommit": { "$ref": "#/$defs/gitSha" },
+        "databaseIdentityHash": { "$ref": "#/$defs/sha256" },
+        "evidenceHash": { "$ref": "#/$defs/sha256" },
+        "reviewer": { "$ref": "#/$defs/principal" },
+        "reviewedAt": { "$ref": "#/$defs/timestamp" },
+        "expiresAt": { "$ref": "#/$defs/timestamp" },
+        "authorityScope": { "const": "all-production-database-ddl-actors" },
+        "exclusiveDdlAuthorityConfirmed": { "const": true },
+        "verifiedFromProtectedBytes": { "const": true }
+      }
+    },
+    "failedListSmokeEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion", "environment", "kind", "bootstrapAttemptId",
+        "backendCandidateCommit", "consoleCandidateCommit", "evidenceHash", "reviewer",
+        "reviewedAt", "expiresAt", "scope", "passed"
+      ],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "environment": { "const": "production" },
+        "kind": { "const": "production-failed-list-smoke" },
+        "bootstrapAttemptId": { "$ref": "#/$defs/attemptId" },
+        "backendCandidateCommit": { "$ref": "#/$defs/gitSha" },
+        "consoleCandidateCommit": { "$ref": "#/$defs/gitSha" },
+        "evidenceHash": { "$ref": "#/$defs/sha256" },
+        "reviewer": { "$ref": "#/$defs/principal" },
+        "reviewedAt": { "$ref": "#/$defs/timestamp" },
+        "expiresAt": { "$ref": "#/$defs/timestamp" },
+        "scope": { "const": "api-failed-outreach-list" },
+        "passed": { "const": true }
+      }
+    },
+    "dashboardPolicySmokeEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion", "environment", "kind", "bootstrapAttemptId",
+        "backendCandidateCommit", "consoleCandidateCommit", "evidenceHash", "reviewer",
+        "reviewedAt", "expiresAt", "scope", "passed"
+      ],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "environment": { "const": "production" },
+        "kind": { "const": "production-dashboard-policy-smoke" },
+        "bootstrapAttemptId": { "$ref": "#/$defs/attemptId" },
+        "backendCandidateCommit": { "$ref": "#/$defs/gitSha" },
+        "consoleCandidateCommit": { "$ref": "#/$defs/gitSha" },
+        "evidenceHash": { "$ref": "#/$defs/sha256" },
+        "reviewer": { "$ref": "#/$defs/principal" },
+        "reviewedAt": { "$ref": "#/$defs/timestamp" },
+        "expiresAt": { "$ref": "#/$defs/timestamp" },
+        "scope": { "const": "console-dashboard-policy" },
+        "passed": { "const": true }
+      }
+    },
+    "operationalSmokeEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["failedList", "dashboardPolicy", "verifiedFromProtectedBytes"],
+      "properties": {
+        "failedList": { "$ref": "#/$defs/failedListSmokeEvidence" },
+        "dashboardPolicy": { "$ref": "#/$defs/dashboardPolicySmokeEvidence" },
+        "verifiedFromProtectedBytes": { "const": true }
+      }
+    },
+    "sourceRollbackBaseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "compatibilityState",
+        "rollbackPermittedUntil",
+        "originalAllowlistNonempty",
+        "originalAllowlistHash",
+        "deliverySafetyEvidence",
+        "databaseDdlAuthorityEvidence",
+        "operationalSmokeEvidence",
+        "privateRestoreBundleHash",
+        "api",
+        "worker",
+        "console"
+      ],
+      "properties": {
+        "compatibilityState": { "const": "legacy-readers-no-new-enum-values-v1" },
+        "rollbackPermittedUntil": { "const": "before-first-clerk-migration-invocation-only" },
+        "originalAllowlistNonempty": { "type": "boolean" },
+        "originalAllowlistHash": { "$ref": "#/$defs/sha256" },
+        "deliverySafetyEvidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "outstandingDeliveryReview",
+            "providerDeliveryDrain",
+            "verifiedFromProtectedBytes"
+          ],
+          "properties": {
+            "outstandingDeliveryReview": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "evidenceHash", "reviewer", "reviewedAt", "expiresAt",
+                "outstandingDeliveryCount", "unresolvedDeliveryCount", "disposition"
+              ],
+              "properties": {
+                "evidenceHash": { "$ref": "#/$defs/sha256" },
+                "reviewer": { "$ref": "#/$defs/principal" },
+                "reviewedAt": { "$ref": "#/$defs/timestamp" },
+                "expiresAt": { "$ref": "#/$defs/timestamp" },
+                "outstandingDeliveryCount": { "const": 0 },
+                "unresolvedDeliveryCount": { "const": 0 },
+                "disposition": { "const": "no-outstanding-deliveries" }
+              }
+            },
+            "providerDeliveryDrain": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "evidenceHash", "reviewer", "reviewedAt", "expiresAt",
+                "providerScope", "inFlightDeliveryCount", "drainConfirmed"
+              ],
+              "properties": {
+                "evidenceHash": { "$ref": "#/$defs/sha256" },
+                "reviewer": { "$ref": "#/$defs/principal" },
+                "reviewedAt": { "$ref": "#/$defs/timestamp" },
+                "expiresAt": { "$ref": "#/$defs/timestamp" },
+                "providerScope": { "const": "all-configured-outbound-providers" },
+                "inFlightDeliveryCount": { "const": 0 },
+                "drainConfirmed": { "const": true }
+              }
+            },
+            "verifiedFromProtectedBytes": { "const": true }
+          }
+        },
+        "databaseDdlAuthorityEvidence": {
+          "$ref": "#/$defs/databaseDdlAuthorityEvidence"
+        },
+        "operationalSmokeEvidence": {
+          "$ref": "#/$defs/operationalSmokeEvidence"
+        },
+        "privateRestoreBundleHash": { "$ref": "#/$defs/sha256" },
+        "api": {
+          "allOf": [
+            { "$ref": "#/$defs/sourceBackendApp" },
+            { "properties": { "revision": { "$ref": "#/$defs/apiRevision" } } }
+          ]
+        },
+        "worker": {
+          "allOf": [
+            { "$ref": "#/$defs/sourceBackendApp" },
+            { "properties": { "revision": { "$ref": "#/$defs/workerRevision" } } }
+          ]
+        },
+        "console": {
+          "allOf": [
+            { "$ref": "#/$defs/sourceConsoleApp" },
+            { "properties": { "revision": { "$ref": "#/$defs/consoleRevision" } } }
+          ]
+        }
+      }
+    },
+    "quiescedApi": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stopped", "activeRevisionCount", "replicaCount", "ingressDisabled"],
+      "properties": {
+        "stopped": { "const": true },
+        "activeRevisionCount": { "const": 0 },
+        "replicaCount": { "const": 0 },
+        "ingressDisabled": { "const": true }
+      }
+    },
+    "quiescedWorker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stopped", "activeRevisionCount", "replicaCount", "consumersDisabled"],
+      "properties": {
+        "stopped": { "const": true },
+        "activeRevisionCount": { "const": 0 },
+        "replicaCount": { "const": 0 },
+        "consumersDisabled": { "const": true }
+      }
+    },
+    "queueState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "paused",
+        "waiting",
+        "active",
+        "delayed",
+        "prioritized",
+        "completed",
+        "failed",
+        "waitingChildren",
+        "pausedJobs",
+        "workerCount"
+      ],
+      "properties": {
+        "paused": { "const": true },
+        "waiting": { "$ref": "#/$defs/nonnegativeInteger" },
+        "active": { "const": 0 },
+        "delayed": { "$ref": "#/$defs/nonnegativeInteger" },
+        "prioritized": { "$ref": "#/$defs/nonnegativeInteger" },
+        "completed": { "$ref": "#/$defs/nonnegativeInteger" },
+        "failed": { "$ref": "#/$defs/nonnegativeInteger" },
+        "waitingChildren": { "$ref": "#/$defs/nonnegativeInteger" },
+        "pausedJobs": { "$ref": "#/$defs/nonnegativeInteger" },
+        "workerCount": { "const": 0 }
+      }
+    },
+    "queueObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observedAt", "stableSince", "evidenceHash", "queues"],
+      "properties": {
+        "observedAt": { "$ref": "#/$defs/timestamp" },
+        "stableSince": { "$ref": "#/$defs/timestamp" },
+        "evidenceHash": { "$ref": "#/$defs/sha256" },
+        "queues": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["agentRuns", "graphRuns", "outreachSend"],
+          "properties": {
+            "agentRuns": { "$ref": "#/$defs/queueState" },
+            "graphRuns": { "$ref": "#/$defs/queueState" },
+            "outreachSend": { "$ref": "#/$defs/queueState" }
+          }
+        }
+      }
+    },
+    "writerFenceState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "target",
+        "mode",
+        "bootstrapAttemptId",
+        "generation",
+        "issuedAt",
+        "expiresAt"
+      ],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "target": { "const": "workforce-os-production" },
+        "mode": { "const": "closed" },
+        "bootstrapAttemptId": { "$ref": "#/$defs/attemptId" },
+        "generation": { "type": "integer", "minimum": 1 },
+        "issuedAt": { "$ref": "#/$defs/timestamp" },
+        "expiresAt": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "writerFence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "target",
+        "observedAt",
+        "generation",
+        "state",
+        "stateHash",
+        "activeWriters",
+        "activeComplianceWriters",
+        "writerZero"
+      ],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "target": { "const": "workforce-os-production" },
+        "observedAt": { "$ref": "#/$defs/timestamp" },
+        "generation": { "type": "integer", "minimum": 1 },
+        "state": { "$ref": "#/$defs/writerFenceState" },
+        "stateHash": { "$ref": "#/$defs/sha256" },
+        "activeWriters": { "const": 0 },
+        "activeComplianceWriters": { "const": 0 },
+        "writerZero": { "const": true }
+      }
+    },
+    "orphanRecoveryTokenState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "activeApplicationWriters", "activeComplianceWriters",
+        "uncertainApplicationWriters", "uncertainComplianceWriters", "tokenSetHash"
+      ],
+      "properties": {
+        "activeApplicationWriters": { "$ref": "#/$defs/nonnegativeInteger" },
+        "activeComplianceWriters": { "$ref": "#/$defs/nonnegativeInteger" },
+        "uncertainApplicationWriters": { "$ref": "#/$defs/nonnegativeInteger" },
+        "uncertainComplianceWriters": { "$ref": "#/$defs/nonnegativeInteger" },
+        "tokenSetHash": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "orphanRecoveryZeroTokenState": {
+      "allOf": [
+        { "$ref": "#/$defs/orphanRecoveryTokenState" },
+        { "properties": {
+          "activeApplicationWriters": { "const": 0 },
+          "activeComplianceWriters": { "const": 0 },
+          "uncertainApplicationWriters": { "const": 0 },
+          "uncertainComplianceWriters": { "const": 0 }
+        } }
+      ]
+    },
+    "orphanRecovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion", "target", "bootstrapAttemptId", "generation", "recoveredAt",
+        "stableZeroEvidenceHash", "pre", "post"
+      ],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "target": { "const": "workforce-os-production" },
+        "bootstrapAttemptId": { "$ref": "#/$defs/attemptId" },
+        "generation": { "$ref": "#/$defs/nonnegativeInteger" },
+        "recoveredAt": { "$ref": "#/$defs/timestamp" },
+        "stableZeroEvidenceHash": { "$ref": "#/$defs/sha256" },
+        "pre": { "$ref": "#/$defs/orphanRecoveryTokenState" },
+        "post": { "$ref": "#/$defs/orphanRecoveryZeroTokenState" }
+      }
+    },
+    "inventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "databaseIdentityHash",
+        "sendingRows",
+        "firstClassDeliveryUnknownRows",
+        "legacyDeliveryUnknownMarkerRows",
+        "firstClassFailedRows",
+        "legacyAutoFailedMarkerRows",
+        "outreachIdempotencyDuplicateGroups",
+        "legacyGmailReplySequenceStopRows",
+        "managerRoleRows",
+        "graphRunRunningRows",
+        "graphRunAwaitingApprovalRows",
+        "graphActiveOrgDuplicateGroups",
+        "graphActiveWithoutRecoveryStateRows",
+        "graphLifecycleSchemaReady",
+        "replySchemaReady",
+        "replySourceDuplicateGroups",
+        "replyConversationDuplicateGroups",
+        "nullSourceReplyRows",
+        "replySlotDuplicateRows",
+        "duplicateInventoryEvidenceHash",
+        "clerkIdentitySchemaReady",
+        "clerkCutoverRowCount",
+        "clerkCutoverReady",
+        "clerkMinimumEventVersion",
+        "clerkInventoryEvidenceHash",
+        "clerkExpectedActiveOrganizationCount",
+        "clerkExpectedActiveMembershipCount",
+        "clerkExpectedActiveUserCount",
+        "clerkActiveOrganizationCount",
+        "clerkActiveMembershipCount",
+        "clerkActiveUserCount",
+        "clerkProjectionMismatchRows",
+        "clerkOrphanActiveAuthorityRows",
+        "clerkReadinessViolationCount"
+      ],
+      "properties": {
+        "databaseIdentityHash": { "$ref": "#/$defs/sha256" },
+        "sendingRows": { "const": 0 },
+        "firstClassDeliveryUnknownRows": { "const": 0 },
+        "legacyDeliveryUnknownMarkerRows": { "const": 0 },
+        "firstClassFailedRows": { "const": 0 },
+        "legacyAutoFailedMarkerRows": { "$ref": "#/$defs/nonnegativeInteger" },
+        "outreachIdempotencyDuplicateGroups": { "const": 0 },
+        "legacyGmailReplySequenceStopRows": { "$ref": "#/$defs/nonnegativeInteger" },
+        "managerRoleRows": { "const": 0 },
+        "graphRunRunningRows": { "const": 0 },
+        "graphRunAwaitingApprovalRows": { "$ref": "#/$defs/nonnegativeInteger" },
+        "graphActiveOrgDuplicateGroups": { "const": 0 },
+        "graphActiveWithoutRecoveryStateRows": { "const": 0 },
+        "graphLifecycleSchemaReady": { "const": false },
+        "replySchemaReady": { "type": "boolean" },
+        "replySourceDuplicateGroups": { "type": ["integer", "null"], "minimum": 0 },
+        "replyConversationDuplicateGroups": { "type": ["integer", "null"], "minimum": 0 },
+        "nullSourceReplyRows": { "type": ["integer", "null"], "minimum": 0 },
+        "replySlotDuplicateRows": { "type": ["integer", "null"], "minimum": 0 },
+        "duplicateInventoryEvidenceHash": { "$ref": "#/$defs/sha256" },
+        "clerkIdentitySchemaReady": { "const": false },
+        "clerkCutoverRowCount": { "const": null },
+        "clerkCutoverReady": { "const": null },
+        "clerkMinimumEventVersion": { "const": null },
+        "clerkInventoryEvidenceHash": { "const": null },
+        "clerkExpectedActiveOrganizationCount": { "const": null },
+        "clerkExpectedActiveMembershipCount": { "const": null },
+        "clerkExpectedActiveUserCount": { "const": null },
+        "clerkActiveOrganizationCount": { "const": null },
+        "clerkActiveMembershipCount": { "const": null },
+        "clerkActiveUserCount": { "const": null },
+        "clerkProjectionMismatchRows": { "const": null },
+        "clerkOrphanActiveAuthorityRows": { "const": null },
+        "clerkReadinessViolationCount": { "const": null }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "replySchemaReady": { "const": false } } },
+          "then": {
+            "properties": {
+              "replySourceDuplicateGroups": { "const": null },
+              "replyConversationDuplicateGroups": { "const": null },
+              "nullSourceReplyRows": { "const": null },
+              "replySlotDuplicateRows": { "const": null }
+            }
+          },
+          "else": {
+            "properties": {
+              "replySourceDuplicateGroups": { "const": 0 },
+              "replyConversationDuplicateGroups": { "const": 0 },
+              "nullSourceReplyRows": { "const": 0 },
+              "replySlotDuplicateRows": { "const": 0 }
+            }
+          }
+        }
+      ]
+    },
+    "quiescedState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "api",
+        "worker",
+        "queueObservations",
+        "writerFence",
+        "orphanRecovery",
+        "inventory",
+        "liveSendAllowlistEmpty",
+        "privateRestoreBundleHash",
+        "evidenceHash"
+      ],
+      "properties": {
+        "api": { "$ref": "#/$defs/quiescedApi" },
+        "worker": { "$ref": "#/$defs/quiescedWorker" },
+        "queueObservations": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            { "$ref": "#/$defs/queueObservation" },
+            { "$ref": "#/$defs/queueObservation" }
+          ],
+          "items": false
+        },
+        "writerFence": { "$ref": "#/$defs/writerFence" },
+        "orphanRecovery": { "$ref": "#/$defs/orphanRecovery" },
+        "inventory": { "$ref": "#/$defs/inventory" },
+        "liveSendAllowlistEmpty": { "const": true },
+        "privateRestoreBundleHash": { "$ref": "#/$defs/sha256" },
+        "evidenceHash": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "clerkReconciliationPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rawPlanSha256",
+        "dryRunEvidenceSha256",
+        "inventoryEvidenceHash",
+        "minimumEventVersion",
+        "expectedActiveOrganizationCount",
+        "expectedActiveMembershipCount",
+        "expectedActiveUserCount",
+        "executor",
+        "dryRunPassed",
+        "approver",
+        "planSignatureSha256",
+        "signatureNamespace",
+        "independentApprovalEvidenceHash",
+        "verifiedAt",
+        "expiresAt"
+      ],
+      "properties": {
+        "rawPlanSha256": { "$ref": "#/$defs/sha256" },
+        "dryRunEvidenceSha256": { "$ref": "#/$defs/sha256" },
+        "inventoryEvidenceHash": { "$ref": "#/$defs/sha256" },
+        "minimumEventVersion": { "$ref": "#/$defs/positiveInteger" },
+        "expectedActiveOrganizationCount": { "$ref": "#/$defs/nonnegativeInteger" },
+        "expectedActiveMembershipCount": { "$ref": "#/$defs/nonnegativeInteger" },
+        "expectedActiveUserCount": { "$ref": "#/$defs/nonnegativeInteger" },
+        "executor": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "version", "sha256"],
+          "properties": {
+            "name": { "const": "workforce-production-clerk-reconciliation-executor" },
+            "version": { "const": "v1" },
+            "sha256": { "$ref": "#/$defs/sha256" }
+          }
+        },
+        "dryRunPassed": { "const": true },
+        "approver": { "$ref": "#/$defs/principal" },
+        "planSignatureSha256": { "$ref": "#/$defs/sha256" },
+        "signatureNamespace": { "const": "workforce-os-clerk-reconciliation-plan" },
+        "independentApprovalEvidenceHash": { "$ref": "#/$defs/sha256" },
+        "verifiedAt": { "$ref": "#/$defs/timestamp" },
+        "expiresAt": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "migrationEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "writerPause", "writerScopes"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "writerPause": { "enum": ["observed", "not-required"] },
+        "writerScopes": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        }
+      }
+    }
+  }
+}

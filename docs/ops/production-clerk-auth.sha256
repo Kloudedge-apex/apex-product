@@ -1,0 +1,14 @@
+# SHA-256 of the exact production Clerk JWT trust tuple.
+#
+# Hash these NUL-terminated fields in order, with no trailing text:
+#   workforce-os-clerk-auth.v1
+#   CLERK_JWKS_URL=https://clerk.workforceos.xyz/.well-known/jwks.json
+#   CLERK_ISSUER=https://clerk.workforceos.xyz
+#   CLERK_DOMAIN=
+#   CLERK_AUDIENCE=
+#   CLERK_AUTHORIZED_PARTIES=https://workforceos.xyz
+#
+# The issuer and JWKS URL match Clerk's public OpenID discovery document. The
+# sole authorized party is the canonical browser application. Any trust-root
+# change requires a reviewed source change in both canonical repositories.
+5eddc3f498e16df540776fa025bef86f741fae6815abfb9dd80652026b8956ad

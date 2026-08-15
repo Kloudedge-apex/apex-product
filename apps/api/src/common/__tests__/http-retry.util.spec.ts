@@ -94,6 +94,25 @@ describe("fetchWithRetry", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("uses an injected DNS-pinned transport for every retry", async () => {
+    const globalFetch = vi.fn().mockRejectedValue(new Error("unpinned fetch used"));
+    globalThis.fetch = globalFetch as unknown as typeof fetch;
+    const pinnedFetch = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(503, { error: "down" }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+
+    const res = await fetchWithRetry("https://example.test/api", undefined, {
+      provider: "example",
+      sleep,
+      fetchImpl: pinnedFetch,
+    });
+
+    expect(res.status).toBe(200);
+    expect(pinnedFetch).toHaveBeenCalledTimes(2);
+    expect(globalFetch).not.toHaveBeenCalled();
+  });
+
   it("throws RateLimitedError after exhausting attempts on 429", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(429, { error: "throttled" }));
     globalThis.fetch = fetchMock as unknown as typeof fetch;

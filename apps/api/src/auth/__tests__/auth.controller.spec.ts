@@ -73,7 +73,10 @@ describe("AuthController.handleWebhook", () => {
     const result = await controller.handleWebhook(req);
 
     expect(handleWebhook).toHaveBeenCalledTimes(1);
-    expect(handleWebhook).toHaveBeenCalledWith(body);
+    expect(handleWebhook).toHaveBeenCalledWith(body, {
+      id: TEST_MSG_ID,
+      timestampSeconds: Number(req.headers["svix-timestamp"]),
+    });
     expect(result).toEqual({ received: true });
   });
 

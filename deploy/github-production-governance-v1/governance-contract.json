@@ -1,0 +1,105 @@
+{
+  "schemaVersion": 1,
+  "kind": "workforce-os-production-github-governance-contract-v1",
+  "repositories": {
+    "backend": {
+      "fullName": "Kloudedge-apex/apex-product",
+      "visibility": "public",
+      "defaultBranch": "master",
+      "securityAndAnalysis": {
+        "secretScanning": "enabled",
+        "secretScanningPushProtection": "enabled"
+      },
+      "actions": {
+        "enabled": true,
+        "allowedActions": "selected",
+        "shaPinningRequired": true,
+        "defaultWorkflowPermissions": "read",
+        "canApprovePullRequestReviews": false,
+        "selectedActions": {
+          "githubOwnedAllowed": true,
+          "verifiedAllowed": false,
+          "patternsAllowed": [
+            "Azure/login@*",
+            "pnpm/action-setup@*"
+          ]
+        }
+      },
+      "branches": {
+        "master": {
+          "requiredChecks": [
+            "API Tests (blocking)",
+            "Lint, Type Check & Build",
+            "Migration Rehearsal (blocking)",
+            "Production Image Contract"
+          ]
+        },
+        "release/go-live-2026-06-01": {
+          "requiredChecks": [
+            "API Tests (blocking)",
+            "Lint, Type Check & Build",
+            "Migration Rehearsal (blocking)",
+            "Production Image Contract"
+          ]
+        }
+      },
+      "environments": [
+        "workforce-os-production-build",
+        "workforce-os-production"
+      ]
+    },
+    "console": {
+      "fullName": "Kloudedge-apex/Workforce-OS",
+      "visibility": "public",
+      "defaultBranch": "main",
+      "securityAndAnalysis": {
+        "secretScanning": "enabled",
+        "secretScanningPushProtection": "enabled"
+      },
+      "actions": {
+        "enabled": true,
+        "allowedActions": "selected",
+        "shaPinningRequired": true,
+        "defaultWorkflowPermissions": "read",
+        "canApprovePullRequestReviews": false,
+        "selectedActions": {
+          "githubOwnedAllowed": true,
+          "verifiedAllowed": false,
+          "patternsAllowed": [
+            "Azure/login@*",
+            "pnpm/action-setup@*"
+          ]
+        }
+      },
+      "branches": {
+        "main": {
+          "requiredChecks": [
+            "Production Console Image Contract",
+            "Type Check, Test & Build"
+          ]
+        }
+      },
+      "environments": [
+        "workforce-os-production-build",
+        "workforce-os-production"
+      ]
+    }
+  },
+  "branchProtection": {
+    "strictStatusChecks": true,
+    "minimumApprovals": 1,
+    "dismissStaleReviews": true,
+    "requireConversationResolution": true,
+    "enforceAdministrators": true,
+    "allowForcePushes": false,
+    "allowDeletions": false
+  },
+  "environmentProtection": {
+    "canAdministratorsBypass": false,
+    "requireReviewers": true,
+    "preventSelfReview": true,
+    "minimumReviewerCount": 1,
+    "protectedBranchesOnly": true,
+    "customBranchPolicies": false
+  }
+}

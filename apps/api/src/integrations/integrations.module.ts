@@ -2,14 +2,21 @@ import { Module } from "@nestjs/common";
 import { IntegrationsController } from "./integrations.controller";
 import { IntegrationsService } from "./integrations.service";
 import { GmailModule } from "./gmail/gmail.module";
-import { HubspotModule } from "./hubspot/hubspot.module";
-import { LinkedInController } from "./linkedin/linkedin.controller";
 import { LinkedInService } from "./linkedin/linkedin.service";
+import { AdminOrManagerGuard } from "../common/admin-or-manager.guard";
+import { OAuthAttemptService } from "./oauth-attempt.service";
 
 @Module({
-  imports: [GmailModule, HubspotModule],
-  controllers: [IntegrationsController, LinkedInController],
-  providers: [IntegrationsService, LinkedInService],
-  exports: [IntegrationsService, LinkedInService, GmailModule, HubspotModule],
+  // The guarded release exposes Gmail only. Deferred provider services remain
+  // in source for later work, but their HTTP controllers must not be mounted.
+  imports: [GmailModule],
+  controllers: [IntegrationsController],
+  providers: [
+    IntegrationsService,
+    LinkedInService,
+    AdminOrManagerGuard,
+    OAuthAttemptService,
+  ],
+  exports: [IntegrationsService, LinkedInService, GmailModule],
 })
-export class IntegrationsModule { }
+export class IntegrationsModule {}

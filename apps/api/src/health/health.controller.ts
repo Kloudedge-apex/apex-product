@@ -3,9 +3,11 @@ import { Logger } from "@nestjs/common";
 import { SkipOrgGuard } from "../common/org-scope.guard";
 import { PrismaService } from "../prisma/prisma.service";
 import { GraphRunQueueService } from "../graph/graph-run-queue.service";
+import { WorkerHealthService } from "./worker-health.service";
+import { healthCheckTimeoutMs, withHealthTimeout } from "./health-timeout";
 
 /**
- * Liveness + readiness probes. Audit P0 #14.
+ * Liveness + readiness probes. Audit P0 #14, GO-LIVE GL9.
  *
  * - `/api/health/live` — process up. Static 200. Used by orchestrator restart
  *   policy; should NOT depend on Postgres/Redis (a flapping DB must not cause
@@ -14,6 +16,14 @@ import { GraphRunQueueService } from "../graph/graph-run-queue.service";
  *   (via the BullMQ queue's redis client) and returns 503 if any dep is down.
  *   Used by the load balancer / Container App readiness probe to drain traffic
  *   off pods whose dependencies have died.
+ * - `/api/health/worker` — BullMQ consumers are actually consuming. 503 when
+ *   jobs are backlogged with zero consumers attached, when a worker-gated
+ *   process has no consumer on its own queue, or when a non-zero backlog has
+ *   made no progress for a full stall window. Heuristic details + limits in
+ *   worker-health.service.ts. Intended consumers: the apex-gtm-worker
+ *   readiness probe (auto-detect a wedged worker) and the live-week alert
+ *   poller hitting the api ingress (queue stats are fleet-wide via Redis, so
+ *   the api pod sees the worker pod's consumers).
  *
  * Backwards-compat: `/api/health` (no suffix) still returns 200 OK and matches
  * the previous static shape so deploy probes pointing at the legacy path do
@@ -28,6 +38,7 @@ export class HealthController {
   constructor(
     private readonly prisma: PrismaService,
     private readonly graphRunQueue: GraphRunQueueService,
+    private readonly workerHealth: WorkerHealthService,
   ) {}
 
   /**
@@ -46,12 +57,17 @@ export class HealthController {
 
   @Get("ready")
   @HttpCode(HttpStatus.OK)
-  async ready() {
+  async ready(env: NodeJS.ProcessEnv = process.env) {
     const checks: Record<string, "ok" | string> = {};
+    const timeoutMs = healthCheckTimeoutMs(env);
 
     // Postgres — a real query against the connection.
     try {
-      await this.prisma.$queryRaw`SELECT 1`;
+      await withHealthTimeout(
+        this.prisma.$queryRaw`SELECT 1`,
+        "Postgres readiness query",
+        timeoutMs,
+      );
       checks.postgres = "ok";
     } catch (err) {
       checks.postgres = err instanceof Error ? err.message : "unknown error";
@@ -66,8 +82,16 @@ export class HealthController {
       const queue = this.graphRunQueue.getBullQueue();
       if (queue) {
         // BullMQ Queue exposes .client which is a Promise<IORedis>; await + ping.
-        const client = await queue.client;
-        await client.ping();
+        const client = await withHealthTimeout(
+          queue.client,
+          "Redis client acquisition",
+          timeoutMs,
+        );
+        await withHealthTimeout(
+          client.ping(),
+          "Redis readiness ping",
+          timeoutMs,
+        );
         checks.redis = "ok";
       } else {
         checks.redis = "ok"; // dev fallback mode — not a readiness failure
@@ -94,6 +118,38 @@ export class HealthController {
       service: "apex-api",
       timestamp: new Date().toISOString(),
       checks,
+    };
+  }
+
+  /**
+   * GO-LIVE GL9: worker-consumption probe. Unlike /live (static) and /ready
+   * (deps reachable), this fails when the BullMQ consumers are not actually
+   * consuming — the failure mode the 2026-06-12 boot-cycle incident proved
+   * invisible to static probes.
+   */
+  @Get("worker")
+  @HttpCode(HttpStatus.OK)
+  async worker() {
+    const report = await this.workerHealth.check();
+    if (!report.healthy) {
+      const failing = report.queues.filter((q) => !q.healthy);
+      this.logger.warn(
+        `Worker health probe failing: ${failing
+          .map((q) => `${q.queue}: ${q.reasons.join("; ")}`)
+          .join(" | ")}`,
+      );
+      throw new ServiceUnavailableException({
+        status: "degraded",
+        service: "apex-api",
+        timestamp: new Date().toISOString(),
+        ...report,
+      });
+    }
+    return {
+      status: "ok",
+      service: "apex-api",
+      timestamp: new Date().toISOString(),
+      ...report,
     };
   }
 

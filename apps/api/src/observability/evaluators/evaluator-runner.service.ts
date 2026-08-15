@@ -71,7 +71,16 @@ export class EvaluatorRunnerService {
     const applicable = this.evaluators.filter((e) => !e.appliesTo || e.appliesTo(ctx));
     if (applicable.length === 0) return;
 
-    const deps: EvaluatorDeps = { judge: this.judge };
+    const metadataOrgId = ctx.metadata?.org_id;
+    const orgId =
+      typeof metadataOrgId === "string" && metadataOrgId.length > 0
+        ? metadataOrgId
+        : undefined;
+    const deps: EvaluatorDeps = {
+      judge: this.judge
+        ? (args) => this.judge?.({ ...args, orgId }) ?? Promise.resolve(null)
+        : undefined,
+    };
 
     await Promise.all(
       applicable.map(async (evaluator) => {

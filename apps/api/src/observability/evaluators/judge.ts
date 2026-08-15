@@ -23,6 +23,7 @@ export async function callJudge(
     readonly systemPrompt: string;
     readonly userPrompt: string;
     readonly model?: string;
+    readonly orgId?: string;
   },
 ): Promise<JudgeVerdict | null> {
   try {
@@ -39,6 +40,8 @@ export async function callJudge(
         maxTokens: 300,
         agent: `evaluator.${args.rubricName}`,
         tags: [JUDGE_TAG, args.rubricName],
+        orgId: args.orgId,
+        metadata: args.orgId ? { org_id: args.orgId } : undefined,
       },
     );
 

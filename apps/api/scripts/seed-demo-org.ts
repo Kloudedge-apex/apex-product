@@ -141,18 +141,26 @@ const SUBJECT_TEMPLATES = [
   (co: string) => `${co}'s SDR setup — worth a 15 min?`,
   (co: string) => `Noticed ${co} is hiring AEs — outbound thoughts`,
   (co: string) => `For ${co}: outbound idea for new CRO`,
-  (co: string) => `${co} + Apex: 2-min idea`,
+  (co: string) => `${co}: a 2-min outbound idea`,
 ];
 
-const BODY_TEMPLATES: ReadonlyArray<(args: { first: string; co: string; signal: string; vertical: string }) => string> = [
-  ({ first, co, signal, vertical }) =>
-    `Hi ${first},\n\nNoticed ${co} is ${signal} — usually when ${vertical} teams scale outbound at your stage, the bottleneck is SDR ramp + write-quality, not list size.\n\nWe help ${vertical} teams ship one calibrated cold email per qualified lead per day, fully reviewed by a human before send. No spam, no template-stamping.\n\nWorth 15 min next week to compare notes? Happy to send what we're seeing across similar Series B+ ${vertical} cos.\n\nThanks,\nApex SDR`,
+interface DemoDraftArgs {
+  first: string;
+  co: string;
+  signal: string;
+  vertical: string;
+  senderName: string;
+}
 
-  ({ first, co, signal, vertical }) =>
-    `Hi ${first},\n\nSaw ${co} ${signal}. Most ${vertical} GTM leaders we talk to at your stage are stuck choosing between Outreach-style sequences (volume but stamps the brand) and hand-written outbound (quality but doesn't scale).\n\nWe're building a third option: AI-drafted, human-approved, one email per lead, grounded in real signals only — no fabricated specifics. Calibrated for deliverability, not volume.\n\nWould a 15-min call to compare what's working make sense?\n\nThanks,\nApex SDR`,
+const BODY_TEMPLATES: ReadonlyArray<(args: DemoDraftArgs) => string> = [
+  ({ first, co, signal, vertical, senderName }) =>
+    `Hi ${first},\n\nNoticed ${co} is ${signal} — usually when ${vertical} teams scale outbound at your stage, the bottleneck is SDR ramp + write-quality, not list size.\n\nWe help ${vertical} teams ship one calibrated cold email per qualified lead per day, fully reviewed by a human before send. No spam, no template-stamping.\n\nWorth 15 min next week to compare notes? Happy to send what we're seeing across similar Series B+ ${vertical} cos.\n\nThanks,\n${senderName}`,
 
-  ({ first, co, signal, vertical }) =>
-    `Hi ${first},\n\nQuick one: ${co} ${signal} is exactly the inflection where most ${vertical} teams either over-hire SDRs or over-automate outbound. Both burn the brand.\n\nWe split the difference — AI does the first 80% of the draft from grounded research, your team reviews and sends. Our best customers are seeing ~3x reply rates with 1/3 the SDR ramp.\n\nOpen to a quick chat?\n\nThanks,\nApex SDR`,
+  ({ first, co, signal, vertical, senderName }) =>
+    `Hi ${first},\n\nSaw ${co} ${signal}. Most ${vertical} GTM leaders we talk to at your stage are stuck choosing between Outreach-style sequences (volume but stamps the brand) and hand-written outbound (quality but doesn't scale).\n\nWe're building a third option: AI-drafted, human-approved, one email per lead, grounded in real signals only — no fabricated specifics. Calibrated for deliverability, not volume.\n\nWould a 15-min call to compare what's working make sense?\n\nThanks,\n${senderName}`,
+
+  ({ first, co, signal, vertical, senderName }) =>
+    `Hi ${first},\n\nQuick one: ${co} ${signal} is exactly the inflection where most ${vertical} teams either over-hire SDRs or over-automate outbound. Both burn the brand.\n\nWe split the difference — AI drafts from grounded research, then your team reviews and decides what gets sent.\n\nOpen to a quick chat?\n\nThanks,\n${senderName}`,
 ];
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -182,6 +190,7 @@ async function main(): Promise<void> {
   if (!org) {
     throw new Error(`Org ${ORG_ID} not found. Create it via Clerk signup first.`);
   }
+  const senderName = org.senderName?.trim() || org.name;
   console.log(`Seeding demo data into org: ${org.name} (${org.id})`);
 
   // 1. ICP profile
@@ -317,6 +326,7 @@ async function main(): Promise<void> {
         co: p.companyName,
         signal: pick(INTENT_SIGNALS, artIdx),
         vertical: p.vertical,
+        senderName,
       });
       const artifactId = `demo-art-${ORG_ID}-${artIdx}`;
       const sentAt = status === OutreachArtifactStatus.SENT && sentOffsetHours

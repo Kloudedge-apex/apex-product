@@ -11,6 +11,34 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConfigService } from "@nestjs/config";
 import { circuitBreakerRegistry } from "../../../common/http-retry.util";
 
+const pinnedFetchMock = vi.hoisted(() =>
+  vi.fn((input: string | URL, init?: RequestInit) => fetch(input, init)),
+);
+const ssrfGuardedFetchMock = vi.hoisted(() =>
+  vi.fn(
+    async (
+      input: string | URL,
+      init: RequestInit = {},
+      opts: {
+        fetcher?: (
+          url: URL,
+          requestInit: RequestInit,
+          pinnedFetch: typeof pinnedFetchMock,
+        ) => Promise<Response>;
+      } = {},
+    ): Promise<Response> => {
+      const url = input instanceof URL ? input : new URL(input);
+      const fetcher = opts.fetcher ?? ((next: URL, nextInit: RequestInit) => fetch(next, nextInit));
+      return fetcher(url, { ...init, redirect: "manual" }, pinnedFetchMock);
+    },
+  ),
+);
+
+vi.mock("../../../runtime/util/ssrf-guard", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../runtime/util/ssrf-guard")>();
+  return { ...actual, ssrfGuardedFetch: ssrfGuardedFetchMock };
+});
+
 const ORIGINAL_FETCH = globalThis.fetch;
 
 interface MockResponseOpts {
@@ -34,6 +62,8 @@ function makeConfig(env: Record<string, string | undefined>): ConfigService {
 
 beforeEach(() => {
   circuitBreakerRegistry._resetForTests();
+  pinnedFetchMock.mockClear();
+  ssrfGuardedFetchMock.mockClear();
 });
 
 afterEach(() => {
@@ -61,6 +91,24 @@ describe("SerpDiscoveryService — retry wiring", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     // First arg to fetch is the URL.
     expect(fetchMock.mock.calls[0]?.[0]).toBe("https://google.serper.dev/search");
+  });
+
+  it("routes discovered-domain probes through the SSRF guard", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse({ status: 200 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const { SerpDiscoveryService } = await import("../serp-discovery.service");
+    const svc = new SerpDiscoveryService(makeConfig({ SERPER_API_KEY: "test" }));
+
+    const result = await (svc as unknown as {
+      validateDomain: (domain: string) => Promise<string | null>;
+    }).validateDomain("acme.com");
+
+    expect(result).toBe("acme.com");
+    expect(ssrfGuardedFetchMock).toHaveBeenCalledTimes(1);
+    expect(pinnedFetchMock).toHaveBeenCalledTimes(1);
+    expect(ssrfGuardedFetchMock.mock.calls[0]?.[0]).toBe("https://acme.com");
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ redirect: "manual" });
   });
 });
 
@@ -124,9 +172,16 @@ describe("TeamPageScraper — retry wiring", () => {
     const { TeamPageScraper } = await import("../team-page-scraper.service");
     const svc = new TeamPageScraper(makeConfig({}));
 
-    const result = await svc.scrapeTeamPage("acme.com", "https://acme.com/team");
+    const result = await svc.scrapeTeamPage(
+      "org-test",
+      "acme.com",
+      "https://acme.com/team",
+    );
     expect(Array.isArray(result)).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(ssrfGuardedFetchMock).toHaveBeenCalledTimes(1);
+    expect(pinnedFetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ redirect: "manual" });
   });
 });
 

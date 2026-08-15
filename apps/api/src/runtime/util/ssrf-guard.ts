@@ -1,6 +1,8 @@
 import { lookup as dnsLookup } from "node:dns/promises";
 import type { LookupAddress } from "node:dns";
 import { isIP } from "node:net";
+import { Agent, fetch as undiciFetch } from "undici";
+import { drainResponseBodyWithLimit } from "../../common/http-body.util";
 
 export class SsrfGuardError extends Error {
   readonly name = "SsrfGuardError";
@@ -30,8 +32,17 @@ export interface SsrfGuardedFetchOptions extends SsrfGuardOptions {
    * Fetcher seam for tests and for wiring retries. Defaults to global fetch.
    * Must be called with `redirect: "manual"` (this wrapper enforces it).
    */
-  fetcher?: (url: URL, init: RequestInit) => Promise<Response>;
+  fetcher?: (
+    url: URL,
+    init: RequestInit,
+    pinnedFetch: PinnedFetch,
+  ) => Promise<Response>;
 }
+
+export type PinnedFetch = (
+  input: string | URL,
+  init?: RequestInit,
+) => Promise<Response>;
 
 function defaultLookupAll(hostname: string): Promise<readonly LookupAddress[]> {
   return dnsLookup(hostname, { all: true, verbatim: true });
@@ -87,11 +98,17 @@ export function parseHttpUrlOrThrow(input: string | URL): URL {
   return url;
 }
 
-function isBlockedIpv4(address: string): boolean {
+function ipv4Bytes(address: string): [number, number, number, number] | null {
   const parts = address.split(".");
-  if (parts.length !== 4) return false;
+  if (parts.length !== 4) return null;
   const bytes = parts.map((p) => Number.parseInt(p, 10));
-  if (bytes.some((b) => !Number.isFinite(b) || b < 0 || b > 255)) return false;
+  if (bytes.some((b) => !Number.isFinite(b) || b < 0 || b > 255)) return null;
+  return bytes as [number, number, number, number];
+}
+
+function isPrivateOrLocalIpv4(address: string): boolean {
+  const bytes = ipv4Bytes(address);
+  if (!bytes) return false;
 
   const [a, b] = bytes;
   if (a === 10) return true; // 10.0.0.0/8
@@ -99,6 +116,25 @@ function isBlockedIpv4(address: string): boolean {
   if (a === 169 && b === 254) return true; // 169.254.0.0/16
   if (a === 192 && b === 168) return true; // 192.168.0.0/16
   if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
+  return false;
+}
+
+/** Deny every IPv4 range that is not ordinary global unicast. */
+function isBlockedIpv4(address: string): boolean {
+  const bytes = ipv4Bytes(address);
+  if (!bytes) return true;
+  const [a, b, c] = bytes;
+
+  if (isPrivateOrLocalIpv4(address)) return true;
+  if (a === 0) return true; // 0.0.0.0/8 (unspecified/current host)
+  if (a === 100 && b >= 64 && b <= 127) return true; // 100.64.0.0/10 shared space
+  if (a === 192 && b === 0 && c === 0) return true; // 192.0.0.0/24 protocol assignments
+  if (a === 192 && b === 0 && c === 2) return true; // TEST-NET-1
+  if (a === 192 && b === 88 && c === 99) return true; // deprecated 6to4 relay
+  if (a === 198 && (b === 18 || b === 19)) return true; // benchmark network
+  if (a === 198 && b === 51 && c === 100) return true; // TEST-NET-2
+  if (a === 203 && b === 0 && c === 113) return true; // TEST-NET-3
+  if (a >= 224) return true; // multicast, reserved, and limited broadcast
   return false;
 }
 
@@ -162,7 +198,21 @@ function ipv6ToBigInt(input: string): bigint | null {
   return value;
 }
 
-function isBlockedIpv6(address: string): boolean {
+function hasIpv6Prefix(value: bigint, prefix: bigint, bits: number): boolean {
+  return bits === 0 || value >> BigInt(128 - bits) === prefix >> BigInt(128 - bits);
+}
+
+function embeddedIpv4(value: bigint): string {
+  const embedded = Number(value & 0xffffffffn);
+  return [
+    (embedded >>> 24) & 0xff,
+    (embedded >>> 16) & 0xff,
+    (embedded >>> 8) & 0xff,
+    embedded & 0xff,
+  ].join(".");
+}
+
+function isPrivateOrLocalIpv6(address: string): boolean {
   const value = ipv6ToBigInt(address);
   if (value === null) return false;
 
@@ -174,16 +224,51 @@ function isBlockedIpv6(address: string): boolean {
   // fe80::/10 (link-local unicast)
   if ((first16 & 0xffc0) === 0xfe80) return true;
 
-  // IPv4-mapped / embedded v4 cases: if last 32 bits are private, block.
-  const embeddedV4 = Number(value & 0xffffffffn);
-  const v4 = [
-    (embeddedV4 >>> 24) & 0xff,
-    (embeddedV4 >>> 16) & 0xff,
-    (embeddedV4 >>> 8) & 0xff,
-    embeddedV4 & 0xff,
-  ].join(".");
-  if (isBlockedIpv4(v4)) return true;
+  // Only IPv4-compatible (::/96) and IPv4-mapped (::ffff:0:0/96) addresses
+  // carry IPv4 semantics. Never classify an arbitrary public IPv6 address by
+  // its low 32 bits.
+  const upper96 = value >> 32n;
+  if (upper96 === 0n || upper96 === 0xffffn) {
+    return isPrivateOrLocalIpv4(embeddedIpv4(value));
+  }
 
+  return false;
+}
+
+function isBlockedIpv6(address: string): boolean {
+  const value = ipv6ToBigInt(address);
+  if (value === null) return true;
+
+  if (value === 0n || isPrivateOrLocalIpv6(address)) return true;
+
+  const upper96 = value >> 32n;
+  if (upper96 === 0n || upper96 === 0xffffn) {
+    return isBlockedIpv4(embeddedIpv4(value));
+  }
+
+  // NAT64 well-known prefix. The embedded target must still be global.
+  const nat64Prefix = ipv6ToBigInt("64:ff9b::")!;
+  if (hasIpv6Prefix(value, nat64Prefix, 96)) {
+    return isBlockedIpv4(embeddedIpv4(value));
+  }
+
+  // Fail closed outside today's global-unicast allocation (2000::/3).
+  if (value >> 125n !== 1n) return true;
+
+  // Special-purpose/documentation ranges within 2000::/3.
+  if (hasIpv6Prefix(value, ipv6ToBigInt("2001::")!, 23)) return true;
+  if (hasIpv6Prefix(value, ipv6ToBigInt("2001:db8::")!, 32)) return true;
+  if (hasIpv6Prefix(value, ipv6ToBigInt("2002::")!, 16)) return true;
+  if (hasIpv6Prefix(value, ipv6ToBigInt("3fff::")!, 20)) return true;
+
+  return false;
+}
+
+/** Private/loopback/link-local only; used for immediate proxy trust. */
+export function isPrivateOrLocalIp(address: string): boolean {
+  const family = isIP(address);
+  if (family === 4) return isPrivateOrLocalIpv4(address);
+  if (family === 6) return isPrivateOrLocalIpv6(address);
   return false;
 }
 
@@ -200,7 +285,21 @@ function resolveEffectiveAllowlist(opts: SsrfGuardOptions): readonly string[] | 
   return getProdHostnameAllowlist(env);
 }
 
-export async function assertUrlIsPublicHttp(urlInput: string | URL, opts: SsrfGuardOptions = {}): Promise<URL> {
+interface ResolvedPublicHttpUrl {
+  url: URL;
+  addresses: readonly LookupAddress[];
+}
+
+function hostnameForLookup(hostname: string): string {
+  return hostname.startsWith("[") && hostname.endsWith("]")
+    ? hostname.slice(1, -1)
+    : hostname;
+}
+
+async function resolvePublicHttpUrl(
+  urlInput: string | URL,
+  opts: SsrfGuardOptions = {},
+): Promise<ResolvedPublicHttpUrl> {
   const url = parseHttpUrlOrThrow(urlInput);
 
   const allowlist = resolveEffectiveAllowlist(opts);
@@ -208,27 +307,186 @@ export async function assertUrlIsPublicHttp(urlInput: string | URL, opts: SsrfGu
     throw new SsrfGuardError(`Hostname not in allowlist: ${url.hostname}`);
   }
 
+  const lookupHostname = hostnameForLookup(url.hostname);
+  const literalFamily = isIP(lookupHostname);
   const lookupAll = opts.lookupAll ?? defaultLookupAll;
   let results: readonly LookupAddress[];
-  try {
-    results = await lookupAll(url.hostname);
-  } catch (err) {
-    throw new SsrfGuardError(
-      `DNS lookup failed for ${url.hostname}: ${err instanceof Error ? err.message : String(err)}`,
-    );
+  if (literalFamily === 4 || literalFamily === 6) {
+    results = [{ address: lookupHostname, family: literalFamily }];
+  } else {
+    try {
+      results = await lookupAll(lookupHostname);
+    } catch (err) {
+      throw new SsrfGuardError(
+        `DNS lookup failed for ${url.hostname}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   if (!results || results.length === 0) {
     throw new SsrfGuardError(`DNS lookup returned no addresses for ${url.hostname}`);
   }
+  if (results.length > 32) {
+    throw new SsrfGuardError(`DNS lookup returned too many addresses for ${url.hostname}`);
+  }
 
+  const addresses: LookupAddress[] = [];
+  const seen = new Set<string>();
   for (const { address } of results) {
+    const family = isIP(address);
+    if (family !== 4 && family !== 6) {
+      throw new SsrfGuardError(`DNS lookup returned an invalid IP for ${url.hostname}`);
+    }
     if (isBlockedIp(address)) {
       throw new SsrfGuardError(`Blocked IP for ${url.hostname}: ${address}`);
     }
+    const key = `${family}:${address}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      addresses.push({ address, family });
+    }
   }
 
-  return url;
+  return { url, addresses };
+}
+
+export async function assertUrlIsPublicHttp(
+  urlInput: string | URL,
+  opts: SsrfGuardOptions = {},
+): Promise<URL> {
+  return (await resolvePublicHttpUrl(urlInput, opts)).url;
+}
+
+export function selectPinnedAddress(
+  requestedHostname: string,
+  validatedHostname: string,
+  addresses: readonly LookupAddress[],
+): LookupAddress {
+  const requested = hostnameForLookup(requestedHostname).toLowerCase();
+  const validated = hostnameForLookup(validatedHostname).toLowerCase();
+  if (requested !== validated) {
+    throw new SsrfGuardError("Pinned DNS lookup hostname did not match the validated hostname");
+  }
+  const address = addresses[0];
+  if (!address) {
+    throw new SsrfGuardError("Pinned DNS lookup had no validated address");
+  }
+  return address;
+}
+
+async function closeAgent(agent: Agent): Promise<void> {
+  try {
+    await agent.close();
+  } catch {
+    // The request result is already authoritative; cleanup errors are not.
+  }
+}
+
+function responseWithAgentCleanup(response: Response, agent: Agent): Response {
+  if (!response.body) {
+    void closeAgent(agent);
+    return response;
+  }
+
+  const reader = response.body.getReader();
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const next = await reader.read();
+        if (next.done) {
+          await closeAgent(agent);
+          controller.close();
+          return;
+        }
+        controller.enqueue(next.value);
+      } catch (error) {
+        await closeAgent(agent);
+        controller.error(error);
+      }
+    },
+    async cancel(reason) {
+      try {
+        await reader.cancel(reason);
+      } finally {
+        await closeAgent(agent);
+      }
+    },
+  });
+
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+}
+
+/**
+ * Build a transport pinned to an already validated DNS snapshot. Callers must
+ * obtain `addresses` from `resolvePublicHttpUrl`; exported for connector-level
+ * tests that exercise Undici against a local listener.
+ */
+export function createPinnedFetch(
+  validatedUrl: URL,
+  addresses: readonly LookupAddress[],
+): PinnedFetch {
+  return async (input, init = {}) => {
+    const requestedUrl = parseHttpUrlOrThrow(input);
+    if (requestedUrl.origin !== validatedUrl.origin) {
+      throw new SsrfGuardError("Pinned fetch origin did not match the validated origin");
+    }
+
+    const agent = new Agent({
+      connect: {
+        lookup: (hostname, options, callback) => {
+          try {
+            selectPinnedAddress(
+              hostname,
+              validatedUrl.hostname,
+              addresses,
+            );
+            const family = options.family === 4 || options.family === 6
+              ? options.family
+              : 0;
+            const candidates = family === 0
+              ? [...addresses]
+              : addresses.filter((address) => address.family === family);
+            if (candidates.length === 0) {
+              const error = new Error("Pinned DNS lookup had no address for the requested family") as NodeJS.ErrnoException;
+              error.code = "ENOTFOUND";
+              throw error;
+            }
+
+            if (options.all) {
+              callback(null, candidates);
+            } else {
+              const address = candidates[0]!;
+              callback(null, address.address, address.family);
+            }
+          } catch (error) {
+            if (options.all) {
+              callback(error as NodeJS.ErrnoException, []);
+            } else {
+              callback(error as NodeJS.ErrnoException, "", 0);
+            }
+          }
+        },
+      },
+    });
+
+    try {
+      const response = await undiciFetch(
+        requestedUrl,
+        {
+          ...init,
+          dispatcher: agent,
+        } as Parameters<typeof undiciFetch>[1],
+      );
+      return responseWithAgentCleanup(response as unknown as Response, agent);
+    } catch (error) {
+      await closeAgent(agent);
+      throw error;
+    }
+  };
 }
 
 function isRedirectStatus(status: number): boolean {
@@ -247,14 +505,14 @@ export async function ssrfGuardedFetch(
   opts: SsrfGuardedFetchOptions = {},
 ): Promise<Response> {
   const maxRedirects = opts.maxRedirects ?? 5;
-  const fetcher = opts.fetcher ?? ((url: URL, requestInit: RequestInit) => fetch(url, requestInit));
 
   let url = parseHttpUrlOrThrow(input);
   let method = (init.method ?? "GET").toString();
   let body = init.body;
 
   for (let hop = 0; hop <= maxRedirects; hop++) {
-    url = await assertUrlIsPublicHttp(url, opts);
+    const resolved = await resolvePublicHttpUrl(url, opts);
+    url = resolved.url;
 
     const requestInit: RequestInit = {
       ...init,
@@ -263,27 +521,26 @@ export async function ssrfGuardedFetch(
       redirect: "manual",
     };
 
-    const res = await fetcher(url, requestInit);
+    const pinnedFetch = createPinnedFetch(url, resolved.addresses);
+    const res = opts.fetcher
+      ? await opts.fetcher(url, requestInit, pinnedFetch)
+      : await pinnedFetch(url, requestInit);
 
     if (!isRedirectStatus(res.status)) {
+      // Current guarded callers need only the status for non-success results.
+      // Drain a bounded prefix here so a discarded 4xx/5xx cannot retain the
+      // per-request pinned Agent/socket indefinitely.
+      if (!res.ok) await drainResponseBodyWithLimit(res);
       return res;
     }
 
     if (hop === maxRedirects) {
-      try {
-        await res.arrayBuffer();
-      } catch {
-        /* ignore */
-      }
+      await drainResponseBodyWithLimit(res);
       throw new SsrfGuardError(`Too many redirects (>${maxRedirects})`);
     }
 
     const location = res.headers.get("location");
-    try {
-      await res.arrayBuffer();
-    } catch {
-      /* ignore */
-    }
+    await drainResponseBodyWithLimit(res);
 
     if (!location) {
       return res;

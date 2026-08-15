@@ -2,7 +2,6 @@ import {
   Controller,
   Get,
   Post,
-  Body,
   Req,
   Logger,
   HttpCode,
@@ -15,7 +14,6 @@ import { Request } from "express";
 import { BillingService } from "./billing.service";
 import { OrgId } from "../common/org-context.decorator";
 import { SkipOrgGuard } from "../common/org-scope.guard";
-import { CreateSubscriptionDto } from "../common/dto/billing.dto";
 import { verifyRazorpayWebhookSignature } from "../common/webhook-signature.util";
 
 type RawBodyRequest = Request & { rawBody?: Buffer };
@@ -56,14 +54,6 @@ export class BillingController {
     private readonly billingService: BillingService,
     private readonly config: ConfigService,
   ) {}
-
-  @Post("subscribe")
-  createSubscription(
-    @OrgId() orgId: string,
-    @Body() body: CreateSubscriptionDto,
-  ) {
-    return this.billingService.createSubscription(orgId, body.planId);
-  }
 
   @Get()
   getSubscription(@OrgId() orgId: string) {

@@ -21,6 +21,7 @@ enum Plan {
 enum UserRole {
   OWNER
   ADMIN
+  MANAGER
   MEMBER
 }
 
@@ -86,6 +87,31 @@ enum OutreachArtifactStatus {
   // Terminal state, same shape as REJECTED for UI purposes but produced by
   // the system (CAN-SPAM compliance), not by a human reviewer.
   SUPPRESSED
+  // Claim state: a send worker CAS'd the row from APPROVED before dispatch so
+  // concurrent workers cannot double-send. Released back to APPROVED only
+  // when no provider attempt or a provider-rejected response is proven. A
+  // stale claim is terminal DELIVERY_UNKNOWN because process death cannot
+  // prove whether the provider accepted the request.
+  // NOTE: SENDING/SIMULATED/DELIVERY_UNKNOWN/FAILED are appended at the end of the
+  // enum to mirror the ALTER TYPE … ADD VALUE migrations (keeps prod and
+  // schema.prisma value order in sync for drift checks).
+  SENDING
+  // Terminal state for forced-mock sends (org not in OUTREACH_LIVE_FOR_ORGS).
+  // The mock_ receipt is kept for the audit trail, but dashboards/KPIs must
+  // never count SIMULATED traffic as delivered mail — that is the whole point
+  // of splitting it off SENT.
+  SIMULATED
+  // Terminal safety state: a live provider request may have been accepted,
+  // but no trustworthy response/receipt reached the worker, or a SENDING
+  // claim went stale after process loss. Automatic dispatch is permanently
+  // disabled for this artifact; an operator must reconcile provider state
+  // before deciding whether a separately reviewed replacement is warranted.
+  DELIVERY_UNKNOWN
+  // Terminal dispatch failure after retry exhaustion where provider
+  // acceptance is known to be impossible (pre-dispatch failure or explicit
+  // provider rejection). This is operational truth, not a human rejection;
+  // the worker never retries this artifact automatically.
+  FAILED
 }
 
 enum OutreachChannel {
@@ -116,39 +142,87 @@ enum MeetingSource {
   IMPORTED
 }
 
+enum ConversationDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum ConversationSentiment {
+  POSITIVE
+  OBJECTION
+  NEUTRAL
+  NEGATIVE
+}
+
+enum ConversationNextActionType {
+  SEND_CONTENT
+  QUALIFY
+  DISQUALIFY
+  FOLLOW_UP
+}
+
+enum ConversationIntelligenceStatus {
+  PENDING
+  READY
+  FAILED
+}
+
+enum FollowUpStatus {
+  OPEN
+  DONE
+  CANCELLED
+}
+
+enum FollowUpSource {
+  HUMAN
+  AGENT
+}
+
+enum OutreachArtifactPurpose {
+  OUTBOUND
+  REPLY
+  FOLLOW_UP
+}
+
 // ─── Models ──────────────────────────────────────────────
 
 model Org {
-  id           String        @id @default(cuid())
-  name         String
-  slug         String        @unique
-  website      String? // company homepage URL (e.g. "acme.com") — used for auto-ICP generation
+  id                   String                @id @default(cuid())
+  // Immutable Clerk Organization identity. Nullable for local trial workspaces
+  // created while Clerk Organizations is disabled; never infer this from slug.
+  clerkOrgId           String?               @unique
+  name                 String
+  slug                 String                @unique
+  website              String? // company homepage URL (e.g. "acme.com") — used for auto-ICP generation
   // CAN-SPAM §7704(a)(5) compliance: every outbound commercial email must
   // include the sender's valid physical postal mailing address. The send
   // worker appends these as a footer; ship-time enforcement (block
   // APPROVED → SENT when physicalAddress is null) is a follow-up gate.
-  physicalAddress String?
-  country         String?
-  senderName      String?
-  plan         Plan          @default(TRIAL)
-  trialEndsAt  DateTime?
-  billingId    String? // Razorpay subscription ID
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
-  users        User[]
-  agents       Agent[]
-  integrations Integration[]
-  runs         AgentRun[]
-  icpProfiles  IcpProfile[]
-  companies    Company[]
-  leadScores   LeadScore[]
-  scrapeJobs   ScrapeJob[]
-  graphRuns    GraphRun[]
-  outreachArtifacts OutreachArtifact[]
-  workflowRuns WorkflowRun[]
-  meetings     MeetingLedger[]
-  evidenceEvents EvidenceEvent[]
+  physicalAddress      String?
+  country              String?
+  senderName           String?
+  plan                 Plan                  @default(TRIAL)
+  trialEndsAt          DateTime?
+  billingId            String? // Razorpay subscription ID
+  createdAt            DateTime              @default(now())
+  updatedAt            DateTime              @updatedAt
+  users                User[]
+  agents               Agent[]
+  integrations         Integration[]
+  runs                 AgentRun[]
+  icpProfiles          IcpProfile[]
+  companies            Company[]
+  leadScores           LeadScore[]
+  scrapeJobs           ScrapeJob[]
+  graphRuns            GraphRun[]
+  outreachArtifacts    OutreachArtifact[]
+  workflowRuns         WorkflowRun[]
+  meetings             MeetingLedger[]
+  evidenceEvents       EvidenceEvent[]
   outreachSuppressions OutreachSuppression[]
+  conversations        Conversation[]
+  conversationMessages ConversationMessage[]
+  followUpTasks        FollowUpTask[]
 
   @@index([slug])
 }
@@ -172,20 +246,87 @@ model EvidenceEvent {
 }
 
 model User {
-  id        String   @id @default(cuid())
-  orgId     String
-  org       Org      @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  email     String   @unique
-  name      String?
-  role         UserRole @default(MEMBER)
-  clerkId      String?  @unique
-  apiKey       String?  @unique
-  passwordHash String?
-  createdAt    DateTime @default(now())
+  id                String   @id @default(cuid())
+  orgId             String
+  org               Org      @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  email             String   @unique
+  name              String?
+  role              UserRole @default(MEMBER)
+  clerkId           String?  @unique
+  // Current immutable Clerk join lifecycle. Historical lifecycle tombstones
+  // live in ClerkMembershipLifecycle so an older id can never be replayed.
+  clerkMembershipId String?  @unique
+  // Fail closed for legacy rows until the release operator reconciles them.
+  // Every application-owned create path sets this explicitly.
+  membershipActive  Boolean  @default(false)
+  apiKey            String?  @unique
+  passwordHash      String?
+  createdAt         DateTime @default(now())
 
   @@index([orgId])
   @@index([clerkId])
   @@index([apiKey])
+}
+
+// Provider-owned lifecycle cursors. These records are intentionally detached
+// from local cascading relations: deleting a local projection must never erase
+// the tombstone that rejects an old Clerk webhook replay.
+model ClerkIdentityCutover {
+  id                              Int      @id
+  minimumEventVersion             BigInt
+  ready                           Boolean  @default(false)
+  inventoryEvidenceHash           String?
+  expectedActiveOrganizationCount Int      @default(-1)
+  expectedActiveMembershipCount   Int      @default(-1)
+  expectedActiveUserCount         Int      @default(-1)
+  establishedAt                   DateTime @default(now())
+  updatedAt                       DateTime @updatedAt
+
+  @@map("clerk_identity_cutover")
+}
+
+model ClerkOrganizationLifecycle {
+  clerkOrgId   String   @id
+  eventVersion BigInt
+  eventRank    Int
+  deleted      Boolean  @default(false)
+  lastEventId  String
+  updatedAt    DateTime @updatedAt
+
+  @@map("clerk_organization_lifecycle")
+}
+
+model ClerkMembershipLifecycle {
+  clerkMembershipId String   @id
+  clerkUserId       String
+  clerkOrgId        String
+  eventVersion      BigInt
+  eventRank         Int
+  role              UserRole
+  deleted           Boolean  @default(false)
+  lastEventId       String
+  updatedAt         DateTime @updatedAt
+
+  @@index([clerkUserId])
+  @@index([clerkOrgId])
+  @@map("clerk_membership_lifecycle")
+}
+
+model ClerkUserLifecycle {
+  clerkUserId            String   @id
+  deleted                Boolean  @default(false)
+  clerkMembershipId      String?
+  clerkOrgId             String?
+  membershipEventVersion BigInt?
+  membershipEventRank    Int?
+  membershipActive       Boolean  @default(false)
+  role                   UserRole @default(MEMBER)
+  lastEventId            String
+  updatedAt              DateTime @updatedAt
+
+  @@index([clerkMembershipId])
+  @@index([clerkOrgId])
+  @@map("clerk_user_lifecycle")
 }
 
 model AgentTemplate {
@@ -206,21 +347,21 @@ model AgentTemplate {
 }
 
 model Agent {
-  id         String        @id @default(cuid())
-  orgId      String
-  org        Org           @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  templateId String
-  template   AgentTemplate @relation(fields: [templateId], references: [id])
-  name       String
-  domain     Domain
-  config     Json
-  schedule   String? // Cron expression
-  status     AgentStatus   @default(PAUSED)
-  createdAt  DateTime      @default(now())
-  updatedAt  DateTime      @updatedAt
-  runs              AgentRun[]
-  memories          AgentMemory[]
-  memoryEmbeddings  AgentMemoryEmbedding[]
+  id               String                 @id @default(cuid())
+  orgId            String
+  org              Org                    @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  templateId       String
+  template         AgentTemplate          @relation(fields: [templateId], references: [id])
+  name             String
+  domain           Domain
+  config           Json
+  schedule         String? // Cron expression
+  status           AgentStatus            @default(PAUSED)
+  createdAt        DateTime               @default(now())
+  updatedAt        DateTime               @updatedAt
+  runs             AgentRun[]
+  memories         AgentMemory[]
+  memoryEmbeddings AgentMemoryEmbedding[]
 
   @@index([orgId])
   @@index([orgId, domain])
@@ -240,28 +381,38 @@ model Integration {
   lastSyncAt           DateTime?
   lastErrorAt          DateTime?
   lastErrorMessage     String?
+  // Gmail push watermark: last Gmail historyId processed for this org's
+  // mailbox. Persists the in-memory HISTORY_WATERMARK map in
+  // integrations/gmail/gmail.service.ts so history dedup survives process
+  // restarts. Null means "no watermark yet — scan from the pushed historyId".
+  lastHistoryId        String?
   createdAt            DateTime          @default(now())
   updatedAt            DateTime          @updatedAt
+  conversations        Conversation[]
 
   @@unique([orgId, provider])
+  // Composite ownership key used by Conversation's tenant-safe FK. The id is
+  // already globally unique; this second key lets Postgres prove that an
+  // integration and conversation carry the same orgId.
+  @@unique([id, orgId])
   @@index([orgId])
   @@index([orgId, provider])
   @@index([status])
 }
 
 model AgentRun {
-  id               String     @id @default(cuid())
+  id               String            @id @default(cuid())
   agentId          String
-  agent            Agent      @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  agent            Agent             @relation(fields: [agentId], references: [id], onDelete: Cascade)
   orgId            String
-  org              Org        @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  startedAt        DateTime   @default(now())
+  org              Org               @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  startedAt        DateTime          @default(now())
   completedAt      DateTime?
-  status           RunStatus  @default(RUNNING)
+  status           RunStatus         @default(RUNNING)
   result           Json?
-  tokensUsed       Int        @default(0)
-  cost             Float      @default(0)
-  requiresApproval Boolean    @default(false)
+  tokensUsed       Int               @default(0)
+  cost             Float             @default(0)
+  requiresApproval Boolean           @default(false)
   approvedAt       DateTime?
   approvedBy       String? // Clerk user ID of the approver
   logs             AgentLog[]
@@ -280,7 +431,6 @@ model AgentRun {
  * Keyed on (runId, toolName, inputHash) — if a run is replayed (worker crash,
  * BullMQ retry), the executor finds an existing receipt and returns the
  * persisted output instead of re-invoking the tool.
- *
  * inputHash is a SHA-256 of a canonical JSON encoding of the tool's input
  * arguments, so semantically-equal inputs collide and dedupe.
  */
@@ -349,19 +499,18 @@ model AgentMemory {
  * Semantic memory entries (pgvector-backed). Each row stores a chunk of
  * free-form text plus its embedding so the executor can retrieve top-K
  * relevant memories at run start instead of dumping every key into the prompt.
- *
  * The `embedding` column is declared as Unsupported because Prisma doesn't
  * model the pgvector type natively. Reads/writes go through $queryRaw /
  * $executeRaw in MemoryService.
  */
 model AgentMemoryEmbedding {
-  id        String                       @id @default(cuid())
+  id        String                      @id @default(cuid())
   agentId   String
-  agent     Agent                        @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  content   String                       @db.Text
+  agent     Agent                       @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  content   String                      @db.Text
   embedding Unsupported("vector(3072)")
   metadata  Json?
-  createdAt DateTime                     @default(now())
+  createdAt DateTime                    @default(now())
 
   @@index([agentId])
 }
@@ -437,7 +586,7 @@ model IcpProfile {
   intentKeywords   String[]
   seedDomains      String[]
   scheduleEnabled  Boolean     @default(false)
-  scheduleInterval Int         @default(24)  // hours between runs
+  scheduleInterval Int         @default(24) // hours between runs
   lastRunAt        DateTime?
   createdAt        DateTime    @default(now())
   updatedAt        DateTime    @updatedAt
@@ -498,6 +647,7 @@ model Person {
   updatedAt     DateTime         @updatedAt
   emails        EmailCandidate[]
   scores        LeadScore[]
+  conversations Conversation[]
 
   @@index([companyId])
   @@index([linkedinSlug])
@@ -578,41 +728,58 @@ model ScrapeJob {
 // the PrismaCheckpointSaver (implements BaseCheckpointSaver).
 
 model GraphRun {
-  id            String         @id @default(cuid())
-  orgId         String
-  org           Org            @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  threadId      String         @unique
-  graphName     String         // e.g. "pipeline-supervisor"
-  status        GraphRunStatus @default(RUNNING)
-  currentNode   String?
-  state         Json?          // last snapshot of public state (for the UI)
-  needsApproval Boolean        @default(false)
-  approvedAt    DateTime?
-  approvedBy    String?
-  error         String?
-  startedAt     DateTime       @default(now())
-  completedAt   DateTime?
+  id                      String             @id @default(cuid())
+  orgId                   String
+  org                     Org                @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  threadId                String             @unique
+  graphName               String // e.g. "pipeline-supervisor"
+  status                  GraphRunStatus     @default(RUNNING)
+  currentNode             String?
+  state                   Json? // last snapshot of public state (for the UI)
+  // Durable canonical input for a first invocation. A worker checks for an
+  // existing GraphCheckpoint before using this seed, so crash recovery never
+  // re-seeds a thread that has already checkpointed.
+  startIcpProfileIds      String[]           @default([])
+  // The reviewer decision remains on the run until a worker successfully
+  // drives it through LangGraph. `false` is a real pending rejection; null
+  // means there is no pending resume command.
+  pendingResumeApproved   Boolean?
+  pendingResumeApprovedBy String?
+  // Monotonic dispatch fence. Every resume/recovery increments this value;
+  // BullMQ job ids include it so retained completed jobs cannot swallow a
+  // later dispatch and stale jobs cannot drive a newer lifecycle phase.
+  dispatchGeneration      Int                @default(0)
+  needsApproval           Boolean            @default(false)
+  approvedAt              DateTime?
+  approvedBy              String?
+  error                   String?
+  startedAt               DateTime           @default(now())
+  // Mutable worker/recovery activity clock. Keep startedAt immutable so run
+  // dates and elapsed durations continue to describe the original run.
+  lastActivityAt          DateTime           @default(now())
+  completedAt             DateTime?
   // LangSmith root run id captured by whichever node makes the first traced
   // LLM call. Persisted (instead of held in an in-memory Map) so a graph that
   // crashes and resumes on a fresh pod can still post run-level feedback for
   // its earlier legs. Nullable: legacy rows and tracing-disabled envs leave it null.
-  langsmithRootRunId String?
-  outreachArtifacts OutreachArtifact[]
+  langsmithRootRunId      String?
+  outreachArtifacts       OutreachArtifact[]
 
   @@index([orgId])
   @@index([status])
+  @@index([status, lastActivityAt])
   @@index([orgId, startedAt])
 }
 
 model GraphCheckpoint {
-  threadId             String
-  checkpointNamespace  String   @default("")
-  checkpointId         String
-  parentCheckpointId   String?
-  type                 String?  // serde format hint ("json", "msgpack", etc)
-  checkpoint           Bytes    // serialized Checkpoint object
-  metadata             Json?
-  createdAt            DateTime @default(now())
+  threadId            String
+  checkpointNamespace String   @default("")
+  checkpointId        String
+  parentCheckpointId  String?
+  type                String? // serde format hint ("json", "msgpack", etc)
+  checkpoint          Bytes // serialized Checkpoint object
+  metadata            Json?
+  createdAt           DateTime @default(now())
 
   @@id([threadId, checkpointNamespace, checkpointId])
   @@index([threadId])
@@ -645,40 +812,174 @@ model GraphCheckpointWrite {
 // would have been sent; if approved, the worker sends and writes back a
 // receipt + provider message id.
 model OutreachArtifact {
-  id            String                 @id @default(cuid())
-  orgId         String
-  org           Org                    @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  graphRunId    String?
-  graphRun      GraphRun?              @relation(fields: [graphRunId], references: [id], onDelete: SetNull)
+  id                String                  @id @default(cuid())
+  orgId             String
+  org               Org                     @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  graphRunId        String?
+  graphRun          GraphRun?               @relation(fields: [graphRunId], references: [id], onDelete: SetNull)
+  // Conversation linkage is optional for legacy/prospecting artifacts. New
+  // email replies use first-class fields rather than burying provider routing
+  // data in payload JSON. The composite relation prevents cross-org links.
+  purpose           OutreachArtifactPurpose @default(OUTBOUND)
+  conversationId    String?
+  conversation      Conversation?           @relation(fields: [conversationId, orgId], references: [id, orgId], onDelete: NoAction)
+  providerThreadId  String?
+  replyToMessageId  String?
+  replyToMessage    ConversationMessage?    @relation("ArtifactReplyToMessage", fields: [replyToMessageId, orgId], references: [id, orgId], onDelete: NoAction)
   // Tool that would have produced the external side effect (e.g. send_email).
-  toolName      String
-  channel       OutreachChannel
+  toolName          String
+  channel           OutreachChannel
   // Identifies the recipient/account on the outbound side without forcing
   // a hard FK to Person/Company (the graph may produce artifacts for
   // not-yet-persisted leads).
-  recipientRef  String?
-  subject       String?
-  bodyText      String?                @db.Text
-  bodyHtml      String?                @db.Text
+  recipientRef      String?
+  subject           String?
+  bodyText          String?                 @db.Text
+  bodyHtml          String?                 @db.Text
   // Verbatim tool args captured at the moment of the dry-run, so reviewers
   // see what would have been sent. The shape mirrors the tool's input.
-  payload       Json
-  status        OutreachArtifactStatus @default(PENDING_REVIEW)
+  payload           Json
+  status            OutreachArtifactStatus  @default(PENDING_REVIEW)
   // Free-text reason from the reviewer when rejecting.
-  reviewerNote  String?
-  reviewedBy    String?
-  reviewedAt    DateTime?
+  reviewerNote      String?
+  reviewedBy        String?
+  reviewedAt        DateTime?
+  // Operational failure evidence is deliberately separate from reviewer
+  // fields so retry exhaustion cannot be misreported as a human rejection.
+  failureReason     String?
+  failedAt          DateTime?
   // Set once the artifact is actually delivered. Together with sendReceiptId
   // these prove a real send happened post-approval.
-  sentAt        DateTime?
-  sendReceiptId String?
-  createdAt     DateTime               @default(now())
-  updatedAt     DateTime               @updatedAt
+  sentAt            DateTime?
+  sendReceiptId     String?
+  createdAt         DateTime                @default(now())
+  updatedAt         DateTime                @updatedAt
+  deliveredMessages ConversationMessage[]   @relation("DeliveredArtifactMessage")
+  // PostgreSQL additionally owns the review-gated partial unique indexes
+  // OutreachArtifact_one_reply_per_inbound_uniq and
+  // OutreachArtifact_one_open_reply_per_conversation_uniq. Prisma 6 cannot
+  // express their status predicates here; see the review-only 2026-08-12
+  // expand migration.
 
+  @@unique([id, orgId])
   @@index([orgId])
   @@index([orgId, status])
+  @@index([orgId, purpose, status])
   @@index([graphRunId])
   @@index([orgId, createdAt])
+  @@index([conversationId, createdAt])
+  @@index([orgId, providerThreadId])
+}
+
+// Durable, org-scoped projection of a provider email thread. Provider IDs are
+// always qualified by Integration so two connected mailboxes cannot collide.
+// A conversation is created only after the store correlates the thread to a
+// delivered outreach artifact; unrelated inbox mail is not materialized.
+model Conversation {
+  id                    String                         @id @default(cuid())
+  orgId                 String
+  org                   Org                            @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  integrationId         String
+  integration           Integration                    @relation(fields: [integrationId, orgId], references: [id, orgId], onDelete: NoAction)
+  providerThreadId      String
+  // Person has no orgId column in the legacy lead schema. ConversationStore
+  // verifies Person.Company.orgId before setting this optional link.
+  personId              String?
+  person                Person?                        @relation(fields: [personId], references: [id], onDelete: SetNull)
+  contactEmail          String
+  contactName           String?
+  subject               String                         @default("")
+  lastMessagePreview    String                         @default("") @db.Text
+  lastMessageAt         DateTime
+  lastInboundAt         DateTime?
+  lastOutboundAt        DateTime?
+  unreadCount           Int                            @default(0)
+  needsReply            Boolean                        @default(false)
+  archivedAt            DateTime?
+  sequenceStoppedAt     DateTime?
+  sequenceStopReason    String?
+  sentiment             ConversationSentiment?
+  sentimentConfidence   Float?
+  nextBestAction        String?                        @db.Text
+  nextBestActionType    ConversationNextActionType?
+  intelligenceStatus    ConversationIntelligenceStatus @default(PENDING)
+  intelligenceError     String?                        @db.Text
+  intelligenceUpdatedAt DateTime?
+  createdAt             DateTime                       @default(now())
+  updatedAt             DateTime                       @updatedAt
+  messages              ConversationMessage[]
+  followUpTasks         FollowUpTask[]
+  outreachArtifacts     OutreachArtifact[]
+  meetings              MeetingLedger[]
+
+  @@unique([integrationId, providerThreadId])
+  @@unique([id, orgId])
+  @@index([orgId, archivedAt, lastMessageAt])
+  @@index([orgId, needsReply, lastMessageAt])
+  @@index([orgId, sentiment, lastMessageAt])
+  @@index([orgId, personId])
+}
+
+// Immutable provider-message projection. Re-delivered Gmail history entries
+// dedupe on (conversationId, providerMessageId); message bodies are stored,
+// but raw MIME payloads and OAuth material are deliberately not retained.
+model ConversationMessage {
+  id                 String                @id @default(cuid())
+  orgId              String
+  org                Org                   @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  conversationId     String
+  conversation       Conversation          @relation(fields: [conversationId, orgId], references: [id, orgId], onDelete: Cascade)
+  direction          ConversationDirection
+  providerMessageId  String
+  internetMessageId  String?
+  senderEmail        String
+  senderName         String?
+  toEmails           String[]
+  ccEmails           String[]              @default([])
+  subject            String                @default("")
+  bodyText           String?               @db.Text
+  bodyHtml           String?               @db.Text
+  sentAt             DateTime
+  readAt             DateTime?
+  outreachArtifactId String?
+  outreachArtifact   OutreachArtifact?     @relation("DeliveredArtifactMessage", fields: [outreachArtifactId, orgId], references: [id, orgId], onDelete: NoAction)
+  replyArtifacts     OutreachArtifact[]    @relation("ArtifactReplyToMessage")
+  sourceMeetings     MeetingLedger[]       @relation("MeetingSourceMessage")
+  createdAt          DateTime              @default(now())
+
+  @@unique([conversationId, providerMessageId])
+  @@unique([id, orgId])
+  @@unique([orgId, outreachArtifactId])
+  @@index([orgId, sentAt])
+  @@index([conversationId, sentAt])
+  @@index([orgId, internetMessageId])
+}
+
+// V1 follow-ups are durable tasks/reminders, never autonomous send jobs. An
+// inbound reply cancels only OPEN AGENT tasks; human-authored reminders remain
+// under explicit operator control.
+model FollowUpTask {
+  id                 String         @id @default(cuid())
+  orgId              String
+  org                Org            @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  conversationId     String
+  conversation       Conversation   @relation(fields: [conversationId, orgId], references: [id, orgId], onDelete: Cascade)
+  dueAt              DateTime
+  note               String?        @db.Text
+  status             FollowUpStatus @default(OPEN)
+  source             FollowUpSource @default(HUMAN)
+  createdBy          String?
+  completedBy        String?
+  completedAt        DateTime?
+  cancelledBy        String?
+  cancelledAt        DateTime?
+  cancellationReason String?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+
+  @@unique([id, orgId])
+  @@index([orgId, status, dueAt])
+  @@index([conversationId, status, dueAt])
 }
 
 // A versioned, declarative description of a multi-step workflow. The
@@ -686,29 +987,29 @@ model OutreachArtifact {
 // run, which inputs to expect, whether HITL is required). Templates are
 // org-agnostic: a single seed row backs every tenant's runs.
 model WorkflowTemplate {
-  id          String   @id @default(cuid())
+  id               String   @id @default(cuid())
   // Stable identifier used by clients to start a workflow (e.g.
   // "tenant_zero_sdr_outreach_artifact_v1"). Unique across versions so a
   // v2 row is a separate template; older runs still resolve to v1.
-  slug        String   @unique
-  name        String
-  description String
-  version     Int      @default(1)
+  slug             String   @unique
+  name             String
+  description      String
+  version          Int      @default(1)
   // Name of the graph the runtime should compile to execute this workflow
   // (currently always "pipeline-supervisor"; here so future templates can
   // target alternative graphs without a code change).
-  graphName   String
+  graphName        String
   // Free-form config: input schema, defaults, HITL gates, feature flags.
   // Kept as JSON so the schema doesn't churn with every workflow.
-  config      Json
+  config           Json
   // Phase 2.5 templates set requiresApproval=true and produce review
   // artifacts only. A v2 release toggles this once policy allows.
   requiresApproval Boolean  @default(true)
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
-  runs        WorkflowRun[]
+  runs WorkflowRun[]
 
   @@index([slug])
   @@index([isActive])
@@ -718,21 +1019,21 @@ model WorkflowTemplate {
 // underlying GraphRun for runs that go through the supervisor; standalone
 // workflows can leave graphRunId null.
 model WorkflowRun {
-  id                String              @id @default(cuid())
-  orgId             String
-  org               Org                 @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  templateId        String
-  template          WorkflowTemplate    @relation(fields: [templateId], references: [id])
-  graphRunId        String?             @unique
+  id          String            @id @default(cuid())
+  orgId       String
+  org         Org               @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  templateId  String
+  template    WorkflowTemplate  @relation(fields: [templateId], references: [id])
+  graphRunId  String?           @unique
   // Verbatim input values supplied at start time, after schema validation.
-  input             Json
-  status            WorkflowRunStatus   @default(RUNNING)
+  input       Json
+  status      WorkflowRunStatus @default(RUNNING)
   // Final state snapshot once the run completes; null while in-flight.
-  output            Json?
-  error             String?
-  startedBy         String?
-  startedAt         DateTime            @default(now())
-  completedAt       DateTime?
+  output      Json?
+  error       String?
+  startedBy   String?
+  startedAt   DateTime          @default(now())
+  completedAt DateTime?
 
   @@index([orgId])
   @@index([orgId, status])
@@ -746,44 +1047,52 @@ model WorkflowRun {
 // and confirms, and the user replicates in their actual calendar. The
 // ledger is the source of truth the dashboard reads from.
 model MeetingLedger {
-  id              String         @id @default(cuid())
-  orgId           String
-  org             Org            @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  id                 String               @id @default(cuid())
+  orgId              String
+  org                Org                  @relation(fields: [orgId], references: [id], onDelete: Cascade)
   // Optional link to the outreach artifact that produced this meeting
   // proposal. Null for manually-logged meetings.
   outreachArtifactId String?
+  // Optional durable thread/message provenance. Composite keys make it
+  // impossible to attach a meeting to another tenant's conversation.
+  conversationId     String?
+  conversation       Conversation?        @relation(fields: [conversationId, orgId], references: [id, orgId], onDelete: NoAction)
+  sourceMessageId    String?
+  sourceMessage      ConversationMessage? @relation("MeetingSourceMessage", fields: [sourceMessageId, orgId], references: [id, orgId], onDelete: NoAction)
   // Optional link to the lead the meeting is with. Null when the meeting
   // is with someone not (yet) persisted as a Person.
-  personId        String?
-  title           String
-  description     String?
+  personId           String?
+  title              String
+  description        String?
   // Wall-clock UTC. Stored as DateTime so we can sort and filter; the UI
   // is responsible for rendering in the org's timezone.
-  scheduledFor    DateTime
-  durationMinutes Int            @default(30)
+  scheduledFor       DateTime
+  durationMinutes    Int                  @default(30)
   // Verbatim email addresses for attendees. Not FK'd to Person because
   // many attendees are external counterparties whose data we don't store.
-  attendeeEmails  String[]
+  attendeeEmails     String[]
   // Free-form notes from the agent (proposed agenda) or human reviewer.
-  notes           String?        @db.Text
-  status          MeetingStatus  @default(PROPOSED)
-  source          MeetingSource  @default(AGENT_PROPOSED)
+  notes              String?              @db.Text
+  status             MeetingStatus        @default(PROPOSED)
+  source             MeetingSource        @default(AGENT_PROPOSED)
   // Who created this row — Clerk user id when human-logged, "agent" for
   // pipeline-proposed entries. Free text by design.
-  createdBy       String?
+  createdBy          String?
   // Set when status transitions from PROPOSED → CONFIRMED.
-  confirmedBy     String?
-  confirmedAt     DateTime?
+  confirmedBy        String?
+  confirmedAt        DateTime?
   // Set when status transitions to CANCELLED.
-  cancelledReason String?
-  cancelledAt     DateTime?
-  createdAt       DateTime       @default(now())
-  updatedAt       DateTime       @updatedAt
+  cancelledReason    String?
+  cancelledAt        DateTime?
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
 
   @@index([orgId])
   @@index([orgId, status])
   @@index([orgId, scheduledFor])
   @@index([outreachArtifactId])
+  @@index([conversationId])
+  @@index([sourceMessageId])
   @@index([personId])
 }
 
@@ -810,18 +1119,18 @@ enum OutreachSuppressionReason {
 }
 
 model OutreachSuppression {
-  id           String                     @id @default(cuid())
+  id           String                    @id @default(cuid())
   orgId        String
-  org          Org                        @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  org          Org                       @relation(fields: [orgId], references: [id], onDelete: Cascade)
   recipientRef String
-  reason       OutreachSuppressionReason  @default(USER_UNSUBSCRIBED)
+  reason       OutreachSuppressionReason @default(USER_UNSUBSCRIBED)
   // Free-text source for audit ("unsubscribe_token", "provider_bounce", etc.).
   source       String?
   // Verbatim user-agent / IP / provider event id, retained for audit trail.
   // Kept minimal — no full request bodies, no PII beyond what the recipient
   // already supplied by clicking unsubscribe.
   metadata     Json?
-  createdAt    DateTime                   @default(now())
+  createdAt    DateTime                  @default(now())
 
   @@unique([orgId, recipientRef])
   @@index([orgId, createdAt])

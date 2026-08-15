@@ -1,0 +1,806 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://workforceos.xyz/schemas/production-bootstrap-phase-receipt-v1.json",
+  "title": "Workforce OS final production bootstrap phase receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "receiptContractVersion", "environment", "kind",
+    "authorizationScope", "attemptId", "candidate", "databaseIdentityHash",
+    "redisIdentityHash", "azureIdentityHash", "admissionContextHash",
+    "fencingGeneration", "sequence", "previousReceiptSha256", "phase", "status",
+    "rollbackPolicy", "clerkInvocation", "phaseContextHash", "issuedAt", "expiresAt",
+    "operator", "approver", "changeTicket", "evidence"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "receiptContractVersion": { "const": "workforce-production-bootstrap-phase-receipt-v1" },
+    "environment": { "const": "production" },
+    "kind": {
+      "enum": [
+        "production-schema-result", "enum-aware-disabled-baseline",
+        "first-class-activation", "bootstrap-complete"
+      ]
+    },
+    "authorizationScope": { "type": "string" },
+    "attemptId": { "$ref": "#/$defs/attemptId" },
+    "candidate": { "$ref": "#/$defs/candidate" },
+    "databaseIdentityHash": { "$ref": "#/$defs/sha256" },
+    "redisIdentityHash": { "$ref": "#/$defs/sha256" },
+    "azureIdentityHash": { "$ref": "#/$defs/sha256" },
+    "admissionContextHash": { "$ref": "#/$defs/sha256" },
+    "fencingGeneration": { "$ref": "#/$defs/positiveInteger" },
+    "sequence": { "enum": [2, 3, 4, 5] },
+    "previousReceiptSha256": { "$ref": "#/$defs/sha256" },
+    "phase": {
+      "enum": ["B4_SCHEMA_VERIFIED", "B5_COMPATIBLE_BASELINE", "B6_FIRST_CLASS_ARMED", "B8_COMPLETE"]
+    },
+    "status": {
+      "enum": ["applied-and-verified", "verified-disabled", "verified-first-class-armed", "verified-complete"]
+    },
+    "rollbackPolicy": { "$ref": "#/$defs/rollbackPolicy" },
+    "clerkInvocation": { "const": "verified" },
+    "phaseContextHash": { "$ref": "#/$defs/sha256" },
+    "issuedAt": { "$ref": "#/$defs/utcSecond" },
+    "expiresAt": { "$ref": "#/$defs/utcSecond" },
+    "operator": { "$ref": "#/$defs/principal" },
+    "approver": { "$ref": "#/$defs/principal" },
+    "changeTicket": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "evidence": { "type": "object" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "kind": { "const": "production-schema-result" } }, "required": ["kind"] },
+      "then": {
+        "properties": {
+          "authorizationScope": { "const": "verify-forward-schema-only" },
+          "sequence": { "const": 2 },
+          "phase": { "const": "B4_SCHEMA_VERIFIED" },
+          "status": { "const": "applied-and-verified" },
+          "rollbackPolicy": { "$ref": "#/$defs/forwardOnlyPolicy" },
+          "evidence": { "$ref": "#/$defs/schemaResultEvidence" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "enum-aware-disabled-baseline" } }, "required": ["kind"] },
+      "then": {
+        "properties": {
+          "authorizationScope": { "const": "establish-enum-aware-disabled-baseline-only" },
+          "sequence": { "const": 3 },
+          "phase": { "const": "B5_COMPATIBLE_BASELINE" },
+          "status": { "const": "verified-disabled" },
+          "rollbackPolicy": { "$ref": "#/$defs/disabledPolicy" },
+          "evidence": { "$ref": "#/$defs/disabledBaselineEvidence" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "first-class-activation" } }, "required": ["kind"] },
+      "then": {
+        "properties": {
+          "authorizationScope": { "const": "authorize-first-class-resume-only" },
+          "sequence": { "const": 4 },
+          "phase": { "const": "B6_FIRST_CLASS_ARMED" },
+          "status": { "const": "verified-first-class-armed" },
+          "rollbackPolicy": { "$ref": "#/$defs/activationPolicy" },
+          "evidence": { "$ref": "#/$defs/activationEvidence" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "bootstrap-complete" } }, "required": ["kind"] },
+      "then": {
+        "properties": {
+          "authorizationScope": { "const": "confirm-bootstrap-complete-only" },
+          "sequence": { "const": 5 },
+          "phase": { "const": "B8_COMPLETE" },
+          "status": { "const": "verified-complete" },
+          "rollbackPolicy": { "$ref": "#/$defs/activationPolicy" },
+          "evidence": { "$ref": "#/$defs/completeEvidence" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "gitSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "attemptId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "principal": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}$" },
+    "utcSecond": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "nonnegativeInteger": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "positiveInteger": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "apiImage": {
+      "type": "string",
+      "pattern": "^ledgracr\\.azurecr\\.io/apex-api@sha256:[0-9a-f]{64}$"
+    },
+    "consoleImage": {
+      "type": "string",
+      "pattern": "^ledgracr\\.azurecr\\.io/workforceos-fe@sha256:[0-9a-f]{64}$"
+    },
+    "apiRevision": { "type": "string", "pattern": "^apex-gtm-api--[a-z0-9][a-z0-9-]{0,62}$" },
+    "workerRevision": { "type": "string", "pattern": "^apex-gtm-worker--[a-z0-9][a-z0-9-]{0,62}$" },
+    "consoleRevision": { "type": "string", "pattern": "^nikxius-web--[a-z0-9][a-z0-9-]{0,62}$" },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["backendCommit", "consoleCommit", "apiImage", "workerImage", "consoleImage"],
+      "properties": {
+        "backendCommit": { "$ref": "#/$defs/gitSha" },
+        "consoleCommit": { "$ref": "#/$defs/gitSha" },
+        "apiImage": { "$ref": "#/$defs/apiImage" },
+        "workerImage": { "$ref": "#/$defs/apiImage" },
+        "consoleImage": { "$ref": "#/$defs/consoleImage" }
+      }
+    },
+    "rollbackPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "floor", "legacySourceRestorePermitted", "enumAwareDisabledRestorePermitted",
+        "requiredRecoveryAction"
+      ],
+      "properties": {
+        "floor": { "enum": ["forward-only", "enum-aware-disabled", "activation-attempted"] },
+        "legacySourceRestorePermitted": { "type": "boolean" },
+        "enumAwareDisabledRestorePermitted": { "type": "boolean" },
+        "requiredRecoveryAction": { "type": "string" }
+      }
+    },
+    "forwardOnlyPolicy": {
+      "allOf": [
+        { "$ref": "#/$defs/rollbackPolicy" },
+        { "properties": {
+          "floor": { "const": "forward-only" },
+          "legacySourceRestorePermitted": { "const": false },
+          "enumAwareDisabledRestorePermitted": { "const": false },
+          "requiredRecoveryAction": { "const": "complete-forward-schema-and-establish-disabled-baseline" }
+        } }
+      ]
+    },
+    "disabledPolicy": {
+      "allOf": [
+        { "$ref": "#/$defs/rollbackPolicy" },
+        { "properties": {
+          "floor": { "const": "enum-aware-disabled" },
+          "legacySourceRestorePermitted": { "const": false },
+          "enumAwareDisabledRestorePermitted": { "const": true },
+          "requiredRecoveryAction": { "const": "restore-exact-enum-aware-disabled-baseline" }
+        } }
+      ]
+    },
+    "activationPolicy": {
+      "allOf": [
+        { "$ref": "#/$defs/rollbackPolicy" },
+        { "properties": {
+          "floor": { "const": "activation-attempted" },
+          "legacySourceRestorePermitted": { "const": false },
+          "enumAwareDisabledRestorePermitted": { "const": true },
+          "requiredRecoveryAction": {
+            "const": "disable-first-class-gates-before-exact-enum-aware-disabled-restore"
+          }
+        } }
+      ]
+    },
+    "queueState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "paused", "waiting", "active", "delayed", "prioritized", "completed", "failed",
+        "waitingChildren", "pausedJobs", "workerCount"
+      ],
+      "properties": {
+        "paused": { "type": "boolean" },
+        "waiting": { "$ref": "#/$defs/nonnegativeInteger" },
+        "active": { "$ref": "#/$defs/nonnegativeInteger" },
+        "delayed": { "$ref": "#/$defs/nonnegativeInteger" },
+        "prioritized": { "$ref": "#/$defs/nonnegativeInteger" },
+        "completed": { "$ref": "#/$defs/nonnegativeInteger" },
+        "failed": { "$ref": "#/$defs/nonnegativeInteger" },
+        "waitingChildren": { "$ref": "#/$defs/nonnegativeInteger" },
+        "pausedJobs": { "$ref": "#/$defs/nonnegativeInteger" },
+        "workerCount": { "$ref": "#/$defs/nonnegativeInteger" }
+      }
+    },
+    "pausedQueueState": {
+      "allOf": [
+        { "$ref": "#/$defs/queueState" },
+        { "properties": {
+          "paused": { "const": true }, "active": { "const": 0 },
+          "workerCount": { "const": 0 }
+        } }
+      ]
+    },
+    "resumedQueueState": {
+      "allOf": [
+        { "$ref": "#/$defs/queueState" },
+        { "properties": { "paused": { "const": false }, "workerCount": { "$ref": "#/$defs/positiveInteger" } } }
+      ]
+    },
+    "pausedConnectedQueueState": {
+      "allOf": [
+        { "$ref": "#/$defs/queueState" },
+        { "properties": {
+          "paused": { "const": true }, "active": { "const": 0 },
+          "workerCount": { "$ref": "#/$defs/positiveInteger" }
+        } }
+      ]
+    },
+    "pausedQueues": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agentRuns", "graphRuns", "outreachSend"],
+      "properties": {
+        "agentRuns": { "$ref": "#/$defs/pausedQueueState" },
+        "graphRuns": { "$ref": "#/$defs/pausedQueueState" },
+        "outreachSend": { "$ref": "#/$defs/pausedQueueState" }
+      }
+    },
+    "resumedQueues": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agentRuns", "graphRuns", "outreachSend"],
+      "properties": {
+        "agentRuns": { "$ref": "#/$defs/resumedQueueState" },
+        "graphRuns": { "$ref": "#/$defs/resumedQueueState" },
+        "outreachSend": { "$ref": "#/$defs/resumedQueueState" }
+      }
+    },
+    "pausedConnectedQueues": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agentRuns", "graphRuns", "outreachSend"],
+      "properties": {
+        "agentRuns": { "$ref": "#/$defs/pausedConnectedQueueState" },
+        "graphRuns": { "$ref": "#/$defs/pausedConnectedQueueState" },
+        "outreachSend": { "$ref": "#/$defs/pausedConnectedQueueState" }
+      }
+    },
+    "queueObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observedAt", "stableSince", "evidenceHash", "queues"],
+      "properties": {
+        "observedAt": { "$ref": "#/$defs/utcSecond" },
+        "stableSince": { "$ref": "#/$defs/utcSecond" },
+        "evidenceHash": { "$ref": "#/$defs/sha256" },
+        "queues": { "$ref": "#/$defs/pausedQueues" }
+      }
+    },
+    "closedWriterFence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion", "target", "mode", "bootstrapAttemptId", "generation", "issuedAt",
+        "observedAt", "expiresAt", "stateHash", "activeWriters", "activeComplianceWriters"
+      ],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "target": { "const": "workforce-os-production" },
+        "mode": { "const": "closed" },
+        "bootstrapAttemptId": { "$ref": "#/$defs/attemptId" },
+        "generation": { "$ref": "#/$defs/positiveInteger" },
+        "issuedAt": { "$ref": "#/$defs/utcSecond" },
+        "observedAt": { "$ref": "#/$defs/utcSecond" },
+        "expiresAt": { "$ref": "#/$defs/utcSecond" },
+        "stateHash": { "$ref": "#/$defs/sha256" },
+        "activeWriters": { "const": 0 },
+        "activeComplianceWriters": { "const": 0 }
+      }
+    },
+    "quiescence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "nonComplianceApiMutationsBlocked", "liveSendAllowlistEmpty", "queueObservations",
+        "writerFence", "evidenceHash"
+      ],
+      "properties": {
+        "nonComplianceApiMutationsBlocked": { "const": true },
+        "liveSendAllowlistEmpty": { "const": true },
+        "queueObservations": {
+          "type": "array", "minItems": 2, "maxItems": 2,
+          "prefixItems": [
+            { "$ref": "#/$defs/queueObservation" }, { "$ref": "#/$defs/queueObservation" }
+          ],
+          "items": false
+        },
+        "writerFence": { "$ref": "#/$defs/closedWriterFence" },
+        "evidenceHash": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "deploymentIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "image", "manifestDigest", "platformDigest", "ociRevision", "platform", "revision",
+        "configHash", "templateHash", "secretReferencesHash"
+      ],
+      "properties": {
+        "image": { "type": "string" },
+        "manifestDigest": { "$ref": "#/$defs/sha256" },
+        "platformDigest": { "$ref": "#/$defs/sha256" },
+        "ociRevision": { "$ref": "#/$defs/gitSha" },
+        "platform": { "const": "linux/amd64" },
+        "revision": { "type": "string" },
+        "configHash": { "$ref": "#/$defs/sha256" },
+        "templateHash": { "$ref": "#/$defs/sha256" },
+        "secretReferencesHash": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "deployment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity", "active", "soleActiveRevision", "healthy", "provisioned"],
+      "properties": {
+        "identity": { "$ref": "#/$defs/deploymentIdentity" },
+        "active": { "const": true },
+        "soleActiveRevision": { "const": true },
+        "healthy": { "const": true },
+        "provisioned": { "const": true }
+      }
+    },
+    "deployments": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["api", "worker", "console"],
+      "properties": {
+        "api": { "$ref": "#/$defs/deployment" },
+        "worker": { "$ref": "#/$defs/deployment" },
+        "console": { "$ref": "#/$defs/deployment" }
+      }
+    },
+    "writeGate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deliveryUnknownWriteMode", "deliveryUnknownWriteAck", "compatibilityEpoch",
+        "failedStatusWritesEnabled", "failedStatusWritesAck"
+      ],
+      "properties": {
+        "deliveryUnknownWriteMode": { "enum": ["disabled", "first-class"] },
+        "deliveryUnknownWriteAck": {
+          "type": ["string", "null"]
+        },
+        "compatibilityEpoch": { "const": "outreach-delivery-unknown-v1" },
+        "failedStatusWritesEnabled": { "type": "boolean" },
+        "failedStatusWritesAck": { "type": ["string", "null"] }
+      }
+    },
+    "writeGates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["api", "worker"],
+      "properties": { "api": { "$ref": "#/$defs/writeGate" }, "worker": { "$ref": "#/$defs/writeGate" } }
+    },
+    "rollbackApp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity", "available", "active"],
+      "properties": {
+        "identity": { "$ref": "#/$defs/deploymentIdentity" },
+        "available": { "const": true },
+        "active": { "type": "boolean" }
+      }
+    },
+    "rollbackBaseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "compatibilityAttestation", "compatibilityEpoch", "deliveryUnknownWriteMode",
+        "failedStatusWritesEnabled", "api", "worker", "console", "evidenceHash"
+      ],
+      "properties": {
+        "compatibilityAttestation": { "const": "enum-aware-api-worker-console-baseline-v1" },
+        "compatibilityEpoch": { "const": "outreach-delivery-unknown-v1" },
+        "deliveryUnknownWriteMode": { "const": "disabled" },
+        "failedStatusWritesEnabled": { "const": false },
+        "api": { "$ref": "#/$defs/rollbackApp" },
+        "worker": { "$ref": "#/$defs/rollbackApp" },
+        "console": { "$ref": "#/$defs/rollbackApp" },
+        "evidenceHash": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "migrationResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path", "sha256", "preflightPassed", "invocationVerified", "applied",
+        "postconditionsPassed", "writerPause", "writerScopes", "duplicateInventoryHash",
+        "postconditionEvidenceHash"
+      ],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "preflightPassed": { "const": true },
+        "invocationVerified": { "const": true },
+        "applied": { "const": true },
+        "postconditionsPassed": { "const": true },
+        "writerPause": { "enum": ["observed", "not-required"] },
+        "writerScopes": { "type": "array", "items": { "type": "string", "minLength": 1 }, "maxItems": 8 },
+        "duplicateInventoryHash": { "$ref": "#/$defs/sha256" },
+        "postconditionEvidenceHash": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "schemaResultEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "targetRevisions", "migrationExecution", "clerkReconciliationPlan", "clerkCutover", "schemaInventory",
+        "deliveryState", "quiescence", "stagingRehearsalEvidenceHash",
+        "productionApplyEvidenceHash", "backupRestoreEvidenceHash", "schemaEvidenceHash"
+      ],
+      "properties": {
+        "targetRevisions": {
+          "type": "object", "additionalProperties": false,
+          "required": ["api", "worker", "console"],
+          "properties": {
+            "api": { "$ref": "#/$defs/apiRevision" },
+            "worker": { "$ref": "#/$defs/workerRevision" },
+            "console": { "$ref": "#/$defs/consoleRevision" }
+          }
+        },
+        "migrationExecution": {
+          "type": "array", "minItems": 8, "maxItems": 8,
+          "prefixItems": [
+            { "$ref": "#/$defs/migrationResult" }, { "$ref": "#/$defs/migrationResult" },
+            { "$ref": "#/$defs/migrationResult" }, { "$ref": "#/$defs/migrationResult" },
+            { "$ref": "#/$defs/migrationResult" }, { "$ref": "#/$defs/migrationResult" },
+            { "$ref": "#/$defs/migrationResult" }, { "$ref": "#/$defs/migrationResult" }
+          ],
+          "items": false
+        },
+        "clerkReconciliationPlan": { "$ref": "#/$defs/clerkReconciliationPlan" },
+        "clerkCutover": { "$ref": "#/$defs/clerkCutover" },
+        "schemaInventory": { "$ref": "#/$defs/schemaInventory" },
+        "deliveryState": { "$ref": "#/$defs/schemaDeliveryState" },
+        "quiescence": { "$ref": "#/$defs/quiescence" },
+        "stagingRehearsalEvidenceHash": { "$ref": "#/$defs/sha256" },
+        "productionApplyEvidenceHash": { "$ref": "#/$defs/sha256" },
+        "backupRestoreEvidenceHash": { "$ref": "#/$defs/sha256" },
+        "schemaEvidenceHash": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "clerkReconciliationPlan": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "rawPlanSha256", "dryRunEvidenceSha256", "inventoryEvidenceHash",
+        "minimumEventVersion", "expectedActiveOrganizationCount",
+        "expectedActiveMembershipCount", "expectedActiveUserCount", "executor",
+        "dryRunPassed", "approver", "planSignatureSha256", "signatureNamespace",
+        "independentApprovalEvidenceHash", "verifiedAt", "expiresAt"
+      ],
+      "properties": {
+        "rawPlanSha256": { "$ref": "#/$defs/sha256" },
+        "dryRunEvidenceSha256": { "$ref": "#/$defs/sha256" },
+        "inventoryEvidenceHash": { "$ref": "#/$defs/sha256" },
+        "minimumEventVersion": { "$ref": "#/$defs/positiveInteger" },
+        "expectedActiveOrganizationCount": { "$ref": "#/$defs/nonnegativeInteger" },
+        "expectedActiveMembershipCount": { "$ref": "#/$defs/nonnegativeInteger" },
+        "expectedActiveUserCount": { "$ref": "#/$defs/nonnegativeInteger" },
+        "executor": {
+          "type": "object", "additionalProperties": false,
+          "required": ["name", "version", "sha256"],
+          "properties": {
+            "name": { "const": "workforce-production-clerk-reconciliation-executor" },
+            "version": { "const": "v1" },
+            "sha256": { "$ref": "#/$defs/sha256" }
+          }
+        },
+        "dryRunPassed": { "const": true },
+        "approver": { "$ref": "#/$defs/principal" },
+        "planSignatureSha256": { "$ref": "#/$defs/sha256" },
+        "signatureNamespace": { "const": "workforce-os-clerk-reconciliation-plan" },
+        "independentApprovalEvidenceHash": { "$ref": "#/$defs/sha256" },
+        "verifiedAt": { "$ref": "#/$defs/utcSecond" },
+        "expiresAt": { "$ref": "#/$defs/utcSecond" }
+      }
+    },
+    "clerkCutover": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "schemaReady", "rowCount", "ready", "minimumEventVersion", "inventoryEvidenceHash",
+        "expectedActiveOrganizationCount", "expectedActiveMembershipCount", "expectedActiveUserCount",
+        "activeOrganizationCount", "activeMembershipCount", "activeUserCount",
+        "projectionMismatchRows", "orphanActiveAuthorityRows", "readinessViolationRows",
+        "invariantEvidenceHash"
+      ],
+      "properties": {
+        "schemaReady": { "const": true }, "rowCount": { "const": 1 }, "ready": { "const": true },
+        "minimumEventVersion": { "$ref": "#/$defs/positiveInteger" },
+        "inventoryEvidenceHash": { "$ref": "#/$defs/sha256" },
+        "expectedActiveOrganizationCount": { "$ref": "#/$defs/nonnegativeInteger" },
+        "expectedActiveMembershipCount": { "$ref": "#/$defs/nonnegativeInteger" },
+        "expectedActiveUserCount": { "$ref": "#/$defs/nonnegativeInteger" },
+        "activeOrganizationCount": { "$ref": "#/$defs/nonnegativeInteger" },
+        "activeMembershipCount": { "$ref": "#/$defs/nonnegativeInteger" },
+        "activeUserCount": { "$ref": "#/$defs/nonnegativeInteger" },
+        "projectionMismatchRows": { "const": 0 }, "orphanActiveAuthorityRows": { "const": 0 },
+        "readinessViolationRows": { "const": 0 },
+        "invariantEvidenceHash": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "schemaInventory": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "outreachIdempotencyDuplicateGroups", "legacyGmailReplySequenceStopRows", "managerRoleRows",
+        "graphRunRunningRows", "graphRunAwaitingApprovalRows", "graphActiveOrgDuplicateGroups",
+        "graphActiveWithoutRecoveryStateRows", "graphLifecycleSchemaReady", "replySchemaReady",
+        "replySourceDuplicateGroups", "replyConversationDuplicateGroups", "nullSourceReplyRows",
+        "replySlotDuplicateRows", "duplicateInventoryEvidenceHash"
+      ],
+      "properties": {
+        "outreachIdempotencyDuplicateGroups": { "const": 0 },
+        "legacyGmailReplySequenceStopRows": { "$ref": "#/$defs/nonnegativeInteger" },
+        "managerRoleRows": { "$ref": "#/$defs/nonnegativeInteger" },
+        "graphRunRunningRows": { "const": 0 },
+        "graphRunAwaitingApprovalRows": { "$ref": "#/$defs/nonnegativeInteger" },
+        "graphActiveOrgDuplicateGroups": { "const": 0 },
+        "graphActiveWithoutRecoveryStateRows": { "const": 0 },
+        "graphLifecycleSchemaReady": { "const": true }, "replySchemaReady": { "const": true },
+        "replySourceDuplicateGroups": { "const": 0 }, "replyConversationDuplicateGroups": { "const": 0 },
+        "nullSourceReplyRows": { "const": 0 }, "replySlotDuplicateRows": { "const": 0 },
+        "duplicateInventoryEvidenceHash": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "schemaDeliveryState": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "deliveryUnknownEnumReady", "failedEnumReady", "deliveryUnknownWriteMode",
+        "deliveryUnknownWriteAck", "failedStatusWritesEnabled", "failedStatusWritesAck",
+        "sendingRows", "firstClassDeliveryUnknownRows", "firstClassFailedRows",
+        "legacyDeliveryUnknownMarkerRows", "legacyAutoFailedMarkerRows",
+        "legacyMarkerInventoryEvidenceHash"
+      ],
+      "properties": {
+        "deliveryUnknownEnumReady": { "const": true }, "failedEnumReady": { "const": true },
+        "deliveryUnknownWriteMode": { "const": "disabled" }, "deliveryUnknownWriteAck": { "const": null },
+        "failedStatusWritesEnabled": { "const": false }, "failedStatusWritesAck": { "const": null },
+        "sendingRows": { "const": 0 }, "firstClassDeliveryUnknownRows": { "const": 0 },
+        "firstClassFailedRows": { "const": 0 },
+        "legacyDeliveryUnknownMarkerRows": { "$ref": "#/$defs/nonnegativeInteger" },
+        "legacyAutoFailedMarkerRows": { "$ref": "#/$defs/nonnegativeInteger" },
+        "legacyMarkerInventoryEvidenceHash": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "legacyRevisions": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "allLegacyRevisionsInactive", "apiActiveLegacyRevisionCount",
+        "workerActiveLegacyRevisionCount", "consoleActiveLegacyRevisionCount", "evidenceHash"
+      ],
+      "properties": {
+        "allLegacyRevisionsInactive": { "const": true },
+        "apiActiveLegacyRevisionCount": { "const": 0 },
+        "workerActiveLegacyRevisionCount": { "const": 0 },
+        "consoleActiveLegacyRevisionCount": { "const": 0 },
+        "evidenceHash": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "disabledBaselineEvidence": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "deployments", "writeGates", "legacyRevisions", "quiescence",
+        "compatibilityAttestation", "baselineEvidenceHash"
+      ],
+      "properties": {
+        "deployments": { "$ref": "#/$defs/deployments" },
+        "writeGates": { "$ref": "#/$defs/writeGates" },
+        "legacyRevisions": { "$ref": "#/$defs/legacyRevisions" },
+        "quiescence": { "$ref": "#/$defs/quiescence" },
+        "compatibilityAttestation": { "const": "enum-aware-api-worker-console-baseline-v1" },
+        "baselineEvidenceHash": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "activationEvidence": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "deployments", "writeGates", "rollbackBaseline", "readerDrain",
+        "deliveryUnknownActivation", "failedActivation", "quiescence", "activationEvidenceHash"
+      ],
+      "properties": {
+        "deployments": { "$ref": "#/$defs/deployments" },
+        "writeGates": { "$ref": "#/$defs/writeGates" },
+        "rollbackBaseline": { "$ref": "#/$defs/rollbackBaseline" },
+        "readerDrain": {
+          "type": "object", "additionalProperties": false,
+          "required": ["legacyApiReadersActive", "legacyWorkerWritersActive", "legacyConsoleReadersActive", "evidenceHash"],
+          "properties": {
+            "legacyApiReadersActive": { "const": 0 }, "legacyWorkerWritersActive": { "const": 0 },
+            "legacyConsoleReadersActive": { "const": 0 }, "evidenceHash": { "$ref": "#/$defs/sha256" }
+          }
+        },
+        "deliveryUnknownActivation": {
+          "type": "object", "additionalProperties": false,
+          "required": ["readersDrained", "rollbackBaselinesVerified", "firstClassDeliveryUnknownRows", "evidenceHash"],
+          "properties": {
+            "readersDrained": { "const": true }, "rollbackBaselinesVerified": { "const": true },
+            "firstClassDeliveryUnknownRows": { "const": 0 }, "evidenceHash": { "$ref": "#/$defs/sha256" }
+          }
+        },
+        "failedActivation": {
+          "type": "object", "additionalProperties": false,
+          "required": [
+            "readersDrained", "legacyInventoryReviewed", "unreviewedHistoricalMarkersPromotedRows",
+            "firstClassFailedRows", "legacyInventoryEvidenceHash", "evidenceHash"
+          ],
+          "properties": {
+            "readersDrained": { "const": true }, "legacyInventoryReviewed": { "const": true },
+            "unreviewedHistoricalMarkersPromotedRows": { "const": 0 }, "firstClassFailedRows": { "const": 0 },
+            "legacyInventoryEvidenceHash": { "$ref": "#/$defs/sha256" },
+            "evidenceHash": { "$ref": "#/$defs/sha256" }
+          }
+        },
+        "quiescence": { "$ref": "#/$defs/quiescence" },
+        "activationEvidenceHash": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "resumeStep": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sequence", "action", "startedAt", "completedAt", "evidenceHash"],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 1, "maximum": 6 },
+        "action": {
+          "enum": [
+            "release-writer-fence", "start-first-class-consumers", "resume-agent-runs", "resume-graph-runs",
+            "resume-outreach-send", "unblock-api-mutations"
+          ]
+        },
+        "startedAt": { "$ref": "#/$defs/utcSecond" },
+        "completedAt": { "$ref": "#/$defs/utcSecond" },
+        "evidenceHash": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "completeEvidence": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "deployments", "writeGates", "rollbackBaseline", "resume", "health",
+        "finalInventory", "bootstrapEvidenceHash"
+      ],
+      "properties": {
+        "deployments": { "$ref": "#/$defs/deployments" },
+        "writeGates": { "$ref": "#/$defs/writeGates" },
+        "rollbackBaseline": { "$ref": "#/$defs/rollbackBaseline" },
+        "resume": {
+          "type": "object", "additionalProperties": false,
+          "required": [
+            "terminalOpenIntent", "steps", "pausedConsumerProof", "queues",
+            "writerFenceRelease", "apiMutations", "ambiguityControl",
+            "liveSendAllowlistEmpty", "evidenceHash"
+          ],
+          "properties": {
+            "terminalOpenIntent": {
+              "type": "object", "additionalProperties": false,
+              "required": [
+                "bootstrapAttemptId", "generation", "previousStateHash", "persistedAt",
+                "forwardOnly", "evidenceHash"
+              ],
+              "properties": {
+                "bootstrapAttemptId": { "$ref": "#/$defs/attemptId" },
+                "generation": { "$ref": "#/$defs/positiveInteger" },
+                "previousStateHash": { "$ref": "#/$defs/sha256" },
+                "persistedAt": { "$ref": "#/$defs/utcSecond" },
+                "forwardOnly": { "const": true },
+                "evidenceHash": { "$ref": "#/$defs/sha256" }
+              }
+            },
+            "steps": {
+              "type": "array", "minItems": 6, "maxItems": 6,
+              "prefixItems": [
+                { "$ref": "#/$defs/resumeStep" }, { "$ref": "#/$defs/resumeStep" },
+                { "$ref": "#/$defs/resumeStep" }, { "$ref": "#/$defs/resumeStep" },
+                { "$ref": "#/$defs/resumeStep" }, { "$ref": "#/$defs/resumeStep" }
+              ],
+              "items": false
+            },
+            "pausedConsumerProof": {
+              "type": "object", "additionalProperties": false,
+              "required": ["queues", "provedAt", "evidenceHash"],
+              "properties": {
+                "queues": { "$ref": "#/$defs/pausedConnectedQueues" },
+                "provedAt": { "$ref": "#/$defs/utcSecond" },
+                "evidenceHash": { "$ref": "#/$defs/sha256" }
+              }
+            },
+            "queues": { "$ref": "#/$defs/resumedQueues" },
+            "writerFenceRelease": {
+              "type": "object", "additionalProperties": false,
+              "required": [
+                "bootstrapAttemptId", "generation", "previousStateHash", "openEpoch",
+                "openStateHash", "releasedAt", "terminalOpen", "evidenceHash"
+              ],
+              "properties": {
+                "bootstrapAttemptId": { "$ref": "#/$defs/attemptId" },
+                "generation": { "$ref": "#/$defs/positiveInteger" },
+                "previousStateHash": { "$ref": "#/$defs/sha256" },
+                "openEpoch": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["schemaVersion", "target", "mode", "bootstrapAttemptId", "generation"],
+                  "properties": {
+                    "schemaVersion": { "const": 1 },
+                    "target": { "const": "workforce-os-production" },
+                    "mode": { "const": "open" },
+                    "bootstrapAttemptId": { "$ref": "#/$defs/attemptId" },
+                    "generation": { "$ref": "#/$defs/positiveInteger" }
+                  }
+                },
+                "openStateHash": { "$ref": "#/$defs/sha256" },
+                "releasedAt": { "$ref": "#/$defs/utcSecond" },
+                "terminalOpen": { "const": true },
+                "evidenceHash": { "$ref": "#/$defs/sha256" }
+              }
+            },
+            "apiMutations": {
+              "type": "object", "additionalProperties": false,
+              "required": ["blocked", "ingressEnabled", "readinessPassed", "restoredAt", "evidenceHash"],
+              "properties": {
+                "blocked": { "const": false }, "ingressEnabled": { "const": true },
+                "readinessPassed": { "const": true }, "restoredAt": { "$ref": "#/$defs/utcSecond" },
+                "evidenceHash": { "$ref": "#/$defs/sha256" }
+              }
+            },
+            "ambiguityControl": {
+              "type": "object", "additionalProperties": false,
+              "required": [
+                "policy", "containmentReady", "ambiguousPartialResumeDetected",
+                "allQueuesRePauseRequired", "apiAndWorkerDeactivateRequired",
+                "stableZeroReplicasRequired", "terminalOpenRecloseForbidden",
+                "holdForwardOnlyRequired", "evidenceHash"
+              ],
+              "properties": {
+                "policy": {
+                  "const": "repause-deactivate-stable-zero-and-hold-terminal-open-forward-only-v1"
+                },
+                "containmentReady": { "const": true },
+                "ambiguousPartialResumeDetected": { "const": false },
+                "allQueuesRePauseRequired": { "const": true },
+                "apiAndWorkerDeactivateRequired": { "const": true },
+                "stableZeroReplicasRequired": { "const": true },
+                "terminalOpenRecloseForbidden": { "const": true },
+                "holdForwardOnlyRequired": { "const": true },
+                "evidenceHash": { "$ref": "#/$defs/sha256" }
+              }
+            },
+            "liveSendAllowlistEmpty": { "const": true },
+            "evidenceHash": { "$ref": "#/$defs/sha256" }
+          }
+        },
+        "health": {
+          "type": "object", "additionalProperties": false,
+          "required": [
+            "apiReady", "workerReady", "consoleReady", "releaseConfigVerified",
+            "failedListSmokePassed", "dashboardPolicySmokePassed",
+            "releaseConfigEvidenceHash", "failedListSmokeEvidenceHash",
+            "dashboardPolicySmokeEvidenceHash", "evidenceHash"
+          ],
+          "properties": {
+            "apiReady": { "const": true }, "workerReady": { "const": true },
+            "consoleReady": { "const": true }, "releaseConfigVerified": { "const": true },
+            "failedListSmokePassed": { "const": true }, "dashboardPolicySmokePassed": { "const": true },
+            "releaseConfigEvidenceHash": { "$ref": "#/$defs/sha256" },
+            "failedListSmokeEvidenceHash": { "$ref": "#/$defs/sha256" },
+            "dashboardPolicySmokeEvidenceHash": { "$ref": "#/$defs/sha256" },
+            "evidenceHash": { "$ref": "#/$defs/sha256" }
+          }
+        },
+        "finalInventory": {
+          "type": "object", "additionalProperties": false,
+          "required": [
+            "sendingRows", "firstClassDeliveryUnknownRows", "firstClassFailedRows",
+            "unreviewedHistoricalMarkersPromotedRows", "evidenceHash"
+          ],
+          "properties": {
+            "sendingRows": { "const": 0 }, "firstClassDeliveryUnknownRows": { "const": 0 },
+            "firstClassFailedRows": { "const": 0 },
+            "unreviewedHistoricalMarkersPromotedRows": { "const": 0 },
+            "evidenceHash": { "$ref": "#/$defs/sha256" }
+          }
+        },
+        "bootstrapEvidenceHash": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}

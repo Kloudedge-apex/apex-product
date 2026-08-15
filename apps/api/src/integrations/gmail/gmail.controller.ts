@@ -11,6 +11,7 @@ import {
   Query,
   UseGuards,
   UnauthorizedException,
+  ServiceUnavailableException,
 } from "@nestjs/common";
 import { GmailService } from "./gmail.service";
 import { OrgId } from "../../common/org-context.decorator";
@@ -59,12 +60,12 @@ export class GmailController {
    *
    * Google Cloud Pub/Sub posts new-message notifications here. We verify the
    * OIDC JWT signed by the configured publisher service account (audience must
-   * match this URL), decode the base64 `message.data` payload, and dispatch
-   * the Reply Handler agent for any new inbound replies.
+   * match this URL), decode the base64 `message.data` payload, and durably
+   * materialize correlated inbound replies.
    *
-   * Always returns 200 on a successful dispatch hand-off so Pub/Sub stops
-   * retrying. Internal failures are logged but never surfaced as 5xx — we
-   * rely on the History API watermark for replay safety.
+   * Returns 200 only after durable processing. Transient persistence failures
+   * surface as 503 so Pub/Sub retries; idempotent provider-message keys make
+   * that replay safe.
    */
   @Post("push")
   @SkipOrgGuard()
@@ -103,12 +104,20 @@ export class GmailController {
     }
 
     try {
-      await this.gmailService.handlePushNotification({ emailAddress, historyId });
+      await this.gmailService.handlePushNotification({
+        emailAddress,
+        historyId,
+      });
     } catch (err) {
-      // Swallow — see method docstring. Logging captures the failure.
-      this.logger.error("gmail.push dispatch failed", {
+      // Return a retryable failure. Acknowledging before durable message
+      // materialization would permanently lose the reply because Pub/Sub
+      // treats every 2xx as success.
+      this.logger.error("gmail.push durable dispatch failed", {
         error: err instanceof Error ? err.message : String(err),
       });
+      throw new ServiceUnavailableException(
+        "Gmail push could not be persisted; retry required",
+      );
     }
 
     return { ok: true };
@@ -118,6 +127,8 @@ export class GmailController {
   @UseGuards(AdminOrManagerGuard)
   @HttpCode(HttpStatus.OK)
   sendEmail(@OrgId() orgId: string, @Body() body: SendEmailDto) {
+    // Compatibility endpoint only. GmailService rejects direct dispatch so
+    // every live send must pass the canonical artifact queue and policy gates.
     return this.gmailService.sendApprovedOutreachEmail(orgId, body);
   }
 
@@ -128,6 +139,7 @@ export class GmailController {
    * renewing watches before the 7-day expiration.
    */
   @Post("watch")
+  @UseGuards(AdminOrManagerGuard)
   @HttpCode(HttpStatus.OK)
   async registerWatch(@OrgId() orgId: string) {
     const result = await this.gmailService.registerWatch(orgId);
@@ -135,6 +147,7 @@ export class GmailController {
   }
 
   @Get("messages")
+  @UseGuards(AdminOrManagerGuard)
   listMessages(
     @OrgId() orgId: string,
     @Query("maxResults") maxResults?: string,
@@ -149,6 +162,7 @@ export class GmailController {
   }
 
   @Get("search")
+  @UseGuards(AdminOrManagerGuard)
   searchMessages(
     @OrgId() orgId: string,
     @Query("q") query: string,
@@ -162,11 +176,13 @@ export class GmailController {
   }
 
   @Get("messages/:messageId")
+  @UseGuards(AdminOrManagerGuard)
   getMessage(@OrgId() orgId: string, @Param("messageId") messageId: string) {
     return this.gmailService.getMessage(orgId, messageId);
   }
 
   @Get("threads/:threadId")
+  @UseGuards(AdminOrManagerGuard)
   getThread(@OrgId() orgId: string, @Param("threadId") threadId: string) {
     return this.gmailService.getThread(orgId, threadId);
   }

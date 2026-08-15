@@ -1,15 +1,123 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Inject,
   Injectable,
   Logger,
   NotFoundException,
   Optional,
 } from "@nestjs/common";
-import { Plan } from "@prisma/client";
+import type { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { EvidenceLedgerService } from "../observability/evidence-ledger.service";
+import { isLiveSendAllowedForOrg } from "../outreach/outreach-allowlist.util";
+import {
+  dailySendCapacityWhere,
+  getDailySendCapPerOrg,
+} from "../outreach/send-outreach.worker";
 import { isIP } from "node:net";
+import { buildTrialOrgSlug } from "../common/trial-org.util";
+import { isGmailWatchFresh } from "../integrations/gmail/gmail-watch-freshness";
+import { senderIdentityReadiness } from "../outreach/sender-identity.util";
+import { hasRequiredClerkOrgSession } from "../common/org-role-authority";
+import { withProvisionableClerkUser } from "../common/clerk-user-provisioning";
+
+/**
+ * Computed live-send truth for an org (GL5). The FE renders Dry Run / Live
+ * badges and the Settings go-live checklist from this object instead of
+ * guessing. Every field mirrors a gate the send worker actually enforces:
+ *
+ *   liveSendAllowed    → OUTREACH_LIVE_FOR_ORGS allowlist — the SAME helper
+ *                        the worker uses to pick SENT vs SIMULATED
+ *   physicalAddressSet → CAN-SPAM §7704(a)(5) fail-closed gate on live email
+ *   senderNameSet      → sender-identity footer field
+ *   mailboxConnected   → a CONNECTED Gmail row has a resolved accountEmail
+ *                        and a users.watch history cursor
+ *   dailyCapRemaining  → GL8a per-org daily cap headroom for the current UTC
+ *                        day, clamped at 0; null is reserved for "cap helper
+ *                        unavailable" (not currently the case — the helper
+ *                        imports cleanly with no module cycle)
+ */
+export interface SendReadiness {
+  liveSendAllowed: boolean;
+  physicalAddressSet: boolean;
+  senderNameSet: boolean;
+  countrySet: boolean;
+  mailboxConnected: boolean;
+  dailyCapRemaining: number | null;
+}
+
+export type OnboardingCurrentStep =
+  | "organization"
+  | "sender_identity"
+  | "icp"
+  | "mailbox"
+  | "complete";
+
+export interface OnboardingStatus {
+  organization: {
+    nameSet: boolean;
+    websiteSet: boolean;
+    complete: boolean;
+  };
+  senderIdentity: {
+    senderNameSet: boolean;
+    countrySet: boolean;
+    physicalAddressSet: boolean;
+    complete: boolean;
+  };
+  icp: {
+    usable: boolean;
+    complete: boolean;
+  };
+  mailbox: {
+    connected: boolean;
+    complete: boolean;
+  };
+  sendReadiness: SendReadiness;
+  currentStep: OnboardingCurrentStep;
+  complete: boolean;
+  readyForLiveSend: boolean;
+}
+
+/**
+ * Public org responses are an explicit allowlist. In particular, relation
+ * selects must never grow implicitly when authentication or provider-secret
+ * columns are added to Prisma models.
+ */
+const ORG_RESPONSE_SCALAR_SELECT = {
+  id: true,
+  name: true,
+  slug: true,
+  website: true,
+  physicalAddress: true,
+  country: true,
+  senderName: true,
+  plan: true,
+  trialEndsAt: true,
+  createdAt: true,
+  updatedAt: true,
+} as const satisfies Prisma.OrgSelect;
+
+const ORG_RESPONSE_USER_SELECT = {
+  id: true,
+  email: true,
+  name: true,
+  role: true,
+  createdAt: true,
+} as const satisfies Prisma.UserSelect;
+
+const ORG_RESPONSE_INTEGRATION_SELECT = {
+  id: true,
+  provider: true,
+  status: true,
+  scopes: true,
+  lastSyncAt: true,
+  lastErrorAt: true,
+  lastErrorMessage: true,
+  createdAt: true,
+  updatedAt: true,
+} as const satisfies Prisma.IntegrationSelect;
 
 /**
  * Optional best-effort LangSmith handle. We keep the interface here (instead of
@@ -58,23 +166,11 @@ export class OrgsService {
     clerkUserId: string;
     email: string;
     userName?: string;
+    clerkOrgId?: string;
+    clerkOrgRole?: string;
   }) {
     const slug =
-      data.slug ||
-      data.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") +
-        "-" +
-        Date.now().toString(36);
-
-    const existingUser = await this.prisma.user.findUnique({
-      where: { clerkId: data.clerkUserId },
-    });
-    if (existingUser) {
-      const org = await this.prisma.org.findUnique({
-        where: { id: existingUser.orgId },
-        include: { users: true },
-      });
-      return org;
-    }
+      data.slug || buildTrialOrgSlug(data.name, data.clerkUserId);
 
     // Clerk's default JWT template omits the email claim, so `data.email` is
     // often "". User.email is @unique, so reuse-of-empty-string would collide
@@ -84,44 +180,282 @@ export class OrgsService {
         ? data.email
         : `${data.clerkUserId}@no-email.workforceos.local`;
 
-    return this.prisma.org.create({
-      data: {
-        name: data.name,
-        slug,
-        plan: "TRIAL",
-        trialEndsAt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000),
-        users: {
-          create: {
-            email,
-            name: data.userName || data.name,
-            role: "OWNER",
-            clerkId: data.clerkUserId,
+    return withProvisionableClerkUser(
+      this.prisma,
+      data.clerkUserId,
+      async (tx) => {
+        const existingUser = await tx.user.findUnique({
+          where: { clerkId: data.clerkUserId },
+          select: {
+            orgId: true,
+            membershipActive: true,
+            org: { select: { clerkOrgId: true } },
           },
-        },
+        });
+        if (existingUser) {
+          if (!existingUser.membershipActive) {
+            throw new ForbiddenException("Organization membership is inactive");
+          }
+          if (!hasRequiredClerkOrgSession(existingUser.org.clerkOrgId, data)) {
+            throw new ForbiddenException(
+              "Active Clerk organization session required",
+            );
+          }
+          return tx.org.findUnique({
+            where: { id: existingUser.orgId },
+            select: {
+              ...ORG_RESPONSE_SCALAR_SELECT,
+              users: { select: ORG_RESPONSE_USER_SELECT },
+            },
+          });
+        }
+
+        if (data.clerkOrgId || data.clerkOrgRole) {
+          throw new ForbiddenException(
+            "Clerk organization must be synchronized before local access",
+          );
+        }
+
+        return tx.org.create({
+          data: {
+            name: data.name,
+            slug,
+            plan: "TRIAL",
+            trialEndsAt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000),
+            users: {
+              create: {
+                email,
+                name: data.userName || data.name,
+                role: "OWNER",
+                clerkId: data.clerkUserId,
+                membershipActive: true,
+              },
+            },
+          },
+          select: {
+            ...ORG_RESPONSE_SCALAR_SELECT,
+            users: { select: ORG_RESPONSE_USER_SELECT },
+          },
+        });
       },
-      include: { users: true },
-    });
+    );
   }
 
   async findOne(id: string) {
     const org = await this.prisma.org.findUnique({
       where: { id },
-      include: { users: true, agents: true, integrations: true },
+      select: {
+        ...ORG_RESPONSE_SCALAR_SELECT,
+        users: { select: ORG_RESPONSE_USER_SELECT },
+        integrations: { select: ORG_RESPONSE_INTEGRATION_SELECT },
+      },
     });
     if (!org) throw new NotFoundException("Org not found");
     return org;
   }
 
-  async findByClerkUser(clerkId: string) {
+  /**
+   * Org payload for GET /orgs/me — the read the FE/BFF settings + dashboard
+   * paths poll. Extends the raw org row with `sendReadiness` so the FE can
+   * stop inferring live-send state from env-shaped guesses (GL5).
+   */
+  async findByClerkUser(
+    clerkId: string,
+    claims: { clerkOrgId?: string; clerkOrgRole?: string } = {},
+  ) {
     const user = await this.prisma.user.findUnique({
       where: { clerkId },
-      include: { org: { include: { agents: true, integrations: true } } },
+      select: {
+        membershipActive: true,
+        org: {
+          select: {
+            ...ORG_RESPONSE_SCALAR_SELECT,
+            clerkOrgId: true,
+            integrations: { select: ORG_RESPONSE_INTEGRATION_SELECT },
+          },
+        },
+      },
     });
-    if (!user) return null;
-    return user.org;
+    if (!user?.membershipActive) return null;
+    if (!hasRequiredClerkOrgSession(user.org.clerkOrgId, claims)) {
+      throw new ForbiddenException("Active Clerk organization session required");
+    }
+    const org = {
+      id: user.org.id,
+      name: user.org.name,
+      slug: user.org.slug,
+      website: user.org.website,
+      physicalAddress: user.org.physicalAddress,
+      country: user.org.country,
+      senderName: user.org.senderName,
+      plan: user.org.plan,
+      trialEndsAt: user.org.trialEndsAt,
+      createdAt: user.org.createdAt,
+      updatedAt: user.org.updatedAt,
+      integrations: user.org.integrations,
+    };
+    const sendReadiness = await this.computeSendReadiness(org);
+    return { ...org, sendReadiness };
   }
 
-  async update(id: string, data: { name?: string; plan?: string; website?: string }) {
+  /**
+   * Derives SendReadiness from the already-loaded org row plus two cheap
+   * org-scoped count queries (run in parallel). Takes the org fields as an
+   * argument so callers that just fetched the row don't pay a refetch.
+   */
+  async computeSendReadiness(org: {
+    id: string;
+    physicalAddress: string | null;
+    senderName: string | null;
+    country: string | null;
+  }): Promise<SendReadiness> {
+    const senderIdentity = senderIdentityReadiness(org);
+    const [mailbox, capacityUsedToday] = await Promise.all([
+      this.prisma.integration.findFirst({
+        where: {
+          orgId: org.id,
+          status: "CONNECTED",
+          provider: "gmail",
+          // GmailService writes accountEmail only after resolving the
+          // authenticated mailbox, and lastHistoryId only after users.watch
+          // succeeds. A generic CONNECTED row is therefore not enough for the
+          // guarded SDR loop: without both fields replies and DSNs cannot be
+          // routed or replayed safely.
+          credentials: {
+            path: ["accountEmail"],
+            string_contains: "@",
+          },
+          encryptedCredentials: { not: null },
+          lastHistoryId: { not: null },
+        },
+        select: { credentials: true },
+      }),
+      // Exactly the same conservative capacity-risk rows as the worker:
+      // confirmed SENT, every unresolved SENDING, and today's DELIVERY_UNKNOWN.
+      this.prisma.outreachArtifact.count({
+        where: {
+          orgId: org.id,
+          ...dailySendCapacityWhere(new Date()),
+        },
+      }),
+    ]);
+
+    return {
+      liveSendAllowed: isLiveSendAllowedForOrg(org.id),
+      physicalAddressSet: senderIdentity.physicalAddressSet,
+      senderNameSet: senderIdentity.senderNameSet,
+      countrySet: senderIdentity.countrySet,
+      mailboxConnected:
+        mailbox !== null && isGmailWatchFresh(mailbox.credentials),
+      dailyCapRemaining: Math.max(
+        0,
+        getDailySendCapPerOrg() - capacityUsedToday,
+      ),
+    };
+  }
+
+  /**
+   * Read-only guided-setup truth. Every value is derived from org-owned rows
+   * or the same backend send gates used by the worker; there is no mutable
+   * "onboarding complete" flag for a client to spoof or drift.
+   */
+  async getOnboardingStatus(orgId: string): Promise<OnboardingStatus> {
+    const [org, currentIcpProfile] = await Promise.all([
+      this.prisma.org.findUnique({
+        where: { id: orgId },
+        select: {
+          id: true,
+          name: true,
+          website: true,
+          senderName: true,
+          country: true,
+          physicalAddress: true,
+        },
+      }),
+      this.prisma.icpProfile.findFirst({
+        where: { orgId },
+        orderBy: { updatedAt: "desc" },
+        select: {
+          name: true,
+          targetTitles: true,
+          targetIndustries: true,
+          targetGeos: true,
+          techStackSignals: true,
+          intentKeywords: true,
+          seedDomains: true,
+        },
+      }),
+    ]);
+
+    if (!org) throw new NotFoundException("Org not found");
+
+    const sendReadiness = await this.computeSendReadiness(org);
+    const nameSet = hasText(org.name);
+    const websiteSet = hasText(org.website);
+    const { senderNameSet, physicalAddressSet, countrySet } =
+      senderIdentityReadiness(org);
+    const usableIcp = currentIcpProfile
+      ? isUsableIcpProfile(currentIcpProfile)
+      : false;
+
+    const organizationComplete = nameSet && websiteSet;
+    const senderIdentityComplete =
+      senderNameSet && countrySet && physicalAddressSet;
+    const mailboxConnected = sendReadiness.mailboxConnected;
+    const complete =
+      organizationComplete &&
+      senderIdentityComplete &&
+      usableIcp &&
+      mailboxConnected;
+
+    const currentStep: OnboardingCurrentStep = !organizationComplete
+      ? "organization"
+      : !senderIdentityComplete
+        ? "sender_identity"
+        : !usableIcp
+          ? "icp"
+          : !mailboxConnected
+            ? "mailbox"
+            : "complete";
+
+    return {
+      organization: {
+        nameSet,
+        websiteSet,
+        complete: organizationComplete,
+      },
+      senderIdentity: {
+        senderNameSet,
+        countrySet,
+        physicalAddressSet,
+        complete: senderIdentityComplete,
+      },
+      icp: { usable: usableIcp, complete: usableIcp },
+      mailbox: {
+        connected: mailboxConnected,
+        complete: mailboxConnected,
+      },
+      sendReadiness,
+      currentStep,
+      complete,
+      readyForLiveSend:
+        complete &&
+        sendReadiness.liveSendAllowed &&
+        sendReadiness.dailyCapRemaining !== null &&
+        sendReadiness.dailyCapRemaining > 0,
+    };
+  }
+
+  async update(
+    id: string,
+    data: {
+      name?: string;
+      website?: string;
+      physicalAddress?: string;
+      senderName?: string;
+      country?: string;
+    },
+  ) {
     const website =
       data.website === undefined
         ? undefined
@@ -133,8 +467,18 @@ export class OrgsService {
       where: { id },
       data: {
         ...(data.name && { name: data.name }),
-        ...(data.plan && { plan: data.plan as Plan }),
         ...(website !== undefined && { website }),
+        // Sender identity (CAN-SPAM §7704(a)(5)) — the send worker fail-closes
+        // live email outreach until physicalAddress is set. UpdateOrgDto has
+        // already trimmed + length-checked these; trim again defensively
+        // because this service is also called outside the HTTP pipe.
+        ...(data.physicalAddress !== undefined && {
+          physicalAddress: data.physicalAddress.trim(),
+        }),
+        ...(data.senderName !== undefined && {
+          senderName: data.senderName.trim(),
+        }),
+        ...(data.country !== undefined && { country: data.country.trim() }),
       },
     });
   }
@@ -451,6 +795,30 @@ export class OrgsService {
       runsByDomain,
     };
   }
+}
+
+function hasText(value: string | null): boolean {
+  return (value ?? "").trim().length > 0;
+}
+
+function isUsableIcpProfile(profile: {
+  name: string;
+  targetTitles: string[];
+  targetIndustries: string[];
+  targetGeos: string[];
+  techStackSignals: string[];
+  intentKeywords: string[];
+  seedDomains: string[];
+}): boolean {
+  if (!hasText(profile.name)) return false;
+  return [
+    profile.targetTitles,
+    profile.targetIndustries,
+    profile.targetGeos,
+    profile.techStackSignals,
+    profile.intentKeywords,
+    profile.seedDomains,
+  ].some((values) => values.some((value) => value.trim().length > 0));
 }
 
 function validateOrgWebsiteOrThrow(input: string): string {

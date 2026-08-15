@@ -14,12 +14,16 @@
  */
 import { Logger } from "@nestjs/common";
 import { Annotation, StateGraph, START, END } from "@langchain/langgraph";
+import type { OutreachArtifactStatus } from "@prisma/client";
 import type { PrismaService } from "../../prisma/prisma.service";
 import type { LLMService } from "../../runtime/llm.service";
 import type { OutreachArtifactsService } from "../../outreach/outreach-artifacts.service";
 import type { EvidenceLedgerService } from "../../observability/evidence-ledger.service";
 import type { RunLevelEvaluatorService } from "../../observability/run-level-evaluator.service";
 import { withNodeSpan } from "../../observability/graph-tracing";
+import { isMocked } from "../../runtime/tools/mock-metadata";
+import { isFresh } from "./research/freshness";
+import type { SelectedOutreachRecipient } from "../outreach-recipient";
 
 const log = new Logger("SdrOutreachSubgraph");
 
@@ -28,6 +32,8 @@ const MAX_SUBJECT_LEN = 120;
 const MAX_BODY_LEN = 2000;
 const MIN_BODY_LEN = 30;
 const MAX_RECENT_EVIDENCE_EVENTS = 5;
+const EVIDENCE_EVENT_PAGE_SIZE = 25;
+const MAX_EVIDENCE_EVENTS_SCANNED = 100;
 
 /** Substrings that, if present, mean the LLM left a placeholder unfilled. */
 const PLACEHOLDER_LEAKS = ["{{", "}}", "[FIRST_NAME]", "[COMPANY]", "TODO", "<insert"];
@@ -71,17 +77,20 @@ export interface SdrLeadInput {
   readonly title?: string | null;
   readonly companyName: string;
   readonly companyDomain: string;
+  readonly recipientProvenance?: SelectedOutreachRecipient;
 }
 
 export interface SdrLeadResult {
   readonly personId: string;
   readonly artifactId: string | null;
+  readonly artifactStatus: OutreachArtifactStatus | null;
   readonly subject: string;
   readonly body: string;
   readonly qaIssues: readonly string[];
   readonly draftAttempts: number;
   readonly refusal: DrafterRefusal | null;
   readonly groundednessSelfCheck: GroundednessSelfCheck | null;
+  readonly recipientProvenance?: SelectedOutreachRecipient;
 }
 
 export interface DrafterRefusal {
@@ -109,7 +118,7 @@ export interface DrafterInput {
   readonly brief: ResearchBrief;
   readonly lead: SdrLeadInput;
   readonly previousAttempt?: { subject: string; body: string; issues: readonly string[] };
-  readonly onRunId?: (runId: string) => void;
+  readonly onRunId?: (runId: string) => void | Promise<void>;
   /**
    * Audit P0 #12: GraphRun-level LangSmith root run id, propagated from the
    * outer pipeline graph so the drafter LLM call lands as a child of the
@@ -192,6 +201,10 @@ const SdrStateAnnotation = Annotation.Root({
     reducer: (_p, n) => n,
     default: () => null,
   }),
+  artifactStatus: Annotation<OutreachArtifactStatus | null>({
+    reducer: (_p, n) => n,
+    default: () => null,
+  }),
   // LangSmith run id of the most recent draft_message LLM call. Captured via
   // LLMService.onRunStart and stashed on the artifact so a HITL reject can
   // append the run to a regression dataset. Best-effort: empty if tracing is
@@ -217,6 +230,8 @@ function qaCheck(
   subject: string,
   body: string,
   refusal: DrafterRefusal | null,
+  selfCheck: GroundednessSelfCheck | null,
+  briefFacts: readonly BriefFact[],
 ): string[] {
   // Refusals are not "QA failures" to retry — they're a first-class outcome
   // and route straight to human review with the reason preserved.
@@ -234,8 +249,40 @@ function qaCheck(
       issues.push(`placeholder_leak(${needle})`);
     }
   }
+  // Citation gate (audit B3): a non-refusal draft must declare which brief
+  // facts it used, every cited id must exist in the brief, and the model must
+  // not have flagged its own sentences as unsupported. The prompt's
+  // `groundedness_self_check` field proves nothing on its own — this is where
+  // "every email cites a real, dated trigger or refuses" actually fails a
+  // draft. Citation issues retry like any other QA issue (the refusal
+  // early-return above keeps refusals un-retried), then land on human review
+  // with the issues attached.
+  const cited = selfCheck?.citedFactIds ?? [];
+  if (cited.length === 0) {
+    issues.push("no_cited_facts");
+  } else {
+    const knownIds = new Set(briefFacts.map((f) => f.id));
+    for (const id of cited) {
+      if (!knownIds.has(id)) issues.push(`unknown_fact_id(${id})`);
+    }
+  }
+  const unsupported = selfCheck?.unsupportedClaims ?? [];
+  if (unsupported.length > 0) {
+    issues.push(`unsupported_claims(${unsupported.length})`);
+  }
   return issues;
 }
+
+/**
+ * Refusal envelope emitted by the in-code evidence gate (audit B3). Mirrors
+ * the prompt's <refusal_protocol> shape exactly so a code refusal and a model
+ * refusal are indistinguishable downstream (QA routing, artifact payload,
+ * reviewer UI).
+ */
+const UNGROUNDED_REFUSAL: DrafterRefusal = {
+  reason: "insufficient_grounding",
+  missing: ["signals"],
+};
 
 // XML-scaffolded SDR draft prompt. The grounding rules + refusal protocol +
 // `groundedness_self_check` field together collapse the previous 3-line prompt's
@@ -243,7 +290,7 @@ function qaCheck(
 // "reference a specific signal" because (a) the brief lists explicit fact_ids,
 // (b) refusal is a first-class JSON output, and (c) the model declares which
 // fact_ids it used in the self-check, giving evaluators a deterministic citation.
-const SDR_DRAFT_SYSTEM_PROMPT = `You are Apex SDR, an outbound writer for first-touch B2B cold email.
+const SDR_DRAFT_SYSTEM_PROMPT = `You are an outbound SDR writing on behalf of the sender's organization.
 
 <role>
 Write one short cold email to one named buyer. You are calibrated for
@@ -353,14 +400,14 @@ async function defaultDrafter(
       // generating trace. We record only the latest attempt's runId — that's
       // the draft a human actually reviews.
       onRunStart: input.onRunId
-        ? (runId): void => {
-            input.onRunId?.(runId);
+        ? async (runId): Promise<void> => {
+            await input.onRunId?.(runId);
           }
         : undefined,
     },
   );
 
-  void evidenceLedger.messageDrafted({
+  await evidenceLedger.messageDrafted({
     orgId: input.lead.orgId,
     runId: input.lead.graphRunId ?? null,
     personId: input.lead.personId,
@@ -466,6 +513,23 @@ export function buildSdrOutreachSubgraph(deps: SubgraphDeps) {
         "apex.lead.person_id": state.lead.personId,
       },
       async () => {
+        // Evidence gate (audit B3): refusal on an ungrounded brief is enforced
+        // IN CODE, before any LLM call. Zero dated grounding signals means
+        // there is nothing citable, so drafting must not start — the prompt's
+        // <refusal_protocol> stays as defense-in-depth, but trusting the model
+        // to refuse would make the wedge probabilistic. Same envelope as a
+        // model refusal so routeAfterQa sends it straight to human review.
+        if (!state.researchBrief.hasGroundingSignal) {
+          return {
+            subject: "",
+            body: "",
+            refusal: UNGROUNDED_REFUSAL,
+            groundednessSelfCheck: { citedFactIds: [], unsupportedClaims: [] },
+            draftAttempts: state.draftAttempts + 1,
+            langsmithRunId: null,
+          };
+        }
+
         const previous =
           state.draftAttempts > 0 && state.qaIssues.length > 0
             ? { subject: state.subject, body: state.body, issues: state.qaIssues }
@@ -481,7 +545,7 @@ export function buildSdrOutreachSubgraph(deps: SubgraphDeps) {
             // the drafter's LLM call reattaches as a child instead of a
             // separate top-level run.
             parentRunId: deps.parentRunId,
-            onRunId: (runId): void => {
+            onRunId: async (runId): Promise<void> => {
               capturedRunId = runId;
               // Audit P0 #13: forward the LangSmith root run id to the
               // run-level evaluator so its terminal feedback (composite score,
@@ -490,7 +554,7 @@ export function buildSdrOutreachSubgraph(deps: SubgraphDeps) {
               // run-level-evaluator.service.ts:245 logs "no langsmith root
               // run for graphRun=..." for every terminal GraphRun.
               if (deps.runLevelEvaluator && state.lead.graphRunId) {
-                deps.runLevelEvaluator.recordLangSmithRunId(
+                await deps.runLevelEvaluator.recordLangSmithRunId(
                   state.lead.graphRunId,
                   runId,
                 );
@@ -533,17 +597,23 @@ export function buildSdrOutreachSubgraph(deps: SubgraphDeps) {
       },
       async () => {
         const startedAt = Date.now();
-        const issues = qaCheck(state.subject, state.body, state.refusal);
+        const issues = qaCheck(
+          state.subject,
+          state.body,
+          state.refusal,
+          state.groundednessSelfCheck,
+          state.researchBrief.facts,
+        );
 
         if (issues.length === 0) {
-          void deps.evidenceLedger.qaPass({
+          await deps.evidenceLedger.qaPass({
             orgId: state.lead.orgId,
             runId: state.lead.graphRunId ?? null,
             personId: state.lead.personId,
             durationMs: Date.now() - startedAt,
           });
         } else {
-          void deps.evidenceLedger.qaFail({
+          await deps.evidenceLedger.qaFail({
             orgId: state.lead.orgId,
             runId: state.lead.graphRunId ?? null,
             personId: state.lead.personId,
@@ -574,9 +644,13 @@ export function buildSdrOutreachSubgraph(deps: SubgraphDeps) {
           to: state.lead.email,
           subject: state.subject,
           body: state.body,
+          bodyContentType: "text",
           personId: state.lead.personId,
           qaIssues: state.qaIssues,
           draftAttempts: state.draftAttempts,
+          ...(state.lead.recipientProvenance
+            ? { recipient_provenance: state.lead.recipientProvenance }
+            : {}),
           // Grounding surface: the cited fact_ids and unsupported_claims the model
           // declared, plus the structured brief facts the drafter actually saw.
           // Approvers see these alongside the draft so they can spot-check.
@@ -598,7 +672,10 @@ export function buildSdrOutreachSubgraph(deps: SubgraphDeps) {
           toolArgs,
         });
 
-        return { artifactId: artifact?.id ?? null };
+        return {
+          artifactId: artifact?.id ?? null,
+          artifactStatus: artifact?.status ?? null,
+        };
       },
     );
   };
@@ -645,12 +722,14 @@ export async function runSdrOutreachSubgraph(
   return {
     personId: lead.personId,
     artifactId: final.artifactId,
+    artifactStatus: final.artifactStatus,
     subject: final.subject,
     body: final.body,
     qaIssues: final.qaIssues,
     draftAttempts: final.draftAttempts,
     refusal: final.refusal,
     groundednessSelfCheck: final.groundednessSelfCheck,
+    recipientProvenance: lead.recipientProvenance,
   };
 }
 
@@ -686,7 +765,6 @@ export async function assembleResearchBrief(
       city: true,
       fundingStage: true,
       techStack: true,
-      intentSignals: true,
     },
   });
 
@@ -721,7 +799,10 @@ export async function assembleResearchBrief(
 
   // Person facts (P-series).
   const person = await prisma.person.findFirst({
-    where: { id: lead.personId },
+    // Person is a legacy global-id model with no orgId column. Scope through
+    // its Company relation so a corrupt/replayed lead cannot ground outreach
+    // with another tenant's profile or bio.
+    where: { id: lead.personId, company: { orgId: lead.orgId } },
     select: { title: true, seniority: true, department: true, location: true, bio: true },
   });
   const personBits: string[] = [`${lead.firstName} ${lead.lastName}`];
@@ -743,32 +824,66 @@ export async function assembleResearchBrief(
     });
   }
 
-  // Behavioral signals (S-series) from EvidenceEvent — most recent first.
+  // Behavioral signals (S-series) from EvidenceEvent — most recent first, fresh + non-mock only.
   let signalCount = 0;
   if (company?.id) {
-    const events = await prisma.evidenceEvent.findMany({
-      where: {
-        orgId: lead.orgId,
-        OR: [
-          { refType: "company", refId: company.id },
-          { refType: "person", refId: lead.personId },
-        ],
-        kind: { in: Array.from(SIGNAL_KINDS) },
-      },
-      orderBy: { createdAt: "desc" },
-      take: MAX_RECENT_EVIDENCE_EVENTS,
-      select: { kind: true, payload: true, createdAt: true },
-    });
-    for (const ev of events) {
-      signalCount += 1;
-      const summary = summarizeEvidencePayload(ev.kind, ev.payload);
-      facts.push({
-        id: `S${signalCount}`,
-        category: "signal",
-        source: `evidence_event.${ev.kind}`,
-        text: summary,
-        date: ev.createdAt.toISOString().slice(0, 10),
+    let cursor: string | undefined;
+    let scanned = 0;
+
+    // Freshness is based on payload.date rather than createdAt, and mocked rows
+    // are rejected after retrieval. Scan a bounded window until we collect the
+    // desired number of usable signals so newer stale/mock rows cannot crowd a
+    // genuinely fresh fact out of the brief.
+    while (
+      signalCount < MAX_RECENT_EVIDENCE_EVENTS &&
+      scanned < MAX_EVIDENCE_EVENTS_SCANNED
+    ) {
+      const take = Math.min(
+        EVIDENCE_EVENT_PAGE_SIZE,
+        MAX_EVIDENCE_EVENTS_SCANNED - scanned,
+      );
+      const events = await prisma.evidenceEvent.findMany({
+        where: {
+          orgId: lead.orgId,
+          OR: [
+            { refType: "company", refId: company.id },
+            { refType: "person", refId: lead.personId },
+          ],
+          kind: { in: Array.from(SIGNAL_KINDS) },
+        },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+        take,
+        select: { id: true, kind: true, payload: true, createdAt: true },
       });
+      if (events.length === 0) break;
+
+      scanned += events.length;
+      cursor = events[events.length - 1]?.id;
+
+      for (const ev of events) {
+        const payload = (ev.payload ?? {}) as Record<string, unknown>;
+        if (isMocked(payload)) continue; // mock never becomes a cited fact
+        const effectiveDate =
+          typeof payload.date === "string"
+            ? payload.date
+            : ev.createdAt.toISOString().slice(0, 10);
+        if (!isFresh(ev.kind, effectiveDate)) continue; // stale signals don't ground
+        signalCount += 1;
+        facts.push({
+          id: `S${signalCount}`,
+          category: "signal",
+          source:
+            typeof payload.source === "string"
+              ? payload.source
+              : `evidence_event.${ev.kind}`,
+          text: summarizeEvidencePayload(ev.kind, ev.payload),
+          date: effectiveDate,
+        });
+        if (signalCount >= MAX_RECENT_EVIDENCE_EVENTS) break;
+      }
+
+      if (events.length < take || !cursor) break;
     }
   }
 
@@ -799,7 +914,7 @@ export async function assembleResearchBrief(
     xml,
     facts,
     doNotClaim,
-    hasGroundingSignal: signalCount > 0 || Boolean(company?.intentSignals?.length),
+    hasGroundingSignal: signalCount > 0,
   };
 }
 

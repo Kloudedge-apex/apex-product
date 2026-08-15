@@ -132,7 +132,7 @@ export interface WrapLlmInput {
   /** Extra metadata merged into the run's metadata field. */
   readonly metadata?: Readonly<Record<string, unknown>>;
   /** Optional callback fired after the run is created on the server, with the runId. Used by evaluators to attach feedback. */
-  readonly onRunStart?: (runId: string) => void;
+  readonly onRunStart?: (runId: string) => void | Promise<void>;
 }
 
 export interface FeedbackInput {
@@ -465,7 +465,7 @@ export class LangSmithService implements OnModuleDestroy {
         const runId = (runTree as unknown as { id?: string }).id;
         if (typeof runId === "string" && runId.length > 0) {
           try {
-            input.onRunStart(runId);
+            await input.onRunStart(runId);
           } catch (cbErr) {
             this.logger.warn(
               `onRunStart callback threw for ${runName}: ${
@@ -514,7 +514,7 @@ export class LangSmithService implements OnModuleDestroy {
         );
       }
 
-      this.fireEvaluators({
+      await this.fireEvaluators({
         runTree,
         agent: input.agent,
         node: input.node,
@@ -548,7 +548,7 @@ export class LangSmithService implements OnModuleDestroy {
     }
   }
 
-  private fireEvaluators(args: {
+  private async fireEvaluators(args: {
     readonly runTree: LangSmithRunTree;
     readonly agent?: string;
     readonly node?: string;
@@ -557,13 +557,12 @@ export class LangSmithService implements OnModuleDestroy {
     readonly outputs: unknown;
     readonly metadata: Readonly<Record<string, unknown>>;
     readonly tags: readonly string[];
-  }): void {
+  }): Promise<void> {
     if (!this.evaluatorRunner) return;
     const runId = (args.runTree as unknown as { id?: string }).id;
     if (typeof runId !== "string" || runId.length === 0) return;
-    // Fire-and-forget; evaluators must never block the agent loop.
-    void this.evaluatorRunner
-      .run({
+    try {
+      await this.evaluatorRunner.run({
         runId,
         agent: args.agent,
         node: args.node,
@@ -572,13 +571,11 @@ export class LangSmithService implements OnModuleDestroy {
         outputs: args.outputs,
         metadata: args.metadata,
         tags: args.tags,
-      })
-      .catch((err) => {
-        this.logger.warn(
-          `Evaluator runner threw for runId=${runId}: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
       });
+    } catch {
+      this.logger.warn(
+        `Evaluator runner failed for runId=${runId}`,
+      );
+    }
   }
 }

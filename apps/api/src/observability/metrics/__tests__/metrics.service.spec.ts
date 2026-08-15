@@ -1,5 +1,15 @@
-import { describe, it, expect, beforeEach } from "vitest";
-import { MetricsService, METRIC, registerCanonicalMetrics } from "../metrics.service";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import type { Logger } from "@nestjs/common";
+import {
+  MetricsService,
+  METRIC,
+  registerCanonicalMetrics,
+  publishQueueDepth,
+  queueDepthAlertThreshold,
+  DEFAULT_QUEUE_DEPTH_ALERT_THRESHOLD,
+  QUEUE_DEPTH_HIGH_LOG_MARKER,
+  QueueStats,
+} from "../metrics.service";
 
 describe("MetricsService", () => {
   let svc: MetricsService;
@@ -60,5 +70,69 @@ describe("MetricsService", () => {
     const fresh = new MetricsService();
     fresh.inc("brand_new", { k: "v" });
     expect(fresh.snapshot().counters.brand_new).toEqual({ "k=v": 1 });
+  });
+});
+
+describe("publishQueueDepth (GL9)", () => {
+  let svc: MetricsService;
+
+  const stats = (overrides: Partial<QueueStats> = {}): QueueStats => ({
+    queueName: "graph-runs",
+    waiting: 4,
+    active: 1,
+    delayed: 2,
+    failed: 3,
+    completed: 9,
+    workerCount: 1,
+    ...overrides,
+  });
+
+  beforeEach(() => {
+    svc = new MetricsService();
+    registerCanonicalMetrics(svc);
+  });
+
+  it("sets one bullmq_queue_depth series per state", () => {
+    publishQueueDepth(svc, stats(), { alertThreshold: 100 });
+    expect(svc.snapshot().gauges[METRIC.BULLMQ_QUEUE_DEPTH]).toEqual({
+      "queue=graph-runs,state=waiting": 4,
+      "queue=graph-runs,state=active": 1,
+      "queue=graph-runs,state=delayed": 2,
+      "queue=graph-runs,state=failed": 3,
+      "queue=graph-runs,state=completed": 9,
+    });
+  });
+
+  it("emits the QUEUE_DEPTH_HIGH marker when waiting+active reaches the threshold", () => {
+    const warn = vi.fn();
+    const logger = { warn } as unknown as Logger;
+    publishQueueDepth(svc, stats({ waiting: 20, active: 5 }), {
+      logger,
+      alertThreshold: 25,
+    });
+    expect(warn).toHaveBeenCalledTimes(1);
+    const line = warn.mock.calls[0]?.[0] as string;
+    expect(line).toContain(QUEUE_DEPTH_HIGH_LOG_MARKER);
+    expect(line).toContain("queue=graph-runs");
+  });
+
+  it("stays quiet below the threshold", () => {
+    const warn = vi.fn();
+    const logger = { warn } as unknown as Logger;
+    publishQueueDepth(svc, stats({ waiting: 1, active: 0 }), {
+      logger,
+      alertThreshold: 25,
+    });
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("queueDepthAlertThreshold reads env with a sane default", () => {
+    expect(queueDepthAlertThreshold({})).toBe(DEFAULT_QUEUE_DEPTH_ALERT_THRESHOLD);
+    expect(
+      queueDepthAlertThreshold({ BULLMQ_QUEUE_DEPTH_ALERT_THRESHOLD: "50" }),
+    ).toBe(50);
+    expect(
+      queueDepthAlertThreshold({ BULLMQ_QUEUE_DEPTH_ALERT_THRESHOLD: "junk" }),
+    ).toBe(DEFAULT_QUEUE_DEPTH_ALERT_THRESHOLD);
   });
 });

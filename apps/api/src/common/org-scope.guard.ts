@@ -11,6 +11,11 @@ import { Reflector } from "@nestjs/core";
 import { Request } from "express";
 import { PrismaService } from "../prisma/prisma.service";
 import { verifyClerkToken } from "./jwt.util";
+import { buildTrialOrgSlug } from "./trial-org.util";
+import {
+  assertClerkUserNotDeleted,
+  withProvisionableClerkUser,
+} from "./clerk-user-provisioning";
 
 export const SKIP_ORG_GUARD = "skipOrgGuard";
 
@@ -18,7 +23,8 @@ export const SKIP_ORG_GUARD = "skipOrgGuard";
  * Authoritative org scoping.
  *
  * - Requires `Authorization: Bearer <Clerk JWT>` on every protected route.
- * - Derives `orgId` from the verified `org_id` claim — never from header/query/body.
+ * - Derives Clerk-bound tenants from the verified `org_id` claim — never from
+ *   header/query/body. Personal sessions may resolve only unbound local tenants.
  * - Confirms the org exists in our DB.
  * - Sets `request.orgId`, `request.clerkUserId`, and `request.clerkOrgRole` for handlers.
  *
@@ -41,7 +47,9 @@ export class OrgScopeGuard implements CanActivate {
   ) {
     this.clerkConfigured = !!(
       process.env.CLERK_DOMAIN ||
-      process.env.CLERK_JWKS_URL
+      process.env.CLERK_JWKS_URL ||
+      process.env.CLERK_ISSUER ||
+      process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
     );
     this.allowDevHeader =
       process.env.NODE_ENV !== "production" &&
@@ -49,7 +57,7 @@ export class OrgScopeGuard implements CanActivate {
 
     if (process.env.NODE_ENV === "production" && !this.clerkConfigured) {
       throw new Error(
-        "OrgScopeGuard: CLERK_DOMAIN or CLERK_JWKS_URL must be set in production. " +
+        "OrgScopeGuard: Clerk issuer/JWKS configuration must be set in production. " +
         "Refusing to start — header-based org spoofing would be possible otherwise.",
       );
     }
@@ -66,6 +74,7 @@ export class OrgScopeGuard implements CanActivate {
     const reqAny = request as unknown as Record<string, unknown>;
 
     let orgId: string | undefined;
+    let orgIdentity: "internal" | "clerk" = "internal";
     let clerkUserId: string | undefined;
     let clerkOrgRole: string | undefined;
 
@@ -84,11 +93,31 @@ export class OrgScopeGuard implements CanActivate {
         throw new UnauthorizedException(msg);
       }
 
+      // Defense in depth: tenant resolution must never proceed without a
+      // concrete Clerk principal, even if the verifier is later replaced or
+      // regresses. A signed org_id alone is not an internal membership proof.
+      if (typeof payload.sub !== "string" || payload.sub.trim().length === 0) {
+        throw new UnauthorizedException("JWT subject is required");
+      }
+      if (payload.sub !== payload.sub.trim()) {
+        throw new UnauthorizedException("JWT subject must be canonical");
+      }
+      const hasClerkOrgId =
+        typeof payload.org_id === "string" && payload.org_id.length > 0;
+      const hasClerkOrgRole =
+        typeof payload.org_role === "string" && payload.org_role.length > 0;
+      if (hasClerkOrgId !== hasClerkOrgRole) {
+        throw new UnauthorizedException(
+          "JWT organization claims are inconsistent",
+        );
+      }
       clerkUserId = payload.sub;
       clerkOrgRole = payload.org_role;
+      await assertClerkUserNotDeleted(this.prisma, clerkUserId);
 
-      if (payload.org_id) {
+      if (hasClerkOrgId) {
         orgId = payload.org_id;
+        orgIdentity = "clerk";
       } else {
         // Fallback: no Clerk Organization yet (common during onboarding before
         // Clerk Org sync). Resolve the internal Org via the verified `sub`
@@ -96,9 +125,12 @@ export class OrgScopeGuard implements CanActivate {
         // each user maps to exactly one internal Org via the User table.
         const user = await this.prisma.user.findUnique({
           where: { clerkId: clerkUserId },
-          select: { orgId: true },
+          select: { orgId: true, membershipActive: true },
         });
         if (user) {
+          if (!user.membershipActive) {
+            throw new ForbiddenException("Organization membership is inactive");
+          }
           orgId = user.orgId;
         } else {
           // No internal Org+User row yet. The dashboard bootstrap normally
@@ -125,41 +157,79 @@ export class OrgScopeGuard implements CanActivate {
       throw new UnauthorizedException("Authentication required");
     }
 
-    // Resolve Clerk org slug -> our internal org id when needed.
-    // Clerk's org id (`org_xxx`) is not the same as our cuid; we look up by slug.
-    const org = await this.resolveOrg(orgId);
+    // A Clerk org claim is an immutable external id. It must never be treated
+    // as an internal cuid or mutable slug; local/no-org and dev flows already
+    // hold the internal id directly.
+    const org =
+      orgIdentity === "clerk"
+        ? await this.resolveClerkOrg(orgId)
+        : await this.resolveInternalOrg(orgId);
     if (!org) {
       throw new ForbiddenException("Organization not found");
     }
 
+    // A verified Clerk org_id proves membership in a Clerk organization, but
+    // it does not by itself prove membership in the internal tenant row that
+    // happened to match by id/slug. Bind every protected request back to the
+    // one internal User row for the verified `sub` before exposing orgId.
+    if (this.clerkConfigured) {
+      const membership = await this.prisma.user.findUnique({
+        where: { clerkId: clerkUserId! },
+        select: { orgId: true, membershipActive: true },
+      });
+      if (
+        !membership ||
+        !membership.membershipActive ||
+        membership.orgId !== org.id
+      ) {
+        throw new ForbiddenException("User is not a member of this organization");
+      }
+
+      // A personal-session JWT can legitimately access an unbound local trial
+      // workspace, but it must never inherit access to a tenant that has been
+      // bound to Clerk Organizations. Bound tenants require both claims from
+      // the verified organization session.
+      if (
+        org.clerkOrgId &&
+        (orgIdentity !== "clerk" ||
+          typeof clerkOrgRole !== "string" ||
+          clerkOrgRole.trim().length === 0)
+      ) {
+        throw new ForbiddenException(
+          "Active Clerk organization session required",
+        );
+      }
+    }
+
     reqAny.orgId = org.id;
-    if (clerkUserId) reqAny.clerkUserId = clerkUserId;
+    if (this.clerkConfigured) reqAny.clerkUserId = clerkUserId!;
     if (clerkOrgRole) reqAny.clerkOrgRole = clerkOrgRole;
     return true;
   }
 
-  /**
-   * Look up our internal Org by either internal cuid or Clerk org id/slug.
-   * Clerk org ids (`org_xxx`) get matched against `slug` if not found as `id`.
-   */
-  private async resolveOrg(idOrSlug: string): Promise<{ id: string } | null> {
-    const byId = await this.prisma.org.findUnique({
-      where: { id: idOrSlug },
-      select: { id: true },
-    });
-    if (byId) return byId;
+  private async resolveInternalOrg(
+    id: string,
+  ): Promise<{ id: string; clerkOrgId: string | null } | null> {
     return this.prisma.org.findUnique({
-      where: { slug: idOrSlug },
-      select: { id: true },
+      where: { id },
+      select: { id: true, clerkOrgId: true },
+    });
+  }
+
+  private async resolveClerkOrg(
+    clerkOrgId: string,
+  ): Promise<{ id: string; clerkOrgId: string | null } | null> {
+    return this.prisma.org.findUnique({
+      where: { clerkOrgId },
+      select: { id: true, clerkOrgId: true },
     });
   }
 
   /**
    * Create an internal Org+User on demand from a verified Clerk JWT payload.
    * Used when a signed-in user hits a protected route before the frontend
-   * bootstrap (POST /api/orgs) has completed. Re-entrant: if a parallel
-   * request created the row in the meantime, the unique-clerkId constraint
-   * will surface that and we look up the existing org.
+   * bootstrap (POST /api/orgs) has completed. Re-entrant: both bootstrap paths
+   * share the same per-user transaction lock and recheck the principal.
    */
   private async autoProvisionOrg(payload: {
     sub: string;
@@ -175,49 +245,50 @@ export class OrgScopeGuard implements CanActivate {
         ? payload.email.split("@")[1].split(".")[0]
         : "Workspace";
     const name = baseName.charAt(0).toUpperCase() + baseName.slice(1);
-    const slug =
-      name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") +
-      "-" +
-      Date.now().toString(36);
+    const slug = buildTrialOrgSlug(name, clerkUserId);
 
-    try {
-      const org = await this.prisma.org.create({
-        data: {
-          name,
-          slug,
-          plan: "TRIAL",
-          trialEndsAt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000),
-          users: {
-            create: {
-              email,
-              name: payload.email || name,
-              role: "OWNER",
-              clerkId: clerkUserId,
+    return withProvisionableClerkUser(
+      this.prisma,
+      clerkUserId,
+      async (tx) => {
+        // Recheck under the same user lock used by user.deleted and the
+        // explicit POST /orgs bootstrap path. A concurrent winner can have
+        // created or deactivated this principal after the guard's pre-read.
+        const existingUser = await tx.user.findUnique({
+          where: { clerkId: clerkUserId },
+          select: { orgId: true, membershipActive: true },
+        });
+        if (existingUser?.membershipActive) {
+          return { id: existingUser.orgId };
+        }
+        if (existingUser) {
+          throw new ForbiddenException("Organization membership is inactive");
+        }
+
+        const org = await tx.org.create({
+          data: {
+            name,
+            slug,
+            plan: "TRIAL",
+            trialEndsAt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000),
+            users: {
+              create: {
+                email,
+                name: payload.email || name,
+                role: "OWNER",
+                clerkId: clerkUserId,
+                membershipActive: true,
+              },
             },
           },
-        },
-        select: { id: true },
-      });
-      this.logger.log(
-        `Auto-provisioned org ${org.id} for clerkUser ${clerkUserId}`,
-      );
-      return org;
-    } catch (err) {
-      // Likely a race: another request created the row first. Re-fetch.
-      const user = await this.prisma.user.findUnique({
-        where: { clerkId: clerkUserId },
-        select: { orgId: true },
-      });
-      if (user) return { id: user.orgId };
-      this.logger.error(
-        `Auto-provision failed for clerkUser ${clerkUserId}: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-      throw new ForbiddenException(
-        "Could not provision workspace for this user",
-      );
-    }
+          select: { id: true },
+        });
+        this.logger.log(
+          `Auto-provisioned org ${org.id} for clerkUser ${clerkUserId}`,
+        );
+        return org;
+      },
+    );
   }
 }
 

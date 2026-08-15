@@ -109,8 +109,14 @@ Apex itself is the first dogfood org. The pipeline is wired to run end-to-end (I
 
 ### Safety contract
 
-1. **Worker gated** by `WORKER_ENABLED`. Anywhere the flag is unset, BullMQ workers never start.
-2. **Fail-fast env validation** at boot — missing `DATABASE_URL`, `REDIS_URL`, `CLERK_SECRET_KEY`, `ENCRYPTION_KEY` (64 hex chars in prod), `OPENAI_API_KEY`, or `WORKER_ENABLED` aborts startup.
+1. **Workers are independently fail-closed.** `WORKER_ENABLED`,
+   `GRAPH_RUN_WORKER_ENABLED`, and `OUTREACH_WORKER_ENABLED` must each equal
+   `true` to start their consumer. Legacy cadence scheduling is separately
+   disabled unless `SCHEDULER_ENABLED=true` and remains outside the guarded-SDR
+   release boundary.
+2. **Fail-fast env validation** rejects missing database, Redis, encryption,
+   public-URL, Clerk verification/webhook, LLM, Gmail OAuth, CORS, and admin
+   configuration before a production process can serve traffic.
 3. **`SideEffectPolicy` is fail-closed.** Every tool call resolves to an entry in `TOOL_POLICY_METADATA`. Unknown tools default to `EXTERNAL_WRITE + requiresApproval=true + allowedDryRun=false`. The guard runs at the executor layer, so subagent paths cannot bypass it.
 4. **Outreach is dry-run by default.** `send_email` / `hubspot` without an `ApprovalEnvelope` produces a `PENDING_REVIEW` `OutreachArtifact` instead of sending.
 5. **SDR outreach is a graph subgraph**, not a tool call. It builds a brief, drafts a message, QA-checks it (placeholder leaks, length bounds), redrafts once on failure, and **always** terminates at `recordDryRun`.
@@ -191,25 +197,54 @@ pnpm db:push          # push schema to current DATABASE_URL
 
 ### Backend (Azure Container Apps)
 
-API and worker run from the same image, gated by `WORKER_ENABLED`:
+API and worker run from one immutable image. Their independent worker gates are
+set by deployment role; `SCHEDULER_ENABLED` stays false for the guarded-SDR
+release:
 
-```bash
-# Build & push to ACR
-az acr build -r ledgracrazurecrio \
-  -t apex-gtm/api:<tag> \
-  -f apps/api/Dockerfile .
-
-# Roll API
-az containerapp update -n apex-gtm-api -g Ledgr-prod \
-  --image ledgracrazurecrio.azurecr.io/apex-gtm/api:<tag>
-
-# Roll worker (same image, WORKER_ENABLED=true)
-az containerapp update -n apex-gtm-worker -g Ledgr-prod \
-  --image ledgracrazurecrio.azurecr.io/apex-gtm/api:<tag>
-```
+Run `scripts/deploy-prod.sh --migration-receipt <outside-repo-receipt.json>
+--migration-signature <outside-repo-receipt.json.sig> --migration-allowed-signers
+<outside-repo-allowed-signers> --yes`
+from a published `release/go-live-*` branch only after a protected CI
+OIDC release workflow and environment exist, using `gh`, `jq`, `ssh-keygen`,
+Azure CLI, and Linux/amd64 Docker. No such protected deploy
+workflow/environment exists yet, and private-repository branch-protection API
+configuration is plan-blocked; production rollout is currently NO-GO. A future
+admitted release environment must invoke the controller noninteractively with
+the required `--yes` acknowledgement and set
+`ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED=true` only after the runbook's RBAC
+audit proves that identity is the exclusive production Container Apps writer;
+the default/unset state is NO-GO because the Container Apps update API does not
+publish an ETag/`If-Match` CAS contract.
+It must also expose the exact four
+`WORKFORCE_PRODUCTION_CONTROL_STORAGE_*` environment values for the fixed
+bootstrap state blob and grant the OIDC identity read/acquire/renew/release
+lease authority on that blob. Backend, console, and initial bootstrap all use
+that one Azure lease. The reviewed custom role restricts read/write to the
+exact container and path and grants no blob-delete action. Azure maps acquire,
+renew, release, and break to the same blob-write data action, so RBAC cannot
+deny only break; the protected controllers themselves contain no break command.
+The compiled, unapplied authority source and its fail-closed verifier live in
+`deploy/azure-production-authority-v1/` and
+`scripts/verify-production-authority-package.mjs`.
+The script requires exact-commit green GitHub CI, validates the approver-signed
+production migration receipt against an external trust root whose exact bytes
+are SHA-256-pinned in reviewed source, verifies the
+API/worker role, release-critical non-secret configuration, secret-reference
+wiring, and probe matrix, re-enters itself and all helpers from a private
+exact-commit `git archive`, binds the digest to
+the completed ACR run record, pulls the immutable digest, and runs the image
+contract against that exact registry artifact. The release verifier requires
+`REQUIRE_PRODUCTION_ENV=true` on both apps and rejects both the live-send
+wildcard and its escape flag. Worker and API roll in stages with active-revision
+health checks and automatic rollback to their previously captured digest
+references. Tags, including `latest`, are never deployment identities.
 
 All sensitive env vars are wired via `secretref`:
 `database-url`, `redis-url`, `clerk-secret-key`, `encryption-key` (64 hex chars), `azure-openai-key`, `hubspot-access-token`, `apollo-api-key`, `instantly-api-key`, `serper-api-key`, `admin-api-key`, plus OAuth client secrets.
+Container Apps redact each app's backing secret value, so the verifier compares
+environment-to-`secretRef` names without claiming that two app-local secrets
+with the same name contain the same value. The approved release evidence must
+establish that shared API/worker references use the same source or rotation.
 
 ### Database schema changes
 

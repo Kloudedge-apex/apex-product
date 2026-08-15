@@ -1,4 +1,4 @@
-import { Controller, Get, Logger, Param, Req, Res } from "@nestjs/common";
+import { Controller, Get, Logger, Param, Post, Req, Res } from "@nestjs/common";
 import { OutreachSuppressionReason } from "@prisma/client";
 import type { Request, Response } from "express";
 import { SkipOrgGuard } from "../common/org-scope.guard";
@@ -64,10 +64,62 @@ export class UnsubscribeController {
   }
 
   /**
-   * POST handler matching RFC 8058 List-Unsubscribe-Post=One-Click. Most
-   * mail providers (Gmail bulk-sender, Apple Mail, Yahoo) POST to the same
-   * URL with body `List-Unsubscribe=One-Click`; the handler is identical to
-   * the GET path so we just delegate.
+   * RFC 8058 one-click handler (audit B11). Mailbox providers (Gmail
+   * bulk-sender, Apple Mail, Yahoo) POST `List-Unsubscribe=One-Click` to the
+   * exact URL advertised in the List-Unsubscribe header — no session, no
+   * redirect-following, and only a fast 2xx counts as success. So: verify,
+   * suppress idempotently, return a bare 200 (no body; nothing renders it).
+   *
+   * Invalid/tampered tokens are a 400 — that failure is permanent, and a
+   * 5xx would invite the provider to retry a request that can never
+   * succeed. A suppression write failure stays a 500 so the provider DOES
+   * retry; suppress() is idempotent on (orgId, recipientRef) so replays
+   * are safe.
+   */
+  @Post(":token")
+  async unsubscribeOneClick(
+    @Param("token") token: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ): Promise<void> {
+    const verified = verifyUnsubscribeToken(token);
+    if (!verified) {
+      this.logger.warn(
+        `Rejected one-click unsubscribe with invalid token from ${req.ip ?? "unknown"}`,
+      );
+      res.status(400).send();
+      return;
+    }
+
+    try {
+      await this.suppression.suppress({
+        orgId: verified.orgId,
+        recipientRef: verified.recipientRef,
+        reason: OutreachSuppressionReason.USER_UNSUBSCRIBED,
+        source: "unsubscribe_one_click",
+        metadata: {
+          user_agent: req.headers["user-agent"] ?? null,
+          ip: req.ip ?? null,
+          issued_at: verified.issuedAt.toISOString(),
+        },
+      });
+    } catch (err) {
+      this.logger.error(
+        `One-click suppression write failed for org=${verified.orgId} recipient=${verified.recipientRef}: ${err instanceof Error ? err.message : "unknown"}`,
+      );
+      res.status(500).send();
+      return;
+    }
+
+    res.status(200).send();
+  }
+
+  /**
+   * Legacy GET alias. An earlier (incorrect) reading of RFC 8058 advertised
+   * `/u/:token/post` as the one-click target; providers POST, they never
+   * GET, so this never fired — kept only so any stray stamped URL still
+   * lands a human on the confirmation page. The real machine path is
+   * @Post(":token") above.
    */
   @Get(":token/post")
   async unsubscribePost(
@@ -85,7 +137,7 @@ export class UnsubscribeController {
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>${status} — Nikxius</title>
+  <title>${status} — Workforce OS</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 540px; margin: 5rem auto; padding: 0 1.25rem; color: #222; }

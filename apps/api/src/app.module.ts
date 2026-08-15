@@ -1,5 +1,5 @@
 import { Module } from "@nestjs/common";
-import { APP_GUARD } from "@nestjs/core";
+import { APP_GUARD, APP_INTERCEPTOR } from "@nestjs/core";
 import { ConfigModule } from "@nestjs/config";
 import { PrismaModule } from "./prisma/prisma.module";
 import { HealthModule } from "./health/health.module";
@@ -21,14 +21,18 @@ import { PolicyEventsModule } from "./policy-events/policy-events.module";
 import { ObservabilityModule } from "./observability/observability.module";
 import { KpisModule } from "./kpis/kpis.module";
 import { BetaStubsModule } from "./beta-stubs/beta-stubs.module";
+import { ConversationsModule } from "./conversations/conversations.module";
 import { OrgScopeGuard } from "./common/org-scope.guard";
 import { RateLimitGuard } from "./common/rate-limit.guard";
+import { ProductionBootstrapWriterFenceInterceptor } from "./ops/production-bootstrap-writer-fence.interceptor";
 
 /**
- * Guards run in registration order. `OrgScopeGuard` must run first so that
- * `request.orgId` is populated before `RateLimitGuard` reads it; otherwise
- * the rate limiter would have to key on a client-controlled header, which
- * lets any caller claim another org's quota.
+ * Guards run in registration order. `OrgScopeGuard` establishes tenant
+ * authority before the tenant-aware limiter reads `request.orgId`. The
+ * application intentionally has no pre-auth per-IP limiter: console traffic
+ * arrives through a shared BFF egress, so such a bucket would let one tenant
+ * deny service to every tenant. Volumetric ingress limiting belongs at the
+ * trusted edge; JWKS network amplification is bounded in the verifier.
  */
 @Module({
   imports: [
@@ -50,6 +54,7 @@ import { RateLimitGuard } from "./common/rate-limit.guard";
     KpisModule,
     WorkflowsModule,
     MeetingsModule,
+    ConversationsModule,
     DashboardModule,
     PolicyEventsModule,
     BetaStubsModule,
@@ -57,6 +62,10 @@ import { RateLimitGuard } from "./common/rate-limit.guard";
   providers: [
     { provide: APP_GUARD, useClass: OrgScopeGuard },
     { provide: APP_GUARD, useClass: RateLimitGuard },
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: ProductionBootstrapWriterFenceInterceptor,
+    },
   ],
 })
 export class AppModule {}
