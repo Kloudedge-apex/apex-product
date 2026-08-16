@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "status": "reviewed-source",
+  "subscriptionId": "3171575e-f164-425c-9ee0-2fb10cf93884",
+  "sourceResourceGroup": "Ledgr-prod",
+  "targetResourceGroup": "workforce-os-prod",
+  "targetEnvironment": "workforce-os-prod-env",
+  "registryLoginServer": "workforceosprodacr.azurecr.io",
+  "runtimePullIdentity": "workforce-os-v2-runtime-pull",
+  "backendReleaseIdentity": "workforce-os-v2-backend-release",
+  "consoleReleaseIdentity": "workforce-os-v2-console-release",
+  "backendSourceImage": "workforceosprodacr.azurecr.io/apex-api@sha256:111a470e65a22d27039d0d130d7d0c7aa33e7a23e0d8ce8fe7183c685dbf6f25",
+  "consoleSourceImage": "workforceosprodacr.azurecr.io/workforceos-fe@sha256:c83bd7b774fa9ed7f83ffd2ad621c1c0edc2502e495d3feab43916e5378dd6ff",
+  "publicApiOrigin": "https://api.workforceos.xyz",
+  "publicConsoleOrigin": "https://workforceos.xyz",
+  "secretMigration": {
+    "source": "server-side Microsoft.App/containerApps/listSecrets",
+    "valuesInDeploymentOutput": false,
+    "legacyRegistryPasswordCopied": false,
+    "plainMetricsTokenConvertedToSecretReference": true
+  },
+  "trafficAdmission": {
+    "publicDnsChangedByPackage": false,
+    "customDomainChangedByPackage": false,
+    "productionTrafficEnabledByPackage": false
+  }
+}
