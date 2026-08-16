@@ -190,6 +190,7 @@ output isolation object = {
   registry: isolatedResources.outputs.registry
   controlStorage: isolatedResources.outputs.controlStorage
   containerAppsEnvironment: isolatedResources.outputs.containerAppsEnvironment
+  runtimeImagePull: isolatedResources.outputs.runtimeImagePull
   authority: isolatedResources.outputs.authority
   roleDefinitions: {
     acrBuildRunner: acrBuildRunnerRole.id

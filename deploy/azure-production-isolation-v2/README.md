@@ -12,7 +12,9 @@ The subscription-scoped template creates:
   local-user access disabled;
 - private `production-control` blob container;
 - a dedicated Log Analytics workspace and Container Apps environment;
-- four new user-assigned identities with exact GitHub Environment OIDC subjects;
+- four user-assigned identities with exact GitHub Environment OIDC subjects;
+- one non-federated runtime identity with read-only `AcrPull` on the isolated
+  registry;
 - narrow ACR build/pull, exact-path control-blob, and read-only audit roles.
 
 The template intentionally creates no application, database, cache, DNS, or
@@ -29,6 +31,7 @@ update must use:
 - `denyWriteAndDelete`;
 - child-scope application;
 - only the four emitted workload principal IDs as excluded principals;
+- the read-only runtime pull identity is not excluded from the deny boundary;
 - `detachAll` on unmanage;
 - no human principal exclusion.
 

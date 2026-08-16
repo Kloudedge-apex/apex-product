@@ -75,6 +75,18 @@ rejected("a wrong console OIDC repository is rejected", "main.bicep", (source) =
     "param consoleRepository string = 'wrong-console'",
   ));
 
+rejected("a missing runtime AcrPull assignment is rejected", "resources.bicep", (source) =>
+  source.replace(
+    "resource runtimeImagePullAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {",
+    "resource runtimeImagePullAcrPullDisabled 'Microsoft.Authorization/locks@2020-05-01' = {",
+  ));
+
+rejected("GitHub federation on the runtime pull identity is rejected", "resources.bicep", (source) =>
+  source.replace(
+    "parent: backendBuildIdentity\n  name: 'github-environment'",
+    "parent: runtimeImagePullIdentity\n  name: 'github-environment'",
+  ));
+
 rejected("a human deny exclusion is rejected", "authority-contract.json", (source) =>
   source.replace(
     '"humanPrincipalExcludedAfterBootstrap": false',

@@ -61,7 +61,7 @@ const resourceSource = read(resolve(PACKAGE, "resources.bicep"), "resource Bicep
 const readme = read(resolve(PACKAGE, "README.md"), "package README");
 
 const expectedContract = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   status: "reviewed-source",
   subscriptionId: "3171575e-f164-425c-9ee0-2fb10cf93884",
   resourceGroup: "workforce-os-prod",
@@ -96,6 +96,12 @@ const expectedContract = {
     storageBlobPublicAccessEnabled: false,
     storageSftpEnabled: false,
     storageLocalUsersEnabled: false,
+  },
+  runtimeImagePull: {
+    identityName: "workforce-os-v2-runtime-pull",
+    acrRole: "AcrPull",
+    githubFederationEnabled: false,
+    deploymentStackExcludedPrincipal: false,
   },
   deploymentStack: {
     name: "workforce-os-production-isolation-v2",
@@ -248,12 +254,12 @@ exactCount("Microsoft.Storage/storageAccounts", 1);
 exactCount("Microsoft.Storage/storageAccounts/blobServices/containers", 1);
 exactCount("Microsoft.OperationalInsights/workspaces", 1);
 exactCount("Microsoft.App/managedEnvironments", 1);
-exactCount("Microsoft.ManagedIdentity/userAssignedIdentities", 4);
+exactCount("Microsoft.ManagedIdentity/userAssignedIdentities", 5);
 exactCount(
   "Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials",
   4,
 );
-exactCount("Microsoft.Authorization/roleAssignments", 10);
+exactCount("Microsoft.Authorization/roleAssignments", 11);
 if (resources.some((item) => [
   "Microsoft.App/containerApps",
   "Microsoft.Cache/Redis",
@@ -294,6 +300,26 @@ if (container.properties?.publicAccess !== "None") {
 const federations = byType(
   "Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials",
 );
+const runtimeIdentity = byType("Microsoft.ManagedIdentity/userAssignedIdentities")
+  .find((item) => item.name === "[format('{0}-runtime-pull', parameters('identityNamePrefix'))]");
+if (!runtimeIdentity || runtimeIdentity.tags?.authority !== "runtime-image-pull") {
+  fail("non-federated runtime image-pull identity is absent");
+}
+if (federations.some((item) => item.name?.includes("format('{0}-runtime-pull'"))) {
+  fail("runtime image-pull identity may not trust GitHub OIDC");
+}
+if (!mainSource.includes("'7f951dda-4ed3-4680-a7ca-43fe172d538d'")) {
+  fail("built-in AcrPull role ID is not source-pinned");
+}
+const acrPullRoleId = "[parameters('acrPullRoleDefinitionId')]";
+const runtimePrincipalId = "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-runtime-pull', parameters('identityNamePrefix'))), '2023-01-31').principalId]";
+const runtimePullAssignments = byType("Microsoft.Authorization/roleAssignments")
+  .filter((item) => item.properties?.principalId === runtimePrincipalId);
+if (runtimePullAssignments.length !== 1 ||
+  runtimePullAssignments[0].scope !== "[resourceId('Microsoft.ContainerRegistry/registries', parameters('registryName'))]" ||
+  runtimePullAssignments[0].properties?.roleDefinitionId !== acrPullRoleId) {
+  fail("runtime identity authority is not exactly isolated-registry AcrPull");
+}
 if (federations.some((item) =>
   item.properties?.issuer !== "[variables('issuer')]" ||
   JSON.stringify(item.properties?.audiences) !==
@@ -328,6 +354,7 @@ if (resourceSource.includes("containers/blobs/delete") ||
 }
 if (!readme.includes("`denyWriteAndDelete`") ||
   !readme.includes("no human principal exclusion") ||
+  !readme.includes("runtime pull identity is not excluded") ||
   !readme.includes("`detachAll` on unmanage")) {
   fail("deployment-stack deny boundary is not documented exactly");
 }

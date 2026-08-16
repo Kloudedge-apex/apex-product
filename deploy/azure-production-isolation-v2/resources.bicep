@@ -179,6 +179,15 @@ resource consoleReleaseIdentity 'Microsoft.ManagedIdentity/userAssignedIdentitie
   }
 }
 
+resource runtimeImagePullIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+  name: format('{0}-runtime-pull', identityNamePrefix)
+  location: location
+  tags: {
+    application: 'workforce-os'
+    authority: 'runtime-image-pull'
+  }
+}
+
 resource backendBuildFederation 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2023-01-31' = {
   parent: backendBuildIdentity
   name: 'github-environment'
@@ -299,6 +308,16 @@ resource consoleReleaseAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-
   }
 }
 
+resource runtimeImagePullAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(registry.id, runtimeImagePullIdentity.name, acrPullRoleDefinitionId)
+  scope: registry
+  properties: {
+    principalId: runtimeImagePullIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: acrPullRoleDefinitionId
+  }
+}
+
 resource backendControlBlob 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(controlStorage.id, backendReleaseIdentity.name, controlBlobOperatorRoleDefinitionId, controlBlobName, authorityDrainCheckpointBlobName)
   scope: controlStorage
@@ -340,6 +359,12 @@ output controlStorage object = {
 output containerAppsEnvironment object = {
   name: containerAppsEnvironment.name
   resourceId: containerAppsEnvironment.id
+}
+
+output runtimeImagePull object = {
+  clientId: runtimeImagePullIdentity.properties.clientId
+  principalId: runtimeImagePullIdentity.properties.principalId
+  resourceId: runtimeImagePullIdentity.id
 }
 
 output authority object = {
