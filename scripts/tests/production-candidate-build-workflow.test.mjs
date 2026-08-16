@@ -80,6 +80,12 @@ rejected("registry deletion is rejected", (source) =>
 rejected("an unreviewed registry is rejected", (source) =>
   source.replaceAll("workforceosprodacr", "otherregistry"));
 
+rejected("an empty-registry admission bypass is rejected", (source) =>
+  source.replace(
+    'if [[ "${repository_exists}" == "0" ]]; then',
+    'if [[ "${repository_exists}" != "0" ]]; then',
+  ));
+
 rejected("a pre-existing commit tag may not be overwritten", (source) =>
   source.replace(
     '          if [[ "${existing}" != "0" ]]; then',
