@@ -32,10 +32,21 @@ for (const literal of [
   "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
   "persist-credentials: false",
   "node scripts/verify-production-isolation-package.mjs",
+  "node scripts/verify-production-runtime-package.mjs",
   "azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5",
   "client-id: 2efd64b0-87c1-43a7-a064-30679ce8b764",
   "tenant-id: d4b3813d-146f-4d03-96b8-d6e5862d58a2",
   "subscription-id: 3171575e-f164-425c-9ee0-2fb10cf93884",
+  "az stack group create",
+  "--resource-group workforce-os-prod",
+  "--name workforce-os-production-runtime-v1",
+  "--template-file deploy/azure-production-runtime-v1/main.bicep",
+  "--deny-settings-mode denyWriteAndDelete",
+  "--deny-settings-apply-to-child-scopes",
+  "abc0d6b0-35ae-4d33-bcea-237fdca83a94 0bc83fa6-91a2-4d94-9dff-f55c104cb425 509039c1-8cfd-4df4-9bb0-cc659b5a7e22 b1d6b4c9-4596-4fa4-9ad8-6cc8e17ff89a",
+  "--action-on-unmanage detachAll",
+  ".deny.mode == \"denyWriteAndDelete\"",
+  ".deny.applyToChildScopes == true",
   "deploy/azure-production-isolation-v2/initialize-authority-drain-checkpoint.sh",
   "--confirmation 'CREATE WORKFORCE OS AUTHORITY DRAIN CHECKPOINT'",
   "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
@@ -49,6 +60,7 @@ for (const [pattern, label] of [
   [/client-secret|AZURE_CREDENTIALS|account-key|connection-string/iu, "credential channel"],
   [/containerapp\s+secret\s+list|storage\s+account\s+keys\s+list/iu, "secret read"],
   [/storage\s+blob\s+(delete|metadata\s+update)|lease\s+break/iu, "destructive reset"],
+  [/stack\s+group\s+(delete|create[\s\S]*--action-on-unmanage\s+delete)/iu, "destructive runtime stack authority"],
   [/RESET WORKFORCE OS AUTHORITY DRAIN CHECKPOINT/u, "checkpoint reset"],
 ]) {
   if (pattern.test(source)) fail(`${label} is present`);
@@ -56,6 +68,7 @@ for (const [pattern, label] of [
 
 const counts = (needle) => source.split(needle).length - 1;
 if (counts("azure/login@") !== 1 ||
+  counts("az stack group create") !== 1 ||
   counts("initialize-authority-drain-checkpoint.sh") !== 1 ||
   counts("environment: workforce-os-production") !== 1) {
   fail("workflow contains duplicate authority or mutation steps");
