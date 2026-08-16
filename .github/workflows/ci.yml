@@ -59,6 +59,7 @@ jobs:
         run: |
           node --test scripts/tests/production-authority-package.test.mjs
           node --test scripts/tests/production-isolation-package.test.mjs
+          node --test scripts/tests/production-runtime-package.test.mjs
           node --test scripts/tests/production-azure-mutation-authority-audit.test.mjs
           node --test scripts/tests/production-github-governance-audit.test.mjs
 
