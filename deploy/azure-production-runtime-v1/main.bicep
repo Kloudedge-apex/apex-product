@@ -330,7 +330,7 @@ resource console 'Microsoft.App/containerApps@2024-03-01' = {
       ]
     }
     template: {
-      revisionSuffix: 'bootstrap-source-50f3a1c'
+      revisionSuffix: 'bootstrap-source-50f3a1c-pin'
       containers: [
         {
           name: consoleName
