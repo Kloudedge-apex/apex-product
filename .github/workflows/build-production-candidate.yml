@@ -163,12 +163,24 @@ jobs:
             echo "ERROR: protected build admission is absent" >&2
             exit 1
           fi
-          existing="$(az acr repository show-tags \
+          repository_exists="$(az acr repository list \
             --name workforceosprodacr \
-            --repository apex-api \
-            --query "length([?@=='${SOURCE_SHA}'])" \
+            --query "length([?@=='apex-api'])" \
             --output tsv \
             --only-show-errors)"
+          if [[ "${repository_exists}" == "0" ]]; then
+            existing="0"
+          elif [[ "${repository_exists}" == "1" ]]; then
+            existing="$(az acr repository show-tags \
+              --name workforceosprodacr \
+              --repository apex-api \
+              --query "length([?@=='${SOURCE_SHA}'])" \
+              --output tsv \
+              --only-show-errors)"
+          else
+            echo "ERROR: ACR repository inventory is invalid" >&2
+            exit 1
+          fi
           if [[ "${existing}" != "0" ]]; then
             echo "ERROR: immutable source tag already exists; refusing to overwrite it" >&2
             exit 1
