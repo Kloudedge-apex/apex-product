@@ -106,9 +106,9 @@ jobs:
             >"${receipt}"
           jq -e '
             .kind == "workforce-os-production-authority-drain-checkpoint-receipt-v1"
-            and .mode == "create"
+            and (.mode == "create" or .mode == "existing")
             and (.structuralEvidenceHash | test("^sha256:[0-9a-f]{64}$"))
-            and (.lastModified | fromdateiso8601 | type == "number")
+            and (.lastModified | sub("\\+00:00$"; "Z") | fromdateiso8601 | type == "number")
           ' >/dev/null "${receipt}"
           printf 'receipt=%s\n' "${receipt}" >>"${GITHUB_OUTPUT}"
 

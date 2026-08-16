@@ -85,6 +85,12 @@ rejected("a writable checkout token is rejected", (source) =>
 rejected("an unprotected ref is rejected", (source) =>
   source.replace('"${REF_PROTECTED}" != "true"', '"${REF_PROTECTED}" != "false"'));
 
+rejected("an existing checkpoint receipt must remain admissible", (source) =>
+  source.replace('(.mode == "create" or .mode == "existing")', '.mode == "create"'));
+
+rejected("Azure UTC offsets must be normalized before receipt validation", (source) =>
+  source.replace('sub("\\\\+00:00$"; "Z") | ', ""));
+
 rejectedSeal("runtime authority without final deny is rejected", (source) =>
   source.replace("--deny-settings-mode denyWriteAndDelete", "--deny-settings-mode none"));
 
