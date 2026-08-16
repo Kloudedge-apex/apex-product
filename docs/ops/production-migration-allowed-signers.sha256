@@ -1,4 +1,4 @@
 # SHA-256 of the exact independently controlled OpenSSH allowed-signers file.
-# Replace UNCONFIGURED only in a reviewed source change after the approver keys
-# and principal mappings have been provisioned outside this repository.
-UNCONFIGURED
+# Principal: workforce-production-approver
+# Public-key fingerprint: SHA256:72kxmyCw6++foGnVgJl5YlxifAr20LXlQsEQjZWK1NM
+c42107ca9aaf48a519c10bfeb5330b5248900eae848cee0cc205a82c9286d24b
