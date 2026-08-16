@@ -10,13 +10,13 @@ set -euo pipefail
 
 EXPECTED_API_IMAGE="${1:-}"
 EXPECTED_WORKER_IMAGE="${2:-}"
-RESOURCE_GROUP="Ledgr-prod"
+RESOURCE_GROUP="workforce-os-prod"
 API_APP="apex-gtm-api"
 WORKER_APP="apex-gtm-worker"
 
 if [[ -n "${EXPECTED_API_IMAGE}" || -n "${EXPECTED_WORKER_IMAGE}" ]]; then
-  if [[ ! "${EXPECTED_API_IMAGE}" =~ ^ledgracr\.azurecr\.io/apex-api@sha256:[0-9a-f]{64}$ ]] ||
-    [[ ! "${EXPECTED_WORKER_IMAGE}" =~ ^ledgracr\.azurecr\.io/apex-api@sha256:[0-9a-f]{64}$ ]]; then
+  if [[ ! "${EXPECTED_API_IMAGE}" =~ ^workforceosprodacr\.azurecr\.io/apex-api@sha256:[0-9a-f]{64}$ ]] ||
+    [[ ! "${EXPECTED_WORKER_IMAGE}" =~ ^workforceosprodacr\.azurecr\.io/apex-api@sha256:[0-9a-f]{64}$ ]]; then
     echo "Usage: $0 [<expected-api-digest-ref> <expected-worker-digest-ref>]" >&2
     exit 2
   fi

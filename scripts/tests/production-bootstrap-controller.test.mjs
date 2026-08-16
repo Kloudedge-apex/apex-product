@@ -49,7 +49,7 @@ const RG = PRODUCTION_AZURE_AUTHORITY_CONTRACT.resourceGroupId;
 function backendArtifact(role, digest = DIGEST_A) {
   const app = role === "api" ? "apex-gtm-api" : "apex-gtm-worker";
   return {
-    image: `ledgracr.azurecr.io/apex-api@${digest}`,
+    image: `workforceosprodacr.azurecr.io/apex-api@${digest}`,
     manifestDigest: digest,
     platformDigest: DIGEST_B,
     ociRevision: SHA_A,
@@ -79,14 +79,14 @@ function validRequest() {
     },
     authority: {
       subscriptionId: SUBSCRIPTION,
-      resourceGroupName: "Ledgr-prod",
+      resourceGroupName: "workforce-os-prod",
       resourceGroupResourceId: RG,
       apiContainerAppResourceId: `${RG}/providers/Microsoft.App/containerApps/apex-gtm-api`,
       workerContainerAppResourceId: `${RG}/providers/Microsoft.App/containerApps/apex-gtm-worker`,
       consoleContainerAppResourceId: `${RG}/providers/Microsoft.App/containerApps/nikxius-web`,
     },
     storage: {
-      accountName: "ledgrstorage",
+      accountName: "workforceosprodctrl",
       containerName: "production-control",
       blobName: "workforce-os/initial-production-bootstrap/state-v1.json",
       resourceId: PRODUCTION_AZURE_AUTHORITY_CONTRACT.targets.stateStorage.storageAccountResourceId,
@@ -95,7 +95,7 @@ function validRequest() {
       api: backendArtifact("api", DIGEST_A),
       worker: backendArtifact("worker", DIGEST_A),
       console: {
-        image: `ledgracr.azurecr.io/workforceos-fe@${DIGEST_C}`,
+        image: `workforceosprodacr.azurecr.io/workforceos-fe@${DIGEST_C}`,
         manifestDigest: DIGEST_C,
         platformDigest: DIGEST_B,
         ociRevision: SHA_B,
@@ -149,7 +149,7 @@ test("request validator accepts only the exact reviewed request shape", () => {
 
 test("request validator rejects mutable or wrong-repository artifacts", () => {
   assert.throws(
-    () => validateRequest(mutate(["targetArtifacts", "api", "image"], "ledgracr.azurecr.io/apex-api:latest")),
+    () => validateRequest(mutate(["targetArtifacts", "api", "image"], "workforceosprodacr.azurecr.io/apex-api:latest")),
     /image is invalid/,
   );
   assert.throws(

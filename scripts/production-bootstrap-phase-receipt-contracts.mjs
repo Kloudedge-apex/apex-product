@@ -31,8 +31,8 @@ const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const ATTEMPT_PATTERN = /^[0-9a-f]{32}$/;
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 const PRINCIPAL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}$/;
-const API_IMAGE_PATTERN = /^ledgracr\.azurecr\.io\/apex-api@sha256:[0-9a-f]{64}$/;
-const CONSOLE_IMAGE_PATTERN = /^ledgracr\.azurecr\.io\/workforceos-fe@sha256:[0-9a-f]{64}$/;
+const API_IMAGE_PATTERN = /^workforceosprodacr\.azurecr\.io\/apex-api@sha256:[0-9a-f]{64}$/;
+const CONSOLE_IMAGE_PATTERN = /^workforceosprodacr\.azurecr\.io\/workforceos-fe@sha256:[0-9a-f]{64}$/;
 const API_REVISION_PATTERN = /^apex-gtm-api--[a-z0-9][a-z0-9-]{0,62}$/;
 const WORKER_REVISION_PATTERN = /^apex-gtm-worker--[a-z0-9][a-z0-9-]{0,62}$/;
 const CONSOLE_REVISION_PATTERN = /^nikxius-web--[a-z0-9][a-z0-9-]{0,62}$/;
@@ -600,7 +600,7 @@ function validateDeploymentIdentity(identity, role, candidate, label) {
   for (const key of ["configHash", "templateHash", "secretReferencesHash"]) {
     assertHash(identity[key], `${label}.${key}`);
   }
-  const repository = role === "console" ? "ledgracr.azurecr.io/workforceos-fe" : "ledgracr.azurecr.io/apex-api";
+  const repository = role === "console" ? "workforceosprodacr.azurecr.io/workforceos-fe" : "workforceosprodacr.azurecr.io/apex-api";
   const expectedImage = role === "console" ? candidate.consoleImage
     : role === "api" ? candidate.apiImage : candidate.workerImage;
   const expectedCommit = role === "console" ? candidate.consoleCommit : candidate.backendCommit;

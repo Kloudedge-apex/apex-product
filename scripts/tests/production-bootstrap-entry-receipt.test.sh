@@ -111,7 +111,7 @@ ALTERNATE_BACKEND_COMMIT="$(git -C "${FIXTURE_REPO}" rev-parse HEAD)"
 CONSOLE_COMMIT="$(repeat_char c 40)"
 ATTEMPT_ID="$(repeat_char a 32)"
 SUBSCRIPTION_ID="12345678-1234-4234-8234-123456789abc"
-RESOURCE_GROUP="Ledgr-prod"
+RESOURCE_GROUP="workforce-os-prod"
 RESOURCE_GROUP_ID="/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}"
 API_RESOURCE_ID="${RESOURCE_GROUP_ID}/providers/Microsoft.App/containerApps/apex-gtm-api"
 WORKER_RESOURCE_ID="${RESOURCE_GROUP_ID}/providers/Microsoft.App/containerApps/apex-gtm-worker"
@@ -185,7 +185,7 @@ jq -n \
   --arg hd "${HASH_D}" --arg he "${HASH_E}" \
   --arg hf "${HASH_F}" '
     def backend_target($revision): {
-      image: ("ledgracr.azurecr.io/apex-api@" + $h1),
+      image: ("workforceosprodacr.azurecr.io/apex-api@" + $h1),
       manifestDigest: $h1,
       platformDigest: $h2,
       ociRevision: $backend_commit,
@@ -259,7 +259,7 @@ jq -n \
         api: backend_target("apex-gtm-api--candidate-a"),
         worker: backend_target("apex-gtm-worker--candidate-a"),
         console: {
-          image: ("ledgracr.azurecr.io/workforceos-fe@" + $h3),
+          image: ("workforceosprodacr.azurecr.io/workforceos-fe@" + $h3),
           manifestDigest: $h3,
           platformDigest: $h4,
           ociRevision: $console_commit,
@@ -367,15 +367,15 @@ jq -n \
         },
         privateRestoreBundleHash: $hf,
         api: source_app(
-          ("ledgracr.azurecr.io/apex-api@" + $h5); $h5; $h6;
+          ("workforceosprodacr.azurecr.io/apex-api@" + $h5); $h5; $h6;
           $legacy_backend_commit; "apex-gtm-api--legacy-a"; $h9; $ha; $hb
         ),
         worker: source_app(
-          ("ledgracr.azurecr.io/apex-api@" + $h5); $h5; $h6;
+          ("workforceosprodacr.azurecr.io/apex-api@" + $h5); $h5; $h6;
           $legacy_backend_commit; "apex-gtm-worker--legacy-a"; $hc; $hd; $he
         ),
         console: source_app(
-          ("ledgracr.azurecr.io/workforceos-fe@" + $h7); $h7; $h8;
+          ("workforceosprodacr.azurecr.io/workforceos-fe@" + $h7); $h7; $h8;
           $legacy_console_commit; "nikxius-web--legacy-a"; $h9; $ha; $hb
         )
       },
@@ -830,7 +830,7 @@ UNSAFE_BOUND_FILTERS=(
   '.sourceRollbackBaseline.operationalSmokeEvidence.dashboardPolicy.reviewer = "other-approver"'
   '.sourceRollbackBaseline.operationalSmokeEvidence.dashboardPolicy.scope = "other-scope"'
   '.sourceRollbackBaseline.operationalSmokeEvidence.dashboardPolicy.passed = false'
-  '.sourceRollbackBaseline.api.image = "ledgracr.azurecr.io/apex-api:mutable"'
+  '.sourceRollbackBaseline.api.image = "workforceosprodacr.azurecr.io/apex-api:mutable"'
   '.sourceRollbackBaseline.api.manifestDigest = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"'
   '.sourceRollbackBaseline.api.ociRevision = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"'
   '.sourceRollbackBaseline.api.configHash = "invalid"'
@@ -839,7 +839,7 @@ UNSAFE_BOUND_FILTERS=(
   '.sourceRollbackBaseline.api.activeRevisionsMode = "Multiple"'
   '.sourceRollbackBaseline.api.maxInactiveRevisions = 0'
   '.sourceRollbackBaseline.api.healthy = false'
-  '.sourceRollbackBaseline.worker.image = "ledgracr.azurecr.io/apex-api@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"'
+  '.sourceRollbackBaseline.worker.image = "workforceosprodacr.azurecr.io/apex-api@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"'
   '.sourceRollbackBaseline.console.platform = "linux/arm64"'
   '.quiescedState.api.stopped = false'
   '.quiescedState.api.activeRevisionCount = 1'

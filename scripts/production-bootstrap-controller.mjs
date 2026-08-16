@@ -74,8 +74,8 @@ const RELEASE_LOCK_REF = "refs/heads/workforce-os-release-lock/production-gtm-pl
 const API_APP = "apex-gtm-api";
 const WORKER_APP = "apex-gtm-worker";
 const CONSOLE_APP = "nikxius-web";
-const RESOURCE_GROUP = "Ledgr-prod";
-const REGISTRY = "ledgracr";
+const RESOURCE_GROUP = "workforce-os-prod";
+const REGISTRY = "workforceosprodacr";
 const CLERK_EXECUTOR_PATH = "scripts/production-clerk-reconciliation-executor.mjs";
 const POST_CLERK_CATALOG_VERIFIER_PATH =
   "scripts/verify-production-post-clerk-migration-catalog.mjs";
@@ -349,8 +349,8 @@ function validateArtifact(artifact, role, expectedCommit) {
     `targetArtifacts.${role}`,
   );
   const imagePattern = role === "console"
-    ? /^ledgracr\.azurecr\.io\/workforceos-fe@sha256:[0-9a-f]{64}$/
-    : /^ledgracr\.azurecr\.io\/apex-api@sha256:[0-9a-f]{64}$/;
+    ? /^workforceosprodacr\.azurecr\.io\/workforceos-fe@sha256:[0-9a-f]{64}$/
+    : /^workforceosprodacr\.azurecr\.io\/apex-api@sha256:[0-9a-f]{64}$/;
   string(artifact.image, imagePattern, `targetArtifacts.${role}.image`);
   for (const key of ["manifestDigest", "platformDigest", "buildEvidenceHash", "rehearsalEvidenceHash"]) {
     string(artifact[key], /^sha256:[0-9a-f]{64}$/, `targetArtifacts.${role}.${key}`);
@@ -425,7 +425,7 @@ export function validateRequest(value) {
   if (!value.storage.resourceId.toLowerCase().startsWith(`/subscriptions/${value.authority.subscriptionId.toLowerCase()}/resourcegroups/`)) {
     fail("request storage account is outside the admitted subscription");
   }
-  if (value.storage.accountName !== "ledgrstorage" ||
+  if (value.storage.accountName !== "workforceosprodctrl" ||
     value.storage.containerName !== PRODUCTION_AUTHORITY_DRAIN_CONTRACT.containerName ||
     value.storage.resourceId.toLowerCase() !==
       PRODUCTION_AZURE_AUTHORITY_CONTRACT.targets.stateStorage.storageAccountResourceId.toLowerCase()) {

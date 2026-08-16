@@ -28,22 +28,22 @@ const write = (name, bytes) => writeFileSync(resolve(outputDirectory, name), byt
 const attemptId = "a".repeat(32);
 const authority = {
   subscriptionId: "12345678-1234-4234-8234-123456789abc",
-  resourceGroupName: "Ledgr-prod",
+  resourceGroupName: "workforce-os-prod",
   resourceGroupResourceId:
-    "/subscriptions/12345678-1234-4234-8234-123456789abc/resourceGroups/Ledgr-prod",
+    "/subscriptions/12345678-1234-4234-8234-123456789abc/resourceGroups/workforce-os-prod",
   apiContainerAppResourceId:
-    "/subscriptions/12345678-1234-4234-8234-123456789abc/resourceGroups/Ledgr-prod/providers/Microsoft.App/containerApps/apex-gtm-api",
+    "/subscriptions/12345678-1234-4234-8234-123456789abc/resourceGroups/workforce-os-prod/providers/Microsoft.App/containerApps/apex-gtm-api",
   workerContainerAppResourceId:
-    "/subscriptions/12345678-1234-4234-8234-123456789abc/resourceGroups/Ledgr-prod/providers/Microsoft.App/containerApps/apex-gtm-worker",
+    "/subscriptions/12345678-1234-4234-8234-123456789abc/resourceGroups/workforce-os-prod/providers/Microsoft.App/containerApps/apex-gtm-worker",
   consoleContainerAppResourceId:
-    "/subscriptions/12345678-1234-4234-8234-123456789abc/resourceGroups/Ledgr-prod/providers/Microsoft.App/containerApps/nikxius-web",
+    "/subscriptions/12345678-1234-4234-8234-123456789abc/resourceGroups/workforce-os-prod/providers/Microsoft.App/containerApps/nikxius-web",
 };
 const candidate = {
   backendCommit,
   consoleCommit,
-  apiImage: `ledgracr.azurecr.io/apex-api@${hash("1")}`,
-  workerImage: `ledgracr.azurecr.io/apex-api@${hash("1")}`,
-  consoleImage: `ledgracr.azurecr.io/workforceos-fe@${hash("3")}`,
+  apiImage: `workforceosprodacr.azurecr.io/apex-api@${hash("1")}`,
+  workerImage: `workforceosprodacr.azurecr.io/apex-api@${hash("1")}`,
+  consoleImage: `workforceosprodacr.azurecr.io/workforceos-fe@${hash("3")}`,
 };
 const identity = {
   attemptId,

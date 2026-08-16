@@ -8,11 +8,11 @@
 # resolves that tag to a content digest, pulls and verifies that exact registry
 # artifact, then rolls BOTH Container Apps to the same immutable digest.
 #
-#   registry  ledgracr            ACR repo  apex-api
-#   RG        Ledgr-prod          apps      apex-gtm-api, apex-gtm-worker
+#   registry  workforceosprodacr            ACR repo  apex-api
+#   RG        workforce-os-prod          apps      apex-gtm-api, apex-gtm-worker
 #
-# Requires an `az` CLI session with AcrPush on ledgracr and Contributor on
-# Ledgr-prod. DB schema changes are NOT applied here; the separately approved
+# Requires an `az` CLI session with AcrPush on workforceosprodacr and Contributor on
+# workforce-os-prod. DB schema changes are NOT applied here; the separately approved
 # workflow must finish first and provide the sanitized receipt required below.
 #
 # Usage: scripts/deploy-prod.sh --migration-receipt <path> \
@@ -404,8 +404,8 @@ release_gh_command() {
     gh "$@"
 }
 
-REGISTRY="ledgracr"
-RESOURCE_GROUP="Ledgr-prod"
+REGISTRY="workforceosprodacr"
+RESOURCE_GROUP="workforce-os-prod"
 ACR_REPO="apex-api"
 API_APP="apex-gtm-api"
 WORKER_APP="apex-gtm-worker"

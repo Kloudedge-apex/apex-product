@@ -211,7 +211,7 @@ of these exist and have been independently reviewed:
   authorized create/reset receipt retained for review;
 - a bootstrap request that copies both the structural-evidence hash and the
   version-2 controller-evidence hash from the same `GO` report. The controller
-  independently reads the exact `ledgrstorage/production-control` checkpoint,
+  independently reads the exact `workforceosprodctrl/production-control` checkpoint,
   revalidates its age and metadata, and hashes it with the current exact-scope
   assignments before admitting any non-audit action;
 - explicit proof that no other principal, pipeline, autoscaler, or operator can

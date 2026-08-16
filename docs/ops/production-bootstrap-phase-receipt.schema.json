@@ -115,11 +115,11 @@
     "positiveInteger": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
     "apiImage": {
       "type": "string",
-      "pattern": "^ledgracr\\.azurecr\\.io/apex-api@sha256:[0-9a-f]{64}$"
+      "pattern": "^workforceosprodacr\\.azurecr\\.io/apex-api@sha256:[0-9a-f]{64}$"
     },
     "consoleImage": {
       "type": "string",
-      "pattern": "^ledgracr\\.azurecr\\.io/workforceos-fe@sha256:[0-9a-f]{64}$"
+      "pattern": "^workforceosprodacr\\.azurecr\\.io/workforceos-fe@sha256:[0-9a-f]{64}$"
     },
     "apiRevision": { "type": "string", "pattern": "^apex-gtm-api--[a-z0-9][a-z0-9-]{0,62}$" },
     "workerRevision": { "type": "string", "pattern": "^apex-gtm-worker--[a-z0-9][a-z0-9-]{0,62}$" },
