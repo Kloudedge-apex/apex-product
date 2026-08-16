@@ -244,29 +244,22 @@ require_literal '.name == $branch'
 require_literal 'and .protected == true'
 require_literal 'and .commit.sha == $sha'
 
-require_literal 'repos/${GITHUB_REPOSITORY}/environments/workforce-os-production'
-require_literal '.can_admins_bypass == false'
-require_literal 'and (.protection_rules | type == "array")'
-require_literal 'all(.protection_rules[]?; .type != "required_reviewers")'
-require_literal '.deployment_branch_policy.protected_branches == true'
-require_literal '.deployment_branch_policy.custom_branch_policies == false'
-require_literal 'repos/${GITHUB_REPOSITORY}/environments/workforce-os-production/variables/${name}'
-require_literal 'azure_client_id="$(read_environment_variable "AZURE_CLIENT_ID")"'
-require_literal 'azure_tenant_id="$(read_environment_variable "AZURE_TENANT_ID")"'
-require_literal 'azure_subscription_id="$(read_environment_variable "AZURE_SUBSCRIPTION_ID")"'
-require_literal '"ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED")"'
+require_literal 'azure_client_id="97808934-23ee-4cb1-9f50-d6de6e6e125f"'
+require_literal 'azure_tenant_id="d4b3813d-146f-4d03-96b8-d6e5862d58a2"'
+require_literal 'azure_subscription_id="3171575e-f164-425c-9ee0-2fb10cf93884"'
+require_literal 'exclusive_mutation_authority="false"'
 require_literal '[[ "${exclusive_mutation_authority}" != "true" ]]'
-require_literal '"WORKFORCE_PRODUCTION_CONTROL_STORAGE_ACCOUNT")"'
-require_literal '"WORKFORCE_PRODUCTION_CONTROL_STORAGE_CONTAINER")"'
-require_literal '"WORKFORCE_PRODUCTION_CONTROL_STORAGE_BLOB")"'
-require_literal '"WORKFORCE_PRODUCTION_CONTROL_STORAGE_RESOURCE_ID")"'
+require_literal 'production_control_storage_account="ledgrstorage"'
+require_literal 'production_control_storage_container="production-control"'
+require_literal 'production_control_storage_blob="workforce-os/initial-production-bootstrap/state-v1.json"'
+require_literal 'production_control_storage_resource_id="/subscriptions/3171575e-f164-425c-9ee0-2fb10cf93884/resourceGroups/Ledgr-prod/providers/Microsoft.Storage/storageAccounts/ledgrstorage"'
 require_literal '"${production_control_storage_container}" != "production-control"'
 require_literal '"${production_control_storage_blob}" != "workforce-os/initial-production-bootstrap/state-v1.json"'
 require_literal 'providers/Microsoft.Storage/storageAccounts/${production_control_storage_account}$'
-require_literal 'repos/${GITHUB_REPOSITORY}/environments/workforce-os-production/secrets/${name}'
-require_literal 'verify_environment_secret "PRODUCTION_MIGRATION_RECEIPT_B64"'
-require_literal 'verify_environment_secret "PRODUCTION_MIGRATION_SIGNATURE_B64"'
-require_literal 'verify_environment_secret "PRODUCTION_MIGRATION_ALLOWED_SIGNERS_B64"'
+reject_pattern 'repos/\$\{GITHUB_REPOSITORY\}/environments' \
+  "workflow token cannot query Environment administration APIs"
+reject_pattern 'exclusive_mutation_authority="true"' \
+  "source-pinned exclusive authority must remain fail-closed"
 require_literal 'printf '\''azure_client_id=%s\n'\'' "${azure_client_id}" >>"${GITHUB_OUTPUT}"'
 require_literal 'printf '\''azure_tenant_id=%s\n'\'' "${azure_tenant_id}" >>"${GITHUB_OUTPUT}"'
 require_literal 'printf '\''azure_subscription_id=%s\n'\'' "${azure_subscription_id}" >>"${GITHUB_OUTPUT}"'
@@ -379,9 +372,7 @@ reject_pattern '(^|[[:space:]])(bash|sh)[[:space:]]+[^#\n]*scripts/deploy-prod\.
 assert_before "Verify protected production environment" "Checkout trusted master workflow source"
 assert_before '[[ "${remote_master_sha}" != "${WORKFLOW_SHA}" ]]' "Checkout trusted master workflow source"
 assert_before 'and .commit.sha == $sha' "Checkout trusted master workflow source"
-assert_before '.deployment_branch_policy.custom_branch_policies == false' \
-  "Checkout trusted master workflow source"
-assert_before 'repos/${GITHUB_REPOSITORY}/environments/workforce-os-production/secrets/${name}' \
+assert_before 'exclusive_mutation_authority="false"' \
   "Checkout trusted master workflow source"
 assert_before "Checkout trusted master workflow source" "Verify trusted master workflow source"
 assert_before "release-control/scripts/verify-production-release-workflow.sh" "Verify exact release CI"

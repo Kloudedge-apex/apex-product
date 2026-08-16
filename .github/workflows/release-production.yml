@@ -106,43 +106,17 @@ jobs:
               and .commit.sha == $sha
             ' >/dev/null <<<"${release_branch_json}"
 
-          environment_json="$(gh api \
-            --method GET \
-            "repos/${GITHUB_REPOSITORY}/environments/workforce-os-production")"
-          jq -e '
-            .name == "workforce-os-production"
-            and .can_admins_bypass == false
-            and (.protection_rules | type == "array")
-            and all(.protection_rules[]?; .type != "required_reviewers")
-            and .deployment_branch_policy.protected_branches == true
-            and .deployment_branch_policy.custom_branch_policies == false
-          ' >/dev/null <<<"${environment_json}"
-
-          read_environment_variable() {
-            local name=$1
-            local variable_json
-            variable_json="$(gh api \
-              --method GET \
-              "repos/${GITHUB_REPOSITORY}/environments/workforce-os-production/variables/${name}")"
-            jq -e --arg name "${name}" '
-              .name == $name
-              and (.value | type == "string" and length > 0)
-            ' >/dev/null <<<"${variable_json}"
-            jq -er '.value' <<<"${variable_json}"
-          }
-          azure_client_id="$(read_environment_variable "AZURE_CLIENT_ID")"
-          azure_tenant_id="$(read_environment_variable "AZURE_TENANT_ID")"
-          azure_subscription_id="$(read_environment_variable "AZURE_SUBSCRIPTION_ID")"
-          exclusive_mutation_authority="$(read_environment_variable \
-            "ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED")"
-          production_control_storage_account="$(read_environment_variable \
-            "WORKFORCE_PRODUCTION_CONTROL_STORAGE_ACCOUNT")"
-          production_control_storage_container="$(read_environment_variable \
-            "WORKFORCE_PRODUCTION_CONTROL_STORAGE_CONTAINER")"
-          production_control_storage_blob="$(read_environment_variable \
-            "WORKFORCE_PRODUCTION_CONTROL_STORAGE_BLOB")"
-          production_control_storage_resource_id="$(read_environment_variable \
-            "WORKFORCE_PRODUCTION_CONTROL_STORAGE_RESOURCE_ID")"
+          # GitHub's workflow token cannot read Environment administration APIs.
+          # The job declaration enforces the reviewed Environment. Public Azure
+          # coordinates and the current NO-GO authority verdict are source-pinned.
+          azure_client_id="97808934-23ee-4cb1-9f50-d6de6e6e125f"
+          azure_tenant_id="d4b3813d-146f-4d03-96b8-d6e5862d58a2"
+          azure_subscription_id="3171575e-f164-425c-9ee0-2fb10cf93884"
+          exclusive_mutation_authority="false"
+          production_control_storage_account="ledgrstorage"
+          production_control_storage_container="production-control"
+          production_control_storage_blob="workforce-os/initial-production-bootstrap/state-v1.json"
+          production_control_storage_resource_id="/subscriptions/3171575e-f164-425c-9ee0-2fb10cf93884/resourceGroups/Ledgr-prod/providers/Microsoft.Storage/storageAccounts/ledgrstorage"
 
           uuid_pattern='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
           for value in \
@@ -165,18 +139,6 @@ jobs:
             echo "ERROR: protected environment has no exact shared production-control lease identity" >&2
             exit 1
           fi
-
-          verify_environment_secret() {
-            local name=$1
-            local secret_json
-            secret_json="$(gh api \
-              --method GET \
-              "repos/${GITHUB_REPOSITORY}/environments/workforce-os-production/secrets/${name}")"
-            jq -e --arg name "${name}" '.name == $name' >/dev/null <<<"${secret_json}"
-          }
-          verify_environment_secret "PRODUCTION_MIGRATION_RECEIPT_B64"
-          verify_environment_secret "PRODUCTION_MIGRATION_SIGNATURE_B64"
-          verify_environment_secret "PRODUCTION_MIGRATION_ALLOWED_SIGNERS_B64"
 
           printf 'azure_client_id=%s\n' "${azure_client_id}" >>"${GITHUB_OUTPUT}"
           printf 'azure_tenant_id=%s\n' "${azure_tenant_id}" >>"${GITHUB_OUTPUT}"

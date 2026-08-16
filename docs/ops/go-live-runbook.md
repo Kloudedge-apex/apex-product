@@ -389,13 +389,13 @@ blob. This is the global provider-enforced mutation lease shared with the
 initial bootstrap and the console repository. It is acquired before any Git
 lock ref or ACR artifact write and released last. A post-mutation failure,
 lost ownership, or Git cleanup uncertainty retains it; no controller issues a
-lease break or deletes the state blob. The protected environment must provide
-the exact `WORKFORCE_PRODUCTION_CONTROL_STORAGE_ACCOUNT`,
+lease break or deletes the state blob. The reviewed workflow source pins the
+exact `WORKFORCE_PRODUCTION_CONTROL_STORAGE_ACCOUNT`,
 `WORKFORCE_PRODUCTION_CONTROL_STORAGE_CONTAINER`,
 `WORKFORCE_PRODUCTION_CONTROL_STORAGE_BLOB`, and
-`WORKFORCE_PRODUCTION_CONTROL_STORAGE_RESOURCE_ID` values through the audited
-environment API. Repository/org variable fallbacks and per-repository blob
-names fail closed. Its OIDC identity needs ABAC-conditioned exact-container-
+`WORKFORCE_PRODUCTION_CONTROL_STORAGE_RESOURCE_ID` values. Repository/org
+variable fallbacks and per-repository blob names fail closed. Its OIDC identity
+needs ABAC-conditioned exact-container-
 and-path blob read/write data-plane authority, with blob deletion excluded, in
 addition to the reviewed ACR and Container Apps permissions. Azure authorizes acquire,
 renew, release, and break through the same blob-write action; RBAC cannot deny
@@ -507,24 +507,26 @@ branch's exact 40-character head SHA, and the literal confirmation
 Before checkout or OIDC, the workflow fails closed unless the repository API
 reports `master` as the default branch, remote `master` still equals the
 executing workflow SHA, and the selected release branch is protected and still
-equals the requested SHA. It then audits the exact
-`workforce-os-production` environment API resources: administrator bypass must
-be disabled, reviewer rules must be absent for accountable direct owner
-dispatch, only protected branches may deploy, and the named OIDC/authority
-variables and migration-evidence secrets must exist in that environment. The
-audited UUIDs and exact `true` authority value become step outputs; the workflow
-deliberately never consumes the
-fallback `${{ vars.* }}` context. Trusted workflow and exact-CI helpers run only
+equals the requested SHA. GitHub natively admits the job through the exact
+`workforce-os-production` environment. The separate governance audit proves
+administrator bypass is disabled, reviewer rules are absent for accountable
+direct owner dispatch, and only protected branches may deploy. A workflow token
+cannot read Environment administration endpoints, so public OIDC coordinates,
+the shared control-blob identity, and the current `false` authority verdict are
+source-pinned on protected `master`. Changing that verdict requires a reviewed,
+CI-proven source change after the Azure authority audit returns GO. The workflow
+deliberately never consumes the fallback `${{ vars.* }}` context. Trusted
+workflow and exact-CI helpers run only
 from the separately checked-out `master` source. The candidate is checked out
 to a different directory, materialized on the selected local release branch,
 and only then supplies the signer pin and release controller.
 
-The one-time bootstrap workflow enforces the same environment-only rule before
-checkout or OIDC. It reads the four Azure identity values and every authority
-boolean through the environment-variable API, verifies the exact
-action-required environment-secret metadata, and passes only audited
-non-secret outputs to Azure login and the controller. Generic `${{ vars.* }}`
-fallback is rejected by the source contract.
+The one-time bootstrap workflow uses the same native Environment admission
+before checkout or OIDC. Its public Azure coordinates and every current NO-GO
+authority verdict are source-pinned fail-closed on protected `master`; only the
+action that needs a protected secret receives it. Generic `${{ vars.* }}`
+fallback and workflow-token Environment administration queries are rejected by
+the source contract.
 
 Both repositories were explicitly made public on 2026-08-15 for the protected
 release and ten-day drain window, removing the GitHub Free private-plan gate.

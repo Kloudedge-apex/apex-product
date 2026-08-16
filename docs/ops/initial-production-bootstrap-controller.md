@@ -169,13 +169,13 @@ lock check before each command and a fresh catalog verification before replay.
 
 ## Workflow secret scope
 
-Before checkout or OIDC, the manual workflow reads every OIDC identity,
-authority, and evidence variable from the exact
-`workforce-os-production` environment API. It verifies action-required secret
-metadata at that environment endpoint and passes only the audited non-secret
-values forward as step outputs. Repository- or organization-level `vars`
-fallback is forbidden; a same-named repository secret cannot substitute
-because the action-required environment secret must exist before it is read.
+Before checkout or OIDC, GitHub natively admits the manual job through the exact
+`workforce-os-production` environment. The reviewed workflow source pins the
+public OIDC identity coordinates and every current NO-GO authority verdict;
+the separate governance audit verifies the Environment policy. A workflow token
+cannot read Environment administration endpoints. Repository- or
+organization-level `vars` fallback is forbidden, and protected secrets are
+provided only to the actions that require them.
 
 The workflow injects receipt/signature material only into actions that
 verify a receipt; Clerk, delivery-review, exclusive-DDL, and operational-smoke
