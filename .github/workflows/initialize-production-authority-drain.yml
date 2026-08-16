@@ -62,21 +62,14 @@ jobs:
           tenant-id: d4b3813d-146f-4d03-96b8-d6e5862d58a2
           subscription-id: 3171575e-f164-425c-9ee0-2fb10cf93884
 
-      - name: Seal isolated runtime mutation authority
+      - name: Verify sealed isolated runtime mutation authority
         run: |
           set -Eeuo pipefail
-          runtime_stack="$(az stack group create \
+          runtime_stack="$(az stack group show \
             --subscription 3171575e-f164-425c-9ee0-2fb10cf93884 \
             --resource-group workforce-os-prod \
             --name workforce-os-production-runtime-v1 \
-            --template-file deploy/azure-production-runtime-v1/main.bicep \
-            --deny-settings-mode denyWriteAndDelete \
-            --deny-settings-apply-to-child-scopes \
-            --deny-settings-excluded-principals \
-              "abc0d6b0-35ae-4d33-bcea-237fdca83a94 0bc83fa6-91a2-4d94-9dff-f55c104cb425 509039c1-8cfd-4df4-9bb0-cc659b5a7e22 b1d6b4c9-4596-4fa4-9ad8-6cc8e17ff89a" \
-            --action-on-unmanage detachAll \
-            --yes \
-            --query '{name:name,state:provisioningState,deny:denySettings}' \
+            --query '{name:name,state:provisioningState,deny:denySettings,resources:resources[].{id:id,status:status,denyStatus:denyStatus}}' \
             --output json \
             --only-show-errors)"
           jq -e '
@@ -91,6 +84,14 @@ jobs:
               "509039c1-8cfd-4df4-9bb0-cc659b5a7e22",
               "b1d6b4c9-4596-4fa4-9ad8-6cc8e17ff89a"
             ] | sort)
+            and ([.resources[] | select(
+              (.id | ascii_downcase) == "/subscriptions/3171575e-f164-425c-9ee0-2fb10cf93884/resourcegroups/workforce-os-prod/providers/microsoft.app/containerapps/apex-gtm-api"
+              or (.id | ascii_downcase) == "/subscriptions/3171575e-f164-425c-9ee0-2fb10cf93884/resourcegroups/workforce-os-prod/providers/microsoft.app/containerapps/apex-gtm-worker"
+              or (.id | ascii_downcase) == "/subscriptions/3171575e-f164-425c-9ee0-2fb10cf93884/resourcegroups/workforce-os-prod/providers/microsoft.app/containerapps/nikxius-web"
+            )] | length) == 3
+            and all(.resources[] | select(.id | ascii_downcase | contains("/providers/microsoft.app/containerapps/"));
+              (.status | ascii_downcase) == "managed"
+              and .denyStatus == "denyWriteAndDelete")
           ' >/dev/null <<<"${runtime_stack}"
 
       - name: Create server-timed drain checkpoint
