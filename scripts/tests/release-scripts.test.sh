@@ -1871,27 +1871,27 @@ test_production_release_workflow_verifier() {
   fi
   pass
 
-  fixture="${harness}/admin-bypass.yml"
-  sed 's/\.can_admins_bypass == false/.can_admins_bypass == true/' \
+  fixture="${harness}/wrong-release-client.yml"
+  sed 's/97808934-23ee-4cb1-9f50-d6de6e6e125f/00000000-0000-0000-0000-000000000000/' \
     "${workflow}" >"${fixture}"
   if "${verifier}" "${fixture}" >/dev/null 2>&1; then
-    fail "workflow verifier accepted administrator environment bypass"
+    fail "workflow verifier accepted an unreviewed release identity"
   fi
   pass
 
-  fixture="${harness}/reviewer-gate.yml"
-  sed 's/\.type != "required_reviewers"/.type == "required_reviewers"/' \
+  fixture="${harness}/wrong-release-tenant.yml"
+  sed 's/d4b3813d-146f-4d03-96b8-d6e5862d58a2/00000000-0000-0000-0000-000000000000/' \
     "${workflow}" >"${fixture}"
   if "${verifier}" "${fixture}" >/dev/null 2>&1; then
-    fail "workflow verifier accepted a reviewer-gated direct-dispatch environment"
+    fail "workflow verifier accepted an unreviewed Azure tenant"
   fi
   pass
 
-  fixture="${harness}/repository-variable-fallback.yml"
-  sed 's#environments/workforce-os-production/variables/${name}#actions/variables/${name}#' \
+  fixture="${harness}/source-authority-enabled.yml"
+  sed 's/exclusive_mutation_authority="false"/exclusive_mutation_authority="true"/' \
     "${workflow}" >"${fixture}"
   if "${verifier}" "${fixture}" >/dev/null 2>&1; then
-    fail "workflow verifier accepted repository-scoped OIDC variables"
+    fail "workflow verifier accepted source-enabled mutation authority"
   fi
   pass
 
@@ -1911,11 +1911,16 @@ test_production_release_workflow_verifier() {
   fi
   pass
 
-  fixture="${harness}/repository-secret-fallback.yml"
-  sed 's#environments/workforce-os-production/secrets/${name}#actions/secrets/${name}#' \
-    "${workflow}" >"${fixture}"
+  fixture="${harness}/environment-admin-api.yml"
+  awk '
+    { print }
+    !changed && $0 == "          set -Eeuo pipefail" {
+      print "          gh api \"repos/${GITHUB_REPOSITORY}/environments/workforce-os-production\" >/dev/null"
+      changed = 1
+    }
+  ' "${workflow}" >"${fixture}"
   if "${verifier}" "${fixture}" >/dev/null 2>&1; then
-    fail "workflow verifier accepted repository-scoped migration evidence secrets"
+    fail "workflow verifier accepted an impossible Environment administration API query"
   fi
   pass
 

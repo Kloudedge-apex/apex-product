@@ -41,10 +41,10 @@ test("canonical bootstrap workflow passes its source contract", () => {
   assert.match(result.stdout, /Production bootstrap workflow contract verified/u);
 });
 
-rejected("a reviewer-gated production environment is rejected", (source) =>
+rejected("an unreviewed Azure client identity is rejected", (source) =>
   source.replace(
-    '.type != "required_reviewers"',
-    '.type == "required_reviewers"',
+    "97808934-23ee-4cb1-9f50-d6de6e6e125f",
+    "00000000-0000-0000-0000-000000000000",
   ));
 
 rejected("repository-level variable fallback is rejected", (source) =>
@@ -53,22 +53,22 @@ rejected("repository-level variable fallback is rejected", (source) =>
     "${{ vars.AZURE_CLIENT_ID }}",
   ));
 
-rejected("repository variable metadata cannot replace environment metadata", (source) =>
+rejected("source-enabled Container Apps authority is rejected", (source) =>
   source.replace(
-    "environments/workforce-os-production/variables/${name}",
-    "actions/variables/${name}",
+    'exclusive_aca_authority="false"',
+    'exclusive_aca_authority="true"',
   ));
 
-rejected("repository secret metadata cannot replace environment metadata", (source) =>
+rejected("source-enabled database DDL authority is rejected", (source) =>
   source.replace(
-    "environments/workforce-os-production/secrets/${name}",
-    "actions/secrets/${name}",
+    'exclusive_ddl_authority="false"',
+    'exclusive_ddl_authority="true"',
   ));
 
-rejected("the action-scoped request secret must be environment-proven", (source) =>
+rejected("workflow-token Environment administration queries are rejected", (source) =>
   source.replace(
-    '          verify_environment_secret "PRODUCTION_BOOTSTRAP_REQUEST_B64"\n',
-    "",
+    "          set -Eeuo pipefail\n",
+    '          set -Eeuo pipefail\n          gh api "repos/${GITHUB_REPOSITORY}/environments/workforce-os-production" >/dev/null\n',
   ));
 
 rejected("the audited Azure principal object ID cannot be bypassed", (source) =>
