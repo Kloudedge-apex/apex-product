@@ -52,6 +52,8 @@ for (const literal of [
   "containerapps/nikxius-web",
   "deploy/azure-production-isolation-v2/initialize-authority-drain-checkpoint.sh",
   "--confirmation 'CREATE WORKFORCE OS AUTHORITY DRAIN CHECKPOINT'",
+  '(.mode == "create" or .mode == "existing")',
+  'sub("\\\\+00:00$"; "Z")',
   "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
 ]) {
   if (!source.includes(literal)) fail(`required source pin is absent: ${literal}`);

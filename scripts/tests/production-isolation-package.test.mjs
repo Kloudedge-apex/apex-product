@@ -110,3 +110,6 @@ rejected("authority-drain overwrite is rejected", "initialize-authority-drain-ch
 
 rejected("authority-drain reset authority is rejected", "initialize-authority-drain-checkpoint.sh", (source) =>
   `${source}\n# RESET WORKFORCE OS AUTHORITY DRAIN CHECKPOINT\n`);
+
+rejected("authority-drain receipt recovery is required", "initialize-authority-drain-checkpoint.sh", (source) =>
+  source.replace('        .findings[0].code == "credential-drain-window-open"', "        false"));
