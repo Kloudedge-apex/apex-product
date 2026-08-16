@@ -82,10 +82,11 @@ require_literal '    timeout-minutes: 90'
 require_literal '"${GITHUB_REF}" != "refs/heads/master"'
 require_literal '"${REF_PROTECTED}" != "true"'
 require_literal '"${CONFIRMATION}" != "BUILD WORKFORCE OS BACKEND CANDIDATE"'
-require_literal 'and (.protection_rules | type == "array")'
-require_literal 'all(.protection_rules[]?; .type != "required_reviewers")'
-require_literal 'repos/${GITHUB_REPOSITORY}/environments/workforce-os-production-build/variables/${name}'
-require_literal '"ACR_BUILD_ONLY_AUTHORITY_CONFIRMED")"'
+require_literal 'azure_client_id="f0c078a3-dd62-4494-af94-1bee946cb4a9"'
+require_literal 'azure_tenant_id="d4b3813d-146f-4d03-96b8-d6e5862d58a2"'
+require_literal 'azure_subscription_id="3171575e-f164-425c-9ee0-2fb10cf93884"'
+require_literal 'azure_principal_object_id="4e305819-61f5-4557-a990-4b0c49631928"'
+require_literal 'build_only_authority="true"'
 require_literal 'client-id: ${{ steps.build_environment.outputs.azure_client_id }}'
 require_literal 'tenant-id: ${{ steps.build_environment.outputs.azure_tenant_id }}'
 require_literal 'subscription-id: ${{ steps.build_environment.outputs.azure_subscription_id }}'
@@ -119,6 +120,8 @@ reject_pattern '\$\{\{[[:space:]]*secrets\.' \
   "backend candidate build must not consume secrets"
 reject_pattern 'repos/\$\{GITHUB_REPOSITORY\}/actions/variables' \
   "repository-scoped build variables are forbidden"
+reject_pattern 'repos/\$\{GITHUB_REPOSITORY\}/environments' \
+  "workflow token cannot query Environment administration APIs"
 reject_pattern 'continue-on-error[[:space:]]*:[[:space:]]*true' \
   "continue-on-error is forbidden"
 reject_pattern 'uses:[[:space:]]+[^[:space:]@]+@(main|master|v[0-9]+)([[:space:]#]|$)' \

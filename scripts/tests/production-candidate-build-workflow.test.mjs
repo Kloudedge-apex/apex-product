@@ -41,10 +41,10 @@ test("canonical backend candidate-build workflow passes", () => {
   assert.match(result.stdout, /candidate-build workflow contract verified/u);
 });
 
-rejected("a reviewer-gated build environment is rejected", (source) =>
+rejected("a changed source-pinned build identity is rejected", (source) =>
   source.replace(
-    '.type != "required_reviewers"',
-    '.type == "required_reviewers"',
+    "f0c078a3-dd62-4494-af94-1bee946cb4a9",
+    "00000000-0000-0000-0000-000000000000",
   ));
 
 rejected("a mutable action reference is rejected", (source) =>
@@ -55,7 +55,7 @@ rejected("a mutable action reference is rejected", (source) =>
 
 rejected("repository variable fallback is rejected", (source) =>
   source.replace(
-    "${{ steps.build_environment.outputs.azure_client_id }}",
+    'azure_client_id="f0c078a3-dd62-4494-af94-1bee946cb4a9"',
     "${{ vars.AZURE_CLIENT_ID }}",
   ));
 
