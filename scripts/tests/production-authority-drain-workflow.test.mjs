@@ -62,3 +62,15 @@ rejected("a writable checkout token is rejected", (source) =>
 
 rejected("an unprotected ref is rejected", (source) =>
   source.replace('"${REF_PROTECTED}" != "true"', '"${REF_PROTECTED}" != "false"'));
+
+rejected("runtime authority without final deny is rejected", (source) =>
+  source.replace("--deny-settings-mode denyWriteAndDelete", "--deny-settings-mode none"));
+
+rejected("runtime authority without the reviewed template is rejected", (source) =>
+  source.replace(
+    "--template-file deploy/azure-production-runtime-v1/main.bicep",
+    "--template-file unreviewed.bicep",
+  ));
+
+rejected("destructive runtime unmanage is rejected", (source) =>
+  source.replace("--action-on-unmanage detachAll", "--action-on-unmanage deleteAll"));
