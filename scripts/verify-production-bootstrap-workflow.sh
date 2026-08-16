@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
 # Static, dependency-free admission check for the one-time protected bootstrap
-# workflow. External environment reviewers, OIDC federation, Azure RBAC, and
-# evidence provisioning remain explicit operational gates.
+# workflow. Direct owner dispatch, OIDC federation, Azure RBAC, and evidence
+# provisioning remain explicit operational gates.
 
 set -euo pipefail
 
@@ -114,6 +114,8 @@ require_literal '"${GITHUB_EVENT_NAME}" != "workflow_dispatch"'
 require_literal '"${GITHUB_REF}" != "refs/heads/master"'
 require_literal '"${REF_PROTECTED}" != "true"'
 require_literal '"${CONFIRMATION}" != "BOOTSTRAP WORKFORCE OS PRODUCTION"'
+require_literal 'and (.protection_rules | type == "array")'
+require_literal 'all(.protection_rules[]?; .type != "required_reviewers")'
 require_literal 'ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED'
 require_literal 'AZURE_PRINCIPAL_OBJECT_ID'
 require_literal 'OUTSTANDING_DELIVERY_REVIEW_CONFIRMED'

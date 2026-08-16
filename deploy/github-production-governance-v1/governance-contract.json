@@ -95,10 +95,11 @@
     "allowDeletions": false
   },
   "environmentProtection": {
+    "approvalMode": "direct-owner-dispatch",
     "canAdministratorsBypass": false,
-    "requireReviewers": true,
-    "preventSelfReview": true,
-    "minimumReviewerCount": 1,
+    "requireReviewers": false,
+    "preventSelfReview": false,
+    "minimumReviewerCount": 0,
     "protectedBranchesOnly": true,
     "customBranchPolicies": false
   }

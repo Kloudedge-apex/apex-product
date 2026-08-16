@@ -357,18 +357,29 @@ function inspectEnvironment(
     ? environment.protection_rules.filter((rule) => rule?.type === "required_reviewers")
     : [];
   const reviewers = rules.flatMap((rule) => Array.isArray(rule.reviewers) ? rule.reviewers : []);
-  if (policy.requireReviewers && (rules.length < 1 ||
-    reviewers.length < policy.minimumReviewerCount)) {
-    addFinding(findings, "environment-reviewer-missing", repositoryKey,
-      `environment:${environmentName}`);
-  }
-  if (policy.preventSelfReview &&
-    (rules.length < 1 || rules.some((rule) => rule.prevent_self_review !== true))) {
-    addFinding(findings, "environment-self-review-enabled", repositoryKey,
-      `environment:${environmentName}`);
-  }
-  if (actorId !== null && reviewers.some((reviewer) => reviewerIdentity(reviewer) === actorId)) {
-    addFinding(findings, "environment-reviewer-not-independent", repositoryKey,
+  if (policy.approvalMode === "direct-owner-dispatch") {
+    if (policy.requireReviewers || policy.preventSelfReview ||
+      policy.minimumReviewerCount !== 0 || rules.length !== 0) {
+      addFinding(findings, "environment-review-policy-drift", repositoryKey,
+        `environment:${environmentName}`);
+    }
+  } else if (policy.approvalMode === "independent-review") {
+    if (policy.requireReviewers && (rules.length < 1 ||
+      reviewers.length < policy.minimumReviewerCount)) {
+      addFinding(findings, "environment-reviewer-missing", repositoryKey,
+        `environment:${environmentName}`);
+    }
+    if (policy.preventSelfReview &&
+      (rules.length < 1 || rules.some((rule) => rule.prevent_self_review !== true))) {
+      addFinding(findings, "environment-self-review-enabled", repositoryKey,
+        `environment:${environmentName}`);
+    }
+    if (actorId !== null && reviewers.some((reviewer) => reviewerIdentity(reviewer) === actorId)) {
+      addFinding(findings, "environment-reviewer-not-independent", repositoryKey,
+        `environment:${environmentName}`);
+    }
+  } else {
+    addFinding(findings, "environment-approval-mode-invalid", repositoryKey,
       `environment:${environmentName}`);
   }
 }

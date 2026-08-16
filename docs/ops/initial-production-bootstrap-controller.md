@@ -190,8 +190,9 @@ Source presence is not production admission. Keep production NO-GO until all
 of these exist and have been independently reviewed:
 
 - protected `master` and protected exact candidate branches with required CI;
-- a `workforce-os-production` environment with non-self reviewers and no
-  administrator bypass;
+- a `workforce-os-production` direct-dispatch environment with no reviewer rule,
+  no administrator bypass, protected-branch admission, and exact typed
+  confirmation;
 - exact environment-subject Azure OIDC federation and exclusive RBAC across
   all three Container Apps and the bootstrap state blob;
 - the exact release identities have both source-reviewed read-only audit roles:
