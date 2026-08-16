@@ -43,7 +43,7 @@ test("canonical backend candidate-build workflow passes", () => {
 
 rejected("a changed source-pinned build identity is rejected", (source) =>
   source.replace(
-    "f0c078a3-dd62-4494-af94-1bee946cb4a9",
+    "9f2c20b8-4d4b-4633-9659-2796a131fa8c",
     "00000000-0000-0000-0000-000000000000",
   ));
 
@@ -55,7 +55,7 @@ rejected("a mutable action reference is rejected", (source) =>
 
 rejected("repository variable fallback is rejected", (source) =>
   source.replace(
-    'azure_client_id="f0c078a3-dd62-4494-af94-1bee946cb4a9"',
+    'azure_client_id="9f2c20b8-4d4b-4633-9659-2796a131fa8c"',
     "${{ vars.AZURE_CLIENT_ID }}",
   ));
 
@@ -74,8 +74,11 @@ rejected("Container App mutation is rejected", (source) =>
 rejected("registry deletion is rejected", (source) =>
   source.replace(
     "          existing=\"$(az acr repository show-tags \\\n",
-    "          az acr repository delete --name ledgracr --repository apex-api\n          existing=\"$(az acr repository show-tags \\\n",
+    "          az acr repository delete --name workforceosprodacr --repository apex-api\n          existing=\"$(az acr repository show-tags \\\n",
   ));
+
+rejected("an unreviewed registry is rejected", (source) =>
+  source.replaceAll("workforceosprodacr", "otherregistry"));
 
 rejected("a pre-existing commit tag may not be overwritten", (source) =>
   source.replace(
