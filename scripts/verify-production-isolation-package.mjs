@@ -59,6 +59,10 @@ const contract = parseJson(
 const mainSource = read(resolve(PACKAGE, "main.bicep"), "main Bicep");
 const resourceSource = read(resolve(PACKAGE, "resources.bicep"), "resource Bicep");
 const readme = read(resolve(PACKAGE, "README.md"), "package README");
+const initializer = read(
+  resolve(PACKAGE, "initialize-control-blob.sh"),
+  "control-blob initializer",
+);
 
 const expectedContract = {
   schemaVersion: 3,
@@ -357,6 +361,26 @@ if (!readme.includes("`denyWriteAndDelete`") ||
   !readme.includes("runtime pull identity is not excluded") ||
   !readme.includes("`detachAll` on unmanage")) {
   fail("deployment-stack deny boundary is not documented exactly");
+}
+
+for (const literal of [
+  'SUBSCRIPTION_ID="3171575e-f164-425c-9ee0-2fb10cf93884"',
+  'RESOURCE_GROUP="workforce-os-prod"',
+  'STORAGE_ACCOUNT="workforceosprodctrl"',
+  'CONTAINER="production-control"',
+  'BLOB="workforce-os/initial-production-bootstrap/state-v1.json"',
+  '--auth-mode login',
+  '--overwrite false',
+  "--if-none-match '*'",
+]) {
+  if (!initializer.includes(literal)) {
+    fail(`control-blob initializer is missing: ${literal}`);
+  }
+}
+if (initializer.includes("--overwrite true") ||
+  /--account-key|--connection-string|storage account keys list/u.test(initializer) ||
+  /storage blob (delete|lease break)/u.test(initializer)) {
+  fail("control-blob initializer contains destructive or credential authority");
 }
 
 console.log(`Production isolation package verified: ${PACKAGE}`);

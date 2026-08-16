@@ -58,3 +58,16 @@ az stack sub validate \
 An authorized initial apply uses the same arguments with `az stack sub create`
 and `--yes`. Capture the sanitized output IDs; never copy secrets or registry or
 Storage credentials into evidence.
+
+After the stack is applied, a separately authorized provisioning operator may
+create the fixed zero-byte controller state exactly once:
+
+```bash
+deploy/azure-production-isolation-v2/initialize-control-blob.sh \
+  --apply \
+  --confirmation 'INITIALIZE WORKFORCE OS PRODUCTION CONTROL BLOB'
+```
+
+The initializer uses Entra login, rejects an existing blob, and sends both
+`--overwrite false` and `--if-none-match '*'`. Release identities must not run
+this one-time provisioning step.
