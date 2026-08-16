@@ -63,6 +63,10 @@ const initializer = read(
   resolve(PACKAGE, "initialize-control-blob.sh"),
   "control-blob initializer",
 );
+const drainInitializer = read(
+  resolve(PACKAGE, "initialize-authority-drain-checkpoint.sh"),
+  "authority-drain initializer",
+);
 
 const expectedContract = {
   schemaVersion: 3,
@@ -381,6 +385,29 @@ if (initializer.includes("--overwrite true") ||
   /--account-key|--connection-string|storage account keys list/u.test(initializer) ||
   /storage blob (delete|lease break)/u.test(initializer)) {
   fail("control-blob initializer contains destructive or credential authority");
+}
+
+for (const literal of [
+  'SUBSCRIPTION_ID="3171575e-f164-425c-9ee0-2fb10cf93884"',
+  'RESOURCE_GROUP="workforce-os-prod"',
+  'STORAGE_ACCOUNT="workforceosprodctrl"',
+  'CONTAINER="production-control"',
+  'BLOB="workforce-os/initial-production-bootstrap/authority-drain-checkpoint-v1"',
+  'CONFIRMATION_PHRASE="CREATE WORKFORCE OS AUTHORITY DRAIN CHECKPOINT"',
+  'and .summary.structuralExclusive == true',
+  'and .findings[0].code == "credential-drain-checkpoint-missing"',
+  '--auth-mode login',
+  '--overwrite false',
+  "--if-none-match '*'",
+]) {
+  if (!drainInitializer.includes(literal)) {
+    fail(`authority-drain initializer is missing: ${literal}`);
+  }
+}
+if (/--account-key|--connection-string|storage account keys list/u.test(drainInitializer) ||
+  /storage blob (delete|metadata update|lease break)/u.test(drainInitializer) ||
+  /RESET WORKFORCE OS AUTHORITY DRAIN CHECKPOINT/u.test(drainInitializer)) {
+  fail("authority-drain initializer contains reset, destructive, or credential authority");
 }
 
 console.log(`Production isolation package verified: ${PACKAGE}`);

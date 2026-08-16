@@ -104,3 +104,9 @@ rejected("control-blob overwrite authority is rejected", "initialize-control-blo
 
 rejected("control-blob account-key auth is rejected", "initialize-control-blob.sh", (source) =>
   source.replace("--auth-mode login", "--account-key unreviewed"));
+
+rejected("authority-drain overwrite is rejected", "initialize-authority-drain-checkpoint.sh", (source) =>
+  source.replace("--overwrite false", "--overwrite true"));
+
+rejected("authority-drain reset authority is rejected", "initialize-authority-drain-checkpoint.sh", (source) =>
+  `${source}\n# RESET WORKFORCE OS AUTHORITY DRAIN CHECKPOINT\n`);
