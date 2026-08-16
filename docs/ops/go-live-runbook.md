@@ -211,6 +211,11 @@ replace it until the principal-to-key mappings have been provisioned and
 reviewed outside the deploy operator's control. Rotation changes both the
 external file and this source-pinned digest.
 
+The reviewed pin currently identifies the independently provisioned
+`workforce-production-approver` Ed25519 public key. Its private key remains
+off-session and outside GitHub and Azure. Any signer rotation requires another
+reviewed source change before a new signature can be admitted.
+
 `scripts/verify-migration-release-receipt.sh` rejects undeclared fields, copies
 the supplied trust file once, matches those exact bytes to the reviewed digest,
 and verifies the detached signature against the claimed approver. The reviewed
@@ -547,11 +552,11 @@ Container Apps before asserting exclusive authority. Azure OIDC federation and
 an RBAC audit must still prove that its service principal is the exclusive
 `Microsoft.App/containerApps/write` identity across `apex-gtm-api`,
 `apex-gtm-worker`, and `nikxius-web`, or is confined by the same coordinated
-three-resource mutation lease. The allowed-signers
-source pin is still `UNCONFIGURED`, and all eight migrations still require
-staging rehearsal, separate production approval, apply, and signed receipt
-evidence. Therefore the authority attestation must remain unset until every
-external control and migration prerequisite is verified. Re-audit after any
+three-resource mutation lease. The allowed-signers source pin is configured for
+`workforce-production-approver`, but all eight migrations still require staging
+rehearsal, separate production approval, apply, and signed receipt evidence.
+Therefore the authority attestation must remain unset until every external
+control and migration prerequisite is verified. Re-audit after any
 branch-protection, environment, role-assignment, group-membership, federation,
 or break-glass change.
 

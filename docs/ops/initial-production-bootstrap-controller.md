@@ -219,8 +219,9 @@ of these exist and have been independently reviewed:
   controller verifies exact assignment evidence, but exclusivity remains an
   independently reviewed external NO-GO gate;
 - the pre-provisioned fixed bootstrap state blob;
-- a configured reviewed allowed-signers pin (the committed `UNCONFIGURED`
-  sentinel blocks every bootstrap);
+- a configured reviewed allowed-signers pin for
+  `workforce-production-approver` (a malformed or mismatched pin blocks every
+  bootstrap);
 - final signed B4/B5/B6/B8 receipt contracts and verifiers;
 - a separately approved Clerk reconciliation procedure and evidence;
 - an approved unsubscribe/API outage window and escalation SLA; and
