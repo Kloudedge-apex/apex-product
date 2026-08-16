@@ -69,6 +69,8 @@ const expectedContract = {
     "workforceosprodacr.azurecr.io/workforceos-fe@sha256:c83bd7b774fa9ed7f83ffd2ad621c1c0edc2502e495d3feab43916e5378dd6ff",
   publicApiOrigin: "https://api.workforceos.xyz",
   publicConsoleOrigin: "https://workforceos.xyz",
+  consoleSourceApiUpstreamOrigin:
+    "https://apex-gtm-api.ashysmoke-fd2f7a7f.eastus.azurecontainerapps.io",
   secretMigration: {
     source: "server-side Microsoft.App/containerApps/listSecrets",
     valuesInDeploymentOutput: false,
@@ -115,6 +117,7 @@ const expectedDefaults = {
   consoleSourceImage: contract.consoleSourceImage,
   publicApiOrigin: contract.publicApiOrigin,
   publicConsoleOrigin: contract.publicConsoleOrigin,
+  consoleSourceApiUpstreamOrigin: contract.consoleSourceApiUpstreamOrigin,
   clerkIssuer: "https://clerk.workforceos.xyz",
   clerkJwksUrl: "https://clerk.workforceos.xyz/.well-known/jwks.json",
 };
@@ -172,6 +175,14 @@ if (worker.configuration?.ingress !== undefined) {
 if (console.configuration?.ingress?.external !== true ||
   console.configuration?.ingress?.targetPort !== 8080) {
   fail("console ingress contract is invalid");
+}
+const consoleEnvironment = console.template?.containers?.[0]?.env;
+const consoleUpstream = Array.isArray(consoleEnvironment)
+  ? consoleEnvironment.filter((item) => item.name === "API_UPSTREAM_URL")
+  : [];
+if (consoleUpstream.length !== 1 ||
+  consoleUpstream[0].value !== "[parameters('consoleSourceApiUpstreamOrigin')]") {
+  fail("console source upstream is not the reviewed immutable-image pin");
 }
 
 const secretExpression = String(api.configuration?.secrets ?? "");
