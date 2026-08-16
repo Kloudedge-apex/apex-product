@@ -15,8 +15,9 @@ The contract requires:
   more approvals, stale-review dismissal, conversation resolution,
   administrator enforcement, and no force-push or deletion;
 - `workforce-os-production-build` and `workforce-os-production` environments in
-  both repositories, with administrator bypass disabled, non-self reviewers,
-  and deployment restricted to protected branches;
+  both repositories, with administrator bypass disabled, no reviewer rule, and
+  deployment restricted to protected branches. Manual dispatch plus the exact
+  typed confirmation is the accountable owner approval;
 - read-only default workflow permissions, no workflow-created PR approvals,
   selected Actions only, and full-SHA pin enforcement.
 
@@ -40,15 +41,15 @@ node scripts/production-github-governance-audit.mjs --fixture snapshot.json
 
 Provisioning order for the explicitly authorized public release window:
 
-1. add an independent reviewer to both repositories;
-2. enable secret scanning and push protection in both repositories;
-3. set the Actions policy in the contract;
-4. protect every contract branch with the exact checks and review controls;
-5. create both protected environments in both repositories;
-6. run this audit and independently review its `GO` report;
-7. merge the reviewed release pull requests;
-8. apply and read back the Azure authority package;
-9. create the server-timed drain checkpoint, then wait the full ten days.
+1. enable secret scanning and push protection in both repositories;
+2. set the Actions policy in the contract;
+3. protect every contract branch with the exact checks and review controls;
+4. create both direct-dispatch environments in both repositories without a
+   required-reviewer rule;
+5. run this audit and inspect its `GO` report;
+6. merge the release changes into the protected default branches;
+7. apply and read back the Azure authority package;
+8. create the server-timed drain checkpoint, then wait the full ten days.
 
 Public clones, forks, and caches cannot be recalled by a later visibility
 change. Do not return either repository to private on GitHub Free while this

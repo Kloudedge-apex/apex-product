@@ -509,10 +509,11 @@ reports `master` as the default branch, remote `master` still equals the
 executing workflow SHA, and the selected release branch is protected and still
 equals the requested SHA. It then audits the exact
 `workforce-os-production` environment API resources: administrator bypass must
-be disabled, non-self reviewers must be required, only protected branches may
-deploy, and the named OIDC/authority variables and migration-evidence secrets
-must exist in that environment. The audited UUIDs and exact `true` authority
-value become step outputs; the workflow deliberately never consumes the
+be disabled, reviewer rules must be absent for accountable direct owner
+dispatch, only protected branches may deploy, and the named OIDC/authority
+variables and migration-evidence secrets must exist in that environment. The
+audited UUIDs and exact `true` authority value become step outputs; the workflow
+deliberately never consumes the
 fallback `${{ vars.* }}` context. Trusted workflow and exact-CI helpers run only
 from the separately checked-out `master` source. The candidate is checked out
 to a different directory, materialized on the selected local release branch,

@@ -41,6 +41,12 @@ test("canonical bootstrap workflow passes its source contract", () => {
   assert.match(result.stdout, /Production bootstrap workflow contract verified/u);
 });
 
+rejected("a reviewer-gated production environment is rejected", (source) =>
+  source.replace(
+    '.type != "required_reviewers"',
+    '.type == "required_reviewers"',
+  ));
+
 rejected("repository-level variable fallback is rejected", (source) =>
   source.replace(
     "${{ steps.production_environment.outputs.azure_client_id }}",

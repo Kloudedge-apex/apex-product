@@ -1879,11 +1879,11 @@ test_production_release_workflow_verifier() {
   fi
   pass
 
-  fixture="${harness}/self-review.yml"
-  sed 's/\.prevent_self_review == true/.prevent_self_review == false/' \
+  fixture="${harness}/reviewer-gate.yml"
+  sed 's/\.type != "required_reviewers"/.type == "required_reviewers"/' \
     "${workflow}" >"${fixture}"
   if "${verifier}" "${fixture}" >/dev/null 2>&1; then
-    fail "workflow verifier accepted self-approval in the production environment"
+    fail "workflow verifier accepted a reviewer-gated direct-dispatch environment"
   fi
   pass
 

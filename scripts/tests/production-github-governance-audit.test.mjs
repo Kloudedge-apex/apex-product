@@ -11,7 +11,6 @@ import {
 
 const CONTRACT = PRODUCTION_GITHUB_GOVERNANCE_CONTRACT;
 const ACTOR_ID = 1001;
-const REVIEWER_ID = 2002;
 
 function protection(requiredChecks) {
   return {
@@ -35,14 +34,7 @@ function environment(name) {
   return {
     name,
     can_admins_bypass: false,
-    protection_rules: [{
-      type: "required_reviewers",
-      prevent_self_review: true,
-      reviewers: [{
-        type: "User",
-        reviewer: { id: REVIEWER_ID, login: "independent-reviewer" },
-      }],
-    }],
+    protection_rules: [],
     deployment_branch_policy: {
       protected_branches: true,
       custom_branch_policies: false,
@@ -168,8 +160,7 @@ test("the canonical protected snapshot is GO and redacts identities", () => {
   assert.equal(report.summary.expectedProtectedEnvironmentCount, 4);
   const serialized = JSON.stringify(report);
   assert.doesNotMatch(serialized, /release-actor/u);
-  assert.doesNotMatch(serialized, /independent-reviewer/u);
-  assert.doesNotMatch(serialized, new RegExp(String(REVIEWER_ID), "u"));
+  assert.doesNotMatch(serialized, new RegExp(String(ACTOR_ID), "u"));
 });
 
 test("a GitHub plan gate remains explicit and fail closed", () => {
@@ -260,23 +251,16 @@ test("environment administrator bypass is rejected", () => {
   assertFinding(report, "environment-administrator-bypass-enabled");
 });
 
-test("a missing environment reviewer fails closed", () => {
+test("a reviewer-gated environment violates direct owner dispatch", () => {
   const report = evaluateMutation((snapshot) => {
     snapshot.repositories.console.environments["workforce-os-production-build"]
-      .value.protection_rules[0].reviewers = [];
+      .value.protection_rules.push({
+        type: "required_reviewers",
+        prevent_self_review: true,
+        reviewers: [{ reviewer: { id: 2002 } }],
+      });
   });
-  assertFinding(report, "environment-reviewer-missing");
-});
-
-test("self review and the authenticated actor as reviewer are rejected", () => {
-  const report = evaluateMutation((snapshot) => {
-    const rule = snapshot.repositories.backend.environments["workforce-os-production"]
-      .value.protection_rules[0];
-    rule.prevent_self_review = false;
-    rule.reviewers[0].reviewer.id = ACTOR_ID;
-  });
-  assertFinding(report, "environment-self-review-enabled");
-  assertFinding(report, "environment-reviewer-not-independent");
+  assertFinding(report, "environment-review-policy-drift");
 });
 
 test("environment deployment must be limited to protected branches", () => {
