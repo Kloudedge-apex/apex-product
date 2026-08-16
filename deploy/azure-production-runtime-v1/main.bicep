@@ -18,6 +18,8 @@ param consoleSourceImage string = 'workforceosprodacr.azurecr.io/workforceos-fe@
 
 param publicApiOrigin string = 'https://api.workforceos.xyz'
 param publicConsoleOrigin string = 'https://workforceos.xyz'
+@description('Exact source-reviewed upstream pinned into the immutable bootstrap console image.')
+param consoleSourceApiUpstreamOrigin string = 'https://apex-gtm-api.ashysmoke-fd2f7a7f.eastus.azurecontainerapps.io'
 param clerkIssuer string = 'https://clerk.workforceos.xyz'
 param clerkJwksUrl string = 'https://clerk.workforceos.xyz/.well-known/jwks.json'
 
@@ -328,13 +330,13 @@ resource console 'Microsoft.App/containerApps@2024-03-01' = {
       ]
     }
     template: {
-      revisionSuffix: 'bootstrap-source-50f3a1c'
+      revisionSuffix: 'bootstrap-source-50f3a1c-pin'
       containers: [
         {
           name: consoleName
           image: consoleSourceImage
           env: [
-            { name: 'API_UPSTREAM_URL', value: 'https://${api.properties.configuration.ingress.fqdn}' }
+            { name: 'API_UPSTREAM_URL', value: consoleSourceApiUpstreamOrigin }
             { name: 'CLERK_AUTHORIZED_PARTIES', value: publicConsoleOrigin }
             { name: 'CLERK_ISSUER', value: clerkIssuer }
             { name: 'CLERK_JWKS_URL', value: clerkJwksUrl }

@@ -11,7 +11,9 @@ The API and worker begin on the immutable legacy runtime copied into
 `workforceosprodacr`. That gives the bootstrap controller a known source
 baseline before it creates the real writer-fence epoch and deploys the current
 backend candidate. The console begins on the immutable candidate that includes
-the guided-setup compatibility adapter.
+the guided-setup compatibility adapter. Its upstream remains the exact legacy
+API origin pinned into that immutable image; cutover to the isolated API needs
+a newly built console candidate with the new upstream pin.
 
 ## Secret boundary
 
