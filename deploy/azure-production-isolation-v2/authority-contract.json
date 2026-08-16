@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "status": "reviewed-source",
   "subscriptionId": "3171575e-f164-425c-9ee0-2fb10cf93884",
   "resourceGroup": "workforce-os-prod",
@@ -29,6 +29,12 @@
     "storageBlobPublicAccessEnabled": false,
     "storageSftpEnabled": false,
     "storageLocalUsersEnabled": false
+  },
+  "runtimeImagePull": {
+    "identityName": "workforce-os-v2-runtime-pull",
+    "acrRole": "AcrPull",
+    "githubFederationEnabled": false,
+    "deploymentStackExcludedPrincipal": false
   },
   "deploymentStack": {
     "name": "workforce-os-production-isolation-v2",
