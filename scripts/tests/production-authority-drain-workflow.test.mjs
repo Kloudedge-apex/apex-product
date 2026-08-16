@@ -9,12 +9,34 @@ import test from "node:test";
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(TEST_DIR, "../..");
 const SOURCE = resolve(REPO_ROOT, ".github/workflows/initialize-production-authority-drain.yml");
+const SEAL_SOURCE = resolve(REPO_ROOT, ".github/workflows/seal-production-runtime-authority.yml");
 const VERIFIER = resolve(REPO_ROOT, "scripts/verify-production-authority-drain-workflow.mjs");
 
-function verify(path = SOURCE) {
-  return spawnSync(process.execPath, [VERIFIER, path], {
+function verify(path = SOURCE, sealPath = SEAL_SOURCE) {
+  return spawnSync(process.execPath, [VERIFIER, path, sealPath], {
     encoding: "utf8",
     env: process.env,
+  });
+}
+
+function rejectedSeal(label, mutate) {
+  test(label, () => {
+    const root = mkdtempSync(resolve(tmpdir(), "workforce-runtime-seal-workflow-"));
+    const path = resolve(root, "workflow.yml");
+    try {
+      const source = readFileSync(SEAL_SOURCE, "utf8");
+      const changed = mutate(source);
+      assert.notEqual(changed, source, "fixture mutation must change source");
+      writeFileSync(path, changed, { mode: 0o600 });
+      const result = verify(SOURCE, path);
+      assert.notEqual(result.status, 0, result.stdout || result.stderr);
+      assert.match(
+        result.stderr,
+        /production authority-drain workflow verification failed/u,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 }
 
@@ -42,7 +64,7 @@ function rejected(label, mutate) {
 test("canonical protected authority-drain workflow verifies", () => {
   const result = verify();
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /Production authority-drain workflow verified/u);
+  assert.match(result.stdout, /Production authority-drain and runtime-seal workflows verified/u);
 });
 
 rejected("a push trigger is rejected", (source) =>
@@ -63,14 +85,14 @@ rejected("a writable checkout token is rejected", (source) =>
 rejected("an unprotected ref is rejected", (source) =>
   source.replace('"${REF_PROTECTED}" != "true"', '"${REF_PROTECTED}" != "false"'));
 
-rejected("runtime authority without final deny is rejected", (source) =>
+rejectedSeal("runtime authority without final deny is rejected", (source) =>
   source.replace("--deny-settings-mode denyWriteAndDelete", "--deny-settings-mode none"));
 
-rejected("runtime authority without the reviewed template is rejected", (source) =>
+rejectedSeal("runtime authority without the reviewed template is rejected", (source) =>
   source.replace(
     "--template-file deploy/azure-production-runtime-v1/main.bicep",
     "--template-file unreviewed.bicep",
   ));
 
-rejected("destructive runtime unmanage is rejected", (source) =>
+rejectedSeal("destructive runtime unmanage is rejected", (source) =>
   source.replace("--action-on-unmanage detachAll", "--action-on-unmanage deleteAll"));
