@@ -1,0 +1,87 @@
+name: Initialize Workforce OS production authority drain
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: "Type CREATE WORKFORCE OS AUTHORITY DRAIN CHECKPOINT"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: workforce-os-production-authority-drain
+  cancel-in-progress: false
+
+jobs:
+  initialize:
+    name: Initialize production authority drain checkpoint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: workforce-os-production
+
+    steps:
+      - name: Validate protected manual authority
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          REF_PROTECTED: ${{ github.ref_protected }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ||
+            "${GITHUB_REF}" != "refs/heads/master" ||
+            "${REF_PROTECTED}" != "true" ||
+            "${CONFIRMATION}" != "CREATE WORKFORCE OS AUTHORITY DRAIN CHECKPOINT" ||
+            ! "${WORKFLOW_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "ERROR: drain initialization requires protected master and exact confirmation" >&2
+            exit 1
+          fi
+          branch_json="$(gh api "repos/${GITHUB_REPOSITORY}/branches/master")"
+          jq -e --arg sha "${WORKFLOW_SHA}" \
+            '.protected == true and .commit.sha == $sha' >/dev/null <<<"${branch_json}"
+
+      - name: Checkout exact protected master
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Verify isolated authority source package
+        run: node scripts/verify-production-isolation-package.mjs
+
+      - name: Authenticate exact backend release identity
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5
+        with:
+          client-id: 2efd64b0-87c1-43a7-a064-30679ce8b764
+          tenant-id: d4b3813d-146f-4d03-96b8-d6e5862d58a2
+          subscription-id: 3171575e-f164-425c-9ee0-2fb10cf93884
+
+      - name: Create server-timed drain checkpoint
+        id: checkpoint
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          receipt="${RUNNER_TEMP}/workforce-authority-drain-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+          deploy/azure-production-isolation-v2/initialize-authority-drain-checkpoint.sh \
+            --apply \
+            --confirmation 'CREATE WORKFORCE OS AUTHORITY DRAIN CHECKPOINT' \
+            >"${receipt}"
+          jq -e '
+            .kind == "workforce-os-production-authority-drain-checkpoint-receipt-v1"
+            and .mode == "create"
+            and (.structuralEvidenceHash | test("^sha256:[0-9a-f]{64}$"))
+            and (.lastModified | fromdateiso8601 | type == "number")
+          ' >/dev/null "${receipt}"
+          printf 'receipt=%s\n' "${receipt}" >>"${GITHUB_OUTPUT}"
+
+      - name: Upload sanitized checkpoint receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: workforce-authority-drain-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.checkpoint.outputs.receipt }}
+          if-no-files-found: error
+          retention-days: 30
