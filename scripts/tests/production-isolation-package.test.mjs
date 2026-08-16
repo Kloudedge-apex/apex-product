@@ -95,3 +95,12 @@ rejected("a human deny exclusion is rejected", "authority-contract.json", (sourc
 
 rejected("a destructive unmanage policy is rejected", "README.md", (source) =>
   source.replace("`detachAll` on unmanage", "`deleteAll` on unmanage"));
+
+rejected("a wrong isolated control account is rejected", "initialize-control-blob.sh", (source) =>
+  source.replace('STORAGE_ACCOUNT="workforceosprodctrl"', 'STORAGE_ACCOUNT="ledgrstorage"'));
+
+rejected("control-blob overwrite authority is rejected", "initialize-control-blob.sh", (source) =>
+  source.replace("--overwrite false", "--overwrite true"));
+
+rejected("control-blob account-key auth is rejected", "initialize-control-blob.sh", (source) =>
+  source.replace("--auth-mode login", "--account-key unreviewed"));
