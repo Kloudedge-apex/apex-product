@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const SUBSCRIPTION_ID = "3171575e-f164-425c-9ee0-2fb10cf93884";
-const RESOURCE_GROUP = "Ledgr-prod";
+const RESOURCE_GROUP = "workforce-os-prod";
 const RESOURCE_GROUP_ID = `/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}`;
 const AUTHORITY_AUDIT_MANAGEMENT_GROUP_SCOPE =
   "/providers/Microsoft.Management/managementGroups/d4b3813d-146f-4d03-96b8-d6e5862d58a2";
@@ -19,6 +19,10 @@ const CREDENTIAL_DRAIN_CHECKPOINT_BLOB =
 const CREDENTIAL_DRAIN_CHECKPOINT_KIND =
   "workforce-os-production-authority-drain-checkpoint-v1";
 const MINIMUM_CREDENTIAL_DRAIN_AGE_SECONDS = 10 * 24 * 60 * 60;
+const DEPLOYMENT_STACK_NAME = "workforce-os-production-isolation-v2";
+const DEPLOYMENT_STACK_ID =
+  `/subscriptions/${SUBSCRIPTION_ID}/providers/Microsoft.Resources/deploymentStacks/${DEPLOYMENT_STACK_NAME}`;
+const ALL_PRINCIPALS_ID = "00000000-0000-0000-0000-000000000000";
 
 export const PRODUCTION_AUTHORITY_DRAIN_CONTRACT = Object.freeze({
   schemaVersion: 1,
@@ -38,30 +42,39 @@ export const PRODUCTION_AZURE_AUTHORITY_CONTRACT = Object.freeze({
   subscriptionId: SUBSCRIPTION_ID,
   resourceGroup: RESOURCE_GROUP,
   resourceGroupId: RESOURCE_GROUP_ID,
+  deploymentStack: {
+    name: DEPLOYMENT_STACK_NAME,
+    resourceId: DEPLOYMENT_STACK_ID,
+    finalDenyMode: "denyWriteAndDelete",
+    applyToChildScopes: true,
+    excludedIdentityKeys: [
+      "backendBuild", "consoleBuild", "backendRelease", "consoleRelease",
+    ],
+  },
   authorityAuditManagementGroupScopes: [AUTHORITY_AUDIT_MANAGEMENT_GROUP_SCOPE],
   identities: {
     backendBuild: {
-      name: "workforce-os-backend-build",
+      name: "workforce-os-v2-backend-build",
       subject: "repo:Kloudedge-apex/apex-product:environment:workforce-os-production-build",
     },
     consoleBuild: {
-      name: "workforce-os-console-build",
+      name: "workforce-os-v2-console-build",
       subject: "repo:Kloudedge-apex/Workforce-OS:environment:workforce-os-production-build",
     },
     backendRelease: {
-      name: "workforce-os-backend-release",
+      name: "workforce-os-v2-backend-release",
       subject: "repo:Kloudedge-apex/apex-product:environment:workforce-os-production",
     },
     consoleRelease: {
-      name: "workforce-os-console-release",
+      name: "workforce-os-v2-console-release",
       subject: "repo:Kloudedge-apex/Workforce-OS:environment:workforce-os-production",
     },
   },
   targets: {
     registry: {
-      resourceId: resourceId("Microsoft.ContainerRegistry", "registries", "ledgracr"),
+      resourceId: resourceId("Microsoft.ContainerRegistry", "registries", "workforceosprodacr"),
       expectedIdentityKeys: ["backendBuild", "consoleBuild", "backendRelease", "consoleRelease"],
-      expectedAssignmentScope: resourceId("Microsoft.ContainerRegistry", "registries", "ledgracr"),
+      expectedAssignmentScope: resourceId("Microsoft.ContainerRegistry", "registries", "workforceosprodacr"),
       role: "registryBuild",
     },
     api: {
@@ -83,11 +96,11 @@ export const PRODUCTION_AZURE_AUTHORITY_CONTRACT = Object.freeze({
       role: "containerAppRelease",
     },
     stateStorage: {
-      resourceId: `${resourceId("Microsoft.Storage", "storageAccounts", "ledgrstorage")}/blobServices/default/containers/${CONTROL_CONTAINER}`,
-      storageAccountResourceId: resourceId("Microsoft.Storage", "storageAccounts", "ledgrstorage"),
-      blobServiceResourceId: `${resourceId("Microsoft.Storage", "storageAccounts", "ledgrstorage")}/blobServices/default`,
+      resourceId: `${resourceId("Microsoft.Storage", "storageAccounts", "workforceosprodctrl")}/blobServices/default/containers/${CONTROL_CONTAINER}`,
+      storageAccountResourceId: resourceId("Microsoft.Storage", "storageAccounts", "workforceosprodctrl"),
+      blobServiceResourceId: `${resourceId("Microsoft.Storage", "storageAccounts", "workforceosprodctrl")}/blobServices/default`,
       expectedIdentityKeys: ["backendRelease", "consoleRelease"],
-      expectedAssignmentScope: resourceId("Microsoft.Storage", "storageAccounts", "ledgrstorage"),
+      expectedAssignmentScope: resourceId("Microsoft.Storage", "storageAccounts", "workforceosprodctrl"),
       role: "controlBlobOperator",
     },
   },
@@ -256,6 +269,14 @@ function grantsAny(role, operations) {
     operations.dataActions.some((operation) => roleGrants(role, operation, true));
 }
 
+function grantsManagement(role, operations) {
+  return operations.actions.some((operation) => roleGrants(role, operation, false));
+}
+
+function grantsData(role, operations) {
+  return operations.dataActions.some((operation) => roleGrants(role, operation, true));
+}
+
 function rolePermissionInventory(role) {
   const permissions = Array.isArray(role?.permissions) ? role.permissions : [];
   return {
@@ -368,7 +389,7 @@ function normalizeRoleDefinitions(roleDefinitions, findings) {
   return result;
 }
 
-function inspectAssignment({ assignment, target, roleDefinitions, allowedPrincipalIds, expectedScope, expectedRole, expectedCounts, findings }) {
+function inspectAssignment({ assignment, target, roleDefinitions, allowedPrincipalIds, expectedScope, expectedRole, expectedCounts, managementDeny, findings }) {
   const normalized = normalizeAssignment(assignment);
   if (!UUID.test(normalized.principalId) || !RESOURCE_ID.test(normalized.roleDefinitionId) ||
     !RESOURCE_ID.test(normalized.scope)) {
@@ -380,8 +401,14 @@ function inspectAssignment({ assignment, target, roleDefinitions, allowedPrincip
     findings.push(safeFinding("unresolved-role-definition", target, normalized));
     return;
   }
-  const mutatesTarget = grantsAny(role, targetOperations(target));
-  const delegatesAuthority = DELEGATION_OPERATIONS.some((operation) => roleGrants(role, operation));
+  const operations = targetOperations(target);
+  const managementDenied = managementDeny?.targets?.has(target) === true &&
+    !managementDeny.excludedPrincipalIds.has(normalized.principalId);
+  const mutatesManagement = grantsManagement(role, operations) && !managementDenied;
+  const mutatesData = grantsData(role, operations);
+  const mutatesTarget = mutatesManagement || mutatesData;
+  const delegatesAuthority = DELEGATION_OPERATIONS.some((operation) =>
+    roleGrants(role, operation)) && !managementDenied;
   if (!mutatesTarget && !delegatesAuthority) return;
   const conditionAllowed = target === "stateStorage" && exactBlobCondition(normalized);
   if (normalized.condition !== null && !conditionAllowed) {
@@ -418,7 +445,7 @@ function requiredPimScopes(contract, identities, managementGroupScopes) {
   ]);
 }
 
-function inspectPim(items, kind, contract, identities, managementGroupScopes, roleDefinitions, findings) {
+function inspectPim(items, kind, contract, identities, managementGroupScopes, roleDefinitions, managementDeny, findings) {
   const targetNames = [
     ...Object.keys(contract.targets),
     ...Object.keys(contract.identities).map((key) => `${key}Identity`),
@@ -437,8 +464,13 @@ function inspectPim(items, kind, contract, identities, managementGroupScopes, ro
     for (const target of targetNames) {
       const targetId = targetResource(contract, target, identities);
       if (!targetId || !appliesToTarget(assignment.scope, targetId, managementGroupScopes)) continue;
-      const relevant = grantsAny(role, targetOperations(target)) ||
-        DELEGATION_OPERATIONS.some((operation) => roleGrants(role, operation));
+      const operations = targetOperations(target);
+      const managementDenied = managementDeny?.targets?.has(target) === true &&
+        !managementDeny.excludedPrincipalIds.has(assignment.principalId);
+      const relevant = grantsData(role, operations) ||
+        (grantsManagement(role, operations) && !managementDenied) ||
+        (DELEGATION_OPERATIONS.some((operation) => roleGrants(role, operation)) &&
+          !managementDenied);
       if (!relevant) continue;
       findings.push(safeFinding(
         kind === "eligible" ? "eligible-pim-authority" : "scheduled-pim-authority",
@@ -447,6 +479,118 @@ function inspectPim(items, kind, contract, identities, managementGroupScopes, ro
       ));
     }
   }
+}
+
+function normalizedPrincipalIds(items) {
+  if (!Array.isArray(items)) return null;
+  const ids = items.map((item) => lower(typeof item === "string" ? item : item?.id));
+  return ids.every((id) => UUID.test(id)) ? stableUnique(ids) : null;
+}
+
+function normalizeDenyAssignment(value) {
+  const properties = value?.properties ?? value;
+  return {
+    id: lower(value?.id),
+    scope: lower(properties?.scope),
+    doNotApplyToChildScopes: properties?.doNotApplyToChildScopes,
+    isSystemProtected: properties?.isSystemProtected,
+    principalIds: normalizedPrincipalIds(properties?.principalIds ?? properties?.principals),
+    excludedPrincipalIds: normalizedPrincipalIds(
+      properties?.excludedPrincipalIds ?? properties?.excludePrincipals,
+    ),
+    permissions: Array.isArray(properties?.permissions)
+      ? properties.permissions.map((permission) => ({
+        actions: stableUnique(permission?.actions ?? []),
+        notActions: stableUnique(permission?.notActions ?? []),
+        dataActions: stableUnique(permission?.dataActions ?? []),
+        notDataActions: stableUnique(permission?.notDataActions ?? []),
+      }))
+      : null,
+  };
+}
+
+function denyBlocksOperation(assignment, operation) {
+  return Array.isArray(assignment.permissions) && assignment.permissions.some((permission) =>
+    permissionGrants(permission, operation, false));
+}
+
+function denyAssignmentCoversTarget(assignment, targetId, expectedExcludedPrincipalIds, operations) {
+  if (assignment.isSystemProtected !== true || assignment.principalIds === null ||
+    !assignment.principalIds.includes(ALL_PRINCIPALS_ID) ||
+    canonicalJson(assignment.excludedPrincipalIds) !== canonicalJson(expectedExcludedPrincipalIds) ||
+    !RESOURCE_ID.test(assignment.scope)) return false;
+  const exactScope = assignment.scope === lower(targetId);
+  const inheritedScope = lower(targetId).startsWith(`${assignment.scope}/`) &&
+    assignment.doNotApplyToChildScopes === false;
+  if (!exactScope && !inheritedScope) return false;
+  return [...operations.actions, ...DELEGATION_OPERATIONS]
+    .every((operation) => denyBlocksOperation(assignment, operation));
+}
+
+function validateDeploymentStack(snapshot, contract, identities, findings) {
+  const empty = { targets: new Set(), excludedPrincipalIds: new Set() };
+  const stack = snapshot.deploymentStack;
+  const expectedExcludedPrincipalIds = contract.deploymentStack.excludedIdentityKeys
+    .map((key) => identities[key]?.principalId)
+    .filter(Boolean)
+    .sort();
+  if (expectedExcludedPrincipalIds.length !== contract.deploymentStack.excludedIdentityKeys.length) {
+    findings.push({ code: "deployment-stack-identity-set-incomplete", target: "azure" });
+    return empty;
+  }
+  const denySettings = stack?.denySettings;
+  const actionOnUnmanage = stack?.actionOnUnmanage;
+  const exactStack = stack?.exists === true &&
+    lower(stack.resourceId) === lower(contract.deploymentStack.resourceId) &&
+    lower(stack.provisioningState) === "succeeded" &&
+    lower(denySettings?.mode) === lower(contract.deploymentStack.finalDenyMode) &&
+    denySettings?.applyToChildScopes === true &&
+    canonicalJson(stableUnique(denySettings?.excludedActions ?? [])) === "[]" &&
+    canonicalJson(normalizedPrincipalIds(denySettings?.excludedPrincipals)) ===
+      canonicalJson(expectedExcludedPrincipalIds) &&
+    actionOnUnmanage?.resources === "detach" &&
+    actionOnUnmanage?.resourceGroups === "detach" &&
+    actionOnUnmanage?.managementGroups === "detach" &&
+    actionOnUnmanage?.resourcesWithoutDeleteSupport === "fail";
+  if (!exactStack) {
+    findings.push({ code: "deployment-stack-final-deny-invalid", target: "azure" });
+    return empty;
+  }
+  const stackResources = Array.isArray(stack.resources) ? stack.resources : [];
+  const groupAnchor = stackResources.find((resource) =>
+    lower(resource?.id) === lower(contract.resourceGroupId));
+  if (lower(groupAnchor?.status) !== "managed" ||
+    lower(groupAnchor?.denyStatus) !== lower(contract.deploymentStack.finalDenyMode)) {
+    findings.push({ code: "deployment-stack-resource-group-deny-unverified", target: "azure" });
+    return empty;
+  }
+  const denyAssignments = Array.isArray(stack.denyAssignments)
+    ? stack.denyAssignments.map(normalizeDenyAssignment)
+    : [];
+  if (denyAssignments.length === 0) {
+    findings.push({ code: "deployment-stack-provider-deny-missing", target: "azure" });
+    return empty;
+  }
+  const targets = new Set();
+  const targetNames = [
+    ...Object.keys(contract.targets),
+    ...Object.keys(contract.identities).map((key) => `${key}Identity`),
+  ];
+  for (const target of targetNames) {
+    const targetId = targetResource(contract, target, identities);
+    const covered = denyAssignments.some((assignment) => denyAssignmentCoversTarget(
+      assignment,
+      targetId,
+      expectedExcludedPrincipalIds,
+      targetOperations(target),
+    ));
+    if (!covered) {
+      findings.push({ code: "deployment-stack-provider-deny-coverage-missing", target });
+    } else {
+      targets.add(target);
+    }
+  }
+  return { targets, excludedPrincipalIds: new Set(expectedExcludedPrincipalIds) };
 }
 
 function validateIdentity(key, identity, expected, findings) {
@@ -646,6 +790,7 @@ function structuralEvidenceHash(snapshot) {
   const evidence = stableValue({
     schemaVersion: snapshot.schemaVersion,
     subscriptionId: snapshot.subscriptionId,
+    deploymentStack: snapshot.deploymentStack ?? null,
     resources: snapshot.resources ?? null,
     identities,
     activeAssignmentsByScope,
@@ -745,6 +890,7 @@ export function evaluateProductionAzureMutationAuthority(snapshot) {
     const identity = validateIdentity(key, snapshot.identities?.[key], expected, findings);
     if (identity) identities[key] = identity;
   }
+  const managementDeny = validateDeploymentStack(snapshot, contract, identities, findings);
   const roleDefinitions = normalizeRoleDefinitions(snapshot.roleDefinitions, findings);
   const activeByScope = snapshot.activeAssignmentsByScope ?? {};
   for (const [target, expected] of Object.entries(contract.targets)) {
@@ -766,6 +912,7 @@ export function evaluateProductionAzureMutationAuthority(snapshot) {
         expectedScope: expected.expectedAssignmentScope,
         expectedRole: EXPECTED_ROLES[expected.role],
         expectedCounts,
+        managementDeny,
         findings,
       });
     }
@@ -793,6 +940,7 @@ export function evaluateProductionAzureMutationAuthority(snapshot) {
         expectedScope: "",
         expectedRole: { actions: [], dataActions: [] },
         expectedCounts: new Map(),
+        managementDeny,
         findings,
       });
     }
@@ -816,9 +964,9 @@ export function evaluateProductionAzureMutationAuthority(snapshot) {
     }
   }
   inspectPim(snapshot.pim?.eligible, "eligible", contract, identities,
-    managementGroupScopes, roleDefinitions, findings);
+    managementGroupScopes, roleDefinitions, managementDeny, findings);
   inspectPim(snapshot.pim?.active, "active", contract, identities,
-    managementGroupScopes, roleDefinitions, findings);
+    managementGroupScopes, roleDefinitions, managementDeny, findings);
 
   const structuralFindings = [...new Map(findings.map((finding) =>
     [canonicalJson(finding), finding])).values()]
@@ -897,11 +1045,19 @@ export function assertReadOnlyAzureAuditCommand(args) {
     ["storage", "account", "or-policy", "list"],
     ["storage", "blob", "show"],
     ["resource", "show"],
+    ["stack", "sub", "show"],
     ["role", "assignment", "list"],
     ["role", "definition", "list"],
   ];
   if (allowedPrefixes.some((prefix) =>
     prefix.every((part, index) => args[index] === part))) return true;
+  if (args[0] === "rest" && args[1] === "--method" && args[2] === "get") {
+    const urlIndex = args.indexOf("--url");
+    const expectedUrl = `https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}` +
+      "/providers/Microsoft.Authorization/denyAssignments?api-version=2022-04-01";
+    if (urlIndex >= 0 && args[urlIndex + 1] === expectedUrl) return true;
+    fail("Azure REST command is not the reviewed deny-assignment query");
+  }
   if (args[0] !== "rest" || args[1] !== "--method" || args[2] !== "post") {
     fail("Azure command is not in the read-only audit allowlist");
   }
@@ -1055,6 +1211,15 @@ export function collectProductionAzureMutationAuthoritySnapshot() {
   ], issues, "azure-account-query-failed");
   if (lower(account?.id) !== SUBSCRIPTION_ID) issues.push("wrong-azure-subscription");
   const contract = PRODUCTION_AZURE_AUTHORITY_CONTRACT;
+  const stack = azJson([
+    "stack", "sub", "show", "--name", DEPLOYMENT_STACK_NAME,
+    "--subscription", SUBSCRIPTION_ID,
+  ], issues, "deployment-stack-query-failed");
+  const denyAssignmentsResponse = azJson([
+    "rest", "--method", "get", "--url",
+    `https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}` +
+      "/providers/Microsoft.Authorization/denyAssignments?api-version=2022-04-01",
+  ], issues, "deployment-stack-deny-assignment-query-failed");
   const identities = {};
   for (const [key, expected] of Object.entries(contract.identities)) {
     const identity = azJson([
@@ -1083,11 +1248,11 @@ export function collectProductionAzureMutationAuthoritySnapshot() {
   }
 
   const registry = azJson([
-    "acr", "show", "--name", "ledgracr", "--resource-group", RESOURCE_GROUP,
+    "acr", "show", "--name", "workforceosprodacr", "--resource-group", RESOURCE_GROUP,
     "--subscription", SUBSCRIPTION_ID,
   ], issues, "registry-query-failed");
   const storage = azJson([
-    "storage", "account", "show", "--name", "ledgrstorage", "--resource-group", RESOURCE_GROUP,
+    "storage", "account", "show", "--name", "workforceosprodctrl", "--resource-group", RESOURCE_GROUP,
     "--subscription", SUBSCRIPTION_ID,
   ], issues, "storage-query-failed");
   const resources = {};
@@ -1115,28 +1280,28 @@ export function collectProductionAzureMutationAuthoritySnapshot() {
   };
 
   const registryTokens = azJson([
-    "acr", "token", "list", "--registry", "ledgracr", "--subscription", SUBSCRIPTION_ID,
+    "acr", "token", "list", "--registry", "workforceosprodacr", "--subscription", SUBSCRIPTION_ID,
   ], issues, "registry-token-query-failed");
   const registryTasks = azJson([
-    "acr", "task", "list", "--registry", "ledgracr", "--subscription", SUBSCRIPTION_ID,
+    "acr", "task", "list", "--registry", "workforceosprodacr", "--subscription", SUBSCRIPTION_ID,
   ], issues, "registry-task-query-failed");
   const localUsers = azJson([
-    "storage", "account", "local-user", "list", "--account-name", "ledgrstorage",
+    "storage", "account", "local-user", "list", "--account-name", "workforceosprodctrl",
     "--resource-group", RESOURCE_GROUP, "--subscription", SUBSCRIPTION_ID,
   ], issues, "storage-local-user-query-failed");
   const managementPolicy = azJsonOptionalNotFound([
     "storage", "account", "management-policy", "show",
-    "--account-name", "ledgrstorage", "--resource-group", RESOURCE_GROUP,
+    "--account-name", "workforceosprodctrl", "--resource-group", RESOURCE_GROUP,
     "--subscription", SUBSCRIPTION_ID,
   ], issues, "storage-management-policy-query-failed", ["ManagementPolicyNotFound"]);
   const objectReplicationPolicies = azJson([
     "storage", "account", "or-policy", "list",
-    "--account-name", "ledgrstorage", "--resource-group", RESOURCE_GROUP,
+    "--account-name", "workforceosprodctrl", "--resource-group", RESOURCE_GROUP,
     "--subscription", SUBSCRIPTION_ID,
   ], issues, "storage-object-replication-query-failed");
   const drainCheckpoint = azJsonOptionalNotFound([
     "storage", "blob", "show", "--auth-mode", "login",
-    "--account-name", "ledgrstorage", "--container-name", CONTROL_CONTAINER,
+    "--account-name", "workforceosprodctrl", "--container-name", CONTROL_CONTAINER,
     "--name", CREDENTIAL_DRAIN_CHECKPOINT_BLOB, "--subscription", SUBSCRIPTION_ID,
   ], issues, "credential-drain-checkpoint-query-failed", ["BlobNotFound"]);
 
@@ -1200,6 +1365,23 @@ export function collectProductionAzureMutationAuthoritySnapshot() {
     schemaVersion: 1,
     subscriptionId: SUBSCRIPTION_ID,
     observedAt: new Date(Math.floor(Date.now() / 1000) * 1000).toISOString().replace(".000Z", "Z"),
+    deploymentStack: {
+      exists: Boolean(stack),
+      resourceId: lower(stack?.id ?? DEPLOYMENT_STACK_ID),
+      provisioningState: stack?.provisioningState ?? null,
+      denySettings: stack?.denySettings ?? null,
+      actionOnUnmanage: stack?.actionOnUnmanage ?? null,
+      resources: Array.isArray(stack?.resources)
+        ? stack.resources.map((resource) => ({
+          id: lower(resource?.id),
+          status: resource?.status ?? null,
+          denyStatus: resource?.denyStatus ?? null,
+        }))
+        : null,
+      denyAssignments: Array.isArray(denyAssignmentsResponse?.value)
+        ? denyAssignmentsResponse.value.map(normalizeDenyAssignment)
+        : null,
+    },
     resources,
     identities,
     activeAssignmentsByScope,

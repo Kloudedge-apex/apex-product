@@ -10,19 +10,19 @@ verified before acting.
 
 | Thing                 | Value                                                                                                                                                           |
 | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Resource group        | `Ledgr-prod`                                                                                                                                                    |
+| Resource group        | `workforce-os-prod`                                                                                                                                                    |
 | API Container App     | `apex-gtm-api`                                                                                                                                                  |
 | Worker Container App  | `apex-gtm-worker`                                                                                                                                               |
-| ACR / repo            | `ledgracr` / `apex-api`                                                                                                                                         |
+| ACR / repo            | `workforceosprodacr` / `apex-api`                                                                                                                                         |
 | BullMQ queues         | `graph-runs` (pipeline runs), `outreach-send` (post-approval delivery)                                                                                          |
 | Tenant-zero org id    | `cmpe63k370000ap01vsiehbj2`                                                                                                                                     |
 | Allowlisted send orgs | `OUTREACH_LIVE_FOR_ORGS` env on `apex-gtm-worker` (currently tenant-zero only)                                                                                  |
-| Prod DB access        | `ledgracr`/pgclient ACI workflow (see memory: prod-schema-snapshot-workflow). All writes go through the DB-safety workflow: dry-run + diff + explicit approval. |
+| Prod DB access        | `workforceosprodacr`/pgclient ACI workflow (see memory: prod-schema-snapshot-workflow). All writes go through the DB-safety workflow: dry-run + diff + explicit approval. |
 
 Resolve the API ingress FQDN whenever a command below needs it:
 
 ```bash
-API_FQDN=$(az containerapp show -n apex-gtm-api -g Ledgr-prod \
+API_FQDN=$(az containerapp show -n apex-gtm-api -g workforce-os-prod \
   --query properties.configuration.ingress.fqdn -o tsv)
 ```
 
@@ -373,7 +373,7 @@ published `release/go-live-*` branch. Mutable worktree files are neither
 executed nor uploaded, and admission deliberately avoids `git status` because
 repository-local fsmonitor configuration can execute code. It must resolve the
 full-SHA ACR tag once,
-pull `ledgracr.azurecr.io/apex-api@sha256:...` as Linux/amd64, and pass
+pull `workforceosprodacr.azurecr.io/apex-api@sha256:...` as Linux/amd64, and pass
 `scripts/verify-registry-api-image.sh` before either Container App changes.
 The checked-out script is only a bootstrap: it creates a mode-0700 `git
 archive` of the exact candidate commit, then runs the controller, every release
@@ -486,7 +486,7 @@ The bootstrap request must copy both
 `bootstrapEvidence.azureMutationAuthorityStructuralEvidenceHash` and
 `bootstrapEvidence.azureMutationAuthorityEvidenceHash` from that same `GO`
 report. The controller admits only the fixed production subscription,
-`Ledgr-prod/ledgrstorage`, container `production-control`, and controller-state
+`workforce-os-prod/workforceosprodctrl`, container `production-control`, and controller-state
 blob. On every non-audit action it reads the exact drain-checkpoint blob with
 Entra login, revalidates its shape, structural hash, unlocked state, zero-byte
 content, and minimum age, then includes that live checkpoint evidence in the
@@ -650,9 +650,9 @@ cosmetic configuration issue.
 Before enabling a live organization, confirm both apps carry the same value:
 
 ```bash
-az containerapp show -n apex-gtm-api -g Ledgr-prod \
+az containerapp show -n apex-gtm-api -g workforce-os-prod \
   --query "properties.template.containers[0].env[?name=='API_PUBLIC_URL'].value | [0]" -o tsv
-az containerapp show -n apex-gtm-worker -g Ledgr-prod \
+az containerapp show -n apex-gtm-worker -g workforce-os-prod \
   --query "properties.template.containers[0].env[?name=='API_PUBLIC_URL'].value | [0]" -o tsv
 ```
 
@@ -697,9 +697,9 @@ NULL, dashboards never count it as delivered).
 verbatim value to recover):
 
 ```bash
-CURRENT_API_ALLOWLIST="$(az containerapp show -n apex-gtm-api -g Ledgr-prod \
+CURRENT_API_ALLOWLIST="$(az containerapp show -n apex-gtm-api -g workforce-os-prod \
   --query "properties.template.containers[0].env[?name=='OUTREACH_LIVE_FOR_ORGS'].value | [0]" -o tsv)"
-CURRENT_WORKER_ALLOWLIST="$(az containerapp show -n apex-gtm-worker -g Ledgr-prod \
+CURRENT_WORKER_ALLOWLIST="$(az containerapp show -n apex-gtm-worker -g workforce-os-prod \
   --query "properties.template.containers[0].env[?name=='OUTREACH_LIVE_FOR_ORGS'].value | [0]" -o tsv)"
 test "$CURRENT_API_ALLOWLIST" = "$CURRENT_WORKER_ALLOWLIST"
 test -n "$CURRENT_API_ALLOWLIST"
@@ -711,8 +711,8 @@ Stop if parity fails. Do not guess which value is authoritative.
 evaluates it for honesty/display — keep them in sync):
 
 ```bash
-az containerapp update -n apex-gtm-worker -g Ledgr-prod --remove-env-vars OUTREACH_LIVE_FOR_ORGS
-az containerapp update -n apex-gtm-api    -g Ledgr-prod --remove-env-vars OUTREACH_LIVE_FOR_ORGS
+az containerapp update -n apex-gtm-worker -g workforce-os-prod --remove-env-vars OUTREACH_LIVE_FOR_ORGS
+az containerapp update -n apex-gtm-api    -g workforce-os-prod --remove-env-vars OUTREACH_LIVE_FOR_ORGS
 ```
 
 **Expected effect:**
@@ -727,14 +727,14 @@ az containerapp update -n apex-gtm-api    -g Ledgr-prod --remove-env-vars OUTREA
 **Recovery:**
 
 ```bash
-az containerapp update -n apex-gtm-api -g Ledgr-prod \
+az containerapp update -n apex-gtm-api -g workforce-os-prod \
   --set-env-vars "OUTREACH_LIVE_FOR_ORGS=$CURRENT_API_ALLOWLIST"
-az containerapp update -n apex-gtm-worker -g Ledgr-prod \
+az containerapp update -n apex-gtm-worker -g workforce-os-prod \
   --set-env-vars "OUTREACH_LIVE_FOR_ORGS=$CURRENT_WORKER_ALLOWLIST"
 
-RESTORED_API_ALLOWLIST="$(az containerapp show -n apex-gtm-api -g Ledgr-prod \
+RESTORED_API_ALLOWLIST="$(az containerapp show -n apex-gtm-api -g workforce-os-prod \
   --query "properties.template.containers[0].env[?name=='OUTREACH_LIVE_FOR_ORGS'].value | [0]" -o tsv)"
-RESTORED_WORKER_ALLOWLIST="$(az containerapp show -n apex-gtm-worker -g Ledgr-prod \
+RESTORED_WORKER_ALLOWLIST="$(az containerapp show -n apex-gtm-worker -g workforce-os-prod \
   --query "properties.template.containers[0].env[?name=='OUTREACH_LIVE_FOR_ORGS'].value | [0]" -o tsv)"
 test "$RESTORED_API_ALLOWLIST" = "$CURRENT_API_ALLOWLIST"
 test "$RESTORED_WORKER_ALLOWLIST" = "$CURRENT_WORKER_ALLOWLIST"
@@ -755,7 +755,7 @@ enables; anything else disables. `onModuleInit` then returns before attaching
 the BullMQ consumer **and before scheduling the reconcile sweep**.
 
 ```bash
-az containerapp update -n apex-gtm-worker -g Ledgr-prod \
+az containerapp update -n apex-gtm-worker -g workforce-os-prod \
   --set-env-vars OUTREACH_WORKER_ENABLED=false
 ```
 
@@ -775,7 +775,7 @@ az containerapp update -n apex-gtm-worker -g Ledgr-prod \
 **Recovery:**
 
 ```bash
-az containerapp update -n apex-gtm-worker -g Ledgr-prod \
+az containerapp update -n apex-gtm-worker -g workforce-os-prod \
   --set-env-vars OUTREACH_WORKER_ENABLED=true
 ```
 
@@ -790,7 +790,7 @@ a large paused backlog may take more than one UTC day to drain by design.
 and min=0 with scale rules can scale back up. The deterministic zero is:
 
 ```bash
-az containerapp stop -n apex-gtm-worker -g Ledgr-prod
+az containerapp stop -n apex-gtm-worker -g workforce-os-prod
 ```
 
 **Expected effect:**
@@ -809,8 +809,8 @@ az containerapp stop -n apex-gtm-worker -g Ledgr-prod
 **Recovery:**
 
 ```bash
-az containerapp start -n apex-gtm-worker -g Ledgr-prod
-az containerapp logs show -n apex-gtm-worker -g Ledgr-prod --tail 50   # watch boot: env validator, worker enable lines
+az containerapp start -n apex-gtm-worker -g workforce-os-prod
+az containerapp logs show -n apex-gtm-worker -g workforce-os-prod --tail 50   # watch boot: env validator, worker enable lines
 curl -fsS "https://${API_FQDN}/api/health/worker" | jq .               # expect 200 + workerCount ≥ 1 per queue
 ```
 
@@ -1057,7 +1057,7 @@ set (GCP project `supple-design-494220-v3`, topic `gmail-inbound`).
 Log lines to check (worker logs):
 
 ```bash
-az containerapp logs show -n apex-gtm-worker -g Ledgr-prod --tail 200 \
+az containerapp logs show -n apex-gtm-worker -g workforce-os-prod --tail 200 \
   | grep -E "gmail.watch|gmail.users.watch"
 ```
 
@@ -1123,7 +1123,7 @@ for this org, and GL8b will cooldown-block it for 14 days regardless.
    and `curl -fsS "https://${API_FQDN}/api/health/ready"` succeeds.
 3. Allowlist contains the org:
    ```bash
-   az containerapp show -n apex-gtm-worker -g Ledgr-prod \
+   az containerapp show -n apex-gtm-worker -g workforce-os-prod \
      --query "properties.template.containers[0].env[?name=='OUTREACH_LIVE_FOR_ORGS'].value | [0]" -o tsv
    ```
 4. Org has `physicalAddress` set (live email fail-closes without it):
@@ -1177,7 +1177,7 @@ will retry within ~15 min; don't re-approve.
 **Step 4 — watch it flip APPROVED → SENDING → SENT**
 
 ```bash
-az containerapp logs show -n apex-gtm-worker -g Ledgr-prod --follow \
+az containerapp logs show -n apex-gtm-worker -g workforce-os-prod --follow \
   | grep -iE "artifact|outreach"
 ```
 

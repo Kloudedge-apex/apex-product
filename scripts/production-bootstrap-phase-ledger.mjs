@@ -117,8 +117,8 @@ const ATTEMPT_PATTERN = /^[0-9a-f]{32}$/;
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 const PRINCIPAL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}$/;
 const REASON_PATTERN = /^[A-Z0-9][A-Z0-9_-]{0,63}$/;
-const API_IMAGE_PATTERN = /^ledgracr\.azurecr\.io\/apex-api@sha256:[0-9a-f]{64}$/;
-const CONSOLE_IMAGE_PATTERN = /^ledgracr\.azurecr\.io\/workforceos-fe@sha256:[0-9a-f]{64}$/;
+const API_IMAGE_PATTERN = /^workforceosprodacr\.azurecr\.io\/apex-api@sha256:[0-9a-f]{64}$/;
+const CONSOLE_IMAGE_PATTERN = /^workforceosprodacr\.azurecr\.io\/workforceos-fe@sha256:[0-9a-f]{64}$/;
 const API_REVISION_PATTERN = /^apex-gtm-api--[a-z0-9][a-z0-9-]{0,62}$/;
 const WORKER_REVISION_PATTERN = /^apex-gtm-worker--[a-z0-9][a-z0-9-]{0,62}$/;
 const CONSOLE_REVISION_PATTERN = /^nikxius-web--[a-z0-9][a-z0-9-]{0,62}$/;
@@ -791,7 +791,7 @@ function validateTargetBackendArtifact(artifact, revisionPattern, expectedCommit
   assertString(artifact.buildRunId, BUILD_RUN_PATTERN, `${label}.buildRunId`);
   assertString(artifact.buildEvidenceHash, SHA256_PATTERN, `${label}.buildEvidenceHash`);
   assertString(artifact.rehearsalEvidenceHash, SHA256_PATTERN, `${label}.rehearsalEvidenceHash`);
-  if (artifact.image !== `ledgracr.azurecr.io/apex-api@${artifact.manifestDigest}` ||
+  if (artifact.image !== `workforceosprodacr.azurecr.io/apex-api@${artifact.manifestDigest}` ||
     artifact.ociRevision !== expectedCommit || artifact.platform !== "linux/amd64") {
     fail(`${label} does not match its immutable candidate provenance`);
   }
@@ -811,7 +811,7 @@ function validateTargetConsoleArtifact(artifact, expectedCommit) {
   ]) {
     assertString(artifact[key], SHA256_PATTERN, `${label}.${key}`);
   }
-  if (artifact.image !== `ledgracr.azurecr.io/workforceos-fe@${artifact.manifestDigest}` ||
+  if (artifact.image !== `workforceosprodacr.azurecr.io/workforceos-fe@${artifact.manifestDigest}` ||
     artifact.ociRevision !== expectedCommit || artifact.platform !== "linux/amd64") {
     fail(`${label} does not match its immutable candidate provenance`);
   }
@@ -1049,19 +1049,19 @@ function validateSourceBaseline(source, binding) {
     label: "entry receipt sourceRollbackBaseline.api",
     imagePattern: API_IMAGE_PATTERN,
     revisionPattern: API_REVISION_PATTERN,
-    repository: "ledgracr.azurecr.io/apex-api",
+    repository: "workforceosprodacr.azurecr.io/apex-api",
   });
   validateSourceApp(source.worker, {
     label: "entry receipt sourceRollbackBaseline.worker",
     imagePattern: API_IMAGE_PATTERN,
     revisionPattern: WORKER_REVISION_PATTERN,
-    repository: "ledgracr.azurecr.io/apex-api",
+    repository: "workforceosprodacr.azurecr.io/apex-api",
   });
   validateSourceApp(source.console, {
     label: "entry receipt sourceRollbackBaseline.console",
     imagePattern: CONSOLE_IMAGE_PATTERN,
     revisionPattern: CONSOLE_REVISION_PATTERN,
-    repository: "ledgracr.azurecr.io/workforceos-fe",
+    repository: "workforceosprodacr.azurecr.io/workforceos-fe",
   });
   for (const key of ["image", "manifestDigest", "platformDigest", "ociRevision"]) {
     if (source.api[key] !== source.worker[key]) {

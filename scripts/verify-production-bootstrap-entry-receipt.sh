@@ -205,8 +205,8 @@ if ! jq -e \
     def principal: type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}$");
     def nonnegative: type == "number" and (floor == .) and . >= 0 and . <= 9007199254740991;
     def positive: nonnegative and . >= 1;
-    def backend_image: type == "string" and test("^ledgracr\\.azurecr\\.io/apex-api@sha256:[0-9a-f]{64}$");
-    def console_image: type == "string" and test("^ledgracr\\.azurecr\\.io/workforceos-fe@sha256:[0-9a-f]{64}$");
+    def backend_image: type == "string" and test("^workforceosprodacr\\.azurecr\\.io/apex-api@sha256:[0-9a-f]{64}$");
+    def console_image: type == "string" and test("^workforceosprodacr\\.azurecr\\.io/workforceos-fe@sha256:[0-9a-f]{64}$");
     def build_id: type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$");
     def target_backend($revision_pattern):
       exact_keys([
@@ -217,7 +217,7 @@ if ! jq -e \
       and (.image | backend_image)
       and (.manifestDigest | sha256)
       and (.platformDigest | sha256)
-      and (.image == ("ledgracr.azurecr.io/apex-api@" + .manifestDigest))
+      and (.image == ("workforceosprodacr.azurecr.io/apex-api@" + .manifestDigest))
       and (.ociRevision | git_sha)
       and .platform == "linux/amd64"
       and (.plannedRevision | type == "string" and test($revision_pattern))
@@ -233,7 +233,7 @@ if ! jq -e \
       and (.image | console_image)
       and (.manifestDigest | sha256)
       and (.platformDigest | sha256)
-      and (.image == ("ledgracr.azurecr.io/workforceos-fe@" + .manifestDigest))
+      and (.image == ("workforceosprodacr.azurecr.io/workforceos-fe@" + .manifestDigest))
       and (.ociRevision | git_sha)
       and .platform == "linux/amd64"
       and (.plannedRevision | type == "string" and test("^nikxius-web--[a-z0-9][a-z0-9-]{0,62}$"))
@@ -433,9 +433,9 @@ if ! jq -e \
       and (.operationalSmokeEvidence.dashboardPolicy |
         valid_operational_smoke("production-dashboard-policy-smoke"; "console-dashboard-policy"))
       and (.privateRestoreBundleHash | sha256)
-      and (.api | source_app("^ledgracr\\.azurecr\\.io/apex-api@sha256:[0-9a-f]{64}$"; "^apex-gtm-api--[a-z0-9][a-z0-9-]{0,62}$"; "ledgracr.azurecr.io/apex-api"))
-      and (.worker | source_app("^ledgracr\\.azurecr\\.io/apex-api@sha256:[0-9a-f]{64}$"; "^apex-gtm-worker--[a-z0-9][a-z0-9-]{0,62}$"; "ledgracr.azurecr.io/apex-api"))
-      and (.console | source_app("^ledgracr\\.azurecr\\.io/workforceos-fe@sha256:[0-9a-f]{64}$"; "^nikxius-web--[a-z0-9][a-z0-9-]{0,62}$"; "ledgracr.azurecr.io/workforceos-fe"))
+      and (.api | source_app("^workforceosprodacr\\.azurecr\\.io/apex-api@sha256:[0-9a-f]{64}$"; "^apex-gtm-api--[a-z0-9][a-z0-9-]{0,62}$"; "workforceosprodacr.azurecr.io/apex-api"))
+      and (.worker | source_app("^workforceosprodacr\\.azurecr\\.io/apex-api@sha256:[0-9a-f]{64}$"; "^apex-gtm-worker--[a-z0-9][a-z0-9-]{0,62}$"; "workforceosprodacr.azurecr.io/apex-api"))
+      and (.console | source_app("^workforceosprodacr\\.azurecr\\.io/workforceos-fe@sha256:[0-9a-f]{64}$"; "^nikxius-web--[a-z0-9][a-z0-9-]{0,62}$"; "workforceosprodacr.azurecr.io/workforceos-fe"))
       and .api.image == .worker.image
       and .api.manifestDigest == .worker.manifestDigest
       and .api.platformDigest == .worker.platformDigest

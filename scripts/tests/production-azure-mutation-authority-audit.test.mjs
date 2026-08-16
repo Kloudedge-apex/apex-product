@@ -98,6 +98,48 @@ function requiredPimScopes() {
   ])].sort();
 }
 
+function deploymentStackSnapshot() {
+  const excludedPrincipals = Object.values(PRINCIPALS)
+    .filter((principalId) => principalId !== PRINCIPALS.unexpected)
+    .sort();
+  return {
+    exists: true,
+    resourceId: CONTRACT.deploymentStack.resourceId,
+    provisioningState: "succeeded",
+    denySettings: {
+      mode: "denyWriteAndDelete",
+      applyToChildScopes: true,
+      excludedActions: [],
+      excludedPrincipals,
+    },
+    actionOnUnmanage: {
+      resources: "detach",
+      resourceGroups: "detach",
+      managementGroups: "detach",
+      resourcesWithoutDeleteSupport: "fail",
+    },
+    resources: [{
+      id: CONTRACT.resourceGroupId,
+      status: "managed",
+      denyStatus: "denyWriteAndDelete",
+    }],
+    denyAssignments: [{
+      id: `${CONTRACT.resourceGroupId}/providers/Microsoft.Authorization/denyAssignments/88888888-8888-4888-8888-888888888888`,
+      scope: CONTRACT.resourceGroupId,
+      doNotApplyToChildScopes: false,
+      isSystemProtected: true,
+      principalIds: ["00000000-0000-0000-0000-000000000000"],
+      excludedPrincipalIds: excludedPrincipals,
+      permissions: [{
+        actions: ["*"],
+        notActions: ["*/read"],
+        dataActions: [],
+        notDataActions: [],
+      }],
+    }],
+  };
+}
+
 function checkpointStructuralSnapshot(snapshot, lastModified = "2026-08-01T05:00:00Z") {
   delete snapshot.credentialDrainCheckpoint;
   const preDrain = evaluateProductionAzureMutationAuthority(snapshot);
@@ -153,6 +195,7 @@ function exclusiveSnapshot() {
     schemaVersion: 1,
     subscriptionId: CONTRACT.subscriptionId,
     observedAt: "2026-08-15T05:00:00Z",
+    deploymentStack: deploymentStackSnapshot(),
     resources,
     identities,
     activeAssignmentsByScope: {
@@ -323,7 +366,7 @@ test("an additional federation on an expected identity fails closed", () => {
   assert(codes(report).has("unexpected-federated-identity-credential"));
 });
 
-test("an inherited wildcard writer and delegator fails closed", () => {
+test("the provider-enforced deny neutralizes a non-excluded inherited wildcard writer", () => {
   const snapshot = exclusiveSnapshot();
   snapshot.roleDefinitions[ROLE_IDS.owner] = role(ROLE_IDS.owner, ["*"]);
   snapshot.activeAssignmentsByScope.api.push(assignment(
@@ -331,9 +374,36 @@ test("an inherited wildcard writer and delegator fails closed", () => {
     ROLE_IDS.owner,
     `/subscriptions/${CONTRACT.subscriptionId}`,
   ));
-  const report = evaluateProductionAzureMutationAuthority(snapshot);
-  assert(codes(report).has("unexpected-active-writer"));
-  assert(codes(report).has("unexpected-authority-delegator"));
+  checkpointStructuralSnapshot(snapshot);
+  assert.equal(evaluateProductionAzureMutationAuthority(snapshot).status, "GO");
+});
+
+test("an extra principal excluded from the deployment-stack deny fails closed", () => {
+  const snapshot = exclusiveSnapshot();
+  snapshot.deploymentStack.denySettings.excludedPrincipals.push(PRINCIPALS.unexpected);
+  snapshot.deploymentStack.denySettings.excludedPrincipals.sort();
+  assert(codes(evaluateProductionAzureMutationAuthority(snapshot))
+    .has("deployment-stack-final-deny-invalid"));
+});
+
+test("a missing provider-created deployment-stack deny fails closed", () => {
+  const snapshot = exclusiveSnapshot();
+  snapshot.deploymentStack.denyAssignments = [];
+  assert(codes(evaluateProductionAzureMutationAuthority(snapshot))
+    .has("deployment-stack-provider-deny-missing"));
+});
+
+test("a management writer excluded from the deny remains active and fails closed", () => {
+  const snapshot = exclusiveSnapshot();
+  snapshot.roleDefinitions[ROLE_IDS.owner] = role(ROLE_IDS.owner, ["*"]);
+  snapshot.activeAssignmentsByScope.api.push(assignment(
+    PRINCIPALS.backendRelease,
+    ROLE_IDS.owner,
+    `/subscriptions/${CONTRACT.subscriptionId}`,
+  ));
+  const found = codes(evaluateProductionAzureMutationAuthority(snapshot));
+  assert(found.has("unexpected-active-writer"));
+  assert(found.has("unexpected-authority-delegator"));
 });
 
 test("the exact read-only subscription and management-group audit roles are permitted", () => {
@@ -417,7 +487,7 @@ test("eligible PIM mutation authority fails closed", () => {
   const snapshot = exclusiveSnapshot();
   snapshot.roleDefinitions[ROLE_IDS.owner] = role(ROLE_IDS.owner, ["*"]);
   snapshot.pim.eligible.push(assignment(
-    PRINCIPALS.unexpected,
+    PRINCIPALS.backendRelease,
     ROLE_IDS.owner,
     CONTRACT.resourceGroupId,
   ));
@@ -535,6 +605,14 @@ test("the live collector command boundary permits queries and rejects mutations"
   ]), true);
   assert.equal(assertReadOnlyAzureAuditCommand([
     "storage", "blob", "show", "--auth-mode", "login",
+  ]), true);
+  assert.equal(assertReadOnlyAzureAuditCommand([
+    "stack", "sub", "show", "--name", CONTRACT.deploymentStack.name,
+  ]), true);
+  assert.equal(assertReadOnlyAzureAuditCommand([
+    "rest", "--method", "get", "--url",
+    `https://management.azure.com/subscriptions/${CONTRACT.subscriptionId}` +
+      "/providers/Microsoft.Authorization/denyAssignments?api-version=2022-04-01",
   ]), true);
   assert.equal(assertReadOnlyAzureAuditCommand([
     "rest", "--method", "post",

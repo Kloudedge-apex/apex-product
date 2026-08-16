@@ -129,14 +129,14 @@ EOF
 
 test_registry_verifier() {
   local image revision wrong_digest
-  image="ledgracr.azurecr.io/apex-api@sha256:$(printf 'a%.0s' {1..64})"
+  image="workforceosprodacr.azurecr.io/apex-api@sha256:$(printf 'a%.0s' {1..64})"
   revision="$(printf 'b%.0s' {1..40})"
-  wrong_digest="ledgracr.azurecr.io/apex-api@sha256:$(printf 'c%.0s' {1..64})"
+  wrong_digest="workforceosprodacr.azurecr.io/apex-api@sha256:$(printf 'c%.0s' {1..64})"
   make_registry_harness
 
   env PATH="${HARNESS}/bin:${PATH}" CALL_LOG="${CALL_LOG}" EXPECTED_IMAGE="${image}" \
     "${HARNESS}/scripts/verify-registry-api-image.sh" "${image}" "${revision}" >/dev/null
-  assert_log_contains "${CALL_LOG}" "az acr login --name ledgracr --output none"
+  assert_log_contains "${CALL_LOG}" "az acr login --name workforceosprodacr --output none"
   assert_log_contains "${CALL_LOG}" "docker pull --platform linux/amd64 ${image}"
   assert_log_contains "${CALL_LOG}" "verify-api-image ${image} ${revision}"
   assert_before "${CALL_LOG}" "docker pull --platform linux/amd64" "verify-api-image"
@@ -145,7 +145,7 @@ test_registry_verifier() {
   : >"${CALL_LOG}"
   if env PATH="${HARNESS}/bin:${PATH}" CALL_LOG="${CALL_LOG}" EXPECTED_IMAGE="${image}" \
     "${HARNESS}/scripts/verify-registry-api-image.sh" \
-    "ledgracr.azurecr.io/apex-api:${revision}" "${revision}" >/dev/null 2>&1; then
+    "workforceosprodacr.azurecr.io/apex-api:${revision}" "${revision}" >/dev/null 2>&1; then
     fail "registry verifier accepted a mutable tag"
   fi
   assert_log_excludes "${CALL_LOG}" "az "
@@ -541,7 +541,7 @@ if [[ "${1:-} ${2:-}" == "containerapp show" ]]; then
     esac
   fi
   jq -n \
-    --arg id "/subscriptions/test-subscription/resourceGroups/Ledgr-prod/providers/Microsoft.App/containerApps/${app}" \
+    --arg id "/subscriptions/test-subscription/resourceGroups/workforce-os-prod/providers/Microsoft.App/containerApps/${app}" \
     --arg app "${app}" \
     --arg image "${current}" \
     --arg revision "${revision}" \
@@ -611,7 +611,7 @@ if [[ "${1:-} ${2:-} ${3:-}" == "containerapp revision show" ]]; then
       *) exit 1 ;;
     esac
     if [[ "${FAKE_CHANGED_RETAINED_APP:-}" == "${app}" ]]; then
-      current="ledgracr.azurecr.io/apex-api@sha256:$(printf '4%.0s' {1..64})"
+      current="workforceosprodacr.azurecr.io/apex-api@sha256:$(printf '4%.0s' {1..64})"
     fi
   fi
   bootstrap_attempt="0123456789abcdef0123456789abcdef"
@@ -770,9 +770,9 @@ run_fake_deploy() {
     WORKFORCE_PRODUCTION_CONTROL_STORAGE_CONTAINER="production-control" \
     WORKFORCE_PRODUCTION_CONTROL_STORAGE_BLOB="${FAKE_CONTROL_BLOB:-workforce-os/initial-production-bootstrap/state-v1.json}" \
     WORKFORCE_PRODUCTION_CONTROL_STORAGE_RESOURCE_ID="/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/production-control/providers/Microsoft.Storage/storageAccounts/workforcebootstrap" \
-    FAKE_PREVIOUS_API_IMAGE="ledgracr.azurecr.io/apex-api@sha256:$(printf 'd%.0s' {1..64})" \
-    FAKE_PREVIOUS_WORKER_IMAGE="ledgracr.azurecr.io/apex-api@sha256:$(printf 'e%.0s' {1..64})" \
-    FAKE_PREVIOUS_CONSOLE_IMAGE="ledgracr.azurecr.io/workforceos-fe@sha256:$(printf 'f%.0s' {1..64})" \
+    FAKE_PREVIOUS_API_IMAGE="workforceosprodacr.azurecr.io/apex-api@sha256:$(printf 'd%.0s' {1..64})" \
+    FAKE_PREVIOUS_WORKER_IMAGE="workforceosprodacr.azurecr.io/apex-api@sha256:$(printf 'e%.0s' {1..64})" \
+    FAKE_PREVIOUS_CONSOLE_IMAGE="workforceosprodacr.azurecr.io/workforceos-fe@sha256:$(printf 'f%.0s' {1..64})" \
     "${HARNESS}/repo/scripts/deploy-prod.sh" "${deploy_args[@]}"
   deploy_status=$?
   return "${deploy_status}"
@@ -831,10 +831,10 @@ test_deploy_admission() {
   FAKE_RUN_ID="ca123"
   FAKE_DIGEST="sha256:$(printf '2%.0s' {1..64})"
   FAKE_VERIFY_STATUS=0
-  requested_image="ledgracr.azurecr.io/apex-api@${FAKE_DIGEST}"
-  rollback_api="ledgracr.azurecr.io/apex-api@sha256:$(printf 'd%.0s' {1..64})"
-  rollback_worker="ledgracr.azurecr.io/apex-api@sha256:$(printf 'e%.0s' {1..64})"
-  exact_baseline_log="${FAKE_COMMIT} ${rollback_api} apex-gtm-api--revision ${rollback_worker} apex-gtm-worker--revision ledgracr.azurecr.io/workforceos-fe@sha256:$(printf 'f%.0s' {1..64}) nikxius-web--revision disabled"
+  requested_image="workforceosprodacr.azurecr.io/apex-api@${FAKE_DIGEST}"
+  rollback_api="workforceosprodacr.azurecr.io/apex-api@sha256:$(printf 'd%.0s' {1..64})"
+  rollback_worker="workforceosprodacr.azurecr.io/apex-api@sha256:$(printf 'e%.0s' {1..64})"
+  exact_baseline_log="${FAKE_COMMIT} ${rollback_api} apex-gtm-api--revision ${rollback_worker} apex-gtm-worker--revision workforceosprodacr.azurecr.io/workforceos-fe@sha256:$(printf 'f%.0s' {1..64}) nikxius-web--revision disabled"
 
   grep -Fq -- "Microsoft.App/containerApps/write authority across apex-gtm-api" \
     "${REPO_ROOT}/scripts/deploy-prod.sh" ||
@@ -886,7 +886,7 @@ test_deploy_admission() {
   assert_log_contains "${CALL_LOG}" "verify-migrations "
   assert_log_contains "${CALL_LOG}" "${exact_baseline_log}"
   assert_before "${CALL_LOG}" "${exact_baseline_log}" "az acr build"
-  assert_log_contains "${CALL_LOG}" "az acr task show-run --registry ledgracr --run-id ${FAKE_RUN_ID}"
+  assert_log_contains "${CALL_LOG}" "az acr task show-run --registry workforceosprodacr --run-id ${FAKE_RUN_ID}"
   assert_log_contains "${CALL_LOG}" "verify-registry ${requested_image} ${FAKE_COMMIT}"
   assert_log_contains "${CALL_LOG}" \
     "commit-tree ${FAKE_TREE_COMMIT} -p ${FAKE_COMMIT}"
@@ -972,7 +972,7 @@ test_deploy_admission() {
     assert_log_contains "${CALL_LOG}" "az containerapp update --name apex-gtm-api"
     assert_log_excludes "${CALL_LOG}" "az containerapp update --name apex-gtm-worker"
     assert_log_contains "${CALL_LOG}" \
-      "az containerapp revision activate --name apex-gtm-api --resource-group Ledgr-prod --revision apex-gtm-api--revision"
+      "az containerapp revision activate --name apex-gtm-api --resource-group workforce-os-prod --revision apex-gtm-api--revision"
     pass
   done
 
@@ -1071,7 +1071,7 @@ test_deploy_admission() {
   reset_deploy_harness
   FAKE_VERIFY_STATUS=0
   FAKE_CONCURRENT_APP="apex-gtm-api"
-  FAKE_CONCURRENT_IMAGE="ledgracr.azurecr.io/apex-api@sha256:$(printf '9%.0s' {1..64})"
+  FAKE_CONCURRENT_IMAGE="workforceosprodacr.azurecr.io/apex-api@sha256:$(printf '9%.0s' {1..64})"
   if run_fake_deploy >/dev/null 2>&1; then
     fail "deploy overwrote a concurrent production image change"
   fi
@@ -1138,14 +1138,14 @@ test_deploy_rollback() {
   FAKE_DIGEST="sha256:$(printf '2%.0s' {1..64})"
   FAKE_VERIFY_STATUS=0
   FAKE_CONFIG_STATUS=0
-  requested_image="ledgracr.azurecr.io/apex-api@${FAKE_DIGEST}"
-  previous_api_image="ledgracr.azurecr.io/apex-api@sha256:$(printf 'd%.0s' {1..64})"
-  previous_worker_image="ledgracr.azurecr.io/apex-api@sha256:$(printf 'e%.0s' {1..64})"
-  forward_worker="az containerapp update --name apex-gtm-worker --resource-group Ledgr-prod --image ${requested_image} --output none"
-  forward_api="az containerapp update --name apex-gtm-api --resource-group Ledgr-prod --image ${requested_image} --output none"
-  rollback_worker="az containerapp revision activate --name apex-gtm-worker --resource-group Ledgr-prod --revision apex-gtm-worker--revision --output none"
-  rollback_api="az containerapp revision activate --name apex-gtm-api --resource-group Ledgr-prod --revision apex-gtm-api--revision --output none"
-  exact_baseline_log="${FAKE_COMMIT} ${previous_api_image} apex-gtm-api--revision ${previous_worker_image} apex-gtm-worker--revision ledgracr.azurecr.io/workforceos-fe@sha256:$(printf 'f%.0s' {1..64}) nikxius-web--revision disabled"
+  requested_image="workforceosprodacr.azurecr.io/apex-api@${FAKE_DIGEST}"
+  previous_api_image="workforceosprodacr.azurecr.io/apex-api@sha256:$(printf 'd%.0s' {1..64})"
+  previous_worker_image="workforceosprodacr.azurecr.io/apex-api@sha256:$(printf 'e%.0s' {1..64})"
+  forward_worker="az containerapp update --name apex-gtm-worker --resource-group workforce-os-prod --image ${requested_image} --output none"
+  forward_api="az containerapp update --name apex-gtm-api --resource-group workforce-os-prod --image ${requested_image} --output none"
+  rollback_worker="az containerapp revision activate --name apex-gtm-worker --resource-group workforce-os-prod --revision apex-gtm-worker--revision --output none"
+  rollback_api="az containerapp revision activate --name apex-gtm-api --resource-group workforce-os-prod --revision apex-gtm-api--revision --output none"
+  exact_baseline_log="${FAKE_COMMIT} ${previous_api_image} apex-gtm-api--revision ${previous_worker_image} apex-gtm-worker--revision workforceosprodacr.azurecr.io/workforceos-fe@sha256:$(printf 'f%.0s' {1..64}) nikxius-web--revision disabled"
 
   # The final fresh receipt check occurs after the slow three-app identity
   # reads. If it expires there, no forward or compensating ACA write is legal.
@@ -1214,7 +1214,7 @@ test_deploy_rollback() {
   reset_deploy_harness
   FAKE_CONFIG_FAIL_CALL=3
   FAKE_ROLLBACK_DRIFT_APP="apex-gtm-api"
-  FAKE_ROLLBACK_DRIFT_IMAGE="ledgracr.azurecr.io/apex-api@sha256:$(printf '3%.0s' {1..64})"
+  FAKE_ROLLBACK_DRIFT_IMAGE="workforceosprodacr.azurecr.io/apex-api@sha256:$(printf '3%.0s' {1..64})"
   if run_fake_deploy >/dev/null 2>&1; then
     fail "deploy succeeded after rollback detected external production drift"
   fi
@@ -1296,11 +1296,11 @@ test_deploy_rollback() {
   assert_before "${CALL_LOG}" "${forward_api}" "${forward_worker}"
   assert_before "${CALL_LOG}" "${rollback_worker}" "${rollback_api}"
   assert_log_contains "${CALL_LOG}" \
-    "az containerapp ingress traffic set --name apex-gtm-api --resource-group Ledgr-prod --revision-weight apex-gtm-api--revision=100 --output none"
+    "az containerapp ingress traffic set --name apex-gtm-api --resource-group workforce-os-prod --revision-weight apex-gtm-api--revision=100 --output none"
   assert_log_excludes "${CALL_LOG}" \
-    "az containerapp update --name apex-gtm-api --resource-group Ledgr-prod --image ${previous_api_image}"
+    "az containerapp update --name apex-gtm-api --resource-group workforce-os-prod --image ${previous_api_image}"
   assert_log_excludes "${CALL_LOG}" \
-    "az containerapp update --name apex-gtm-worker --resource-group Ledgr-prod --image ${previous_worker_image}"
+    "az containerapp update --name apex-gtm-worker --resource-group workforce-os-prod --image ${previous_worker_image}"
   assert_log_contains "${CALL_LOG}" "verify-containerapps ${previous_api_image} ${previous_worker_image}"
   pass
 
@@ -1314,7 +1314,7 @@ test_deploy_rollback() {
   (trap - EXIT; run_fake_deploy >"${HARNESS}/signal-output.log" 2>&1) &
   deploy_job=$!
   signal_ready="false"
-  for _ in {1..200}; do
+  for _ in {1..1200}; do
     if [[ -s "${DEPLOY_PID_FILE}" && -e "${SIGNAL_READY_FILE}" ]]; then
       signal_ready="true"
       break
@@ -1363,7 +1363,7 @@ test_bootstrap_signal_forwarding() {
 
   (trap - EXIT; run_fake_deploy >"${HARNESS}/bootstrap-signal-output.log" 2>&1) &
   deploy_job=$!
-  for _ in {1..300}; do
+  for _ in {1..1200}; do
     if [[ -s "${BOOTSTRAP_PID_FILE}" && -s "${DEPLOY_PID_FILE}" &&
       -s "${BOOTSTRAP_DESCENDANT_PID_FILE}" &&
       -e "${BOOTSTRAP_SIGNAL_READY_FILE}" ]]; then
@@ -1443,7 +1443,7 @@ test_bootstrap_signal_forwarding() {
   signal_ready="false"
   (trap - EXIT; run_fake_deploy >"${HARNESS}/leader-death-output.log" 2>&1) &
   deploy_job=$!
-  for _ in {1..300}; do
+  for _ in {1..1200}; do
     if [[ -s "${BOOTSTRAP_PID_FILE}" && -s "${DEPLOY_PID_FILE}" &&
       -s "${BOOTSTRAP_DESCENDANT_PID_FILE}" &&
       -e "${BOOTSTRAP_SIGNAL_READY_FILE}" ]]; then
@@ -1872,7 +1872,7 @@ test_production_release_workflow_verifier() {
   pass
 
   fixture="${harness}/wrong-release-client.yml"
-  sed 's/97808934-23ee-4cb1-9f50-d6de6e6e125f/00000000-0000-0000-0000-000000000000/' \
+  sed 's/2efd64b0-87c1-43a7-a064-30679ce8b764/00000000-0000-0000-0000-000000000000/' \
     "${workflow}" >"${fixture}"
   if "${verifier}" "${fixture}" >/dev/null 2>&1; then
     fail "workflow verifier accepted an unreviewed release identity"
@@ -2227,9 +2227,9 @@ test_migration_receipt_verifier() {
   git -C "${harness}/repo" commit -q -m "fixture: committed release evidence"
   commit="$(git -C "${harness}/repo" rev-parse HEAD)"
   evidence="sha256:$(printf '6%.0s' {1..64})"
-  api_image="ledgracr.azurecr.io/apex-api@sha256:$(printf '7%.0s' {1..64})"
-  worker_image="ledgracr.azurecr.io/apex-api@sha256:$(printf '8%.0s' {1..64})"
-  console_image="ledgracr.azurecr.io/workforceos-fe@sha256:$(printf '9%.0s' {1..64})"
+  api_image="workforceosprodacr.azurecr.io/apex-api@sha256:$(printf '7%.0s' {1..64})"
+  worker_image="workforceosprodacr.azurecr.io/apex-api@sha256:$(printf '8%.0s' {1..64})"
+  console_image="workforceosprodacr.azurecr.io/workforceos-fe@sha256:$(printf '9%.0s' {1..64})"
   api_revision="apex-gtm-api--rollback-a"
   worker_revision="apex-gtm-worker--rollback-b"
   console_revision="nikxius-web--rollback-c"
@@ -2388,7 +2388,7 @@ EOF
     "${harness}/receipt.json.sig" \
     "${harness}/allowed-signers" \
     "${commit}" \
-    "ledgracr.azurecr.io/apex-api@sha256:$(printf '9%.0s' {1..64})" \
+    "workforceosprodacr.azurecr.io/apex-api@sha256:$(printf '9%.0s' {1..64})" \
     "${api_revision}" \
     "${worker_image}" \
     "${worker_revision}" \
@@ -2440,7 +2440,7 @@ EOF
     "${api_revision}" \
     "${worker_image}" \
     "${worker_revision}" \
-    "ledgracr.azurecr.io/workforceos-fe@sha256:$(printf 'a%.0s' {1..64})" \
+    "workforceosprodacr.azurecr.io/workforceos-fe@sha256:$(printf 'a%.0s' {1..64})" \
     "${console_revision}" \
     disabled >/dev/null 2>&1; then
     fail "migration receipt verifier accepted a different console/BFF digest"
@@ -2709,8 +2709,8 @@ test_containerapp_config_verifier() {
   [[ "${test_vector}" == "5eddc3f498e16df540776fa025bef86f741fae6815abfb9dd80652026b8956ad" ]] ||
     fail "Clerk auth trust-tuple test vector drifted"
   pass
-  api_image="ledgracr.azurecr.io/apex-api@sha256:$(printf '7%.0s' {1..64})"
-  worker_image="ledgracr.azurecr.io/apex-api@sha256:$(printf '8%.0s' {1..64})"
+  api_image="workforceosprodacr.azurecr.io/apex-api@sha256:$(printf '7%.0s' {1..64})"
+  worker_image="workforceosprodacr.azurecr.io/apex-api@sha256:$(printf '8%.0s' {1..64})"
   write_containerapp_fixture "${harness}/api.json" api "${api_image}" "api--1"
   write_containerapp_fixture "${harness}/worker.json" worker "${worker_image}" "worker--1"
   jq -n --arg image "${api_image}" '{properties: {

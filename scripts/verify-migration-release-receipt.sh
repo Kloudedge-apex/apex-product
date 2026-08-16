@@ -36,9 +36,9 @@ if [[ -z "${RECEIPT}" || -z "${SIGNATURE}" || -z "${ALLOWED_SIGNERS}" ||
   exit 2
 fi
 if [[ "${#}" -eq 11 ]]; then
-  if [[ ! "${EXPECTED_API_IMAGE}" =~ ^ledgracr\.azurecr\.io/apex-api@sha256:[0-9a-f]{64}$ ]] ||
-    [[ ! "${EXPECTED_WORKER_IMAGE}" =~ ^ledgracr\.azurecr\.io/apex-api@sha256:[0-9a-f]{64}$ ]] ||
-    [[ ! "${EXPECTED_CONSOLE_IMAGE}" =~ ^ledgracr\.azurecr\.io/workforceos-fe@sha256:[0-9a-f]{64}$ ]] ||
+  if [[ ! "${EXPECTED_API_IMAGE}" =~ ^workforceosprodacr\.azurecr\.io/apex-api@sha256:[0-9a-f]{64}$ ]] ||
+    [[ ! "${EXPECTED_WORKER_IMAGE}" =~ ^workforceosprodacr\.azurecr\.io/apex-api@sha256:[0-9a-f]{64}$ ]] ||
+    [[ ! "${EXPECTED_CONSOLE_IMAGE}" =~ ^workforceosprodacr\.azurecr\.io/workforceos-fe@sha256:[0-9a-f]{64}$ ]] ||
     [[ ! "${EXPECTED_API_REVISION}" =~ ^apex-gtm-api--[a-z0-9][a-z0-9-]*$ ]] ||
     [[ ! "${EXPECTED_WORKER_REVISION}" =~ ^apex-gtm-worker--[a-z0-9][a-z0-9-]*$ ]] ||
     [[ ! "${EXPECTED_CONSOLE_REVISION}" =~ ^nikxius-web--[a-z0-9][a-z0-9-]*$ ]] ||
@@ -224,11 +224,11 @@ if ! jq -e \
     "workerImage",
     "workerRevision"
   ])
-  and (.rollbackBaseline.apiImage | type == "string" and test("^ledgracr\\.azurecr\\.io/apex-api@sha256:[0-9a-f]{64}$"))
+  and (.rollbackBaseline.apiImage | type == "string" and test("^workforceosprodacr\\.azurecr\\.io/apex-api@sha256:[0-9a-f]{64}$"))
   and (.rollbackBaseline.apiRevision | type == "string" and test("^apex-gtm-api--[a-z0-9][a-z0-9-]*$"))
-  and (.rollbackBaseline.workerImage | type == "string" and test("^ledgracr\\.azurecr\\.io/apex-api@sha256:[0-9a-f]{64}$"))
+  and (.rollbackBaseline.workerImage | type == "string" and test("^workforceosprodacr\\.azurecr\\.io/apex-api@sha256:[0-9a-f]{64}$"))
   and (.rollbackBaseline.workerRevision | type == "string" and test("^apex-gtm-worker--[a-z0-9][a-z0-9-]*$"))
-  and (.rollbackBaseline.consoleImage | type == "string" and test("^ledgracr\\.azurecr\\.io/workforceos-fe@sha256:[0-9a-f]{64}$"))
+  and (.rollbackBaseline.consoleImage | type == "string" and test("^workforceosprodacr\\.azurecr\\.io/workforceos-fe@sha256:[0-9a-f]{64}$"))
   and (.rollbackBaseline.consoleRevision | type == "string" and test("^nikxius-web--[a-z0-9][a-z0-9-]*$"))
   and .rollbackBaseline.compatibilityAttestation == "enum-aware-api-worker-console-baseline-v1"
   and .rollbackBaseline.compatibilityEpoch == "outreach-delivery-unknown-v1"

@@ -43,7 +43,7 @@ test("canonical bootstrap workflow passes its source contract", () => {
 
 rejected("an unreviewed Azure client identity is rejected", (source) =>
   source.replace(
-    "97808934-23ee-4cb1-9f50-d6de6e6e125f",
+    "2efd64b0-87c1-43a7-a064-30679ce8b764",
     "00000000-0000-0000-0000-000000000000",
   ));
 

@@ -43,11 +43,11 @@ function hash(character) {
 
 const AUTHORITY = Object.freeze({
   subscriptionId: "12345678-1234-4234-8234-123456789abc",
-  resourceGroupName: "Ledgr-prod",
-  resourceGroupResourceId: "/subscriptions/12345678-1234-4234-8234-123456789abc/resourceGroups/Ledgr-prod",
-  apiContainerAppResourceId: "/subscriptions/12345678-1234-4234-8234-123456789abc/resourceGroups/Ledgr-prod/providers/Microsoft.App/containerApps/apex-gtm-api",
-  workerContainerAppResourceId: "/subscriptions/12345678-1234-4234-8234-123456789abc/resourceGroups/Ledgr-prod/providers/Microsoft.App/containerApps/apex-gtm-worker",
-  consoleContainerAppResourceId: "/subscriptions/12345678-1234-4234-8234-123456789abc/resourceGroups/Ledgr-prod/providers/Microsoft.App/containerApps/nikxius-web",
+  resourceGroupName: "workforce-os-prod",
+  resourceGroupResourceId: "/subscriptions/12345678-1234-4234-8234-123456789abc/resourceGroups/workforce-os-prod",
+  apiContainerAppResourceId: "/subscriptions/12345678-1234-4234-8234-123456789abc/resourceGroups/workforce-os-prod/providers/Microsoft.App/containerApps/apex-gtm-api",
+  workerContainerAppResourceId: "/subscriptions/12345678-1234-4234-8234-123456789abc/resourceGroups/workforce-os-prod/providers/Microsoft.App/containerApps/apex-gtm-worker",
+  consoleContainerAppResourceId: "/subscriptions/12345678-1234-4234-8234-123456789abc/resourceGroups/workforce-os-prod/providers/Microsoft.App/containerApps/nikxius-web",
 });
 
 const IDENTITY = Object.freeze({
@@ -55,9 +55,9 @@ const IDENTITY = Object.freeze({
   candidate: Object.freeze({
     backendCommit: "b".repeat(40),
     consoleCommit: "c".repeat(40),
-    apiImage: `ledgracr.azurecr.io/apex-api@${hash("1")}`,
-    workerImage: `ledgracr.azurecr.io/apex-api@${hash("1")}`,
-    consoleImage: `ledgracr.azurecr.io/workforceos-fe@${hash("3")}`,
+    apiImage: `workforceosprodacr.azurecr.io/apex-api@${hash("1")}`,
+    workerImage: `workforceosprodacr.azurecr.io/apex-api@${hash("1")}`,
+    consoleImage: `workforceosprodacr.azurecr.io/workforceos-fe@${hash("3")}`,
   }),
   databaseIdentityHash: hash("1"),
   redisIdentityHash: hash("2"),
@@ -228,17 +228,17 @@ function entryReceiptFor(fencingGeneration, minute, overrides = {}) {
       verifiedFromProtectedBytes: true,
     },
     api: sourceApp(
-      `ledgracr.azurecr.io/apex-api@${hash("5")}`,
+      `workforceosprodacr.azurecr.io/apex-api@${hash("5")}`,
       hash("5"), hash("6"), "d".repeat(40), "apex-gtm-api--legacy-a",
       [hash("9"), hash("a"), hash("b")],
     ),
     worker: sourceApp(
-      `ledgracr.azurecr.io/apex-api@${hash("5")}`,
+      `workforceosprodacr.azurecr.io/apex-api@${hash("5")}`,
       hash("5"), hash("6"), "d".repeat(40), "apex-gtm-worker--legacy-a",
       [hash("c"), hash("d"), hash("e")],
     ),
     console: sourceApp(
-      `ledgracr.azurecr.io/workforceos-fe@${hash("7")}`,
+      `workforceosprodacr.azurecr.io/workforceos-fe@${hash("7")}`,
       hash("7"), hash("8"), "e".repeat(40), "nikxius-web--legacy-a",
       [hash("9"), hash("a"), hash("b")],
     ),
@@ -918,7 +918,7 @@ test("B2 consumes the exact signed entry v2 contract and rejects generic adapter
     (receipt) => {
       receipt.sourceRollbackBaseline.operationalSmokeEvidence.dashboardPolicy.passed = false;
     },
-    (receipt) => { receipt.targetArtifacts.console.image = `ledgracr.azurecr.io/workforceos-fe@${hash("8")}`; },
+    (receipt) => { receipt.targetArtifacts.console.image = `workforceosprodacr.azurecr.io/workforceos-fe@${hash("8")}`; },
   ];
   for (const mutate of variants) {
     const receipt = structuredClone(valid);

@@ -5,7 +5,7 @@
 #   1. apex-gtm-worker replica restart spike  (native platform metric alert)
 #   2. BullMQ queue backlog                   (log-based scheduled-query alert)
 #
-# Targets: resource group Ledgr-prod, Container Apps apex-gtm-api /
+# Targets: resource group workforce-os-prod, Container Apps apex-gtm-api /
 # apex-gtm-worker (Microsoft.App/containerApps).
 #
 # ── Assumptions (verified against what Azure Container Apps actually supports)
@@ -46,11 +46,11 @@
 # * IDEMPOTENCY: `az monitor action-group create` and
 #   `az monitor metrics alert create` upsert on re-run.
 #   `az monitor scheduled-query create` fails if the rule already exists —
-#   delete it first (`az monitor scheduled-query delete -g Ledgr-prod -n
+#   delete it first (`az monitor scheduled-query delete -g workforce-os-prod -n
 #   nikxius-golive-queue-backlog --yes`) or use `update`.
 #
 # * Requires: az CLI >= 2.50 logged in with Monitoring Contributor (or
-#   Contributor) on Ledgr-prod, plus Reader on the Log Analytics workspace.
+#   Contributor) on workforce-os-prod, plus Reader on the Log Analytics workspace.
 #
 # Usage:  scripts/setup-alerts.sh
 # The script refuses to run until the TODO placeholder email is replaced.
@@ -64,7 +64,7 @@ set -euo pipefail
 ALERT_EMAIL="REPLACE-ME@example.com"
 # ─────────────────────────────────────────────────────────────────────────────
 
-RG="Ledgr-prod"
+RG="workforce-os-prod"
 API_APP="apex-gtm-api"
 WORKER_APP="apex-gtm-worker"
 
