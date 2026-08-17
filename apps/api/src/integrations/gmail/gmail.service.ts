@@ -33,6 +33,7 @@ import {
   normalizeGmailWatchExpiration,
   withGmailWatchExpiration,
 } from "./gmail-watch-freshness";
+import { GMAIL_OAUTH_SCOPES } from "./gmail-oauth-scopes";
 import {
   ProductionBootstrapWriterFenceService,
   runWithProductionBootstrapWriterFenceOrSkipClosed,
@@ -105,13 +106,6 @@ interface GmailPushPayload {
   emailAddress: string;
   historyId: string;
 }
-
-const GMAIL_SCOPES = [
-  "https://www.googleapis.com/auth/gmail.send",
-  "https://www.googleapis.com/auth/gmail.readonly",
-  "https://www.googleapis.com/auth/gmail.compose",
-  "https://www.googleapis.com/auth/gmail.modify",
-];
 
 // Gmail watches expire after ~7 days (see registerWatch). A daily sweep keeps
 // every connected mailbox comfortably inside that window — losing the watch
@@ -856,7 +850,7 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
     return oauth2Client.generateAuthUrl({
       access_type: "offline",
       prompt: "consent",
-      scope: GMAIL_SCOPES,
+      scope: [...GMAIL_OAUTH_SCOPES],
       state: orgId,
     });
   }
@@ -874,7 +868,7 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
         refresh_token: `mock_gmail_refresh_token_${now}`,
         expiry_date: now + 30 * 24 * 60 * 60 * 1000,
         token_type: "Bearer",
-        scope: GMAIL_SCOPES.join(" "),
+        scope: GMAIL_OAUTH_SCOPES.join(" "),
       };
       const safeOrgId = orgId.toLowerCase().replace(/[^a-z0-9._-]/g, "-");
       await this.persistCallbackState({
@@ -901,7 +895,7 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
       refresh_token: tokens.refresh_token,
       expiry_date: tokens.expiry_date ?? Date.now() + 3600 * 1000,
       token_type: tokens.token_type ?? "Bearer",
-      scope: tokens.scope ?? GMAIL_SCOPES.join(" "),
+      scope: tokens.scope ?? GMAIL_OAUTH_SCOPES.join(" "),
     };
 
     const encryptedCreds = encrypt(JSON.stringify(tokenData));
@@ -1086,7 +1080,7 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
         : { accountEmail: input.accountEmail }) as Prisma.InputJsonValue,
       encryptedCredentials: input.encryptedCredentials,
       status: input.status,
-      scopes: GMAIL_SCOPES,
+      scopes: [...GMAIL_OAUTH_SCOPES],
       lastHistoryId: input.lastHistoryId,
       lastSyncAt:
         input.status === IntegrationStatus.CONNECTED ? now : null,
