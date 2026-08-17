@@ -455,6 +455,24 @@ inventory. The independent read-only audit is:
 node scripts/production-azure-mutation-authority-audit.mjs
 ```
 
+For the required post-drain production evidence, run that audit through the
+protected backend release identity rather than a human Azure session:
+
+```bash
+gh workflow run audit-production-authority.yml \
+  --repo Kloudedge-apex/apex-product \
+  --ref master \
+  -f confirmation='AUDIT WORKFORCE OS PRODUCTION AUTHORITY'
+```
+
+The workflow uploads the sanitized report whether the audit returns `GO` or
+`NO-GO`, but the run succeeds only for an exact `GO` report with no findings,
+complete credential drain, and non-null structural and controller evidence.
+It has no database, Redis, Container Apps mutation, or checkpoint-write
+authority. Do not rerun the checkpoint initializer to collect post-drain
+evidence: its create/existing operation is only the separately authorized
+start-of-drain ceremony.
+
 It must return `GO` and non-null controller evidence. Its live collection covers
 exact OIDC federations, active role assignments, resolved wildcard and exclusion
 semantics, active and eligible PIM schedules at management-group through exact

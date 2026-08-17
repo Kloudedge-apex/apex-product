@@ -10,12 +10,34 @@ const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(TEST_DIR, "../..");
 const SOURCE = resolve(REPO_ROOT, ".github/workflows/initialize-production-authority-drain.yml");
 const SEAL_SOURCE = resolve(REPO_ROOT, ".github/workflows/seal-production-runtime-authority.yml");
+const AUDIT_SOURCE = resolve(REPO_ROOT, ".github/workflows/audit-production-authority.yml");
 const VERIFIER = resolve(REPO_ROOT, "scripts/verify-production-authority-drain-workflow.mjs");
 
-function verify(path = SOURCE, sealPath = SEAL_SOURCE) {
-  return spawnSync(process.execPath, [VERIFIER, path, sealPath], {
+function verify(path = SOURCE, sealPath = SEAL_SOURCE, auditPath = AUDIT_SOURCE) {
+  return spawnSync(process.execPath, [VERIFIER, path, sealPath, auditPath], {
     encoding: "utf8",
     env: process.env,
+  });
+}
+
+function rejectedAudit(label, mutate) {
+  test(label, () => {
+    const root = mkdtempSync(resolve(tmpdir(), "workforce-production-authority-audit-workflow-"));
+    const path = resolve(root, "workflow.yml");
+    try {
+      const source = readFileSync(AUDIT_SOURCE, "utf8");
+      const changed = mutate(source);
+      assert.notEqual(changed, source, "fixture mutation must change source");
+      writeFileSync(path, changed, { mode: 0o600 });
+      const result = verify(SOURCE, SEAL_SOURCE, path);
+      assert.notEqual(result.status, 0, result.stdout || result.stderr);
+      assert.match(
+        result.stderr,
+        /production authority-drain workflow verification failed/u,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 }
 
@@ -64,7 +86,7 @@ function rejected(label, mutate) {
 test("canonical protected authority-drain workflow verifies", () => {
   const result = verify();
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /Production authority-drain and runtime-seal workflows verified/u);
+  assert.match(result.stdout, /Production authority-drain, runtime-seal, and audit workflows verified/u);
 });
 
 rejected("a push trigger is rejected", (source) =>
@@ -102,3 +124,30 @@ rejectedSeal("runtime authority without the reviewed template is rejected", (sou
 
 rejectedSeal("destructive runtime unmanage is rejected", (source) =>
   source.replace("--action-on-unmanage detachAll", "--action-on-unmanage deleteAll"));
+
+rejectedAudit("a non-manual production audit trigger is rejected", (source) =>
+  source.replace("  workflow_dispatch:", "  schedule:\n  workflow_dispatch:"));
+
+rejectedAudit("a writable production audit token is rejected", (source) =>
+  source.replace("contents: read", "contents: write"));
+
+rejectedAudit("a production audit client secret is rejected", (source) =>
+  source.replace(
+    "client-id: 2efd64b0-87c1-43a7-a064-30679ce8b764",
+    "client-secret: unreviewed",
+  ));
+
+rejectedAudit("an unprotected production audit ref is rejected", (source) =>
+  source.replace('"${REF_PROTECTED}" != "true"', '"${REF_PROTECTED}" != "false"'));
+
+rejectedAudit("a substituted production audit program is rejected", (source) =>
+  source.replace(
+    "node scripts/production-azure-mutation-authority-audit.mjs",
+    "node scripts/unreviewed-audit.mjs",
+  ));
+
+rejectedAudit("a production audit mutation command is rejected", (source) =>
+  source.replace(
+    "node scripts/production-azure-mutation-authority-audit.mjs",
+    "az storage blob delete --name state-v1.json\n          node scripts/production-azure-mutation-authority-audit.mjs",
+  ));
