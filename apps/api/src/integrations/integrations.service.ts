@@ -13,6 +13,7 @@ import {
   isGmailWatchFresh,
   withGmailWatchExpiration,
 } from "./gmail/gmail-watch-freshness";
+import { GMAIL_OAUTH_SCOPES } from "./gmail/gmail-oauth-scopes";
 
 interface OAuthConfig {
   clientId?: string;
@@ -40,12 +41,7 @@ const OAUTH_CONFIGS: Record<string, OAuthConfig> = {
       "http://localhost:4000/api/integrations/gmail/callback",
     authUrl: "https://accounts.google.com/o/oauth2/v2/auth",
     tokenUrl: "https://oauth2.googleapis.com/token",
-    scopes: [
-      "https://www.googleapis.com/auth/gmail.send",
-      "https://www.googleapis.com/auth/gmail.readonly",
-      "https://www.googleapis.com/auth/gmail.compose",
-      "https://www.googleapis.com/auth/gmail.modify",
-    ],
+    scopes: [...GMAIL_OAUTH_SCOPES],
   },
 };
 
