@@ -9,6 +9,9 @@ const workflow = resolve(
 const sealWorkflow = resolve(
   process.argv[3] ?? ".github/workflows/seal-production-runtime-authority.yml",
 );
+const auditWorkflow = resolve(
+  process.argv[4] ?? ".github/workflows/audit-production-authority.yml",
+);
 
 function fail(message) {
   throw new Error(`production authority-drain workflow verification failed: ${message}`);
@@ -16,9 +19,11 @@ function fail(message) {
 
 let source;
 let sealSource;
+let auditSource;
 try {
   source = readFileSync(workflow, "utf8");
   sealSource = readFileSync(sealWorkflow, "utf8");
+  auditSource = readFileSync(auditWorkflow, "utf8");
 } catch {
   fail("workflow source set is unavailable");
 }
@@ -129,4 +134,58 @@ if (sealCounts("azure/login@") !== 1 ||
   fail("runtime-seal workflow contains duplicate authority or mutation steps");
 }
 
-process.stdout.write("Production authority-drain and runtime-seal workflows verified\n");
+for (const literal of [
+  "workflow_dispatch:",
+  "contents: read",
+  "id-token: write",
+  "group: workforce-os-production-authority-audit",
+  "cancel-in-progress: false",
+  "environment: workforce-os-production",
+  '"${GITHUB_REF}" != "refs/heads/master"',
+  '"${REF_PROTECTED}" != "true"',
+  '"${CONFIRMATION}" != "AUDIT WORKFORCE OS PRODUCTION AUTHORITY"',
+  ".protected == true and .commit.sha == $sha",
+  "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+  "persist-credentials: false",
+  "node scripts/verify-production-isolation-package.mjs",
+  "node scripts/verify-production-runtime-package.mjs",
+  "node scripts/verify-production-authority-package.mjs",
+  "azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5",
+  "client-id: 2efd64b0-87c1-43a7-a064-30679ce8b764",
+  "tenant-id: d4b3813d-146f-4d03-96b8-d6e5862d58a2",
+  "subscription-id: 3171575e-f164-425c-9ee0-2fb10cf93884",
+  'node scripts/production-azure-mutation-authority-audit.mjs >"${report}"',
+  'printf \'report=%s\\n\' "${report}" >>"${GITHUB_OUTPUT}"',
+  'echo "ERROR: production authority audit returned NO-GO"',
+  '.status == "GO"',
+  ".summary.structuralExclusive == true",
+  ".summary.credentialDrainComplete == true",
+  ".controllerEvidence | type == \"object\"",
+  ".findings | type == \"array\" and length == 0",
+  "always() && steps.authority_audit.outputs.report != ''",
+  "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+]) {
+  if (!auditSource.includes(literal)) fail(`required production-audit source pin is absent: ${literal}`);
+}
+
+for (const [pattern, label] of [
+  [/^\s*(push|pull_request|schedule|repository_dispatch):/mu, "non-manual production-audit trigger"],
+  [/permissions:\s*[\s\S]*?contents:\s*write/u, "production-audit content write permission"],
+  [/client-secret|AZURE_CREDENTIALS|account-key|connection-string/iu, "production-audit credential channel"],
+  [/\$\{\{\s*(secrets|vars)\./u, "production-audit secret or variable input"],
+  [/containerapp\s+(create|update|delete)|role\s+assignment\s+(create|delete)|storage\s+blob\s+(upload|delete)|stack\s+group\s+(create|delete)|lease\s+(acquire|break|release)/iu, "production-audit mutation command"],
+  [/containerapp\s+secret\s+list|storage\s+account\s+keys\s+list/iu, "production-audit secret read"],
+  [/continue-on-error\s*:\s*true/iu, "production-audit ignored failure"],
+]) {
+  if (pattern.test(auditSource)) fail(`${label} is present`);
+}
+
+const auditCounts = (needle) => auditSource.split(needle).length - 1;
+if (auditCounts("azure/login@") !== 1 ||
+  auditCounts("production-azure-mutation-authority-audit.mjs") !== 1 ||
+  auditCounts("environment: workforce-os-production") !== 1 ||
+  auditCounts("actions/upload-artifact@") !== 1) {
+  fail("production-audit workflow contains duplicate authority or evidence steps");
+}
+
+process.stdout.write("Production authority-drain, runtime-seal, and audit workflows verified\n");

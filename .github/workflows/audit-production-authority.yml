@@ -1,0 +1,99 @@
+name: Audit Workforce OS production authority
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: "Type AUDIT WORKFORCE OS PRODUCTION AUTHORITY"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: workforce-os-production-authority-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: Audit production mutation authority
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: workforce-os-production
+
+    steps:
+      - name: Validate protected manual authority
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          REF_PROTECTED: ${{ github.ref_protected }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ||
+            "${GITHUB_REF}" != "refs/heads/master" ||
+            "${REF_PROTECTED}" != "true" ||
+            "${CONFIRMATION}" != "AUDIT WORKFORCE OS PRODUCTION AUTHORITY" ||
+            ! "${WORKFLOW_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "ERROR: production authority audit requires protected master and exact confirmation" >&2
+            exit 1
+          fi
+          branch_json="$(gh api "repos/${GITHUB_REPOSITORY}/branches/master")"
+          jq -e --arg sha "${WORKFLOW_SHA}" \
+            '.protected == true and .commit.sha == $sha' >/dev/null <<<"${branch_json}"
+
+      - name: Checkout exact protected master
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Verify source-only authority packages
+        run: |
+          node scripts/verify-production-isolation-package.mjs
+          node scripts/verify-production-runtime-package.mjs
+          node scripts/verify-production-authority-package.mjs
+
+      - name: Authenticate exact backend release identity
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5
+        with:
+          client-id: 2efd64b0-87c1-43a7-a064-30679ce8b764
+          tenant-id: d4b3813d-146f-4d03-96b8-d6e5862d58a2
+          subscription-id: 3171575e-f164-425c-9ee0-2fb10cf93884
+
+      - name: Run read-only production authority audit
+        id: authority_audit
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          report="${RUNNER_TEMP}/workforce-production-authority-audit-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+          status=0
+          node scripts/production-azure-mutation-authority-audit.mjs >"${report}" || status=$?
+          chmod 600 "${report}"
+          printf 'report=%s\n' "${report}" >>"${GITHUB_OUTPUT}"
+          if [[ "${status}" -ne 0 ]]; then
+            echo "ERROR: production authority audit returned NO-GO" >&2
+            exit "${status}"
+          fi
+          jq -e '
+            .schemaVersion == 1
+            and .kind == "workforce-os-production-azure-mutation-authority-audit"
+            and .status == "GO"
+            and .summary.structuralExclusive == true
+            and .summary.credentialDrainComplete == true
+            and (.structuralEvidenceHash | test("^sha256:[0-9a-f]{64}$"))
+            and (.controllerEvidenceHash | test("^sha256:[0-9a-f]{64}$"))
+            and (.controllerEvidence | type == "object")
+            and (.findings | type == "array" and length == 0)
+          ' >/dev/null "${report}"
+
+      - name: Upload sanitized authority report
+        if: ${{ always() && steps.authority_audit.outputs.report != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: workforce-production-authority-audit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.authority_audit.outputs.report }}
+          if-no-files-found: error
+          retention-days: 30
