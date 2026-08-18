@@ -166,6 +166,7 @@ async function main() {
       location: "Austin, TX",
       email: "elena@atlas-robotics.example",
       score: 92,
+      breakdown: { fit: 100, intent: 88, engagement: 80, timing: 88 },
     },
     {
       id: "investor-demo-person-daniel",
@@ -177,7 +178,8 @@ async function main() {
       department: "OPERATIONS",
       location: "New York, NY",
       email: "daniel@harbor-finance.example",
-      score: 84,
+      score: 89,
+      breakdown: { fit: 100, intent: 79, engagement: 80, timing: 79 },
     },
   ];
 
@@ -226,13 +228,92 @@ async function main() {
         orgId,
         personId: person.id,
         score: person.score,
-        breakdown: { fit: 40, intent: 30, timing: 22 },
+        breakdown: person.breakdown,
         qualifiedAt: now,
       },
       update: {
         score: person.score,
-        breakdown: { fit: 40, intent: 30, timing: 22 },
+        breakdown: person.breakdown,
         qualifiedAt: now,
+      },
+    });
+  }
+
+  const evidenceEvents = [
+    {
+      id: "investor-demo-evidence-atlas-hiring",
+      kind: "recent_hire",
+      refId: "investor-demo-company-atlas",
+      payload: {
+        kind: "recent_hire",
+        source: "https://atlas-robotics.example/careers/account-executive",
+        date: hoursAgo(48).toISOString(),
+        confidence: 0.94,
+        jobTitle: "Account Executive",
+        summary: "Atlas Robotics is hiring account executives as it expands its sales team.",
+      },
+      createdAt: hoursAgo(48),
+    },
+    {
+      id: "investor-demo-evidence-atlas-leadership",
+      kind: "leadership_change",
+      refId: "investor-demo-company-atlas",
+      payload: {
+        kind: "leadership_change",
+        source: "https://atlas-robotics.example/news/new-vp-sales",
+        date: hoursAgo(96).toISOString(),
+        confidence: 0.91,
+        name: "Elena Park",
+        role: "VP of Sales",
+        summary: "Atlas Robotics appointed Elena Park as VP of Sales.",
+      },
+      createdAt: hoursAgo(96),
+    },
+    {
+      id: "investor-demo-evidence-harbor-hiring",
+      kind: "recent_hire",
+      refId: "investor-demo-company-harbor",
+      payload: {
+        kind: "recent_hire",
+        source: "https://harbor-finance.example/careers/revenue-systems-manager",
+        date: hoursAgo(24).toISOString(),
+        confidence: 0.9,
+        jobTitle: "Revenue Systems Manager",
+        summary: "Harbor Finance is hiring a revenue systems manager during its CRM migration.",
+      },
+      createdAt: hoursAgo(24),
+    },
+    {
+      id: "investor-demo-evidence-harbor-funding",
+      kind: "funding_event",
+      refId: "investor-demo-company-harbor",
+      payload: {
+        kind: "funding_event",
+        source: "https://harbor-finance.example/news/series-a",
+        date: hoursAgo(240).toISOString(),
+        confidence: 0.88,
+        amount: "$18M",
+        round: "Series A",
+        summary: "Harbor Finance announced an $18M Series A to expand its go-to-market team.",
+      },
+      createdAt: hoursAgo(240),
+    },
+  ];
+
+  for (const event of evidenceEvents) {
+    await prisma.evidenceEvent.upsert({
+      where: { id: event.id },
+      create: {
+        ...event,
+        orgId,
+        runId: "investor-demo-run-1",
+        refType: "company",
+      },
+      update: {
+        kind: event.kind,
+        refId: event.refId,
+        payload: event.payload,
+        createdAt: event.createdAt,
       },
     });
   }
