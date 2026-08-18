@@ -74,7 +74,7 @@ export class GraphService {
         await tx.$queryRaw`
           SELECT pg_advisory_xact_lock(
             hashtextextended(${`graph-run-single-flight:${orgId}`}, 0::bigint)
-          )
+          ) IS NULL AS acquired
         `;
 
         // Treat every ICP id as a tenant-owned resource reference, not merely

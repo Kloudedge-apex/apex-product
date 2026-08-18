@@ -115,6 +115,14 @@ describe("GraphService durable start lifecycle", () => {
     expect(db.rows[0].threadId).not.toBe("");
     expect(db.rows[0].startIcpProfileIds).toEqual(["icp_1", "icp_2"]);
     expect(db.tx.$queryRaw).toHaveBeenCalledTimes(2);
+    const advisorySql = (
+      db.tx.$queryRaw.mock.calls[0]?.[0] as TemplateStringsArray
+    ).join(" ? ");
+    expect(advisorySql).toContain("pg_advisory_xact_lock");
+    // PostgreSQL's lock function returns `void`, which Prisma cannot
+    // deserialize as a result column. The null test preserves the lock side
+    // effect while materializing a supported boolean result.
+    expect(advisorySql).toContain("IS NULL AS acquired");
     expect(enqueueGraphRun).toHaveBeenCalledTimes(1);
     expect(enqueueGraphRun).toHaveBeenCalledWith({
       graphRunId: db.rows[0].id,
