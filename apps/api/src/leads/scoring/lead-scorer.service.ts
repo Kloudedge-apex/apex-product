@@ -14,7 +14,11 @@ interface PersonForScoring {
     name: string;
     country: string | null;
     industry: string | null;
+    employeeRange?: string | null;
+    techStack?: string[];
     intentScore?: number;
+    intentSignals?: string[];
+    updatedAt?: Date;
   };
   emails: Array<{
     email: string;
@@ -28,6 +32,9 @@ interface IcpForScoring {
   targetTitles: string[];
   targetGeos: string[];
   targetIndustries: string[];
+  minEmployees?: number | null;
+  maxEmployees?: number | null;
+  techStackSignals?: string[];
 }
 
 interface ScoreResult {
@@ -36,74 +43,108 @@ interface ScoreResult {
 }
 
 const SOURCE_CONFIRMED: EmailSource[] = ["TEAM_PAGE", "GITHUB_COMMIT", "SEC_FILING", "PRESS_RELEASE"];
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function percent(points: number, maximum: number): number {
+  return Math.max(0, Math.min(100, Math.round((points / maximum) * 100)));
+}
+
+function normalized(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function textMatches(actual: string | null | undefined, targets: readonly string[]): boolean {
+  if (!actual) return false;
+  const candidate = normalized(actual);
+  const candidateTokens = new Set(candidate.split(" ").filter((token) => token.length > 1));
+  return targets.some((target) => {
+    const expected = normalized(target);
+    const expectedTokens = expected.split(" ").filter((token) => token.length > 1);
+    return expected.length > 0 && (
+      candidate.includes(expected) ||
+      expected.includes(candidate) ||
+      expectedTokens.every((token) => candidateTokens.has(token))
+    );
+  });
+}
+
+function geoMatches(location: string | null, country: string | null, targets: readonly string[]): boolean {
+  const aliases: Record<string, string[]> = {
+    us: ["us", "usa", "united states", "united states of america"],
+    gb: ["gb", "uk", "united kingdom", "great britain"],
+    ae: ["ae", "uae", "united arab emirates"],
+  };
+  const actual = normalized([location, country].filter(Boolean).join(" "));
+  return targets.some((target) => {
+    const value = normalized(target);
+    const group = Object.values(aliases).find((items) => items.includes(value)) ?? [value];
+    return group.some((alias) => actual.includes(alias));
+  });
+}
+
+function employeeRangeMatches(
+  range: string | null | undefined,
+  min: number | null | undefined,
+  max: number | null | undefined,
+): boolean {
+  if (!range || (min == null && max == null)) return false;
+  const numbers = range.match(/\d[\d,]*/g)?.map((value) => Number(value.replace(/,/g, ""))) ?? [];
+  if (numbers.length === 0) return false;
+  const actualMin = numbers[0]!;
+  const actualMax = numbers[1] ?? actualMin;
+  return (max == null || actualMin <= max) && (min == null || actualMax >= min);
+}
 
 @Injectable()
 export class LeadScorer {
   score(person: PersonForScoring, icp: IcpForScoring): ScoreResult {
-    const breakdown: Record<string, number> = {};
-
-    // Full name: 10 pts
-    if (person.firstName && person.lastName) {
-      breakdown.fullName = 10;
+    let fitPoints = 0;
+    let fitMaximum = 0;
+    if (icp.targetTitles.length > 0) {
+      fitMaximum += 20;
+      if (textMatches(person.title, icp.targetTitles)) fitPoints += 20;
+    }
+    if (icp.targetIndustries.length > 0) {
+      fitMaximum += 10;
+      if (textMatches(person.company.industry, icp.targetIndustries)) fitPoints += 10;
+    }
+    if (icp.targetGeos.length > 0) {
+      fitMaximum += 5;
+      if (geoMatches(person.location, person.company.country, icp.targetGeos)) fitPoints += 5;
+    }
+    if (icp.minEmployees != null || icp.maxEmployees != null) {
+      fitMaximum += 5;
+      if (employeeRangeMatches(person.company.employeeRange, icp.minEmployees, icp.maxEmployees)) fitPoints += 5;
+    }
+    if ((icp.techStackSignals?.length ?? 0) > 0) {
+      fitMaximum += 5;
+      if ((person.company.techStack ?? []).some((tech) => textMatches(tech, icp.techStackSignals ?? []))) fitPoints += 5;
     }
 
-    // Job title: 10 pts
-    if (person.title) {
-      breakdown.jobTitle = 10;
-    }
-
-    // Company + domain: 10 pts
-    if (person.company.domain && person.company.name) {
-      breakdown.companyDomain = 10;
-    }
-
-    // LinkedIn URL confirmed: 20 pts
-    if (person.linkedinUrl) {
-      breakdown.linkedinUrl = 20;
-    }
-
-    // Geography matches ICP: 5 pts
-    if (icp.targetGeos.length > 0 && person.location) {
-      const loc = person.location.toLowerCase();
-      const companyCountry = person.company.country?.toLowerCase();
-      const matches = icp.targetGeos.some(
-        (g) => loc.includes(g.toLowerCase()) || companyCountry === g.toLowerCase(),
-      );
-      if (matches) breakdown.geoMatch = 5;
-    }
-
-    // Seniority matches ICP: 10 pts
-    if (icp.targetTitles.length > 0 && person.title) {
-      const titleLower = person.title.toLowerCase();
-      const matches = icp.targetTitles.some((t) => titleLower.includes(t.toLowerCase()));
-      if (matches) breakdown.seniorityMatch = 10;
-    }
+    const fit = fitMaximum > 0 ? percent(fitPoints, fitMaximum) : 0;
+    const intent = Math.max(0, Math.min(100, Math.round(person.company.intentScore ?? 0)));
 
     // Email scoring
     const hasVerified = person.emails.some((e) => e.verified);
     const hasSourceConfirmed = person.emails.some((e) => SOURCE_CONFIRMED.includes(e.source));
     const hasPatternGuess = person.emails.some((e) => e.source === "PATTERN_GUESS" && e.confidence > 0.3);
 
-    if (hasVerified) {
-      breakdown.verifiedEmail = 50;
-    } else if (hasSourceConfirmed) {
-      breakdown.sourceConfirmedEmail = 50;
-    } else if (hasPatternGuess) {
-      breakdown.patternGuessedEmail = 15;
-    }
-
-    // Buying intent signal: 15 pts
-    if (person.company.intentScore && person.company.intentScore >= 15) {
-      breakdown.buyingIntent = 15;
-    }
-
-    // Multi-source corroboration: 10 pts
+    let engagement = hasVerified || hasSourceConfirmed ? 80 : hasPatternGuess ? 40 : 0;
+    if (person.linkedinUrl) engagement += 10;
     const uniqueSources = new Set(person.emails.map((e) => e.source));
-    if (uniqueSources.size >= 2) {
-      breakdown.multiSourceCorroboration = 10;
-    }
+    if (uniqueSources.size >= 2) engagement += 10;
+    engagement = Math.min(100, engagement);
 
-    const score = Object.values(breakdown).reduce((sum, v) => sum + v, 0);
+    const signalAgeDays = person.company.updatedAt
+      ? Math.max(0, (Date.now() - person.company.updatedAt.getTime()) / DAY_MS)
+      : Number.POSITIVE_INFINITY;
+    const timingMultiplier = signalAgeDays <= 30 ? 1 : signalAgeDays <= 60 ? 0.6 : 0;
+    const timing = intent > 0 ? Math.round(intent * timingMultiplier) : 0;
+
+    const breakdown: Record<string, number> = { fit, intent, engagement, timing };
+    const score = Math.max(0, Math.min(100, Math.round(
+      fit * 0.45 + intent * 0.25 + engagement * 0.2 + timing * 0.1,
+    )));
 
     return { score, breakdown };
   }
