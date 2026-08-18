@@ -33,6 +33,7 @@ interface DiscoveredCompany {
   name: string;
   country?: string;
   industry?: string;
+  employeeRange?: string;
   intentScore: number;
   intentSignals: string[];
   jobTitles: string[];
@@ -138,6 +139,7 @@ export class TheirStackService {
             name: job.company_name ?? domain,
             country: job.company_country,
             industry: job.company_industry,
+            employeeRange: job.company_size,
             intentScore: 0,
             intentSignals: signals,
             jobTitles: [job.title],

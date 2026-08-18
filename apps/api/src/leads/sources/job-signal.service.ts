@@ -77,7 +77,11 @@ export class JobSignalService {
       signals.push("moderate-hiring-volume");
     }
 
-    return { domain: "", intentScore, signals };
+    return {
+      domain: "",
+      intentScore: Math.min(100, Math.max(0, intentScore)),
+      signals: [...new Set(signals)],
+    };
   }
 
   /**
