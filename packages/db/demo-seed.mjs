@@ -239,6 +239,15 @@ async function main() {
     });
   }
 
+  await prisma.evidenceEvent.deleteMany({
+    where: {
+      orgId,
+      refType: "person",
+      refId: { in: people.map((person) => person.id) },
+      kind: { in: ["message.drafted", "qa.pass", "qa.fail"] },
+    },
+  });
+
   const evidenceEvents = [
     {
       id: "investor-demo-evidence-atlas-hiring",
