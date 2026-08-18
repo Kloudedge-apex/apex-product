@@ -18,6 +18,12 @@ import { TheirStackService } from "./sources/theirstack.service";
 import { EmailPatternService } from "./enrichment/email-pattern.service";
 import { IdentityResolver } from "./enrichment/identity-resolver.service";
 import { LeadScorer } from "./scoring/lead-scorer.service";
+import {
+  buildLeadResearchBrief,
+  normalizeLeadScoreBreakdown,
+  toEvidenceTimeline,
+  toIntentSignals,
+} from "./lead-intelligence";
 import { QUALIFIED_THRESHOLD } from "../common/qualification.constants";
 import {
   isAggregatorDomain,
@@ -304,12 +310,12 @@ export class LeadsService {
     icp: { targetTitles: string[]; targetIndustries: string[]; targetGeos: string[]; minEmployees?: number | null; maxEmployees?: number | null; techStackSignals: string[]; seedDomains?: string[]; intentKeywords?: string[] },
     jobId?: string,
   ): Promise<string[]> {
-    const companyIds: string[] = [];
+    const companyIds = new Set<string>();
     const seenDomains = new Set<string>();
     let processed = 0;
     const totalSteps = 4;
 
-    const upsertCompany = async (co: { domain: string; name: string; industry?: string; country?: string; atsProvider?: string; atsSlug?: string; source?: string; linkedinCompanyUrl?: string }) => {
+    const upsertCompany = async (co: { domain: string; name: string; industry?: string; country?: string; employeeRange?: string; atsProvider?: string; atsSlug?: string; source?: string; linkedinCompanyUrl?: string }) => {
       if (!co.domain || co.domain.length === 0) return;
       // Block aggregator / SEO / social / parking domains BEFORE we touch the
       // DB. Catches dnb.com, consultancy-me.com, legal500.com, cultureamp.com
@@ -321,7 +327,7 @@ export class LeadsService {
         );
         return;
       }
-      if (seenDomains.has(co.domain)) return;
+      const firstObservation = !seenDomains.has(co.domain);
       seenDomains.add(co.domain);
       try {
         const data = {
@@ -329,6 +335,7 @@ export class LeadsService {
           name: co.name,
           industry: co.industry,
           country: co.country,
+          employeeRange: co.employeeRange,
           atsProvider: co.atsProvider,
           atsSlug: co.atsSlug,
         };
@@ -337,7 +344,10 @@ export class LeadsService {
           create: { ...data, orgId },
           update: data,
         });
-        companyIds.push(company.id);
+        companyIds.add(company.id);
+        if (!firstObservation) {
+          this.logger.debug(`[lead-quality] Merged another source for ${co.domain}`);
+        }
       } catch (err) {
         this.logger.warn(`Failed to upsert company ${co.domain}: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -354,7 +364,13 @@ export class LeadsService {
     // Step 2: TheirStack (hiring intent)
     const theirStackCompanies = await withRetry(() => this.theirStack.discoverHiringCompanies(icp));
     for (const co of theirStackCompanies) {
-      await upsertCompany({ domain: co.domain, name: co.name, country: co.country, industry: co.industry });
+      await upsertCompany({
+        domain: co.domain,
+        name: co.name,
+        country: co.country,
+        industry: co.industry,
+        employeeRange: co.employeeRange,
+      });
       // Score intent from TheirStack job data
       if (co.jobTitles.length > 0) {
         try {
@@ -405,7 +421,7 @@ export class LeadsService {
     processed++;
     if (jobId) await this.updateJobProgress(jobId, processed, totalSteps, { stage: "registry-complete", found: registryCompanies.length });
 
-    return companyIds;
+    return [...companyIds];
   }
 
   private async discoverPeople(
@@ -871,7 +887,14 @@ export class LeadsService {
 
   private async scoreLeads(
     orgId: string,
-    icp: { targetTitles: string[]; targetGeos: string[]; targetIndustries: string[] },
+    icp: {
+      targetTitles: string[];
+      targetGeos: string[];
+      targetIndustries: string[];
+      minEmployees?: number | null;
+      maxEmployees?: number | null;
+      techStackSignals?: string[];
+    },
     scopedPersonIds?: string[],
   ): Promise<{ count: number; personIds: string[] }> {
     // per-run only: when scopedPersonIds is provided we score only the
@@ -1200,6 +1223,21 @@ export class LeadsService {
       },
     });
 
+    const score = p.scores[0] ?? null;
+    const evidence = await this.prisma.evidenceEvent.findMany({
+      where: {
+        orgId,
+        OR: [
+          { refType: "person", refId: p.id },
+          { refType: "company", refId: p.companyId },
+        ],
+      },
+      select: { id: true, kind: true, payload: true, createdAt: true },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: 25,
+    });
+    const intentSignals = toIntentSignals(evidence);
+
     return {
       id: p.id,
       firstName: p.firstName,
@@ -1210,11 +1248,16 @@ export class LeadsService {
       seniority: p.seniority,
       department: p.department,
       linkedinUrl: p.linkedinUrl,
-      location: null,
-      bio: null,
+      location: p.location,
+      bio: p.bio,
+      industry: p.company.industry,
+      employeeRange: p.company.employeeRange,
+      country: p.company.country,
+      city: p.company.city,
+      createdAt: p.createdAt,
       bestEmail: p.emails[0]?.email ?? null,
-      score: p.scores[0]?.score ?? null,
-      qualifiedAt: p.scores[0]?.qualifiedAt ?? null,
+      score: score?.score ?? null,
+      qualifiedAt: score?.qualifiedAt ?? null,
       emails: p.emails.map((e) => ({
         email: e.email,
         pattern: e.pattern,
@@ -1223,9 +1266,27 @@ export class LeadsService {
         verified: e.verified,
         verificationResult: e.verificationResult,
       })),
-      scoreBreakdown: p.scores[0] ? [
-        { category: "Total", points: p.scores[0].score },
-      ] : [],
+      researchBrief: buildLeadResearchBrief({
+        firstName: p.firstName,
+        lastName: p.lastName,
+        title: p.title,
+        location: p.location,
+        company: {
+          name: p.company.name,
+          domain: p.company.domain,
+          industry: p.company.industry,
+          employeeRange: p.company.employeeRange,
+          city: p.company.city,
+          country: p.company.country,
+          fundingStage: p.company.fundingStage,
+          techStack: p.company.techStack,
+        },
+        score: score?.score ?? null,
+        evidence,
+      }),
+      scoreBreakdown: normalizeLeadScoreBreakdown(score?.breakdown),
+      recentEvidenceEvents: toEvidenceTimeline(evidence),
+      intentSignals: intentSignals.length > 0 ? intentSignals : null,
     };
   }
 

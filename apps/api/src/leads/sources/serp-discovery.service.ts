@@ -122,7 +122,11 @@ export class SerpDiscoveryService {
         for (const r of results) {
           const person = this.parseLinkedInPersonResult(r);
           if (person) {
-            const key = `${person.firstName.toLowerCase()}-${person.lastName.toLowerCase()}`;
+            const key = person.linkedinSlug
+              ? `linkedin:${person.linkedinSlug.toLowerCase()}`
+              : [person.firstName, person.lastName, person.companyName ?? "unknown-company"]
+                  .map((value) => value.toLowerCase().trim())
+                  .join(":");
             if (!seen.has(key)) {
               seen.add(key);
               allPeople.push(person);
@@ -259,11 +263,9 @@ export class SerpDiscoveryService {
         return null;
       }
     } else if (link.match(/greenhouse\.io|lever\.co|ashbyhq\.com/)) {
-      // ATS page: extract company slug
-      const atsMatch = link.match(/(?:greenhouse\.io|lever\.co|ashbyhq\.com)\/([^/?]+)/);
-      if (!atsMatch) return null;
-      name = atsMatch[1]!.replace(/-/g, " ");
-      domain = `${atsMatch[1]!.replace(/-/g, "")}.com`;
+      // An ATS tenant slug is not a company domain. The dedicated ATS scraper
+      // resolves tenant slugs against already admitted company domains.
+      return null;
     } else {
       // Direct website
       try {
