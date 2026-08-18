@@ -146,6 +146,14 @@ export class OrgScopeGuard implements CanActivate {
       const headerOrgId = request.headers["x-org-id"];
       if (typeof headerOrgId === "string" && headerOrgId.length > 0) {
         orgId = headerOrgId;
+        const headerClerkUserId = request.headers["x-clerk-user-id"];
+        if (
+          typeof headerClerkUserId === "string" &&
+          headerClerkUserId.length > 0
+        ) {
+          clerkUserId = headerClerkUserId;
+          reqAny.clerkUserId = headerClerkUserId;
+        }
         this.logger.warn(
           "Dev mode: orgId resolved from x-org-id header. " +
           "Never enable this in production.",

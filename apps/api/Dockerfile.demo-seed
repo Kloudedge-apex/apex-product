@@ -1,0 +1,26 @@
+# syntax=docker/dockerfile:1@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+
+ARG NODE_IMAGE=node:24-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03
+FROM ${NODE_IMAGE}
+
+ARG PNPM_VERSION=10.28.2
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates openssl \
+    && rm -rf /var/lib/apt/lists/* \
+    && corepack enable \
+    && corepack prepare "pnpm@${PNPM_VERSION}" --activate
+
+WORKDIR /workspace
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json ./
+COPY packages/db/package.json packages/db/
+RUN pnpm install --frozen-lockfile --filter @apex/db...
+
+COPY --chown=node:node packages/db/ packages/db/
+RUN pnpm --filter @apex/db db:generate
+
+WORKDIR /workspace/packages/db
+USER node
+
+CMD ["node", "demo-seed.mjs"]

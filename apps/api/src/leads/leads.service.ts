@@ -929,6 +929,48 @@ export class LeadsService {
       where: { id: icpProfileId, orgId },
     });
 
+    if (
+      process.env.INVESTOR_DEMO_MODE === "true" &&
+      orgId === "investor-demo"
+    ) {
+      const [companyRows, personRows] = await Promise.all([
+        this.prisma.company.findMany({
+          where: { orgId },
+          select: { id: true },
+          take: 20,
+        }),
+        this.prisma.person.findMany({
+          where: { company: { orgId } },
+          select: { id: true },
+          take: 100,
+        }),
+      ]);
+      const companyJobId = await this.createJob(
+        orgId,
+        icpProfileId,
+        "COMPANY_DISCOVERY",
+      );
+      const peopleJobId = await this.createJob(
+        orgId,
+        icpProfileId,
+        "PEOPLE_DISCOVERY",
+      );
+      await Promise.all([
+        this.markJobRunning(companyJobId),
+        this.markJobRunning(peopleJobId),
+      ]);
+      await Promise.all([
+        this.markJobCompleted(companyJobId, companyRows.length),
+        this.markJobCompleted(peopleJobId, personRows.length),
+      ]);
+      return {
+        companies: companyRows.length,
+        people: personRows.length,
+        companyIds: companyRows.map((row) => row.id),
+        personIds: personRows.map((row) => row.id),
+      };
+    }
+
     const companyJobId = await this.createJob(orgId, icpProfileId, "COMPANY_DISCOVERY");
     let companies = 0;
     let companyIds: string[] = [];
@@ -966,6 +1008,43 @@ export class LeadsService {
     icpProfileId: string,
     scopedPersonIds?: string[],
   ): Promise<{ merged: number; enriched: number; personIds: string[] }> {
+    if (
+      process.env.INVESTOR_DEMO_MODE === "true" &&
+      orgId === "investor-demo"
+    ) {
+      const personRows = await this.prisma.person.findMany({
+        where: {
+          company: { orgId },
+          ...(scopedPersonIds ? { id: { in: scopedPersonIds } } : {}),
+        },
+        select: { id: true },
+        take: 100,
+      });
+      const identityJobId = await this.createJob(
+        orgId,
+        icpProfileId,
+        "IDENTITY_RESOLUTION",
+      );
+      const contactJobId = await this.createJob(
+        orgId,
+        icpProfileId,
+        "CONTACT_ENRICHMENT",
+      );
+      await Promise.all([
+        this.markJobRunning(identityJobId),
+        this.markJobRunning(contactJobId),
+      ]);
+      await Promise.all([
+        this.markJobCompleted(identityJobId, 0),
+        this.markJobCompleted(contactJobId, personRows.length),
+      ]);
+      return {
+        merged: 0,
+        enriched: personRows.length,
+        personIds: personRows.map((row) => row.id),
+      };
+    }
+
     const identityJobId = await this.createJob(orgId, icpProfileId, "IDENTITY_RESOLUTION");
     let merged = 0;
     try {
@@ -1010,6 +1089,26 @@ export class LeadsService {
     const jobId = await this.createJob(orgId, icpProfileId, "SCORING");
     try {
       await this.markJobRunning(jobId);
+      if (
+        process.env.INVESTOR_DEMO_MODE === "true" &&
+        orgId === "investor-demo"
+      ) {
+        const scores = await this.prisma.leadScore.findMany({
+          where: {
+            orgId,
+            ...(scopedPersonIds
+              ? { personId: { in: scopedPersonIds } }
+              : {}),
+          },
+          select: { personId: true },
+          take: 100,
+        });
+        await this.markJobCompleted(jobId, scores.length);
+        return {
+          scored: scores.length,
+          personIds: scores.map((score) => score.personId),
+        };
+      }
       // per-run only: score only the people enriched in THIS run.
       const result = await this.scoreLeads(orgId, icp, scopedPersonIds);
       await this.markJobCompleted(jobId, result.count);
