@@ -13,18 +13,15 @@ const MAX_BODY_LENGTH = 2_000;
  * wrapper over LinkedIn's gated `/v2/messages` endpoint. See that file for the
  * (substantial) caveats about LinkedIn's restrictive scopes. The contract
  * here:
- *   - Mock receipt is returned when no LinkedInService is injected OR the org
- *     has no live LinkedIn credentials. The mock branch mirrors send_email's
- *     behavior so dry-runs and credential-less local dev still surface a
- *     reviewable payload.
+ *   - Missing service wiring or live LinkedIn credentials is an explicit
+ *     failure. The tool never manufactures a successful preview receipt.
  *   - Real-credentials path is invoked when the worker has loaded live
  *     LinkedIn credentials into `context.integrations` (see
  *     SendOutreachWorker.loadIntegrations).
  *   - On any non-retryable LinkedIn error (most commonly 401/403 because the
  *     OAuth scopes don't permit messaging), the tool returns success=false
  *     with a stable `error` code. It does NOT pretend the send happened.
- *   - Evidence is emitted only on real-send success — never on mock receipts
- *     or failure paths.
+ *   - Evidence is emitted only on real-send success, never on failure paths.
  *
  * SideEffectPolicy: registered as EXTERNAL_WRITE in `side-effect.ts`. The
  * executor's dry-run path captures the artifact before this tool is invoked,
@@ -94,16 +91,24 @@ export class LinkedInSendMessageTool implements Tool {
         ? integrationIdParam
         : null;
 
-    // No live integration credentials AND no service injected => mock path.
-    // This mirrors send-email's "mock when nothing real to call" semantics so
-    // local dev / fixtures still surface a reviewable preview.
     const liveCreds = context.integrations.get("linkedin");
     const hasLiveCreds = !!(
       liveCreds?.accessToken && !liveCreds.accessToken.startsWith("mock_")
     );
 
-    if (!this.linkedinService || !hasLiveCreds) {
-      return this.mockSend(recipientUrn, body);
+    if (!this.linkedinService) {
+      return {
+        success: false,
+        data: null,
+        error: "LinkedIn delivery is unavailable because its live service is not configured.",
+      };
+    }
+    if (!hasLiveCreds) {
+      return {
+        success: false,
+        data: null,
+        error: "LinkedIn integration is not connected with live credentials for this organization.",
+      };
     }
 
     const sendResult = await this.linkedinService.sendMessage(
@@ -173,20 +178,4 @@ export class LinkedInSendMessageTool implements Tool {
     }
   }
 
-  private mockSend(recipientUrn: string, body: string): ToolResult {
-    return {
-      success: true,
-      data: {
-        sent: false,
-        mock: true,
-        provider: "linkedin",
-        messageId: `mock_linkedin_${Date.now()}_${Math.random()
-          .toString(36)
-          .slice(2, 8)}`,
-        would_send_to: recipientUrn,
-        body,
-        note: "LinkedIn message not actually sent - no real LinkedIn integration credentials configured. This is a preview of what would be sent.",
-      },
-    };
-  }
 }

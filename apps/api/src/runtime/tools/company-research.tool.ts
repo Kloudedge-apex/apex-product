@@ -1,14 +1,31 @@
 import { Tool, ToolContext, ToolResult } from "./tool.interface";
 import { WebSearchTool } from "./web-search.tool";
 import { WebScrapeTool } from "./web-scrape.tool";
-import { MOCK_DISCLAIMER_SUFFIX, markMocked, markMockedItem } from "./mock-metadata";
 import { assertUrlIsPublicHttp } from "../util/ssrf-guard";
+
+interface SearchItem {
+  title?: string;
+  url?: string;
+  snippet?: string;
+  content?: string;
+  date?: string;
+}
+
+interface SearchData {
+  results?: SearchItem[];
+  answer?: string;
+}
+
+interface WebsiteContent {
+  title: string;
+  content: string;
+  links: string[];
+}
 
 export class CompanyResearchTool implements Tool {
   name = "company_research";
   description =
-    "Research a company by combining web search and website scraping. Returns a structured company profile including industry, size, description, recent news, and key people." +
-    MOCK_DISCLAIMER_SUFFIX;
+    "Research a company using live web search and public website data. Returns a structured profile only when at least one attributable live source succeeds; otherwise returns an explicit failure.";
   parameters = {
     company_name: { type: "string", description: "Name of the company to research", required: true },
     domain: { type: "string", description: "Company website domain (e.g. acme.com)", required: false },
@@ -26,13 +43,19 @@ export class CompanyResearchTool implements Tool {
     }
 
     try {
-      // Search for company info
-      const searchResult = await this.searchTool.execute(
-        { query: `${companyName} company overview industry size funding`, max_results: 5 },
-        context,
-      );
+      const [searchResult, newsResult] = await Promise.all([
+        this.searchTool.execute(
+          { query: `${companyName} company overview industry size funding`, max_results: 5 },
+          context,
+        ),
+        this.searchTool.execute(
+          { query: `${companyName} latest news`, max_results: 3, vertical: "news" },
+          context,
+        ),
+      ]);
 
-      let websiteContent: { title: string; content: string; links: string[] } | null = null;
+      let websiteContent: WebsiteContent | null = null;
+      let websiteError: string | null = null;
 
       // Scrape company website if domain is provided
       if (domain) {
@@ -41,41 +64,65 @@ export class CompanyResearchTool implements Tool {
           await assertUrlIsPublicHttp(scrapeUrl);
           const scrapeResult = await this.scrapeTool.execute({ url: scrapeUrl }, context);
           if (scrapeResult.success) {
-            websiteContent = scrapeResult.data as { title: string; content: string; links: string[] };
+            websiteContent = scrapeResult.data as WebsiteContent;
+          } else {
+            websiteError = scrapeResult.error || "company website retrieval failed";
           }
-        } catch {
-          // Ignore blocked/invalid domains; proceed with search-only profile.
+        } catch (error) {
+          websiteError = error instanceof Error ? error.message : String(error);
         }
       }
 
-      // Search for recent news
-      const newsResult = await this.searchTool.execute(
-        { query: `${companyName} latest news 2026`, max_results: 3 },
-        context,
-      );
+      const searchData = searchResult.success ? (searchResult.data as SearchData) : null;
+      const newsData = newsResult.success ? (newsResult.data as SearchData) : null;
 
-      // Build company profile from gathered data
-      const searchData = searchResult.data as { results: Array<{ title: string; snippet: string; content: string; source?: string; confidence?: number; reason?: string }>; answer?: string } | null;
-      const newsData = newsResult.data as { results: Array<{ title: string; url: string; snippet: string; source?: string; confidence?: number; reason?: string }> } | null;
+      if (!this.hasLiveEvidence(searchData, websiteContent, newsData)) {
+        const reasons = [searchResult.error, newsResult.error, websiteError].filter(
+          (value): value is string => Boolean(value),
+        );
+        return {
+          success: false,
+          data: null,
+          error:
+            reasons.length > 0
+              ? `Company research could not retrieve live evidence: ${reasons.join("; ")}`
+              : "Company research returned no attributable live evidence.",
+        };
+      }
 
       const profile = this.buildProfile(companyName, domain, searchData, websiteContent, newsData);
 
       return { success: true, data: profile };
     } catch (error) {
-      const reason = `company_research aggregation failed: ${error instanceof Error ? error.message : String(error)}`;
       return {
-        success: true,
-        data: markMocked(this.mockProfile(companyName, domain), reason),
+        success: false,
+        data: null,
+        error: `Company research failed: ${error instanceof Error ? error.message : String(error)}`,
       };
     }
+  }
+
+  private hasLiveEvidence(
+    searchData: SearchData | null,
+    websiteContent: WebsiteContent | null,
+    newsData: SearchData | null,
+  ): boolean {
+    const hasSearch = Boolean(
+      searchData?.results?.some((item) => item.url?.trim()),
+    );
+    const hasWebsite = Boolean(
+      websiteContent?.title?.trim() || websiteContent?.content?.trim(),
+    );
+    const hasNews = Boolean(newsData?.results?.some((item) => item.url?.trim()));
+    return hasSearch || hasWebsite || hasNews;
   }
 
   private buildProfile(
     companyName: string,
     domain: string | undefined,
-    searchData: { results: Array<{ title: string; snippet: string; content: string; source?: string; confidence?: number; reason?: string }>; answer?: string } | null,
-    websiteContent: { title: string; content: string; links: string[] } | null,
-    newsData: { results: Array<{ title: string; url: string; snippet: string; source?: string; confidence?: number; reason?: string }> } | null,
+    searchData: SearchData | null,
+    websiteContent: WebsiteContent | null,
+    newsData: SearchData | null,
   ) {
     const allContent = [
       searchData?.answer || "",
@@ -95,7 +142,7 @@ export class CompanyResearchTool implements Tool {
     };
 
     const contentLower = allContent.toLowerCase();
-    let industry = "Technology";
+    let industry = "Unknown";
     for (const [ind, keywords] of Object.entries(industryKeywords)) {
       if (keywords.some((kw) => contentLower.includes(kw))) {
         industry = ind;
@@ -125,55 +172,49 @@ export class CompanyResearchTool implements Tool {
       }
     }
 
+    const sources = [
+      ...(searchData?.results || []).map((item) => ({
+        type: "search",
+        title: item.title || "Search result",
+        url: item.url || "",
+      })),
+      ...(newsData?.results || []).map((item) => ({
+        type: "news",
+        title: item.title || "News result",
+        url: item.url || "",
+      })),
+      ...(websiteContent && domain
+        ? [
+            {
+              type: "website",
+              title: websiteContent.title || `${companyName} website`,
+              url: domain.startsWith("http") ? domain : `https://${domain}`,
+            },
+          ]
+        : []),
+    ].filter((source) => source.url.length > 0);
+
     return {
       name: companyName,
       domain: domain || "unknown",
       industry,
       size,
-      description: searchData?.answer || searchData?.results?.[0]?.snippet || `${companyName} is a technology company.`,
-      recent_news: newsData?.results?.map((n) => {
-        const base: { title: string; url: string; snippet: string; source?: string; confidence?: number; reason?: string } = {
-          title: n.title,
-          url: n.url,
-          snippet: n.snippet,
-        };
-        // Preserve inline mock-tagging so downstream LLMs see fixture flags
-        // even on aggregated fields.
-        if (n.source === "mock") {
-          base.source = "mock";
-          base.confidence = 0;
-          base.reason = n.reason || "propagated from web_search mock";
-        }
-        return base;
-      }) || [],
+      description:
+        searchData?.answer ||
+        searchData?.results?.find((item) => item.snippet || item.content)?.snippet ||
+        searchData?.results?.find((item) => item.content)?.content ||
+        websiteContent?.content?.slice(0, 500) ||
+        null,
+      recent_news:
+        newsData?.results?.filter((item) => item.url?.trim()).map((item) => ({
+          title: item.title || "Untitled result",
+          url: item.url || "",
+          snippet: item.snippet || item.content || "",
+          date: item.date,
+        })) || [],
       key_people: [],
       website_summary: websiteContent?.content?.slice(0, 300) || null,
-    };
-  }
-
-  private mockProfile(companyName: string, domain?: string) {
-    const reason = "fixture profile";
-    return {
-      name: companyName,
-      domain: domain || `${companyName.toLowerCase().replace(/\s+/g, "")}.com`,
-      industry: "SaaS",
-      size: "100-500",
-      description: `${companyName} is a growing technology company specializing in innovative SaaS solutions for enterprise clients. The company has been rapidly scaling its operations and recently secured significant funding to expand its product offerings.`,
-      recent_news: [
-        markMockedItem(
-          { title: `${companyName} Raises Series B Funding`, url: "#", snippet: `${companyName} announced a $45M Series B round led by top-tier VCs.` },
-          reason,
-        ),
-        markMockedItem(
-          { title: `${companyName} Launches AI-Powered Features`, url: "#", snippet: `The company unveiled new AI capabilities in its flagship product.` },
-          reason,
-        ),
-      ],
-      key_people: [
-        markMockedItem({ name: "CEO", role: "Chief Executive Officer" }, reason),
-        markMockedItem({ name: "CTO", role: "Chief Technology Officer" }, reason),
-      ],
-      website_summary: `${companyName} provides enterprise-grade solutions that help teams work more efficiently. Their platform integrates with major business tools and offers advanced analytics capabilities.`,
+      sources,
     };
   }
 }

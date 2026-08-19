@@ -169,13 +169,19 @@ export class LLMService {
     @Optional() private readonly budget?: LlmBudgetService,
   ) {
     if (process.env.NODE_ENV === "production") {
-      const hasAzure = !!(this.azureKey && this.azureEndpoint);
-      const hasOpenAI = !!this.apiKey;
-      const hasAnthropic = !!process.env.ANTHROPIC_API_KEY;
-      if (!hasAzure && !hasOpenAI && !hasAnthropic) {
+      const hasAzure = !!(
+        this.azureKey?.trim() &&
+        this.azureEndpoint?.trim() &&
+        process.env.AZURE_OPENAI_FAST_DEPLOYMENT?.trim() &&
+        process.env.AZURE_OPENAI_DEPLOYMENT?.trim()
+      );
+      const hasOpenAI = !!this.apiKey?.trim();
+      const hasAnthropic = !!process.env.ANTHROPIC_API_KEY?.trim();
+      if (!hasAzure && !hasOpenAI) {
         throw new Error(
-          "LLMService: no provider configured in production. " +
-            "Set AZURE_OPENAI_ENDPOINT+AZURE_OPENAI_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY.",
+          "LLMService: no complete OpenAI-compatible provider configured in production. " +
+            "Set OPENAI_API_KEY, or set AZURE_OPENAI_ENDPOINT+AZURE_OPENAI_KEY+" +
+            "AZURE_OPENAI_FAST_DEPLOYMENT+AZURE_OPENAI_DEPLOYMENT.",
         );
       }
       this.logger.log(
@@ -474,7 +480,9 @@ export class LLMService {
     temperature?: number,
   ): Promise<LLMResponse> {
     const anthropicKey = process.env.ANTHROPIC_API_KEY;
-    if (!anthropicKey) return this.mockResponse(messages, model, maxTokens, tools);
+    if (!anthropicKey) {
+      throw new Error(`LLMService: Anthropic provider is unavailable for model "${model}".`);
+    }
 
     try {
       return await this.wrapWithLangSmith(

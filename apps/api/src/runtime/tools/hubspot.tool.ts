@@ -6,6 +6,15 @@ import { fetchWithRetry, withCircuitBreaker } from "../../common/http-retry.util
 type HubspotEntityType = "contact" | "deal" | "note";
 type HubspotOperation = "create" | "update" | "delete";
 
+const HUBSPOT_ACTIONS = new Set([
+  "create_contact",
+  "update_contact",
+  "search_contacts",
+  "create_deal",
+  "update_deal",
+  "log_activity",
+]);
+
 /** Single helper to wrap every HubSpot REST call uniformly with retry + CB. */
 function hubspotFetch(url: string, init: RequestInit): Promise<Response> {
   return withCircuitBreaker("hubspot", () =>
@@ -39,6 +48,9 @@ export class HubSpotTool implements Tool {
     if (!action || !data) {
       return { success: false, data: null, error: "action and data are required" };
     }
+    if (!HUBSPOT_ACTIONS.has(action)) {
+      return { success: false, data: null, error: `Unknown action: ${action}` };
+    }
 
     const creds = context.integrations.get("hubspot");
 
@@ -46,7 +58,11 @@ export class HubSpotTool implements Tool {
       return this.executeReal(action, data, creds.accessToken, context);
     }
 
-    return this.executeMock(action, data);
+    return {
+      success: false,
+      data: null,
+      error: "HubSpot integration is not connected with live credentials for this organization.",
+    };
   }
 
   private async executeReal(
@@ -71,6 +87,7 @@ export class HubSpotTool implements Tool {
           });
           if (!response.ok) throw new Error(`HubSpot API error: ${response.status}`);
           const result = (await response.json()) as { id?: string };
+          if (!result.id) throw new Error("HubSpot create_contact response missing contact id");
           await this.emitCrmSynced(context, {
             entityType: "contact",
             entityId: result.id,
@@ -80,7 +97,10 @@ export class HubSpotTool implements Tool {
           return { success: true, data: { action: "contact_created", contact: result } };
         }
         case "update_contact": {
-          const contactId = data.id as string;
+          const contactId = data.id;
+          if (typeof contactId !== "string" || contactId.trim().length === 0) {
+            return { success: false, data: null, error: "update_contact requires a contact id" };
+          }
           const properties = { ...data };
           delete properties.id;
           const response = await hubspotFetch(`${baseUrl}/crm/v3/objects/contacts/${contactId}`, {
@@ -128,6 +148,7 @@ export class HubSpotTool implements Tool {
           });
           if (!response.ok) throw new Error(`HubSpot API error: ${response.status}`);
           const result = (await response.json()) as { id?: string };
+          if (!result.id) throw new Error("HubSpot create_deal response missing deal id");
           await this.emitCrmSynced(context, {
             entityType: "deal",
             entityId: result.id,
@@ -137,7 +158,10 @@ export class HubSpotTool implements Tool {
           return { success: true, data: { action: "deal_created", deal: result } };
         }
         case "update_deal": {
-          const dealId = data.id as string;
+          const dealId = data.id;
+          if (typeof dealId !== "string" || dealId.trim().length === 0) {
+            return { success: false, data: null, error: "update_deal requires a deal id" };
+          }
           const properties = { ...data };
           delete properties.id;
           const response = await hubspotFetch(`${baseUrl}/crm/v3/objects/deals/${dealId}`, {
@@ -168,6 +192,7 @@ export class HubSpotTool implements Tool {
           });
           if (!response.ok) throw new Error(`HubSpot API error: ${response.status}`);
           const result = (await response.json()) as { id?: string };
+          if (!result.id) throw new Error("HubSpot log_activity response missing note id");
           await this.emitCrmSynced(context, {
             entityType: "note",
             entityId: result.id,
@@ -190,119 +215,31 @@ export class HubSpotTool implements Tool {
 
   /**
    * Best-effort append to the evidence ledger. Only invoked when the real
-   * HubSpot API returns 2xx — failures and mock responses never produce an
-   * event. Missing ids fall back to a synthetic placeholder so the ref column
-   * is never empty (downstream KPI joins require a non-null refId).
+   * HubSpot API returns a successful response with an attributable entity id.
+   * Failures and missing credentials never produce an event.
    */
   private async emitCrmSynced(
     context: ToolContext,
     args: {
       readonly entityType: HubspotEntityType;
-      readonly entityId: string | undefined;
+      readonly entityId: string;
       readonly operation: HubspotOperation;
       readonly fieldsChanged: readonly string[];
     },
   ): Promise<void> {
     if (!this.evidenceLedger) return;
-    const entityId = args.entityId && args.entityId.length > 0
-      ? args.entityId
-      : `hubspot:${args.entityType}:unknown:${Date.now()}`;
     try {
       await this.evidenceLedger.crmSynced({
         orgId: context.orgId,
         runId: context.runId ?? null,
         provider: "hubspot",
         entityType: args.entityType,
-        entityId,
+        entityId: args.entityId,
         operation: args.operation,
         fieldsChanged: args.fieldsChanged,
       });
     } catch {
       this.logger.warn("Evidence ledger append failed after a successful HubSpot write");
-    }
-  }
-
-  private executeMock(action: string, data: Record<string, unknown>): ToolResult {
-    const mockId = `mock_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-
-    switch (action) {
-      case "create_contact":
-        return {
-          success: true,
-          data: {
-            action: "contact_created",
-            mock: true,
-            contact: {
-              id: mockId,
-              properties: {
-                email: data.email || "contact@example.com",
-                firstname: data.firstname || data.first_name || "John",
-                lastname: data.lastname || data.last_name || "Doe",
-                company: data.company || "Example Corp",
-                ...data,
-              },
-              createdAt: new Date().toISOString(),
-            },
-          },
-        };
-      case "update_contact":
-        return {
-          success: true,
-          data: {
-            action: "contact_updated",
-            mock: true,
-            contact: { id: data.id || mockId, properties: data, updatedAt: new Date().toISOString() },
-          },
-        };
-      case "search_contacts":
-        return {
-          success: true,
-          data: {
-            action: "contacts_found",
-            mock: true,
-            contacts: [
-              { id: mockId, properties: { email: "john@example.com", firstname: "John", lastname: "Doe", company: "Example Corp" } },
-            ],
-          },
-        };
-      case "create_deal":
-        return {
-          success: true,
-          data: {
-            action: "deal_created",
-            mock: true,
-            deal: {
-              id: mockId,
-              properties: {
-                dealname: data.dealname || data.name || "New Deal",
-                amount: data.amount || 10000,
-                dealstage: data.dealstage || "appointmentscheduled",
-                ...data,
-              },
-              createdAt: new Date().toISOString(),
-            },
-          },
-        };
-      case "update_deal":
-        return {
-          success: true,
-          data: {
-            action: "deal_updated",
-            mock: true,
-            deal: { id: data.id || mockId, properties: data, updatedAt: new Date().toISOString() },
-          },
-        };
-      case "log_activity":
-        return {
-          success: true,
-          data: {
-            action: "activity_logged",
-            mock: true,
-            note: { id: mockId, body: data.note || data.body, timestamp: new Date().toISOString() },
-          },
-        };
-      default:
-        return { success: false, data: null, error: `Unknown action: ${action}` };
     }
   }
 }

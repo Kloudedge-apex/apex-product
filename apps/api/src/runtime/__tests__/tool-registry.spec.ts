@@ -92,9 +92,9 @@ describe("ToolRegistry", () => {
       expect(names).toContain("web_search");
     });
 
-    it("should return all tools for unknown template as fallback", () => {
+    it("should return no tools for an unknown template", () => {
       const tools = registry.getForTemplate("Unknown Template");
-      expect(tools.length).toBeGreaterThan(0);
+      expect(tools).toEqual([]);
     });
 
     it("should be case-insensitive", () => {
@@ -141,7 +141,7 @@ describe("ToolRegistry", () => {
       expect(allowed).toEqual(["web_search", "web_scrape", "company_research", "memory"]);
     });
 
-    it("should return null for an unknown template (fallback = unrestricted)", () => {
+    it("should return null for an unknown template so execution can fail closed", () => {
       const allowed = registry.getAllowedToolNames("Unknown Template");
       expect(allowed).toBeNull();
     });

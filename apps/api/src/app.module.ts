@@ -20,7 +20,6 @@ import { DashboardModule } from "./dashboard/dashboard.module";
 import { PolicyEventsModule } from "./policy-events/policy-events.module";
 import { ObservabilityModule } from "./observability/observability.module";
 import { KpisModule } from "./kpis/kpis.module";
-import { BetaStubsModule } from "./beta-stubs/beta-stubs.module";
 import { ConversationsModule } from "./conversations/conversations.module";
 import { OrgScopeGuard } from "./common/org-scope.guard";
 import { RateLimitGuard } from "./common/rate-limit.guard";
@@ -57,7 +56,6 @@ import { ProductionBootstrapWriterFenceInterceptor } from "./ops/production-boot
     ConversationsModule,
     DashboardModule,
     PolicyEventsModule,
-    BetaStubsModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: OrgScopeGuard },

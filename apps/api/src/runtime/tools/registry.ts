@@ -91,10 +91,8 @@ export class ToolRegistry {
     this.register(new CompanyResearchTool());
     this.register(new LeadScoreTool());
     // linkedin_send_message is always registered so the template/registry sync
-    // invariant holds even when LinkedInService isn't wired (tests, bootstrap
-    // before integrations module loads). The tool's mock-path activates when
-    // linkedinService is undefined OR no live LinkedIn creds exist on the
-    // ToolContext.
+    // invariant holds even when LinkedInService isn't wired. Execution fails
+    // explicitly unless both the service and live tenant credentials exist.
     this.register(new LinkedInSendMessageTool(linkedinService, evidenceLedger));
     if (memoryService) {
       this.register(new MemoryTool(memoryService));
@@ -114,8 +112,7 @@ export class ToolRegistry {
     const toolNames = this.templateToolMap[normalized];
 
     if (!toolNames) {
-      // Return all tools as fallback
-      return Array.from(this.tools.values());
+      return [];
     }
 
     return toolNames
@@ -125,8 +122,8 @@ export class ToolRegistry {
 
   /**
    * Returns the allow-list of tool names for a template, or `null` when the
-   * template has no explicit entry (fallback = all tools). Callers should
-   * treat `null` as "no restriction" and any array as the exclusive whitelist.
+   * template has no explicit entry. Execution callers must treat `null` as an
+   * empty allow-list; evaluator callers may use it to try normalized aliases.
    */
   getAllowedToolNames(templateName: string): string[] | null {
     const normalized = templateName.toLowerCase();

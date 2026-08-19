@@ -76,8 +76,8 @@ describe("LinkedInSendMessageTool", () => {
     });
   });
 
-  describe("mock / dry-run path", () => {
-    it("returns mock receipt when no LinkedInService is injected", async () => {
+  describe("missing live integration", () => {
+    it("fails explicitly when no LinkedInService is injected", async () => {
       const ledger = mockLedger();
       const tool = new LinkedInSendMessageTool(undefined, ledger);
       const result = await tool.execute(
@@ -85,22 +85,12 @@ describe("LinkedInSendMessageTool", () => {
         makeContext(liveCreds()),
       );
 
-      expect(result.success).toBe(true);
-      const data = result.data as {
-        mock: boolean;
-        provider: string;
-        would_send_to: string;
-        sent: boolean;
-      };
-      expect(data.mock).toBe(true);
-      expect(data.provider).toBe("linkedin");
-      expect(data.would_send_to).toBe("urn:li:person:abc");
-      expect(data.sent).toBe(false);
-      // Mock path must NOT emit evidence — no real send happened.
+      expect(result).toMatchObject({ success: false, data: null });
+      expect(result.error).toMatch(/live service is not configured/);
       expect(ledger.messageSent).not.toHaveBeenCalled();
     });
 
-    it("returns mock receipt when context has no live LinkedIn creds", async () => {
+    it("fails explicitly when context has no live LinkedIn credentials", async () => {
       const svc = mockService(async () => ({ ok: true, messageId: "x" }));
       const tool = new LinkedInSendMessageTool(svc);
       const result = await tool.execute(
@@ -108,13 +98,13 @@ describe("LinkedInSendMessageTool", () => {
         makeContext(), // empty integrations map
       );
 
-      expect(result.success).toBe(true);
-      expect((result.data as { mock: boolean }).mock).toBe(true);
+      expect(result).toMatchObject({ success: false, data: null });
+      expect(result.error).toMatch(/not connected with live credentials/);
       // Service must not be invoked when creds are absent.
       expect(svc.sendMessage).not.toHaveBeenCalled();
     });
 
-    it("returns mock receipt when stored access token is a mock value", async () => {
+    it("fails explicitly when the stored access token is a placeholder", async () => {
       const svc = mockService(async () => ({ ok: true, messageId: "x" }));
       const tool = new LinkedInSendMessageTool(svc);
       const result = await tool.execute(
@@ -122,8 +112,8 @@ describe("LinkedInSendMessageTool", () => {
         makeContext(mockCreds()),
       );
 
-      expect(result.success).toBe(true);
-      expect((result.data as { mock: boolean }).mock).toBe(true);
+      expect(result).toMatchObject({ success: false, data: null });
+      expect(result.error).toMatch(/not connected with live credentials/);
       expect(svc.sendMessage).not.toHaveBeenCalled();
     });
   });

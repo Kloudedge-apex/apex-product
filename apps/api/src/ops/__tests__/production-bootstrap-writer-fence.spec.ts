@@ -1127,7 +1127,7 @@ describe("production bootstrap HTTP classification", () => {
   it("classifies the complete reviewed GET/HEAD-equivalent controller surface", () => {
     const sourceRoot = join(process.cwd(), "src");
     const routes = productionGetRoutes(sourceRoot);
-    expect(routes).toHaveLength(87);
+    expect(routes).toHaveLength(82);
     expect(new Set(routes).size).toBe(routes.length);
 
     const writerRoutes = new Set([

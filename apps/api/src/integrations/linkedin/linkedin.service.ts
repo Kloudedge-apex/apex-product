@@ -73,8 +73,7 @@ export class LinkedInService {
    *   2. Otherwise, fall back to the org's primary LinkedIn integration (the
    *      first CONNECTED row).
    *   3. If no integration is found, return `{ ok: false, error:
-   *      "linkedin_not_connected" }` — the caller decides whether to surface
-   *      that as a tool error or fall back to mock.
+   *      "linkedin_not_connected" }`; callers surface the explicit failure.
    *
    * Network failures and non-2xx responses are surfaced as `ok: false` with a
    * stable `error` string. We do NOT throw on 4xx so the caller can record a
@@ -109,9 +108,7 @@ export class LinkedInService {
       };
     }
 
-    // Mock-mode credentials (set by simulateConnect / mock_code OAuth flow)
-    // must not be used to hit the real endpoint. Return a stable error so the
-    // tool can decide whether to fall back to a mock receipt.
+    // Placeholder credentials must never be used to hit the live endpoint.
     if (accessToken.startsWith("mock_")) {
       return {
         ok: false,

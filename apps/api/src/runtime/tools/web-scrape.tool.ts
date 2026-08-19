@@ -1,5 +1,4 @@
 import { Tool, ToolContext, ToolResult } from "./tool.interface";
-import { MOCK_DISCLAIMER_SUFFIX, markMocked } from "./mock-metadata";
 import { fetchWithRetry } from "../../common/http-retry.util";
 import { ssrfGuardedFetch } from "../util/ssrf-guard";
 import {
@@ -12,8 +11,7 @@ const MAX_SCRAPE_BYTES = 500_000;
 export class WebScrapeTool implements Tool {
   name = "web_scrape";
   description =
-    "Extract readable content from a URL. Returns the page title, main content text, and links found on the page." +
-    MOCK_DISCLAIMER_SUFFIX;
+    "Extract readable content from a live public URL. Returns the page title, main content text, and links found on the page. Returns an explicit failure when the page cannot be retrieved.";
   parameters = {
     url: { type: "string", description: "The URL to scrape", required: true },
   };
@@ -54,15 +52,17 @@ export class WebScrapeTool implements Tool {
       }
 
       const html = await readResponseTextWithLimit(response, MAX_SCRAPE_BYTES);
-      return { success: true, data: this.extractContent(html, url) };
+      return { success: true, data: this.extractContent(html) };
     } catch (error) {
-      // Return mock data on failure, but tag it so the LLM does not cite it as fact.
-      const reason = `Scrape fetch failed: ${error instanceof Error ? error.message : String(error)}`;
-      return { success: true, data: markMocked(this.mockScrape(url), reason) };
+      return {
+        success: false,
+        data: null,
+        error: `Web page retrieval failed: ${error instanceof Error ? error.message : String(error)}`,
+      };
     }
   }
 
-  private extractContent(html: string, url: string): { title: string; content: string; links: string[] } {
+  private extractContent(html: string): { title: string; content: string; links: string[] } {
     // Extract title
     const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
     const title = titleMatch ? titleMatch[1].trim().replace(/\s+/g, " ") : "Untitled";
@@ -102,20 +102,5 @@ export class WebScrapeTool implements Tool {
     }
 
     return { title, content, links };
-  }
-
-  private mockScrape(url: string): { title: string; content: string; links: string[] } {
-    const domain = new URL(url).hostname;
-    return {
-      title: `${domain} - Company Page`,
-      content: `${domain} is a technology company focused on delivering innovative solutions. The company offers a range of products and services designed to help businesses scale efficiently. With a team of experienced professionals, ${domain} serves clients across multiple industries including SaaS, fintech, and enterprise software. Recent initiatives include AI-powered automation, cloud infrastructure optimization, and enhanced data analytics capabilities.`,
-      links: [
-        `${url}/about`,
-        `${url}/products`,
-        `${url}/blog`,
-        `${url}/careers`,
-        `${url}/contact`,
-      ],
-    };
   }
 }

@@ -43,7 +43,7 @@ CRITICAL RULES:
     { name: "memory", description: "Read and write durable agent memory (contacted leads, run summaries)" },
     // LinkedIn DMs are an optional channel — they only succeed when the org has a
     // CONNECTED LinkedIn integration with the right scopes. Without one, the tool
-    // returns a mock receipt so the agent loop doesn't crash on missing creds.
+    // fails explicitly rather than returning a preview receipt.
     { name: "linkedin_send_message", description: "Send a personalized LinkedIn DM to a 1st-degree prospect via the connected LinkedIn account" },
     // TODO: add email_read to registry (needed for reply detection inside SDR loop; currently delegated to reply-handler)
     // TODO: add linkedin_search to registry (currently approximated via web_search)

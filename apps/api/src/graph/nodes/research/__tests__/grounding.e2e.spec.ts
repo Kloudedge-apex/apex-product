@@ -7,7 +7,7 @@ import { markMocked } from "../../../../runtime/tools/mock-metadata";
 
 /**
  * END-TO-END grounding proof. Wires the REAL RESEARCH node + REAL
- * SignalExtractionService (mock/keyless web_search) + REAL EvidenceLedgerService,
+ * SignalExtractionService (legacy-mock compatibility fake) + REAL EvidenceLedgerService,
  * all sharing ONE in-memory evidenceEvent store, then runs the REAL
  * assembleResearchBrief against the same store. This is the integration seam the
  * unit tests cannot exercise: recordSignal's WRITE payload shape must be readable
@@ -149,9 +149,10 @@ const lead = {
 // Inside the recent_hire freshness window (75d) — counts toward grounding.
 const freshDate = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);
 
-// Keyless web_search returns a mock-tagged payload → extractLiveTrigger yields []
-// (mock never becomes a fact), so the only possible signal is the scraped job.
-const mockKeylessSearch = {
+// A legacy/imported mock-tagged payload yields no live trigger. Production web
+// search now fails explicitly instead of returning such a payload, but this
+// defense remains important for old persisted data and test fixtures.
+const legacyMockSearch = {
   execute: async () => ({ success: true, data: markMocked({ results: [] }, "no key") }),
 };
 
@@ -160,7 +161,7 @@ describe("research grounding e2e (real node → real ledger → real brief, one 
     const raw = { jobs: [{ title: "Senior SDR", url: "https://jobs.test/1", postedAt: freshDate }] };
     const prisma = makeFakePrisma(raw);
 
-    const svc = new SignalExtractionService(mockKeylessSearch as any);
+    const svc = new SignalExtractionService(legacyMockSearch as any);
     const ledger = new EvidenceLedgerService(prisma as any);
     const node = buildResearchNode({ prisma: prisma as any, signalExtraction: svc, evidenceLedger: ledger });
 
@@ -189,7 +190,7 @@ describe("research grounding e2e (real node → real ledger → real brief, one 
     const raw = {}; // no jobs[]
     const prisma = makeFakePrisma(raw);
 
-    const svc = new SignalExtractionService(mockKeylessSearch as any);
+    const svc = new SignalExtractionService(legacyMockSearch as any);
     const ledger = new EvidenceLedgerService(prisma as any);
     const node = buildResearchNode({ prisma: prisma as any, signalExtraction: svc, evidenceLedger: ledger });
 
