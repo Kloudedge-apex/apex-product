@@ -5,7 +5,6 @@ import {
   OnModuleInit,
   UnauthorizedException,
   BadRequestException,
-  ForbiddenException,
   ServiceUnavailableException,
   ConflictException,
   Optional,
@@ -26,9 +25,6 @@ import { SuppressionService } from "../../outreach/suppression.service";
 import { ConversationStoreService } from "../../conversation-store/conversation-store.service";
 import { encrypt, decrypt } from "../crypto.util";
 import {
-  buildUnsubscribeUrl,
-} from "../../outreach/unsubscribe-token.util";
-import {
   isGmailWatchFresh,
   normalizeGmailWatchExpiration,
   withGmailWatchExpiration,
@@ -45,35 +41,6 @@ interface GmailTokens {
   expiry_date: number;
   token_type: string;
   scope: string;
-}
-
-interface SendEmailOptions {
-  to: string;
-  subject: string;
-  body: string;
-  html?: string;
-  cc?: string;
-  bcc?: string;
-  replyTo?: string;
-  inReplyTo?: string;
-  threadId?: string;
-  /**
-   * When set, the send injects RFC 8058 / CAN-SPAM List-Unsubscribe +
-   * List-Unsubscribe-Post: One-Click headers, with the URL signed via
-   * unsubscribe-token.util so the public /u/:token endpoint can verify and
-   * record the suppression. Audit P0 #3.
-   *
-   * Required for any outbound that should be CAN-SPAM compliant — the send
-   * worker passes this on every approved-artifact dispatch.
-   */
-  unsubscribeContext?: {
-    readonly orgId: string;
-    readonly recipientRef: string;
-  };
-}
-
-export interface SendApprovedOutreachEmailOptions extends SendEmailOptions {
-  readonly outreachArtifactId: string;
 }
 
 interface GmailMessage {
@@ -1353,79 +1320,6 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
       snippet: response.data.snippet ?? "",
       messages,
     };
-  }
-
-  async sendEmail(orgId: string, options: SendEmailOptions): Promise<{ id: string; threadId: string }> {
-    const gmail = await this.getGmailClient(orgId);
-
-    const mimeLines: string[] = [];
-
-    if (options.inReplyTo) {
-      mimeLines.push(`In-Reply-To: ${options.inReplyTo}`);
-      mimeLines.push(`References: ${options.inReplyTo}`);
-    }
-    mimeLines.push(`To: ${options.to}`);
-    if (options.cc) mimeLines.push(`Cc: ${options.cc}`);
-    if (options.bcc) mimeLines.push(`Bcc: ${options.bcc}`);
-    if (options.replyTo) mimeLines.push(`Reply-To: ${options.replyTo}`);
-    mimeLines.push(`Subject: ${options.subject}`);
-    mimeLines.push("MIME-Version: 1.0");
-    if (options.unsubscribeContext) {
-      const url = buildUnsubscribeUrl(
-        options.unsubscribeContext.orgId,
-        options.unsubscribeContext.recipientRef,
-      );
-      mimeLines.push(`List-Unsubscribe: <${url}>`);
-      mimeLines.push("List-Unsubscribe-Post: List-Unsubscribe=One-Click");
-    }
-
-    if (options.html) {
-      const boundary = `boundary_${Date.now()}`;
-      mimeLines.push(`Content-Type: multipart/alternative; boundary="${boundary}"`);
-      mimeLines.push("");
-      mimeLines.push(`--${boundary}`);
-      mimeLines.push("Content-Type: text/plain; charset=UTF-8");
-      mimeLines.push("");
-      mimeLines.push(options.body);
-      mimeLines.push(`--${boundary}`);
-      mimeLines.push("Content-Type: text/html; charset=UTF-8");
-      mimeLines.push("");
-      mimeLines.push(options.html);
-      mimeLines.push(`--${boundary}--`);
-    } else {
-      mimeLines.push("Content-Type: text/plain; charset=UTF-8");
-      mimeLines.push("");
-      mimeLines.push(options.body);
-    }
-
-    const raw = Buffer.from(mimeLines.join("\r\n")).toString("base64url");
-
-    const response = await gmail.users.messages.send({
-      userId: "me",
-      requestBody: {
-        raw,
-        threadId: options.threadId,
-      },
-    });
-
-    return {
-      id: response.data.id!,
-      threadId: response.data.threadId!,
-    };
-  }
-
-  async sendApprovedOutreachEmail(
-    _orgId: string,
-    _options: SendApprovedOutreachEmailOptions,
-  ): Promise<never> {
-    // Direct provider dispatch used to duplicate a subset of the worker's
-    // approval checks while bypassing suppression, cooldown, daily caps,
-    // compliance composition, CAS claiming, and ambiguous-delivery handling.
-    // Keep the method as a fail-closed compatibility boundary; the only live
-    // path is artifact approval -> outreach queue -> SendOutreachWorker.
-    throw new ForbiddenException(
-      "Direct Gmail dispatch is disabled; approve the artifact through the outreach queue",
-    );
   }
 
   async searchMessages(
