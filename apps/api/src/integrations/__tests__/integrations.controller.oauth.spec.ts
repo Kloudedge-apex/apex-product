@@ -148,21 +148,6 @@ describe("IntegrationsController OAuth transaction boundary", () => {
     );
   });
 
-  it("keeps unsupported provider callbacks explicitly unavailable", async () => {
-    await controller.outlookCallback(
-      "outlook-auth-code",
-      "signed-state",
-      undefined,
-      response,
-    );
-
-    expect(oauthAttempts.parkAuthorizationCode).not.toHaveBeenCalled();
-    expect(gmailService.handleCallback).not.toHaveBeenCalled();
-    expect(redirect).toHaveBeenCalledWith(
-      "https://workforceos.xyz/settings/integrations?error=outlook_unavailable&provider=outlook",
-    );
-  });
-
   it("consumes once, activates canonical Gmail, and returns only the public projection", async () => {
     const result = await controller.finalizeGmail(
       "org_1",

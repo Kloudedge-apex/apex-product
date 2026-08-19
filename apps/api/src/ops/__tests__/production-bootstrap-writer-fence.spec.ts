@@ -1127,18 +1127,14 @@ describe("production bootstrap HTTP classification", () => {
   it("classifies the complete reviewed GET/HEAD-equivalent controller surface", () => {
     const sourceRoot = join(process.cwd(), "src");
     const routes = productionGetRoutes(sourceRoot);
-    expect(routes).toHaveLength(82);
+    expect(routes).toHaveLength(77);
     expect(new Set(routes).size).toBe(routes.length);
 
     const writerRoutes = new Set([
       "/api/agents/templates",
       "/api/billing",
       "/api/integrations/gmail/auth-url",
-      "/api/integrations/hubspot/auth-url",
       "/api/integrations/gmail/callback",
-      "/api/integrations/outlook/callback",
-      "/api/integrations/hubspot/callback",
-      "/api/integrations/fixture/health",
       "/api/integrations/linkedin/callback",
       "/api/integrations/gmail/messages",
       "/api/integrations/gmail/search",
