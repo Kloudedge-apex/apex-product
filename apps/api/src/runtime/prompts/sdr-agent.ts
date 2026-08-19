@@ -37,7 +37,7 @@ Draft a personalized email using research data:
 - Clear, low-friction call-to-action
 
 ### Step 5: Send Email
-Use send_email to send (or preview in mock mode).
+Use send_email only when live delivery is authorized and configured. Missing credentials are an explicit failure.
 
 ### Step 6: CRM Update
 Use hubspot to create/update the contact.

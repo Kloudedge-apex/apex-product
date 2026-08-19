@@ -28,6 +28,7 @@ function baseProdEnv(): NodeJS.ProcessEnv {
     ENCRYPTION_KEY: HEX_KEY,
     ADMIN_API_KEY: "admin-secret",
     OPENAI_API_KEY: "sk-test-openai",
+    SERPER_API_KEY: "serper-test-key",
     GOOGLE_CLIENT_ID: "gmail-client-id",
     GOOGLE_CLIENT_SECRET: "gmail-client-secret",
     GOOGLE_REDIRECT_URI:
@@ -143,36 +144,46 @@ describe("validateEnv", () => {
     expect(encryptionKeyFingerprint?.length).toBe(8);
   });
 
-  it("passes with the minimum prod credential set (1 LLM key + Gmail OAuth)", () => {
+  it("passes with the minimum prod credential set", () => {
     const { issues } = validateEnv(baseProdEnv());
     expect(issues).toEqual([]);
   });
 
-  it("accepts AZURE_OPENAI_KEY as the LLM provider when OPENAI_API_KEY is unset", () => {
+  it("accepts a complete Azure OpenAI configuration when OPENAI_API_KEY is unset", () => {
     const env = baseProdEnv();
     delete env.OPENAI_API_KEY;
     env.AZURE_OPENAI_KEY = "azure-test-key";
+    env.AZURE_OPENAI_ENDPOINT = "https://example.openai.azure.com";
+    env.AZURE_OPENAI_FAST_DEPLOYMENT = "gpt-4o-mini";
+    env.AZURE_OPENAI_DEPLOYMENT = "gpt-4o";
     const { issues } = validateEnv(env);
     expect(issues).toEqual([]);
   });
 
-  it("accepts ANTHROPIC_API_KEY alone as the LLM provider", () => {
+  it("rejects ANTHROPIC_API_KEY as the only provider because OpenAI-model calls remain", () => {
     const env = baseProdEnv();
     delete env.OPENAI_API_KEY;
     env.ANTHROPIC_API_KEY = "sk-ant-test";
     const { issues } = validateEnv(env);
-    expect(issues).toEqual([]);
+    expect(issues.some((issue) => issue.includes("OpenAI-compatible LLM provider"))).toBe(true);
   });
 
-  it("fails when no LLM provider key is set in production", () => {
+  it("rejects partial Azure OpenAI configuration", () => {
     const env = baseProdEnv();
     delete env.OPENAI_API_KEY;
+    env.AZURE_OPENAI_KEY = "azure-test-key";
+    env.AZURE_OPENAI_ENDPOINT = "https://example.openai.azure.com";
     const { issues } = validateEnv(env);
-    expect(
-      issues.some((i) =>
-        i.includes("OPENAI_API_KEY / AZURE_OPENAI_KEY / ANTHROPIC_API_KEY"),
-      ),
-    ).toBe(true);
+    expect(issues.some((issue) => issue.includes("OpenAI-compatible LLM provider"))).toBe(true);
+  });
+
+  it("fails when no live web-search provider key is set in production", () => {
+    const env = baseProdEnv();
+    delete env.SERPER_API_KEY;
+    const { issues } = validateEnv(env);
+    expect(issues).toContain(
+      "At least one of TAVILY_API_KEY / SERPER_API_KEY must be set when NODE_ENV=production",
+    );
   });
 
   it("fails when GOOGLE_CLIENT_ID is missing", () => {
@@ -320,9 +331,7 @@ describe("validateEnv", () => {
     env.OPENAI_API_KEY = "";
     const { issues } = validateEnv(env);
     expect(
-      issues.some((i) =>
-        i.includes("OPENAI_API_KEY / AZURE_OPENAI_KEY / ANTHROPIC_API_KEY"),
-      ),
+      issues.some((i) => i.includes("OpenAI-compatible LLM provider")),
     ).toBe(true);
   });
 

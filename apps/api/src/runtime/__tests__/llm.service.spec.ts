@@ -1,13 +1,38 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { afterEach, describe, it, expect, beforeEach } from "vitest";
 import { LLMService } from "../llm.service";
+
+const PROVIDER_ENV_KEYS = [
+  "NODE_ENV",
+  "OPENAI_API_KEY",
+  "AZURE_OPENAI_KEY",
+  "AZURE_OPENAI_ENDPOINT",
+  "AZURE_OPENAI_FAST_DEPLOYMENT",
+  "AZURE_OPENAI_DEPLOYMENT",
+  "ANTHROPIC_API_KEY",
+] as const;
+
+let originalProviderEnv: Partial<Record<(typeof PROVIDER_ENV_KEYS)[number], string>>;
 
 describe("LLMService", () => {
   let llm: LLMService;
 
   beforeEach(() => {
+    originalProviderEnv = {};
+    for (const key of PROVIDER_ENV_KEYS) {
+      if (process.env[key] !== undefined) originalProviderEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+    process.env.NODE_ENV = "test";
     // Ensure no API key so we get mock responses
-    delete process.env.OPENAI_API_KEY;
     llm = new LLMService();
+  });
+
+  afterEach(() => {
+    for (const key of PROVIDER_ENV_KEYS) {
+      const original = originalProviderEnv[key];
+      if (original === undefined) delete process.env[key];
+      else process.env[key] = original;
+    }
   });
 
   describe("chat (mock mode)", () => {
@@ -116,6 +141,25 @@ describe("LLMService", () => {
       expect(llm.getTokenLimit("GROWTH")).toBe(50000);
       expect(llm.getTokenLimit("ENTERPRISE")).toBe(Infinity);
       expect(llm.getTokenLimit("UNKNOWN")).toBe(5000); // fallback to TRIAL
+    });
+  });
+
+  describe("production provider readiness", () => {
+    it("rejects production startup without an OpenAI-compatible provider", () => {
+      process.env.NODE_ENV = "production";
+      process.env.ANTHROPIC_API_KEY = "anthropic-only";
+
+      expect(() => new LLMService()).toThrow(/complete OpenAI-compatible provider/);
+    });
+
+    it("accepts a complete Azure OpenAI provider", () => {
+      process.env.NODE_ENV = "production";
+      process.env.AZURE_OPENAI_KEY = "azure-key";
+      process.env.AZURE_OPENAI_ENDPOINT = "https://example.openai.azure.com";
+      process.env.AZURE_OPENAI_FAST_DEPLOYMENT = "gpt-4o-mini";
+      process.env.AZURE_OPENAI_DEPLOYMENT = "gpt-4o";
+
+      expect(() => new LLMService()).not.toThrow();
     });
   });
 });

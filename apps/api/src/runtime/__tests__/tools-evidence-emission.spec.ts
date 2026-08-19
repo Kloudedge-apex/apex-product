@@ -276,17 +276,18 @@ describe("HubSpotTool evidence emission", () => {
     expect(ledger.crmSynced).not.toHaveBeenCalled();
   });
 
-  it("does NOT emit crm.synced in mock mode (no real credentials)", async () => {
+  it("fails explicitly and does NOT emit crm.synced without real credentials", async () => {
     const ledger = makeLedger();
     const tool = new HubSpotTool(ledger);
 
-    const ctx = makeContext(new Map()); // no creds → mock path
+    const ctx = makeContext(new Map());
     const result = await tool.execute(
       { action: "create_contact", data: { email: "a@b.com" } },
       ctx,
     );
 
-    expect(result.success).toBe(true);
+    expect(result).toMatchObject({ success: false, data: null });
+    expect(result.error).toMatch(/not connected with live credentials/);
     expect(ledger.crmSynced).not.toHaveBeenCalled();
   });
 

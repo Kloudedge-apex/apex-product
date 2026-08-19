@@ -1,8 +1,8 @@
 /**
- * Helpers for tagging mock/fixture data returned by external-provider tools
- * (web_search, web_scrape, company_research) when the live provider is
- * unconfigured or fails. The flag is intended to be visible inline to the
- * downstream LLM so it does not cite fixture data as fact.
+ * Compatibility helpers for identifying legacy fixture data and constructing
+ * explicit fixture payloads in tests. Live research tools fail explicitly and
+ * never create this metadata. Consumers retain the guard so old imported or
+ * persisted fixture rows cannot become citable evidence.
  */
 
 export interface MockMetadata {
@@ -34,13 +34,6 @@ export function markMockedItem<T extends object>(item: T, reason: string): T & M
 export function markMocked<T extends object>(data: T, reason: string): T & MockMetadata {
   return { ...data, ...mockMetadata(reason) };
 }
-
-/**
- * Boilerplate description suffix appended to every mock-capable tool so the
- * LLM is informed (in-schema) how to treat `source: "mock"` items.
- */
-export const MOCK_DISCLAIMER_SUFFIX =
-  ' Results may include items marked `source: "mock"` when external providers are unavailable. Treat mocked items as missing data — do NOT cite them as fact.';
 
 /** True if a value carries the mock metadata flag. Mock data must never be cited as fact. */
 export function isMocked(data: unknown): boolean {

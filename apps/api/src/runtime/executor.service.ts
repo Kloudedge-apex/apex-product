@@ -235,12 +235,10 @@ export class ExecutorService {
     const tools = this.toolRegistry.getForTemplate(agent.template.name);
     const openAITools = tools.map(toolToOpenAIFunction);
 
-    // Per-template tool whitelist enforced inside the agent loop. `null` means
-    // the template has no explicit mapping (fallback = unrestricted, matches
-    // the existing ToolRegistry behaviour). Any array is the exclusive set the
-    // LLM is allowed to call — even if the global registry has more tools.
+    // Per-template tool whitelist enforced inside the agent loop. Unknown
+    // templates resolve to an empty set and cannot call any global tool.
     const allowedToolNames = this.toolRegistry.getAllowedToolNames(agent.template.name);
-    const allowedToolSet = allowedToolNames ? new Set(allowedToolNames) : null;
+    const allowedToolSet = new Set(allowedToolNames ?? []);
 
     await this.addLog(runId, "INFO", `Loaded ${tools.length} tools: ${tools.map((t) => t.name).join(", ")}`);
 
@@ -412,7 +410,7 @@ export class ExecutorService {
           // returned to the LLM so it can choose a different tool. This is the
           // choke point that makes scoped templates (Reply Handler, SEO Agent)
           // safe even if the global ToolRegistry has more tools available.
-          if (allowedToolSet && !allowedToolSet.has(toolName)) {
+          if (!allowedToolSet.has(toolName)) {
             const reason = `Tool "${toolName}" is not allowed for this agent template. Allowed tools: ${[...allowedToolSet].join(", ")}.`;
             await this.addLog(runId, "WARN", `tool_not_whitelisted: ${reason}`);
             const rejection = { success: false, error: reason, tool_not_whitelisted: true };

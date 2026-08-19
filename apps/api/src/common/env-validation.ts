@@ -29,7 +29,8 @@ import {
  *     - ADMIN_API_KEY must be set
  *
  *   When NODE_ENV="production" (i.e. running as a deployed image):
- *     - At least one LLM provider key (OPENAI_API_KEY | AZURE_OPENAI_KEY | ANTHROPIC_API_KEY)
+ *     - A complete OpenAI-compatible LLM provider (public OpenAI or both Azure deployments)
+ *     - At least one live web-search provider (TAVILY_API_KEY | SERPER_API_KEY)
  *     - GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET (Gmail OAuth, needed by api + worker)
  *     - METRICS_AUTH_TOKEN (protects the public Prometheus endpoint)
  *
@@ -152,20 +153,26 @@ export function validateEnv(
     // worker. Anything role-specific remains warned-not-thrown so a partial
     // integration config does not take the whole pod down.
     //
-    // LLM provider: at least one of OPENAI_API_KEY / AZURE_OPENAI_KEY /
-    // ANTHROPIC_API_KEY must be set. Prod uses Azure OpenAI today, but the
-    // codepath chooses dynamically.
-    const hasAnyLlmKey = [
-      "OPENAI_API_KEY",
-      "AZURE_OPENAI_KEY",
-      "ANTHROPIC_API_KEY",
-    ].some((k) => {
-      const v = env[k];
-      return typeof v === "string" && v.length > 0;
-    });
-    if (!hasAnyLlmKey) {
+    // The supported customer loop always makes gpt-4o-mini and gpt-4o calls.
+    // Anthropic can serve Claude-specific work, but cannot by itself satisfy
+    // those OpenAI-compatible call sites. Azure must therefore be complete
+    // for both mapped models, or public OpenAI must be configured.
+    const hasOpenAI = Boolean(env.OPENAI_API_KEY?.trim());
+    const hasCompleteAzureOpenAI = [
+      env.AZURE_OPENAI_KEY,
+      env.AZURE_OPENAI_ENDPOINT,
+      env.AZURE_OPENAI_FAST_DEPLOYMENT,
+      env.AZURE_OPENAI_DEPLOYMENT,
+    ].every((value) => Boolean(value?.trim()));
+    if (!hasOpenAI && !hasCompleteAzureOpenAI) {
       issues.push(
-        "At least one of OPENAI_API_KEY / AZURE_OPENAI_KEY / ANTHROPIC_API_KEY must be set when NODE_ENV=production",
+        "An OpenAI-compatible LLM provider is required when NODE_ENV=production: set OPENAI_API_KEY, or set AZURE_OPENAI_KEY + AZURE_OPENAI_ENDPOINT + AZURE_OPENAI_FAST_DEPLOYMENT + AZURE_OPENAI_DEPLOYMENT",
+      );
+    }
+
+    if (!env.TAVILY_API_KEY?.trim() && !env.SERPER_API_KEY?.trim()) {
+      issues.push(
+        "At least one of TAVILY_API_KEY / SERPER_API_KEY must be set when NODE_ENV=production",
       );
     }
 

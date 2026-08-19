@@ -2,8 +2,8 @@
  * Provider-selection + response-mapping tests for WebSearchTool. The retry/SSRF
  * layer is mocked out (it has its own coverage in http-retry-wiring.spec.ts);
  * here we prove: Tavily wins when its key is set, Serper is the fallback when
- * prod has only SERPER_API_KEY, neither key → mock (refusal-safe), and a Serper
- * failure degrades to mock rather than fabricating a real result.
+ * prod has only SERPER_API_KEY, neither key fails explicitly, and a Serper
+ * failure remains an explicit failure rather than fabricating a result.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { isMocked } from "../mock-metadata";
@@ -80,19 +80,18 @@ describe("WebSearchTool provider selection", () => {
     });
   });
 
-  it("returns mock (refusal-safe) when neither provider key is configured", async () => {
+  it("fails explicitly when neither provider key is configured", async () => {
     delete process.env.TAVILY_API_KEY;
     delete process.env.SERPER_API_KEY;
 
     const { WebSearchTool } = await import("../web-search.tool");
     const r = await new WebSearchTool().execute({ query: "Acme" }, ctx);
 
-    expect(r.success).toBe(true);
-    // mock data → extractLiveTrigger writes no signal → the lead refuses (never fabricates).
-    expect(isMocked(r.data)).toBe(true);
+    expect(r).toMatchObject({ success: false, data: null });
+    expect(r.error).toMatch(/no live provider is configured/i);
   });
 
-  it("degrades to mock when Serper errors (never fabricates a real signal)", async () => {
+  it("fails explicitly when Serper errors", async () => {
     delete process.env.TAVILY_API_KEY;
     process.env.SERPER_API_KEY = "serp";
     globalThis.fetch = vi.fn().mockResolvedValue(mockResponse(500, {})) as unknown as typeof fetch;
@@ -100,8 +99,8 @@ describe("WebSearchTool provider selection", () => {
     const { WebSearchTool } = await import("../web-search.tool");
     const r = await new WebSearchTool().execute({ query: "Acme" }, ctx);
 
-    expect(r.success).toBe(true);
-    expect(isMocked(r.data)).toBe(true);
+    expect(r).toMatchObject({ success: false, data: null });
+    expect(r.error).toMatch(/Serper web search failed/);
   });
 });
 
