@@ -18,19 +18,6 @@ import { OrgId } from "../../common/org-context.decorator";
 import { SkipOrgGuard } from "../../common/org-scope.guard";
 import { AdminOrManagerGuard } from "../../common/admin-or-manager.guard";
 
-class SendEmailDto {
-  outreachArtifactId!: string;
-  to!: string;
-  subject!: string;
-  body!: string;
-  html?: string;
-  cc?: string;
-  bcc?: string;
-  replyTo?: string;
-  inReplyTo?: string;
-  threadId?: string;
-}
-
 /**
  * Google Pub/Sub push delivery envelope. See
  * https://cloud.google.com/pubsub/docs/push#receive_push for the shape.
@@ -121,15 +108,6 @@ export class GmailController {
     }
 
     return { ok: true };
-  }
-
-  @Post("send")
-  @UseGuards(AdminOrManagerGuard)
-  @HttpCode(HttpStatus.OK)
-  sendEmail(@OrgId() orgId: string, @Body() body: SendEmailDto) {
-    // Compatibility endpoint only. GmailService rejects direct dispatch so
-    // every live send must pass the canonical artifact queue and policy gates.
-    return this.gmailService.sendApprovedOutreachEmail(orgId, body);
   }
 
   /**

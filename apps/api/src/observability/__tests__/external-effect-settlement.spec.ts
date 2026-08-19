@@ -51,13 +51,6 @@ const GUARDED_EFFECTS: readonly GuardedEffect[] = [
       endsWithPath(callee, "evaluatorRunner.run"),
   },
   {
-    id: "gmail-provider-send",
-    matches: (callee) =>
-      callee.endsWith(".users.messages.send") ||
-      endsWithPath(callee, "gmailService.sendEmail") ||
-      endsWithPath(callee, "gmailService.sendApprovedOutreachEmail"),
-  },
-  {
     id: "linkedin-provider-send",
     matches: (callee) => endsWithPath(callee, "linkedinService.sendMessage"),
   },
