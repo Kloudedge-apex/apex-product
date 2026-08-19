@@ -122,6 +122,7 @@ case "${1:-}" in
     clerk_webhook_secret_seen=false
     bootstrap_attempt_seen=false
     bootstrap_generation_seen=false
+    serper_api_key_seen=false
     previous=""
     for value in "$@"; do
       if [[ "${previous}" == "--name" ]]; then
@@ -135,6 +136,9 @@ case "${1:-}" in
       elif [[ "${previous}" == "--env" &&
         "${value}" == "WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION=1" ]]; then
         bootstrap_generation_seen=true
+      elif [[ "${previous}" == "--env" &&
+        "${value}" == "SERPER_API_KEY=ci-synthetic-provider-disabled" ]]; then
+        serper_api_key_seen=true
       fi
       previous="${value}"
     done
@@ -142,6 +146,7 @@ case "${1:-}" in
     [[ "${clerk_webhook_secret_seen}" == "true" ]] || exit 1
     [[ "${bootstrap_attempt_seen}" == "true" ]] || exit 1
     [[ "${bootstrap_generation_seen}" == "true" ]] || exit 1
+    [[ "${serper_api_key_seen}" == "true" ]] || exit 1
     [[ "${last_arg}" == "sha256:$(printf '%064d' 1)" ]] || exit 1
     : >"${state_dir}/${name}.created"
     printf 'fake-container-id\n'

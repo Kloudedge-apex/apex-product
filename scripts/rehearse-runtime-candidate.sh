@@ -294,6 +294,7 @@ COMMON_ENV=(
   --env ADMIN_API_KEY=ci-synthetic-admin-only
   --env METRICS_AUTH_TOKEN=ci-synthetic-metrics-only
   --env OPENAI_API_KEY=ci-synthetic-provider-disabled
+  --env SERPER_API_KEY=ci-synthetic-provider-disabled
   --env GOOGLE_CLIENT_ID=ci-synthetic-client.apps.googleusercontent.com
   --env GOOGLE_CLIENT_SECRET=ci-synthetic-provider-disabled
   --env OAUTH_STATE_SECRET=ci-synthetic-oauth-state-secret-0000000000000000
