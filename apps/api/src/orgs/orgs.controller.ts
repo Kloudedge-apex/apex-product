@@ -149,6 +149,16 @@ export class OrgsController {
     return this.orgsService.getOnboardingStatus(orgId);
   }
 
+  /**
+   * Server-authoritative customer health used by Settings. The tenant comes
+   * only from the verified request context; the response contains aggregate
+   * readiness and a suppression count, never recipient data.
+   */
+  @Get("me/health")
+  getOrgHealth(@OrgId() orgId: string) {
+    return this.orgsService.getOrgHealth(orgId);
+  }
+
   @Get(":id")
   findOne(@OrgId() orgId: string, @Param("id") id: string) {
     if (id !== orgId) throw new ForbiddenException("Cross-org access denied");

@@ -1199,9 +1199,9 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
     artifact: OutreachArtifact,
     liveAllowed: boolean,
   ): Promise<ToolResult> {
-    // Gate: only allowlisted orgs may load real credentials. For non-listed
-    // orgs we pass an empty Map, which causes the send tools to take their
-    // mock branch — same shape as having no integration connected.
+    // Gate: only allowlisted orgs may load real credentials. Non-listed orgs
+    // receive an empty credential map plus explicit simulation authority;
+    // missing credentials alone never silently turn into a mock success.
     if (!liveAllowed) {
       this.logger.log(
         `Org ${artifact.orgId} not in OUTREACH_LIVE_FOR_ORGS — forcing mock send for artifact ${artifact.id}`,
@@ -1255,6 +1255,7 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
           agentId: "outreach-worker",
           runId: artifact.graphRunId ?? "outreach-worker",
           integrations,
+          simulationMode: !liveAllowed,
           senderOrg: {
             orgName: org.name,
             physicalAddress: org.physicalAddress,

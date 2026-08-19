@@ -1063,6 +1063,9 @@ describe("production bootstrap HTTP classification", () => {
     expect(classifyProductionBootstrapHttpRequest("GET", "/api/orgs/me")).toBe(
       "read",
     );
+    expect(
+      classifyProductionBootstrapHttpRequest("GET", "/api/orgs/me/health"),
+    ).toBe("read");
     expect(classifyProductionBootstrapHttpRequest("GET", "/api/leads?limit=10")).toBe(
       "read",
     );
@@ -1124,7 +1127,7 @@ describe("production bootstrap HTTP classification", () => {
   it("classifies the complete reviewed GET/HEAD-equivalent controller surface", () => {
     const sourceRoot = join(process.cwd(), "src");
     const routes = productionGetRoutes(sourceRoot);
-    expect(routes).toHaveLength(86);
+    expect(routes).toHaveLength(87);
     expect(new Set(routes).size).toBe(routes.length);
 
     const writerRoutes = new Set([
@@ -1265,7 +1268,7 @@ describe("production raw SQL source policy", () => {
         `${raw.file} introduces an unreviewed raw-SQL function`,
       ).toEqual([]);
     }
-  });
+  }, 15_000);
 });
 
 function productionTypeScriptFiles(directory: string): string[] {

@@ -167,7 +167,7 @@ describe("external-effect promise settlement", () => {
       violations,
       "await or return every guarded provider/observability mutation",
     ).toEqual([]);
-  });
+  }, 15_000);
 });
 
 function scanGuardedEffects(

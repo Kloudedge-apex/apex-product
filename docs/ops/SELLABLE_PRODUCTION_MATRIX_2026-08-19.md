@@ -1,0 +1,69 @@
+# Workforce OS sellable-production matrix
+
+Date: 2026-08-19 (Asia/Kolkata)
+
+Product boundary: one guarded AI SDR workflow. A customer signs up, completes
+setup, connects Gmail, sources and enriches leads, reviews grounded evidence,
+approves a run and individual email, sends through policy gates, receives
+replies, and operates the workspace without manual database intervention.
+
+This matrix separates source completeness from live proof. A source pass is not
+permission to call the public service production-ready.
+
+## Current release decision
+
+**NO-GO for production cutover today.** The current public Azure runtime is an
+older compatibility release. The candidate source is substantially complete,
+but the protected authority drain cannot mature before
+`2026-08-26T18:49:06Z`, Google restricted-scope verification is external and
+unfinished, and the exact candidate still needs governed migration, deployment,
+and authenticated end-to-end proof.
+
+Status meanings:
+
+- **SOURCE PASS**: implemented and covered by current automated verification.
+- **CUTOVER REQUIRED**: the public Azure runtime does not yet run the candidate.
+- **LIVE PROOF REQUIRED**: behavior must be exercised against the exact deployed
+  image and real providers.
+- **EXTERNAL GATE**: completion depends on a provider or authority outside the
+  application repository.
+
+## Customer-loop matrix
+
+| Customer outcome | Candidate evidence | Remaining evidence before sale |
+| --- | --- | --- |
+| Sign up and receive one isolated workspace | **SOURCE PASS.** Clerk JWT validation, immutable identity binding, tenant-scoped guards, idempotent trial provisioning, and cross-org denial are implemented. | **CUTOVER REQUIRED / LIVE PROOF REQUIRED.** Normalize the live Clerk tuple, onboard a fresh user without operator intervention, then execute the full cross-org read/write matrix. |
+| Complete setup and see truthful readiness | **SOURCE PASS.** Organization, sender identity, country, physical address, ICP, mailbox, capacity, and allowlist are persisted and fail closed. Settings now uses a tenant-scoped server health projection instead of a hard-coded unavailable response. | **CUTOVER REQUIRED / LIVE PROOF REQUIRED.** Save and reload every field on a fresh production tenant and verify role-denied controls remain read-only. |
+| Connect Gmail and maintain reply sync | **SOURCE PASS.** OAuth attempts are actor/org-bound and one-time; authenticated finalization, encrypted credentials, mailbox identity, history cursor, watch freshness, renewal, and reconnect failure states are implemented. | **EXTERNAL GATE.** Complete Google's restricted Gmail-scope verification. **LIVE PROOF REQUIRED.** Connect a fresh authorized mailbox and prove watch renewal, revocation, and reconnect. |
+| Generate and enrich real leads | **SOURCE PASS.** Serper-backed discovery, bounded scraping, structured extraction, deduplication, scoring, and source provenance exist. Team-page extraction now uses the configured LLM provider, including Azure OpenAI, rather than incorrectly requiring `OPENAI_API_KEY`. Mock-tagged provider fallbacks cannot become citable facts. | **CUTOVER REQUIRED / LIVE PROOF REQUIRED.** Complete a non-mock provider run with the exact production environment and retain source, selection, and refusal evidence. |
+| Review research, score rationale, and evidence | **SOURCE PASS.** Lead research briefs, score breakdowns, intent signals, and recent evidence are derived only when attributable data exists; missing facts remain unavailable rather than fabricated. | **LIVE PROOF REQUIRED.** Verify representative leads contain attributable citations and that evidence-poor leads refuse unsupported personalization. |
+| Approve or reject a run before drafting | **SOURCE PASS.** Tenant-scoped compare-and-set decisions, server-derived reviewer identity, explicit capability checks, and duplicate/stale conflict handling are implemented. | **LIVE PROOF REQUIRED.** Exercise authorized and unauthorized sessions against the migrated runtime. |
+| Review the exact recipient and email before send | **SOURCE PASS.** Individual artifact approval revalidates recipient, subject, plain-text body, provenance, grounding, and QA at resume, approval, and dispatch. Bulk approval is hidden. | **LIVE PROOF REQUIRED.** Prove browser-visible content is byte-for-byte the provider-bound content sent by the worker. |
+| Send exactly once through policy gates | **SOURCE PASS.** Gmail readiness, workspace allowlist, sender/address/country, suppression, cooldown, daily cap, reservation, unsubscribe, and ambiguity quarantine are enforced. Missing credentials now fail explicitly; simulation requires an explicit guarded worker context. | **LIVE PROOF REQUIRED.** Exercise concurrent consumers, replay, pre-provider crash, response-loss ambiguity, and one controlled owned-inbox send. |
+| Ingest replies and stop further outreach | **SOURCE PASS.** Gmail history replay, duplicate Pub/Sub handling, conversation persistence, one-reply-per-inbound fencing, suppression, and follow-up state exist. | **LIVE PROOF REQUIRED.** Reply from the owned inbox, verify ingestion and sequence stop, then exercise duplicate delivery and stale-draft races. |
+| Navigate and operate every visible surface | **SOURCE PASS.** Today, Pipeline, Outbound, Runs, Conversations, and the five supported Settings tabs are wired to authenticated routes. Unsupported Settings tabs and non-Gmail integrations are hidden; a regression test prevents Outlook and HubSpot cards from leaking into the release UI. | **CUTOVER REQUIRED.** Browser-smoke every visible link and action on desktop and mobile against the exact deployed console/BFF/API tuple. |
+| Detect failures and recover safely | **SOURCE PASS.** Health/readiness probes, queue metrics, recovery loops, delivery-unknown quarantine, graceful worker drain, and protected bootstrap writer fencing exist. | **LIVE PROOF REQUIRED.** Verify alerts, queue consumers, watch renewal, rollback, restore, kill switches, and named operator ownership in production. |
+
+## Mandatory gates
+
+The release is sellable only when all of these are recorded for one exact source
+commit and immutable image digest:
+
+1. Protected release-authority drain reaches its full ten days with a fresh
+   unchanged `GO` audit. Earliest possible maturity is
+   `2026-08-26T18:49:06Z`.
+2. Google approves the OAuth consent screen for the restricted Gmail scopes
+   required by send and reply sync.
+3. Default branches contain the approved candidate, exact-branch CI is green,
+   and immutable API, worker, BFF, and console images are built from those
+   commits.
+4. Required production migrations are rehearsed on a production-shaped snapshot,
+   backed up, applied in order, and verified before writers reopen.
+5. The exact images pass fresh-user onboarding, cross-tenant denial, non-mock
+   sourcing, approval, one controlled Gmail send, reply ingestion, suppression,
+   recovery, observability, and rollback tests.
+6. Unsupported capabilities remain hidden and marketing is limited to the
+   guarded SDR workflow in this document.
+
+Until every gate passes, the accurate state is **verified source candidate,
+production cutover pending**.

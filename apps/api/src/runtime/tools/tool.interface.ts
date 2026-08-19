@@ -10,6 +10,12 @@ export interface ToolContext {
   runId: string;
   integrations: Map<string, IntegrationCredentials>;
   /**
+   * Explicit, caller-owned simulation authority. Missing provider credentials
+   * must fail unless the guarded dispatch worker deliberately requested a
+   * non-delivery simulation for a non-live workspace.
+   */
+  simulationMode?: boolean;
+  /**
    * CAN-SPAM §7704(a)(5) compliance: sender identity fields used by
    * SendEmailTool to compose the physical-address + unsubscribe-link footer
    * appended to every outbound. Worker-dispatched sends populate this from

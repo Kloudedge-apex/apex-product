@@ -21,6 +21,7 @@ import { isGmailWatchFresh } from "../integrations/gmail/gmail-watch-freshness";
 import { senderIdentityReadiness } from "../outreach/sender-identity.util";
 import { hasRequiredClerkOrgSession } from "../common/org-role-authority";
 import { withProvisionableClerkUser } from "../common/clerk-user-provisioning";
+import { resolveApiPublicOrigin } from "../outreach/unsubscribe-token.util";
 
 /**
  * Computed live-send truth for an org (GL5). The FE renders Dry Run / Live
@@ -78,6 +79,14 @@ export interface OnboardingStatus {
   currentStep: OnboardingCurrentStep;
   complete: boolean;
   readyForLiveSend: boolean;
+}
+
+export interface OrgHealth {
+  liveSendEnabled: boolean;
+  postalAddressConfigured: boolean;
+  unsubscribeConfigured: boolean;
+  suppressionCount: number;
+  blockers: string[];
 }
 
 /**
@@ -443,6 +452,58 @@ export class OrgsService {
         sendReadiness.liveSendAllowed &&
         sendReadiness.dailyCapRemaining !== null &&
         sendReadiness.dailyCapRemaining > 0,
+    };
+  }
+
+  /**
+   * One server-authoritative health projection for the customer settings UI.
+   * Every field is derived from the same persisted rows and runtime gates used
+   * by onboarding and dispatch. It must never turn an unknown into a green
+   * status or expose recipient suppression records.
+   */
+  async getOrgHealth(orgId: string): Promise<OrgHealth> {
+    const [onboarding, suppressionCount] = await Promise.all([
+      this.getOnboardingStatus(orgId),
+      this.prisma.outreachSuppression.count({ where: { orgId } }),
+    ]);
+
+    const unsubscribeConfigured = hasPublicUnsubscribeOrigin();
+    const readiness = onboarding.sendReadiness;
+    const blockers: string[] = [];
+    if (!onboarding.organization.complete) {
+      blockers.push("Organization identity is incomplete");
+    }
+    if (!onboarding.icp.complete) {
+      blockers.push("Ideal customer profile is incomplete");
+    }
+    if (!readiness.senderNameSet) blockers.push("Sender name is missing");
+    if (!readiness.countrySet) blockers.push("Sender country is missing");
+    if (!readiness.physicalAddressSet) {
+      blockers.push("Physical postal address is missing");
+    }
+    if (!readiness.mailboxConnected) {
+      blockers.push("Gmail mailbox is not ready");
+    }
+    if (!unsubscribeConfigured) {
+      blockers.push("Public unsubscribe origin is not configured");
+    }
+    if (!readiness.liveSendAllowed) {
+      blockers.push("Live sending is not enabled for this workspace");
+    }
+    if (
+      readiness.dailyCapRemaining === null ||
+      readiness.dailyCapRemaining <= 0
+    ) {
+      blockers.push("Daily send capacity is unavailable");
+    }
+
+    return {
+      liveSendEnabled:
+        onboarding.readyForLiveSend && unsubscribeConfigured,
+      postalAddressConfigured: readiness.physicalAddressSet,
+      unsubscribeConfigured,
+      suppressionCount,
+      blockers,
     };
   }
 
@@ -819,6 +880,20 @@ function isUsableIcpProfile(profile: {
     profile.intentKeywords,
     profile.seedDomains,
   ].some((values) => values.some((value) => value.trim().length > 0));
+}
+
+function hasPublicUnsubscribeOrigin(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  // Development's localhost fallback is useful for local links but is not a
+  // configured customer-facing unsubscribe origin.
+  if (!env.API_PUBLIC_URL?.trim()) return false;
+  try {
+    resolveApiPublicOrigin(env);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function validateOrgWebsiteOrThrow(input: string): string {

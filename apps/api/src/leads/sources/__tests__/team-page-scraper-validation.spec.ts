@@ -79,6 +79,13 @@ function makeConfig(): ConfigService {
   return new ConfigService({ OPENAI_API_KEY: "test-key" });
 }
 
+function makeAzureOnlyConfig(): ConfigService {
+  return new ConfigService({
+    AZURE_OPENAI_ENDPOINT: "https://example.openai.azure.com",
+    AZURE_OPENAI_KEY: "test-key",
+  });
+}
+
 beforeEach(() => {
   circuitBreakerRegistry._resetForTests();
   ssrfGuardedFetchMock.mockClear();
@@ -94,6 +101,26 @@ afterEach(() => {
 });
 
 describe("TeamPageScraper.extractWithLlm — JSON validation retry", () => {
+  it("uses the injected LLM provider without requiring OPENAI_API_KEY", async () => {
+    const { llm, chatMock } = makeLlm([
+      JSON.stringify({
+        people: [{ firstName: "Katherine", lastName: "Johnson", title: "CTO" }],
+      }),
+    ]);
+    const scraper = new TeamPageScraper(makeAzureOnlyConfig(), llm);
+
+    const people = await scraper.scrapeTeamPage("org-test", "acme.com");
+
+    expect(people).toEqual([
+      expect.objectContaining({
+        firstName: "Katherine",
+        lastName: "Johnson",
+        title: "CTO",
+      }),
+    ]);
+    expect(chatMock).toHaveBeenCalledTimes(1);
+  });
+
   it("retries once when the first LLM response is malformed and succeeds on the second", async () => {
     const validResponse = JSON.stringify({
       people: [{ firstName: "Ada", lastName: "Lovelace", title: "CTO" }],

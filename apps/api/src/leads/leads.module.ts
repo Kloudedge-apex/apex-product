@@ -2,7 +2,8 @@
  * Lead Engine Module
  *
  * Required environment variables:
- * - OPENAI_API_KEY        (required - LLM extraction from team pages)
+ * - A configured LLMService provider (OpenAI or Azure OpenAI) enables the
+ *   unstructured team-page extraction fallback.
  * - HUNTER_API_KEY        (optional - fallback email finder via Hunter.io)
  * - COMPANIES_HOUSE_API_KEY (optional - UK Companies House registry)
  * - GITHUB_TOKEN          (optional - GitHub enrichment, higher rate limits)

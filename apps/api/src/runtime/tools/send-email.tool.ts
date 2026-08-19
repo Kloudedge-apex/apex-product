@@ -109,7 +109,7 @@ export class SendEmailTool implements Tool {
   private readonly logger = new Logger(SendEmailTool.name);
   name = "send_email";
   description =
-    "Send an email through a connected Outlook or Gmail mailbox; otherwise operate in mock mode.";
+    "Send an email through a connected Outlook or Gmail mailbox. Missing credentials fail unless the guarded worker explicitly requests simulation.";
   parameters = {
     to: { type: "string", description: "Recipient email address", required: true },
     subject: { type: "string", description: "Email subject line", required: true },
@@ -258,8 +258,20 @@ export class SendEmailTool implements Tool {
       return result;
     }
 
-    // Mock mode — no real send occurred, no evidence emitted.
-    return this.mockSend(to, subject, body);
+    if (context.simulationMode === true) {
+      // Explicit simulation — no real send occurred, no evidence emitted.
+      return this.mockSend(to, subject, body);
+    }
+
+    return {
+      success: false,
+      data: {
+        sent: false,
+        dispatchOutcome: EMAIL_DISPATCH_OUTCOME.NOT_ATTEMPTED,
+      },
+      error:
+        "No usable Gmail or Outlook credentials are available; email was not sent",
+    };
   }
 
   /**
