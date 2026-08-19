@@ -102,14 +102,11 @@ const TEAM_PAGE_EXTRACTOR_SYSTEM_PROMPT = [
 @Injectable()
 export class TeamPageScraper {
   private readonly logger = new Logger(TeamPageScraper.name);
-  private readonly openaiKey: string | undefined;
 
   constructor(
-    private readonly config: ConfigService,
+    _config: ConfigService,
     @Optional() private readonly llm?: LLMService,
-  ) {
-    this.openaiKey = this.config.get<string>("OPENAI_API_KEY");
-  }
+  ) {}
 
   async scrapeTeamPage(
     orgId: string,
@@ -169,7 +166,7 @@ export class TeamPageScraper {
         }
 
         // LLM fallback for unstructured HTML
-        if (this.openaiKey && html.length < 50000) {
+        if (this.llm && html.length < 50000) {
           const llmPeople = await this.extractWithLlm(html, url, orgId);
           if (llmPeople.length > 0) {
             this.logger.log(`Found ${llmPeople.length} people via LLM on ${url}`);
@@ -293,7 +290,7 @@ export class TeamPageScraper {
     url: string,
     orgId: string,
   ): Promise<DiscoveredPerson[]> {
-    if (!this.llm || !this.openaiKey) return [];
+    if (!this.llm) return [];
 
     // Truncate HTML to save tokens
     const stripped = html.replace(/<script[\s\S]*?<\/script>/gi, "")

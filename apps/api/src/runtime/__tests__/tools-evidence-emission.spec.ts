@@ -70,18 +70,18 @@ describe("SendEmailTool evidence emission", () => {
     });
   });
 
-  it("does NOT emit message.sent when in mock mode (no real credentials)", async () => {
+  it("does NOT emit message.sent when credentials are unavailable", async () => {
     const ledger = makeLedger();
     const tool = new SendEmailTool(ledger);
 
-    const ctx = makeContext(new Map()); // no creds → mock path
+    const ctx = makeContext(new Map());
     const result = await tool.execute(
       { to: "alice@example.com", subject: "hi", body: "hello" },
       ctx,
     );
 
-    expect(result.success).toBe(true);
-    expect((result.data as { mock?: boolean }).mock).toBe(true);
+    expect(result.success).toBe(false);
+    expect((result.data as { sent?: boolean }).sent).toBe(false);
     expect(ledger.messageSent).not.toHaveBeenCalled();
   });
 

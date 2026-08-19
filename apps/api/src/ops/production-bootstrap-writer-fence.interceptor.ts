@@ -50,7 +50,7 @@ const READ_ONLY_GET_PATHS: readonly RegExp[] = [
   /^\/api\/outreach-artifacts(?:\/(?:review-capability|[^/]+))?\/?$/,
   /^\/api\/workflows\/templates(?:\/[^/]+)?\/?$/,
   /^\/api\/workflows\/runs\/?$/,
-  /^\/api\/orgs\/(?:me|me\/capabilities|onboarding\/status|[^/]+|[^/]+\/stats)\/?$/,
+  /^\/api\/orgs\/(?:me|me\/(?:capabilities|health)|onboarding\/status|[^/]+|[^/]+\/stats)\/?$/,
   /^\/api\/outreach\/suppression\/?$/,
   /^\/api\/conversations(?:\/[^/]+)?\/?$/,
   /^\/api\/(?:inbox|accounts|campaigns|playbooks|deliverability)\/?$/,

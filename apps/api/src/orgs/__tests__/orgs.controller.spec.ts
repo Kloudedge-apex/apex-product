@@ -24,6 +24,7 @@ describe("OrgsController IDOR protection", () => {
     update: ReturnType<typeof vi.fn>;
     getStats: ReturnType<typeof vi.fn>;
     getOnboardingStatus: ReturnType<typeof vi.fn>;
+    getOrgHealth: ReturnType<typeof vi.fn>;
   };
   let prisma: { user: { findFirst: ReturnType<typeof vi.fn> } };
   let controller: OrgsController;
@@ -39,6 +40,13 @@ describe("OrgsController IDOR protection", () => {
         currentStep: "organization",
         complete: false,
         readyForLiveSend: false,
+      }),
+      getOrgHealth: vi.fn().mockResolvedValue({
+        liveSendEnabled: false,
+        postalAddressConfigured: false,
+        unsubscribeConfigured: true,
+        suppressionCount: 0,
+        blockers: ["Physical postal address is missing"],
       }),
     };
     prisma = { user: { findFirst: vi.fn() } };
@@ -57,6 +65,18 @@ describe("OrgsController IDOR protection", () => {
         currentStep: "organization",
         complete: false,
         readyForLiveSend: false,
+      });
+    });
+  });
+
+  describe("GET /orgs/me/health", () => {
+    it("uses only the guard-provided tenant", async () => {
+      const result = await controller.getOrgHealth(ORG_ID);
+
+      expect(service.getOrgHealth).toHaveBeenCalledWith(ORG_ID);
+      expect(result).toMatchObject({
+        liveSendEnabled: false,
+        suppressionCount: 0,
       });
     });
   });

@@ -27,12 +27,14 @@ function mockResponse(status: number, body: unknown): Response {
 
 function buildContext(
   integrations: Map<string, IntegrationCredentials> = new Map(),
+  simulationMode = false,
 ): ToolContext {
   return {
     orgId: "org_test",
     agentId: "agent_test",
     runId: "run_test",
     integrations,
+    simulationMode,
   };
 }
 
@@ -64,28 +66,30 @@ afterEach(() => {
 });
 
 describe("SendEmailTool — provider/mode stamping (GL2)", () => {
-  it("stamps provider='mock' (and mock=true, sent=false) when no credentials exist", async () => {
+  it("fails truthfully when no credentials exist and simulation was not requested", async () => {
     const tool = new SendEmailTool();
     const result = await tool.execute(PARAMS, buildContext());
 
-    expect(result.success).toBe(true);
+    expect(result.success).toBe(false);
     const data = dataOf(result);
-    expect(data.provider).toBe("mock");
-    expect(data.mock).toBe(true);
     expect(data.sent).toBe(false);
     expect(getEmailDispatchOutcome(result)).toBe(
       EMAIL_DISPATCH_OUTCOME.NOT_ATTEMPTED,
     );
-    expect(isMockModeResult(result)).toBe(true);
+    expect(isMockModeResult(result)).toBe(false);
+    expect(result.error).toMatch(/No usable Gmail or Outlook credentials/);
   });
 
-  it("treats mock_-prefixed credentials as no credentials (mock mode)", async () => {
+  it("simulates only when the guarded caller requests simulation explicitly", async () => {
     const tool = new SendEmailTool();
     const integrations = new Map<string, IntegrationCredentials>([
       ["gmail", creds("gmail", "mock_token_123")],
       ["outlook", creds("outlook", "mock_token_456")],
     ]);
-    const result = await tool.execute(PARAMS, buildContext(integrations));
+    const result = await tool.execute(
+      PARAMS,
+      buildContext(integrations, true),
+    );
 
     expect(result.success).toBe(true);
     expect(dataOf(result).provider).toBe("mock");
