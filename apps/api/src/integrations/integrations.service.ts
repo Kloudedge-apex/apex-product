@@ -74,21 +74,10 @@ export class IntegrationsService {
     category: string;
     description: string;
     authType: "oauth" | "api_key" | "system";
-    status: "available" | "coming_soon";
+    status: "available";
   }> {
     return [
       { provider: "gmail", category: "email", name: "Google Workspace (Gmail)", description: "Send and receive email via your Google Workspace mailbox.", authType: "oauth", status: "available" },
-      { provider: "outlook", category: "email", name: "Microsoft 365 (Outlook)", description: "Microsoft 365 mailbox support is not included in this release.", authType: "oauth", status: "coming_soon" },
-      { provider: "hubspot", category: "crm", name: "HubSpot", description: "HubSpot sync is not included in this release.", authType: "oauth", status: "coming_soon" },
-      { provider: "salesforce", category: "crm", name: "Salesforce", description: "Bi-directional CRM sync.", authType: "oauth", status: "coming_soon" },
-      { provider: "pipedrive", category: "crm", name: "Pipedrive", description: "Bi-directional CRM sync.", authType: "oauth", status: "coming_soon" },
-      { provider: "apollo", category: "enrichment", name: "Apollo.io", description: "Apollo enrichment is not included in this release.", authType: "api_key", status: "coming_soon" },
-      { provider: "clay", category: "enrichment", name: "Clay", description: "Waterfall enrichment with custom signals.", authType: "api_key", status: "coming_soon" },
-      { provider: "google_calendar", category: "calendar", name: "Google Calendar", description: "Calendar actions are not included in this release.", authType: "oauth", status: "coming_soon" },
-      { provider: "microsoft_calendar", category: "calendar", name: "Microsoft Calendar", description: "Booking and availability lookup.", authType: "oauth", status: "coming_soon" },
-      { provider: "slack", category: "communication", name: "Slack", description: "Slack notifications are not included in this release.", authType: "oauth", status: "coming_soon" },
-      { provider: "whatsapp", category: "communication", name: "WhatsApp Business", description: "Channel for booked-meeting confirmations.", authType: "oauth", status: "coming_soon" },
-      { provider: "elevenlabs", category: "voice", name: "ElevenLabs Voice", description: "Voice outreach is not included in this release.", authType: "api_key", status: "coming_soon" },
     ];
   }
 

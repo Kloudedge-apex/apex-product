@@ -48,14 +48,9 @@ describe("IntegrationsService.findOne (IDOR scoping)", () => {
 
   it("advertises only Gmail as available in the guarded release", () => {
     const catalog = service.getCatalog();
-    expect(catalog.find((entry) => entry.provider === "gmail")?.status).toBe(
-      "available",
-    );
-    expect(
-      catalog
-        .filter((entry) => entry.provider !== "gmail")
-        .every((entry) => entry.status === "coming_soon"),
-    ).toBe(true);
+    expect(catalog).toEqual([
+      expect.objectContaining({ provider: "gmail", status: "available" }),
+    ]);
   });
 
   it("rejects generic callbacks so Gmail activation only uses GmailService", async () => {

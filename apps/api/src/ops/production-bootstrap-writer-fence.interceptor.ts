@@ -25,9 +25,8 @@ const SIDE_EFFECTFUL_GET_PATHS: readonly RegExp[] = [
   /^\/api\/agents\/templates$/,
   /^\/api\/billing\/?$/,
   /^\/api\/integrations\/gmail\/auth-url$/,
-  /^\/api\/integrations\/(?:gmail|outlook|hubspot)\/callback$/,
+  /^\/api\/integrations\/gmail\/callback$/,
   /^\/api\/integrations\/linkedin\/callback$/,
-  /^\/api\/integrations\/[^/]+\/health$/,
   /^\/api\/integrations\/gmail\/(?:messages|search|threads)(?:\/|$)/,
   /^\/api\/integrations\/hubspot\//,
   /^\/api\/workflows\/runs\/[^/]+$/,
@@ -67,7 +66,6 @@ const READ_ONLY_GET_PATHS: readonly RegExp[] = [
   /^\/api\/agents\/[^/]+(?:\/(?:analytics|runs|memories))?\/?$/,
   /^\/api\/integrations\/?$/,
   /^\/api\/integrations\/catalog$/,
-  /^\/api\/integrations\/outlook\/auth-url$/,
   /^\/api\/integrations\/linkedin\/connect$/,
 ];
 

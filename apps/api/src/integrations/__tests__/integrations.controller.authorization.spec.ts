@@ -11,16 +11,9 @@ function guardsOn(method: keyof IntegrationsController): unknown[] {
 
 describe("IntegrationsController management authorization", () => {
   it.each([
-    "create",
-    "remove",
     "gmailAuthUrl",
     "finalizeGmail",
-    "outlookAuthUrl",
-    "hubspotAuthUrl",
-    "simulateConnect",
-    "connectApiKey",
-    "disconnectByProvider",
-    "testByProvider",
+    "disconnectGmail",
   ] as const)("attaches AdminOrManagerGuard to %s", (method) => {
     expect(guardsOn(method)).toContain(AdminOrManagerGuard);
   });
@@ -34,7 +27,7 @@ describe("IntegrationsController management authorization", () => {
     ).not.toBe(true);
   });
 
-  it.each(["findAll", "getCatalog", "checkHealth"] as const)(
+  it.each(["findAll", "getCatalog"] as const)(
     "keeps read-only status method %s available to authenticated org members",
     (method) => {
       expect(guardsOn(method)).not.toContain(AdminOrManagerGuard);
