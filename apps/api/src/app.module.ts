@@ -6,7 +6,6 @@ import { HealthModule } from "./health/health.module";
 import { AuthModule } from "./auth/auth.module";
 import { OrgsModule } from "./orgs/orgs.module";
 import { IntegrationsModule } from "./integrations/integrations.module";
-import { BillingModule } from "./billing/billing.module";
 import { RuntimeModule } from "./runtime/runtime.module";
 import { LeadsModule } from "./leads/leads.module";
 import { PipelineModule } from "./pipeline/pipeline.module";
@@ -38,7 +37,6 @@ import { ProductionBootstrapWriterFenceInterceptor } from "./ops/production-boot
     AuthModule,
     OrgsModule,
     IntegrationsModule,
-    BillingModule,
     RuntimeModule,
     LeadsModule,
     PipelineModule,

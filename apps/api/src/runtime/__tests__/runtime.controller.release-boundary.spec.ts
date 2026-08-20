@@ -3,7 +3,6 @@ import { RequestMethod } from "@nestjs/common";
 import { describe, expect, it } from "vitest";
 import { AppModule } from "../../app.module";
 import { AgentsModule } from "../../agents/agents.module";
-import { BillingController } from "../../billing/billing.controller";
 import { BillingModule } from "../../billing/billing.module";
 import { GraphController } from "../../graph/graph.controller";
 import { GraphModule } from "../../graph/graph.module";
@@ -83,6 +82,7 @@ describe("RuntimeController release boundary", () => {
   it("does not activate deferred product modules or legacy AgentRun providers", () => {
     const appImports = moduleEntries(AppModule, IMPORTS_METADATA);
     expect(appImports).not.toContain(AgentsModule);
+    expect(appImports).not.toContain(BillingModule);
     expect(appImports).not.toContain(RunsModule);
     expect(appImports).not.toContain(WorkflowsModule);
 
@@ -124,21 +124,4 @@ describe("RuntimeController release boundary", () => {
     );
   });
 
-  it("keeps billing reads and the signed webhook but removes self-service subscribe", () => {
-    expect(mountedControllers(BillingModule)).toContain(BillingController);
-    const routes = exposedRoutes(BillingController);
-
-    expect(routes).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ path: "/", method: RequestMethod.GET }),
-        expect.objectContaining({ path: "webhook", method: RequestMethod.POST }),
-      ]),
-    );
-    expect(
-      routes.some(
-        ({ path, method }) =>
-          path === "subscribe" && method === RequestMethod.POST,
-      ),
-    ).toBe(false);
-  });
 });

@@ -230,6 +230,16 @@ for GATE in GMAIL_WATCH_RENEWAL_ENABLED GRAPH_RUN_WORKER_ENABLED OUTREACH_WORKER
 done
 require_env_absent "${API_JSON}" WORKER_ENABLED "API retired generic worker gate"
 require_env_absent "${WORKER_JSON}" WORKER_ENABLED "worker retired generic worker gate"
+for RETIRED_BILLING_ENV in RAZORPAY_KEY_ID RAZORPAY_KEY_SECRET RAZORPAY_WEBHOOK_SECRET; do
+  require_env_absent \
+    "${API_JSON}" \
+    "${RETIRED_BILLING_ENV}" \
+    "API retired billing configuration ${RETIRED_BILLING_ENV}"
+  require_env_absent \
+    "${WORKER_JSON}" \
+    "${RETIRED_BILLING_ENV}" \
+    "worker retired billing configuration ${RETIRED_BILLING_ENV}"
+done
 API_FAILED_WRITE_GATE="$(env_value "${API_JSON}" OUTREACH_FAILED_STATUS_WRITES_ENABLED)"
 WORKER_FAILED_WRITE_GATE="$(env_value "${WORKER_JSON}" OUTREACH_FAILED_STATUS_WRITES_ENABLED)"
 if [[ -n "${API_FAILED_WRITE_GATE}" && "${API_FAILED_WRITE_GATE}" != "false" ]]; then
@@ -587,10 +597,9 @@ for SECRET_NAME in "${OPTIONAL_SHARED_SECRET_ENV_NAMES[@]}"; do
   require_secret_ref_name_parity "${SECRET_NAME}" "false"
 done
 
-# These endpoint-only secrets are intentionally outside cross-role parity: the
-# worker has no public Clerk or billing webhook ingress. If configured, they
-# must still be secret-backed rather than inline.
-for SECRET_NAME in CLERK_WEBHOOK_SECRET RAZORPAY_KEY_SECRET RAZORPAY_WEBHOOK_SECRET; do
+# The Clerk webhook is API-only and intentionally outside cross-role parity.
+# If configured, it must still be secret-backed rather than inline.
+for SECRET_NAME in CLERK_WEBHOOK_SECRET; do
   optional_secret_ref "${API_JSON}" "${SECRET_NAME}" >/dev/null
   optional_secret_ref "${WORKER_JSON}" "${SECRET_NAME}" >/dev/null
 done

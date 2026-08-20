@@ -22,7 +22,6 @@ const UNSUBSCRIBE_POST_PATH = /^\/api\/u\/[^/]+\/?$/i;
  * credentials, call a provider, or synchronize a database projection.
  */
 const SIDE_EFFECTFUL_GET_PATHS: readonly RegExp[] = [
-  /^\/api\/billing\/?$/,
   /^\/api\/integrations\/gmail\/auth-url$/,
   /^\/api\/integrations\/gmail\/callback$/,
   /^\/api\/integrations\/gmail\/(?:messages|search|threads)(?:\/|$)/,

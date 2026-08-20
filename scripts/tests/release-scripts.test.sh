@@ -2767,6 +2767,38 @@ EOF
   fi
   pass
 
+  jq '.properties.template.containers[0].env += [
+    {name: "RAZORPAY_KEY_ID", value: "retired-key"},
+    {name: "RAZORPAY_KEY_SECRET", secretRef: "retired-key-secret"},
+    {name: "RAZORPAY_WEBHOOK_SECRET", secretRef: "retired-webhook-secret"}
+  ]' "${harness}/api.json" >"${harness}/api-retired-billing-config.json"
+  if env PATH="${harness}/bin:${PATH}" \
+    API_JSON_FILE="${harness}/api-retired-billing-config.json" \
+    WORKER_JSON_FILE="${harness}/worker.json" \
+    API_REVISION_FILE="${harness}/api-revision.json" \
+    WORKER_REVISION_FILE="${harness}/worker-revision.json" \
+    "${harness}/scripts/verify-containerapp-release-config.sh" \
+    "${api_image}" "${worker_image}" >/dev/null 2>&1; then
+    fail "Container App verifier accepted retired API billing configuration"
+  fi
+  pass
+
+  jq '.properties.template.containers[0].env += [
+    {name: "RAZORPAY_KEY_ID", value: "retired-key"},
+    {name: "RAZORPAY_KEY_SECRET", secretRef: "retired-key-secret"},
+    {name: "RAZORPAY_WEBHOOK_SECRET", secretRef: "retired-webhook-secret"}
+  ]' "${harness}/worker.json" >"${harness}/worker-retired-billing-config.json"
+  if env PATH="${harness}/bin:${PATH}" \
+    API_JSON_FILE="${harness}/api.json" \
+    WORKER_JSON_FILE="${harness}/worker-retired-billing-config.json" \
+    API_REVISION_FILE="${harness}/api-revision.json" \
+    WORKER_REVISION_FILE="${harness}/worker-revision.json" \
+    "${harness}/scripts/verify-containerapp-release-config.sh" \
+    "${api_image}" "${worker_image}" >/dev/null 2>&1; then
+    fail "Container App verifier accepted retired worker billing configuration"
+  fi
+  pass
+
   jq '.properties.template.containers[0].env += [{name: "WORKER_ENABLED", value: "true"}]' \
     "${harness}/worker.json" >"${harness}/worker-retired-gate.json"
   if env PATH="${harness}/bin:${PATH}" \

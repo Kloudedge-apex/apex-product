@@ -1104,9 +1104,6 @@ describe("production bootstrap HTTP classification", () => {
         "/api/integrations/gmail/auth-url",
       ),
     ).toBe("writer");
-    expect(classifyProductionBootstrapHttpRequest("GET", "/api/billing")).toBe(
-      "writer",
-    );
     expect(classifyProductionBootstrapHttpRequest("POST", "/api/auth/webhook")).toBe(
       "writer",
     );
@@ -1115,11 +1112,10 @@ describe("production bootstrap HTTP classification", () => {
   it("classifies the complete mounted GET/HEAD-equivalent controller surface", () => {
     const sourceRoot = join(process.cwd(), "src");
     const routes = productionGetRoutes(sourceRoot);
-    expect(routes).toHaveLength(54);
+    expect(routes).toHaveLength(53);
     expect(new Set(routes).size).toBe(routes.length);
 
     const writerRoutes = new Set([
-      "/api/billing",
       "/api/integrations/gmail/auth-url",
       "/api/integrations/gmail/callback",
       "/api/integrations/gmail/messages",
@@ -1145,6 +1141,7 @@ describe("production bootstrap HTTP classification", () => {
 
     for (const retiredPrefix of [
       "/api/agents",
+      "/api/billing",
       "/api/runs",
       "/api/workflows",
       "/api/integrations/hubspot",
