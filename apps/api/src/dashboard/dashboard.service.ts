@@ -13,8 +13,6 @@ export interface DashboardStats {
   leadsSourced: number;
   leadsQualified: number;
   emailsSent: number;
-  /** Null until a durable, time-windowed reply-rate definition is available. */
-  replyRate: number | null;
   meetingsBooked: number;
 }
 
@@ -64,7 +62,6 @@ export class DashboardService {
       leadsSourced,
       leadsQualified,
       emailsSent,
-      replyRate: null,
       meetingsBooked,
     };
   }
