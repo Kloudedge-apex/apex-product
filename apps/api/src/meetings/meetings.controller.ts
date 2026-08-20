@@ -96,6 +96,55 @@ export class MeetingsController {
     @Param("id") id: string,
     @Body() body: UpdateBody,
   ) {
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      throw new BadRequestException("meeting update body is required");
+    }
+    if (
+      body.title === undefined &&
+      body.scheduledFor === undefined &&
+      body.attendeeEmails === undefined &&
+      body.durationMinutes === undefined &&
+      body.description === undefined &&
+      body.notes === undefined
+    ) {
+      throw new BadRequestException("meeting update must include a supported field");
+    }
+    if (body.title !== undefined && typeof body.title !== "string") {
+      throw new BadRequestException("title must be a string");
+    }
+    if (
+      body.scheduledFor !== undefined &&
+      typeof body.scheduledFor !== "string"
+    ) {
+      throw new BadRequestException("scheduledFor must be an ISO-8601 datetime");
+    }
+    if (
+      body.attendeeEmails !== undefined &&
+      (!Array.isArray(body.attendeeEmails) ||
+        body.attendeeEmails.some((email) => typeof email !== "string"))
+    ) {
+      throw new BadRequestException("attendeeEmails must be an array of strings");
+    }
+    if (
+      body.durationMinutes !== undefined &&
+      typeof body.durationMinutes !== "number"
+    ) {
+      throw new BadRequestException("durationMinutes must be a number");
+    }
+    if (
+      body.description !== undefined &&
+      body.description !== null &&
+      typeof body.description !== "string"
+    ) {
+      throw new BadRequestException("description must be a string or null");
+    }
+    if (
+      body.notes !== undefined &&
+      body.notes !== null &&
+      typeof body.notes !== "string"
+    ) {
+      throw new BadRequestException("notes must be a string or null");
+    }
     return this.meetings.update(orgId, id, {
       title: body.title,
       description: body.description,
@@ -131,6 +180,11 @@ export class MeetingsController {
   @Post(":id/complete")
   complete(@OrgId() orgId: string, @Param("id") id: string) {
     return this.meetings.markCompleted(orgId, id);
+  }
+
+  @Post(":id/no-show")
+  noShow(@OrgId() orgId: string, @Param("id") id: string) {
+    return this.meetings.markNoShow(orgId, id);
   }
 }
 

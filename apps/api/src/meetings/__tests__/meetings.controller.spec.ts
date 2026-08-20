@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { UnauthorizedException } from "@nestjs/common";
+import { BadRequestException, UnauthorizedException } from "@nestjs/common";
 import { MeetingSource, MeetingStatus } from "@prisma/client";
 import { MeetingsController } from "../meetings.controller";
 import { MeetingsService } from "../meetings.service";
@@ -15,6 +15,7 @@ function mockMeetings() {
     update: vi.fn(),
     cancel: vi.fn(),
     markCompleted: vi.fn(),
+    markNoShow: vi.fn(),
   };
 }
 
@@ -75,5 +76,22 @@ describe("MeetingsController human provenance", () => {
       }),
     ).toThrow(UnauthorizedException);
     expect(meetings.confirm).not.toHaveBeenCalled();
+  });
+
+  it("records a no-show through the tenant-scoped service", async () => {
+    await controller.noShow("org_1", "mtg_1");
+    expect(meetings.markNoShow).toHaveBeenCalledWith("org_1", "mtg_1");
+  });
+
+  it("rejects empty or mistyped meeting updates before calling the service", () => {
+    expect(() => controller.update("org_1", "mtg_1", {})).toThrow(
+      BadRequestException,
+    );
+    expect(() =>
+      controller.update("org_1", "mtg_1", {
+        title: 42 as unknown as string,
+      }),
+    ).toThrow(BadRequestException);
+    expect(meetings.update).not.toHaveBeenCalled();
   });
 });

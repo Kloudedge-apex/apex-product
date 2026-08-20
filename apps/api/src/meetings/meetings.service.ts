@@ -8,6 +8,7 @@ import {
   MeetingLedger,
   MeetingSource,
   MeetingStatus,
+  Prisma,
 } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 
@@ -170,16 +171,17 @@ export class MeetingsService {
     id: string,
     patch: UpdateMeetingInput,
   ): Promise<MeetingLedger> {
-    const meeting = await this.get(orgId, id);
     if (
-      meeting.status === MeetingStatus.CANCELLED ||
-      meeting.status === MeetingStatus.COMPLETED
+      !patch ||
+      (patch.title === undefined &&
+        patch.description === undefined &&
+        patch.notes === undefined &&
+        patch.scheduledFor === undefined &&
+        patch.durationMinutes === undefined &&
+        patch.attendeeEmails === undefined)
     ) {
-      throw new BadRequestException(
-        `Cannot update ${meeting.status.toLowerCase()} meeting`,
-      );
+      throw new BadRequestException("meeting update must include a supported field");
     }
-
     if (patch.title !== undefined && patch.title.trim().length === 0) {
       throw new BadRequestException("title cannot be empty");
     }
@@ -197,8 +199,12 @@ export class MeetingsService {
       );
     }
 
-    return this.prisma.meetingLedger.update({
-      where: { id },
+    const updated = await this.prisma.meetingLedger.updateMany({
+      where: {
+        id,
+        orgId,
+        status: { in: [MeetingStatus.PROPOSED, MeetingStatus.CONFIRMED] },
+      },
       data: {
         ...(patch.title !== undefined ? { title: patch.title.trim() } : {}),
         ...(patch.description !== undefined ? { description: patch.description } : {}),
@@ -212,6 +218,12 @@ export class MeetingsService {
           : {}),
       },
     });
+    if (updated.count === 1) return this.get(orgId, id);
+
+    const meeting = await this.get(orgId, id);
+    throw new BadRequestException(
+      `Cannot update ${meeting.status.toLowerCase()} meeting`,
+    );
   }
 
   async confirm(
@@ -219,20 +231,17 @@ export class MeetingsService {
     id: string,
     confirmedBy: string,
   ): Promise<MeetingLedger> {
-    const meeting = await this.get(orgId, id);
-    if (meeting.status !== MeetingStatus.PROPOSED) {
-      throw new BadRequestException(
-        `Meeting ${id} is ${meeting.status}; only PROPOSED meetings can be confirmed`,
-      );
-    }
-    return this.prisma.meetingLedger.update({
-      where: { id },
-      data: {
-        status: MeetingStatus.CONFIRMED,
+    return this.transitionStatus(
+      orgId,
+      id,
+      [MeetingStatus.PROPOSED],
+      MeetingStatus.CONFIRMED,
+      {
         confirmedBy,
         confirmedAt: new Date(),
       },
-    });
+      "only PROPOSED meetings can be confirmed",
+    );
   }
 
   async cancel(
@@ -240,42 +249,70 @@ export class MeetingsService {
     id: string,
     reason?: string,
   ): Promise<MeetingLedger> {
-    const meeting = await this.get(orgId, id);
-    if (
-      meeting.status === MeetingStatus.CANCELLED ||
-      meeting.status === MeetingStatus.COMPLETED
-    ) {
-      throw new BadRequestException(
-        `Meeting ${id} is already ${meeting.status.toLowerCase()}`,
-      );
-    }
-    return this.prisma.meetingLedger.update({
-      where: { id },
-      data: {
-        status: MeetingStatus.CANCELLED,
-        cancelledReason: reason ?? null,
+    const cancelledReason = normalizeOptionalText(reason, 2000, "reason");
+    return this.transitionStatus(
+      orgId,
+      id,
+      [MeetingStatus.PROPOSED, MeetingStatus.CONFIRMED],
+      MeetingStatus.CANCELLED,
+      {
+        cancelledReason,
         cancelledAt: new Date(),
       },
-    });
+      "only PROPOSED or CONFIRMED meetings can be cancelled",
+    );
   }
 
   async markCompleted(orgId: string, id: string): Promise<MeetingLedger> {
-    const meeting = await this.get(orgId, id);
-    if (meeting.status !== MeetingStatus.CONFIRMED) {
-      throw new BadRequestException(
-        `Meeting ${id} is ${meeting.status}; only CONFIRMED meetings can be marked completed`,
-      );
-    }
-    return this.prisma.meetingLedger.update({
-      where: { id },
-      data: { status: MeetingStatus.COMPLETED },
+    return this.transitionStatus(
+      orgId,
+      id,
+      [MeetingStatus.CONFIRMED],
+      MeetingStatus.COMPLETED,
+      {},
+      "only CONFIRMED meetings can be marked completed",
+    );
+  }
+
+  async markNoShow(orgId: string, id: string): Promise<MeetingLedger> {
+    return this.transitionStatus(
+      orgId,
+      id,
+      [MeetingStatus.CONFIRMED],
+      MeetingStatus.NO_SHOW,
+      {},
+      "only CONFIRMED meetings can be marked no-show",
+    );
+  }
+
+  private async transitionStatus(
+    orgId: string,
+    id: string,
+    from: MeetingStatus[],
+    target: MeetingStatus,
+    data: Prisma.MeetingLedgerUpdateManyMutationInput,
+    rule: string,
+  ): Promise<MeetingLedger> {
+    const result = await this.prisma.meetingLedger.updateMany({
+      where: { id, orgId, status: { in: from } },
+      data: { ...data, status: target },
     });
+    const current = await this.get(orgId, id);
+    if (current.status === target) return current;
+
+    const disposition = result.count === 1 ? "was superseded and is now" : "is";
+    throw new BadRequestException(
+      `Meeting ${id} ${disposition} ${current.status}; ${rule}`,
+    );
   }
 }
 
 function normalizeAttendees(emails: ReadonlyArray<string>): string[] {
   const cleaned: string[] = [];
   for (const raw of emails) {
+    if (typeof raw !== "string") {
+      throw new BadRequestException("attendee email must be a string");
+    }
     const trimmed = raw.trim().toLowerCase();
     if (!EMAIL_RE.test(trimmed)) {
       throw new BadRequestException(`Invalid attendee email: ${raw}`);
@@ -287,4 +324,20 @@ function normalizeAttendees(emails: ReadonlyArray<string>): string[] {
 
 function clamp(n: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, n));
+}
+
+function normalizeOptionalText(
+  value: string | undefined,
+  maximum: number,
+  field: string,
+): string | null {
+  if (value === undefined) return null;
+  if (typeof value !== "string") {
+    throw new BadRequestException(`${field} must be a string`);
+  }
+  const normalized = value.trim();
+  if (normalized.length > maximum) {
+    throw new BadRequestException(`${field} must not exceed ${maximum} characters`);
+  }
+  return normalized.length > 0 ? normalized : null;
 }
