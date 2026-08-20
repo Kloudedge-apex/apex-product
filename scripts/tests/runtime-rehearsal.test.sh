@@ -212,7 +212,6 @@ case "${url}" in
       status: "ok",
       healthy: true,
       queues: [
-        {queue: "agent-runs", mode: "bullmq", healthy: true, workerCount: $count},
         {queue: "graph-runs", mode: "bullmq", healthy: true, workerCount: $count},
         {queue: "outreach-send", mode: "bullmq", healthy: true, workerCount: $count}
       ]
@@ -300,7 +299,7 @@ if ! jq -e --arg commit "${EXPECTED_COMMIT}" '
   and .roles.worker.liveness == true
   and .roles.worker.readiness == true
   and .consumerRegistration.healthy == true
-  and (.consumerRegistration.queues | length == 3)
+  and (.consumerRegistration.queues | length == 2)
   and .accessBoundary == {unauthenticatedTenantDenied: true, statusCode: 401}
   and .shutdown.api.clean == true
   and .shutdown.worker.clean == true

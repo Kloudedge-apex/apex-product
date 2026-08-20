@@ -244,7 +244,7 @@
       "additionalProperties": false,
       "required": ["agentRuns", "graphRuns", "outreachSend"],
       "properties": {
-        "agentRuns": { "$ref": "#/$defs/resumedQueueState" },
+        "agentRuns": { "$ref": "#/$defs/pausedQueueState" },
         "graphRuns": { "$ref": "#/$defs/resumedQueueState" },
         "outreachSend": { "$ref": "#/$defs/resumedQueueState" }
       }
@@ -254,7 +254,7 @@
       "additionalProperties": false,
       "required": ["agentRuns", "graphRuns", "outreachSend"],
       "properties": {
-        "agentRuns": { "$ref": "#/$defs/pausedConnectedQueueState" },
+        "agentRuns": { "$ref": "#/$defs/pausedQueueState" },
         "graphRuns": { "$ref": "#/$defs/pausedConnectedQueueState" },
         "outreachSend": { "$ref": "#/$defs/pausedConnectedQueueState" }
       }
@@ -642,10 +642,10 @@
       "type": "object", "additionalProperties": false,
       "required": ["sequence", "action", "startedAt", "completedAt", "evidenceHash"],
       "properties": {
-        "sequence": { "type": "integer", "minimum": 1, "maximum": 6 },
+        "sequence": { "type": "integer", "minimum": 1, "maximum": 5 },
         "action": {
           "enum": [
-            "release-writer-fence", "start-first-class-consumers", "resume-agent-runs", "resume-graph-runs",
+            "release-writer-fence", "start-first-class-consumers", "resume-graph-runs",
             "resume-outreach-send", "unblock-api-mutations"
           ]
         },
@@ -688,11 +688,11 @@
               }
             },
             "steps": {
-              "type": "array", "minItems": 6, "maxItems": 6,
+              "type": "array", "minItems": 5, "maxItems": 5,
               "prefixItems": [
                 { "$ref": "#/$defs/resumeStep" }, { "$ref": "#/$defs/resumeStep" },
                 { "$ref": "#/$defs/resumeStep" }, { "$ref": "#/$defs/resumeStep" },
-                { "$ref": "#/$defs/resumeStep" }, { "$ref": "#/$defs/resumeStep" }
+                { "$ref": "#/$defs/resumeStep" }
               ],
               "items": false
             },

@@ -283,9 +283,9 @@ bound_reject "bootstrap-complete" "b8-api-early" \
   '.evidence.resume.apiMutations.restoredAt = .evidence.resume.steps[3].completedAt' \
   "API mutations restored before the final B8 step"
 bound_reject "bootstrap-complete" "b8-future-completion" \
-  '(.evidence.resume.steps[5].completedAt | fromdateiso8601 + 600 | todateiso8601) as $future
-   | .evidence.resume.steps[5].startedAt = $future
-   | .evidence.resume.steps[5].completedAt = $future
+  '(.evidence.resume.steps[4].completedAt | fromdateiso8601 + 600 | todateiso8601) as $future
+   | .evidence.resume.steps[4].startedAt = $future
+   | .evidence.resume.steps[4].completedAt = $future
    | .evidence.resume.apiMutations.restoredAt = $future' \
   "B8 resume evidence after receipt issuance"
 bound_reject "bootstrap-complete" "b8-no-worker" \

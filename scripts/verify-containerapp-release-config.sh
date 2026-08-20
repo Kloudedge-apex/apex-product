@@ -224,10 +224,12 @@ require_value \
 require_inactive_revision_retention "${API_JSON}" "${API_APP}"
 require_inactive_revision_retention "${WORKER_JSON}" "${WORKER_APP}"
 
-for GATE in WORKER_ENABLED GRAPH_RUN_WORKER_ENABLED OUTREACH_WORKER_ENABLED; do
+for GATE in GMAIL_WATCH_RENEWAL_ENABLED GRAPH_RUN_WORKER_ENABLED OUTREACH_WORKER_ENABLED; do
   require_value "$(env_value "${API_JSON}" "${GATE}")" "false" "API ${GATE}"
   require_value "$(env_value "${WORKER_JSON}" "${GATE}")" "true" "worker ${GATE}"
 done
+require_env_absent "${API_JSON}" WORKER_ENABLED "API retired generic worker gate"
+require_env_absent "${WORKER_JSON}" WORKER_ENABLED "worker retired generic worker gate"
 API_FAILED_WRITE_GATE="$(env_value "${API_JSON}" OUTREACH_FAILED_STATUS_WRITES_ENABLED)"
 WORKER_FAILED_WRITE_GATE="$(env_value "${WORKER_JSON}" OUTREACH_FAILED_STATUS_WRITES_ENABLED)"
 if [[ -n "${API_FAILED_WRITE_GATE}" && "${API_FAILED_WRITE_GATE}" != "false" ]]; then

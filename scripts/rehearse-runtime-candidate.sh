@@ -328,7 +328,7 @@ start_role() {
     --security-opt no-new-privileges \
     --network host \
     --env "API_PORT=${port}" \
-    --env "WORKER_ENABLED=${workers_enabled}" \
+    --env "GMAIL_WATCH_RENEWAL_ENABLED=${workers_enabled}" \
     --env "GRAPH_RUN_WORKER_ENABLED=${workers_enabled}" \
     --env "OUTREACH_WORKER_ENABLED=${workers_enabled}" \
     "${COMMON_ENV[@]}" \
@@ -386,8 +386,8 @@ wait_for_json_probe "API readiness" "${API_CONTAINER}" \
 
 WORKER_HEALTH_FILTER='
   .status == "ok" and .healthy == true
-  and (.queues | type == "array" and length == 3)
-  and ((.queues | map(.queue) | sort) == ["agent-runs", "graph-runs", "outreach-send"])
+  and (.queues | type == "array" and length == 2)
+  and ((.queues | map(.queue) | sort) == ["graph-runs", "outreach-send"])
   and all(.queues[];
     .mode == "bullmq" and .healthy == true
     and (.workerCount | type == "number" and . >= 1)
@@ -516,9 +516,9 @@ if ! jq -e --arg commit "${CANDIDATE_COMMIT}" '
     worker: {liveness: true, readiness: true}
   }
   and .consumerRegistration.healthy == true
-  and (.consumerRegistration.queues | length == 3)
+  and (.consumerRegistration.queues | length == 2)
   and all(.consumerRegistration.queues[];
-    (.name == "agent-runs" or .name == "graph-runs" or .name == "outreach-send")
+    (.name == "graph-runs" or .name == "outreach-send")
     and (.workerCount | type == "number" and . >= 1)
   )
   and .accessBoundary == {unauthenticatedTenantDenied: true, statusCode: 401}

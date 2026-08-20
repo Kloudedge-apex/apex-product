@@ -2646,7 +2646,7 @@ write_containerapp_fixture() {
               {name: "REQUIRE_PRODUCTION_ENV", value: "true"},
               {name: "WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID", value: "0123456789abcdef0123456789abcdef"},
               {name: "WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION", value: "7"},
-              {name: "WORKER_ENABLED", value: $enabled},
+              {name: "GMAIL_WATCH_RENEWAL_ENABLED", value: $enabled},
               {name: "GRAPH_RUN_WORKER_ENABLED", value: $enabled},
               {name: "OUTREACH_WORKER_ENABLED", value: $enabled},
               {name: "SCHEDULER_ENABLED", value: "false"},
@@ -2749,6 +2749,19 @@ EOF
     API_REVISION_FILE="${harness}/api-revision.json" WORKER_REVISION_FILE="${harness}/worker-revision.json" \
     "${harness}/scripts/verify-containerapp-release-config.sh" \
     "${api_image}" "${worker_image}" >/dev/null
+  pass
+
+  jq '.properties.template.containers[0].env += [{name: "WORKER_ENABLED", value: "true"}]' \
+    "${harness}/worker.json" >"${harness}/worker-retired-gate.json"
+  if env PATH="${harness}/bin:${PATH}" \
+    API_JSON_FILE="${harness}/api.json" \
+    WORKER_JSON_FILE="${harness}/worker-retired-gate.json" \
+    API_REVISION_FILE="${harness}/api-revision.json" \
+    WORKER_REVISION_FILE="${harness}/worker-revision.json" \
+    "${harness}/scripts/verify-containerapp-release-config.sh" \
+    "${api_image}" "${worker_image}" >/dev/null 2>&1; then
+    fail "Container App verifier accepted the retired generic worker gate"
+  fi
   pass
 
   jq '.properties.template.containers[0].env |= map(select(

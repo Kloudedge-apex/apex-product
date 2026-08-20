@@ -359,7 +359,6 @@ function evidenceFor(kind, generation, issuedOffset) {
   const actions = [
     "release-writer-fence",
     "start-first-class-consumers",
-    "resume-agent-runs",
     "resume-graph-runs",
     "resume-outreach-send",
     "unblock-api-mutations",
@@ -373,6 +372,7 @@ function evidenceFor(kind, generation, issuedOffset) {
   }));
   const resumed = () => queueState(false, 1);
   const paused = () => queueState(true, 1);
+  const retired = () => queueState(true, 0);
   return {
     ...structuredClone(armed),
     resume: {
@@ -387,7 +387,7 @@ function evidenceFor(kind, generation, issuedOffset) {
       steps,
       pausedConsumerProof: {
         queues: {
-          agentRuns: paused(),
+          agentRuns: retired(),
           graphRuns: paused(),
           outreachSend: paused(),
         },
@@ -395,7 +395,7 @@ function evidenceFor(kind, generation, issuedOffset) {
         evidenceHash: hash("8"),
       },
       queues: {
-        agentRuns: resumed(),
+        agentRuns: retired(),
         graphRuns: resumed(),
         outreachSend: resumed(),
       },
@@ -419,7 +419,7 @@ function evidenceFor(kind, generation, issuedOffset) {
         blocked: false,
         ingressEnabled: true,
         readinessPassed: true,
-        restoredAt: steps[5].completedAt,
+        restoredAt: steps[4].completedAt,
         evidenceHash: hash("b"),
       },
       ambiguityControl: {

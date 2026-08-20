@@ -18,7 +18,6 @@ import {
 } from "./state";
 import type { LeadsService } from "../leads/leads.service";
 import type { PrismaService } from "../prisma/prisma.service";
-import type { RuntimeService } from "../runtime/runtime.service";
 import type { LLMService } from "../runtime/llm.service";
 import type { OutreachArtifactsService } from "../outreach/outreach-artifacts.service";
 import type { EvidenceLedgerService } from "../observability/evidence-ledger.service";
@@ -59,7 +58,6 @@ function personIdFromArtifactPayload(payload: unknown): string | null {
 interface Deps {
   leads: LeadsService;
   prisma: PrismaService;
-  runtime: RuntimeService;
   llm: LLMService;
   outreachArtifacts: OutreachArtifactsService;
   evidenceLedger: EvidenceLedgerService;

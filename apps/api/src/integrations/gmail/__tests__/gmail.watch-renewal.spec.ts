@@ -116,7 +116,7 @@ function buildService(
 describe("GmailService watch auto-renewal (GL7)", () => {
   let mockPrisma: ReturnType<typeof createMockPrisma>;
   let service: GmailService;
-  const originalWorkerEnabled = process.env.WORKER_ENABLED;
+  const originalWatchRenewalEnabled = process.env.GMAIL_WATCH_RENEWAL_ENABLED;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -131,13 +131,16 @@ describe("GmailService watch auto-renewal (GL7)", () => {
   afterEach(() => {
     // Always tear down any interval onModuleInit scheduled.
     service.onModuleDestroy();
-    if (originalWorkerEnabled === undefined) delete process.env.WORKER_ENABLED;
-    else process.env.WORKER_ENABLED = originalWorkerEnabled;
+    if (originalWatchRenewalEnabled === undefined) {
+      delete process.env.GMAIL_WATCH_RENEWAL_ENABLED;
+    } else {
+      process.env.GMAIL_WATCH_RENEWAL_ENABLED = originalWatchRenewalEnabled;
+    }
     vi.useRealTimers();
   });
 
-  function enableWorker(): void {
-    process.env.WORKER_ENABLED = "true";
+  function enableWatchRenewal(): void {
+    process.env.GMAIL_WATCH_RENEWAL_ENABLED = "true";
   }
 
   function setConnectedIntegrations(orgIds: string[]): void {
@@ -151,8 +154,8 @@ describe("GmailService watch auto-renewal (GL7)", () => {
   }
 
   describe("worker gating (onModuleInit)", () => {
-    it("does nothing when WORKER_ENABLED is not 'true' (api process must not sweep)", async () => {
-      delete process.env.WORKER_ENABLED;
+    it("does nothing when GMAIL_WATCH_RENEWAL_ENABLED is not 'true'", async () => {
+      delete process.env.GMAIL_WATCH_RENEWAL_ENABLED;
 
       await service.onModuleInit();
 
@@ -161,7 +164,7 @@ describe("GmailService watch auto-renewal (GL7)", () => {
     });
 
     it("runs the boot sweep immediately in the worker process", async () => {
-      enableWorker();
+      enableWatchRenewal();
       setConnectedIntegrations(["org_1"]);
 
       await service.onModuleInit();
@@ -172,7 +175,7 @@ describe("GmailService watch auto-renewal (GL7)", () => {
 
     it("re-sweeps daily, and onModuleDestroy stops the interval", async () => {
       vi.useFakeTimers();
-      enableWorker();
+      enableWatchRenewal();
       setConnectedIntegrations(["org_1"]);
 
       await service.onModuleInit();
@@ -188,7 +191,7 @@ describe("GmailService watch auto-renewal (GL7)", () => {
 
     it("contains and logs writer-fence rejection from the renewal timer", async () => {
       vi.useFakeTimers();
-      enableWorker();
+      enableWatchRenewal();
       let rejectTimer = false;
       const fence = {
         runWriter: vi.fn(async (_kind, operation) => {
@@ -230,7 +233,7 @@ describe("GmailService watch auto-renewal (GL7)", () => {
 
     it("schedules while CLOSED and skips boot/periodic provider sweeps", async () => {
       vi.useFakeTimers();
-      enableWorker();
+      enableWatchRenewal();
       service.onModuleDestroy();
       const fence = {
         runWriter: vi.fn(async () => {

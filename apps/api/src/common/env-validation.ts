@@ -1,7 +1,6 @@
 import * as crypto from "crypto";
 import { isIP } from "node:net";
 import { Logger } from "@nestjs/common";
-import { isWorkerEnabled } from "../runtime/worker.service";
 import { resolveApiPublicOrigin } from "../outreach/unsubscribe-token.util";
 import {
   DELIVERY_UNKNOWN_COMPATIBILITY_EPOCH,
@@ -22,7 +21,8 @@ import {
  *   In all environments:
  *     - DATABASE_URL must be set
  *     - ENCRYPTION_KEY must be set and pass crypto.util.ts's format check
- *     - If WORKER_ENABLED=true, REDIS_URL must be set
+ *     - Legacy WORKER_ENABLED must be absent; supported worker loops have
+ *       exact independent gates
  *
  *   When REQUIRE_PRODUCTION_ENV=true (set on every deployed Container App):
  *     - NODE_ENV must equal "production"
@@ -73,10 +73,21 @@ export function validateEnv(
 
   const encryptionKeyFingerprint = checkEncryptionKey(env, isProd, issues);
 
-  if (isWorkerEnabled(env)) {
-    if (!env.REDIS_URL || env.REDIS_URL.length === 0) {
-      issues.push("REDIS_URL is required when WORKER_ENABLED=true");
-    }
+  if (env.WORKER_ENABLED !== undefined && env.WORKER_ENABLED.trim() !== "") {
+    issues.push(
+      "WORKER_ENABLED is retired; use GMAIL_WATCH_RENEWAL_ENABLED, GRAPH_RUN_WORKER_ENABLED, and OUTREACH_WORKER_ENABLED",
+    );
+  }
+
+  if (
+    env.GMAIL_WATCH_RENEWAL_ENABLED !== undefined &&
+    env.GMAIL_WATCH_RENEWAL_ENABLED !== "" &&
+    env.GMAIL_WATCH_RENEWAL_ENABLED !== "true" &&
+    env.GMAIL_WATCH_RENEWAL_ENABLED !== "false"
+  ) {
+    issues.push(
+      "GMAIL_WATCH_RENEWAL_ENABLED must be exactly true or false when set",
+    );
   }
 
   if (requireProd) {

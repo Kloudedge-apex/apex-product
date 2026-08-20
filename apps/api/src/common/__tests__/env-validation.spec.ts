@@ -124,17 +124,29 @@ describe("validateEnv", () => {
     expect(issues.some((i) => i.includes("ADMIN_API_KEY"))).toBe(true);
   });
 
-  it("requires REDIS_URL when WORKER_ENABLED=true", () => {
+  it("rejects the retired generic worker gate", () => {
     const env = baseProdEnv();
     env.WORKER_ENABLED = "true";
     const { issues } = validateEnv(env);
-    expect(issues.some((i) => i.includes("REDIS_URL"))).toBe(true);
+    expect(issues).toContain(
+      "WORKER_ENABLED is retired; use GMAIL_WATCH_RENEWAL_ENABLED, GRAPH_RUN_WORKER_ENABLED, and OUTREACH_WORKER_ENABLED",
+    );
   });
 
-  it("does not require REDIS_URL when WORKER_ENABLED is not set", () => {
+  it("accepts the exact Gmail renewal role gate", () => {
     const env = baseProdEnv();
+    env.GMAIL_WATCH_RENEWAL_ENABLED = "true";
     const { issues } = validateEnv(env);
-    expect(issues.some((i) => i.includes("REDIS_URL"))).toBe(false);
+    expect(issues).toEqual([]);
+  });
+
+  it("rejects a noncanonical Gmail renewal role gate", () => {
+    const env = baseProdEnv();
+    env.GMAIL_WATCH_RENEWAL_ENABLED = "yes";
+    const { issues } = validateEnv(env);
+    expect(issues).toContain(
+      "GMAIL_WATCH_RENEWAL_ENABLED must be exactly true or false when set",
+    );
   });
 
   it("returns a fingerprint that never includes the raw key", () => {

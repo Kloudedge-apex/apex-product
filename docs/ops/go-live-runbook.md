@@ -143,8 +143,8 @@ After that receipt passes exact-source verification, the same blocking CI job
 builds the candidate production image and runs
 `scripts/rehearse-runtime-candidate.sh`. This second hermetic gate starts that
 image twice, using the default production command: first as the worker with all
-three BullMQ consumer gates enabled, then as the API with those local consumer
-gates disabled. Both roles connect only to the guarded
+two supported BullMQ consumer gates and Gmail watch renewal enabled, then as
+the API with those local worker gates disabled. Both roles connect only to the guarded
 `workforce_rehearsal_*` PostgreSQL fixture and an empty, credential-free
 loopback Redis database. Before boot, the controller proves that the database still contains
 exactly the two reserved synthetic tenants and refreshes only the synthetic
@@ -152,8 +152,8 @@ RUNNING graph's activity clock so orphan recovery cannot enqueue provider
 work during the test.
 
 The runtime gate requires liveness and PostgreSQL/Redis readiness from both
-roles, fleet-visible consumers for `agent-runs`, `graph-runs`, and
-`outreach-send`, HTTP 401 from an unauthenticated tenant route, and bounded
+roles, fleet-visible consumers for `graph-runs` and `outreach-send`, HTTP 401
+from an unauthenticated tenant route, and bounded
 SIGTERM shutdown without a forced-kill exit. It rejects remote database or
 Redis hosts, non-rehearsal database names, credentials other than the fixed CI
 PostgreSQL identity, Redis credentials, and an image whose OCI revision label
@@ -783,7 +783,8 @@ az containerapp update -n apex-gtm-worker -g workforce-os-prod \
 - No consumer on `outreach-send`; APPROVED rows and their jobs accumulate
   untouched. Nothing goes terminal. True pause.
 - Pipeline runs (`graph-runs`, gated by `GRAPH_RUN_WORKER_ENABLED`) and the
-  Gmail watch renewal sweep (gated by `WORKER_ENABLED`) keep running.
+  Gmail watch renewal sweep (gated by `GMAIL_WATCH_RENEWAL_ENABLED`) keep
+  running.
 - **Expected alarms while paused** (ack them, don't chase): `/api/health/worker`
   goes 503 once backlog > 0 with reason
   `N job(s) backlogged on "outreach-send" with zero BullMQ consumers attached`;
@@ -1036,15 +1037,15 @@ curl -fsS "https://${API_FQDN}/api/health/worker" | jq .
 - `200 {"status":"ok", ...}` — healthy.
 - `503 {"status":"degraded", ...}` — at least one queue unhealthy; `queues[].reasons` says why.
 
-Per queue (`graph-runs`, `outreach-send`, `agent-runs`) it reports `mode`
+Per supported queue (`graph-runs`, `outreach-send`) it reports `mode`
 (`bullmq`/`fallback`), `healthy`, `reasons`, `workerCount` (fleet-wide),
 `backlog` (waiting+active), full `counts`, and `observedWindowMs`. Failure
 conditions — exactly two:
 
 1. **No consumers** — zero attached consumers while backlog > 0, or while the
-   probed process itself sets the queue's gate env (`WORKER_ENABLED` /
-   `GRAPH_RUN_WORKER_ENABLED` / `OUTREACH_WORKER_ENABLED`) to `true`. In
-   production, all three consumers are required even when the probe is served
+   probed process itself sets the supported queue gate env
+   (`GRAPH_RUN_WORKER_ENABLED` / `OUTREACH_WORKER_ENABLED`) to `true`. In
+   production, both consumers are required even when the probe is served
    by an API process whose local worker gates are false, so API-ingress checks
    still assess the fleet-wide worker deployment.
 2. **Stalled** — backlog was non-zero a full stall window ago (default 5 min;
@@ -1067,7 +1068,8 @@ retention cap with inflow ≈ outflow can rarely false-positive as stalled.
 
 Code: `apps/api/src/integrations/gmail/gmail.service.ts`. Gmail watches expire
 after ~7 days; without renewal, DSN bounce auto-suppression and
-reply→stop-outreach silently die. The worker (`WORKER_ENABLED=true` process
+reply→stop-outreach silently die. The worker
+(`GMAIL_WATCH_RENEWAL_ENABLED=true` process
 only) runs a renewal sweep **daily and once at boot**, re-registering the
 watch for every CONNECTED gmail integration. Requires `GMAIL_PUBSUB_TOPIC`
 set (GCP project `supple-design-494220-v3`, topic `gmail-inbound`).
@@ -1082,7 +1084,7 @@ az containerapp logs show -n apex-gtm-worker -g workforce-os-prod --tail 200 \
 - `gmail.users.watch registered` `{orgId, historyId, expiration}` — per-mailbox success; `expiration` is ms-epoch ~7 days out.
 - `gmail.watch renewal sweep complete` `{renewed, failed}` — sweep summary (only logged when it did something).
 - `gmail.watch renewal failed for org` `{orgId, error}` — per-org failure; the sweep continues for other orgs. Repeated failures for the same org usually mean a dead token → triage #4.
-- `Gmail watch renewal sweep disabled in this process (set WORKER_ENABLED=true to enable)` — you are looking at the api pod, or the worker gate is off.
+- `Gmail watch renewal sweep disabled in this process (set GMAIL_WATCH_RENEWAL_ENABLED=true to enable)` — you are looking at the api pod, or the Gmail renewal gate is off.
 
 Manual re-arm for one org (idempotent, org-scoped auth):
 `POST https://${API_FQDN}/api/integrations/gmail/watch` — returns

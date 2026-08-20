@@ -11,7 +11,6 @@ import { randomUUID } from "node:crypto";
 import { GraphRunStatus, Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { LeadsService } from "../leads/leads.service";
-import { RuntimeService } from "../runtime/runtime.service";
 import { LLMService } from "../runtime/llm.service";
 import { OutreachArtifactsService } from "../outreach/outreach-artifacts.service";
 import { EvidenceLedgerService } from "../observability/evidence-ledger.service";
@@ -38,7 +37,6 @@ export class GraphService {
     private readonly prisma: PrismaService,
     @Inject(forwardRef(() => LeadsService))
     private readonly leads: LeadsService,
-    private readonly runtime: RuntimeService,
     private readonly llm: LLMService,
     private readonly outreachArtifacts: OutreachArtifactsService,
     private readonly evidenceLedger: EvidenceLedgerService,
@@ -376,7 +374,6 @@ export class GraphService {
     const compiled = buildPipelineGraph({
       leads: this.leads,
       prisma: this.prisma,
-      runtime: this.runtime,
       llm: this.llm,
       outreachArtifacts: this.outreachArtifacts,
       evidenceLedger: this.evidenceLedger,

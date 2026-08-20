@@ -109,11 +109,10 @@ Apex itself is the first dogfood org. The pipeline is wired to run end-to-end (I
 
 ### Safety contract
 
-1. **Workers are independently fail-closed.** `WORKER_ENABLED`,
+1. **Workers are independently fail-closed.** `GMAIL_WATCH_RENEWAL_ENABLED`,
    `GRAPH_RUN_WORKER_ENABLED`, and `OUTREACH_WORKER_ENABLED` must each equal
-   `true` to start their consumer. Legacy cadence scheduling is separately
-   disabled unless `SCHEDULER_ENABLED=true` and remains outside the guarded-SDR
-   release boundary.
+   `true` to start their supported loop. The generic AgentRun worker and its
+   cadence scheduler are not mounted in the guarded release.
 2. **Fail-fast env validation** rejects missing database, Redis, encryption,
    public-URL, Clerk verification/webhook, LLM, Gmail OAuth, CORS, and admin
    configuration before a production process can serve traffic.
@@ -197,9 +196,9 @@ pnpm db:push          # push schema to current DATABASE_URL
 
 ### Backend (Azure Container Apps)
 
-API and worker run from one immutable image. Their independent worker gates are
-set by deployment role; `SCHEDULER_ENABLED` stays false for the guarded-SDR
-release:
+API and worker run from one immutable image. Their independent Gmail-renewal,
+graph-run, and approved-outreach gates are set by deployment role;
+`SCHEDULER_ENABLED` remains false as an explicit compatibility fence:
 
 Run `scripts/deploy-prod.sh --migration-receipt <outside-repo-receipt.json>
 --migration-signature <outside-repo-receipt.json.sig> --migration-allowed-signers

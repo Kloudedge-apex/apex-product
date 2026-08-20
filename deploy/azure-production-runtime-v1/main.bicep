@@ -134,7 +134,7 @@ var sharedSecretEnvironment = [
 ]
 
 var apiEnvironment = concat(sharedPlainEnvironment, sharedSecretEnvironment, [
-  { name: 'WORKER_ENABLED', value: 'false' }
+  { name: 'GMAIL_WATCH_RENEWAL_ENABLED', value: 'false' }
   { name: 'GRAPH_RUN_WORKER_ENABLED', value: 'false' }
   { name: 'OUTREACH_WORKER_ENABLED', value: 'false' }
   { name: 'USAGE_ROLLUP_WORKER_ENABLED', value: 'false' }
@@ -142,7 +142,7 @@ var apiEnvironment = concat(sharedPlainEnvironment, sharedSecretEnvironment, [
 ])
 
 var workerEnvironment = concat(sharedPlainEnvironment, sharedSecretEnvironment, [
-  { name: 'WORKER_ENABLED', value: 'true' }
+  { name: 'GMAIL_WATCH_RENEWAL_ENABLED', value: 'true' }
   { name: 'GRAPH_RUN_WORKER_ENABLED', value: 'true' }
   { name: 'OUTREACH_WORKER_ENABLED', value: 'true' }
   { name: 'USAGE_ROLLUP_WORKER_ENABLED', value: 'true' }

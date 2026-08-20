@@ -11,7 +11,6 @@ import {
   QueueDepthCounts,
   QueueStats,
 } from "../observability/metrics/metrics.service";
-import { QueueService, RUN_QUEUE_NAME } from "../runtime/queue.service";
 import { healthCheckTimeoutMs, withHealthTimeout } from "./health-timeout";
 
 /**
@@ -24,13 +23,13 @@ import { healthCheckTimeoutMs, withHealthTimeout } from "./health-timeout";
  * alone, so it works from BOTH the api and the worker process (the BullMQ
  * Queue producer reads counts + the fleet-wide consumer list from Redis).
  *
- * Two failure conditions per queue across agent runs, graph runs, and
+ * Two failure conditions per supported queue across graph runs and approved
  * outreach sends:
  *
  *  1. NO CONSUMERS — `Queue.getWorkers()` (Redis CLIENT LIST, fleet-wide)
  *     reports zero attached consumers while jobs are backlogged
  *     (waiting+active > 0), OR while the process is env-gated to consume the
- *     queue. Production probes always require all three fleet consumers, even
+ *     queue. Production probes always require both supported fleet consumers, even
  *     when served by an API process whose local worker gates are false. Gate
  *     names are mirrored here instead of imported from worker files to keep
  *     HealthModule's file-import graph tiny; see outreach/suppression.module.ts
@@ -75,12 +74,12 @@ export function workerStallWindowMs(
 
 /**
  * Env var that gates consumption of each queue in a given process. Mirrors
- * the three worker gate helpers ("true" only, case-sensitive, default off).
+ * the two supported queue gate helpers ("true" only, case-sensitive, default
+ * off).
  */
 const CONSUMER_GATE_ENV: Readonly<Record<string, string>> = {
   [GRAPH_RUN_QUEUE_NAME]: "GRAPH_RUN_WORKER_ENABLED",
   [OUTREACH_SEND_QUEUE_NAME]: "OUTREACH_WORKER_ENABLED",
-  [RUN_QUEUE_NAME]: "WORKER_ENABLED",
 };
 
 interface QueueSnapshot {
@@ -120,7 +119,6 @@ export class WorkerHealthService {
   constructor(
     private readonly graphRunQueue: GraphRunQueueService,
     private readonly outreachSendQueue: OutreachSendQueueService,
-    private readonly runQueue: QueueService,
   ) {}
 
   /**
@@ -136,7 +134,6 @@ export class WorkerHealthService {
     const sources: ReadonlyArray<readonly [string, QueueStatsSource]> = [
       [GRAPH_RUN_QUEUE_NAME, this.graphRunQueue],
       [OUTREACH_SEND_QUEUE_NAME, this.outreachSendQueue],
-      [RUN_QUEUE_NAME, this.runQueue],
     ];
 
     const timeoutMs = healthCheckTimeoutMs(env);

@@ -1780,8 +1780,12 @@ function assertRuntimeHeldEvidence(evidence, request, generation) {
       fail(`runtime hold evidence does not prove ${key} paused and idle`);
     }
     // A candidate worker may be connected after B5. Only the B2 entry
-    // contract requires workerCount=0.
+    // contract requires all worker counts to be zero. The retired AgentRun
+    // queue is the exception and must remain worker-free in every phase.
     safeInteger(queue.workerCount, `runtime hold ${key}.workerCount`, 0);
+    if (key === "agentRuns" && queue.workerCount !== 0) {
+      fail("runtime hold evidence retains a worker on retired agentRuns");
+    }
   }
   string(evidence.evidenceHash, /^sha256:[0-9a-f]{64}$/, "runtime hold evidence hash");
   return evidence;
@@ -3545,8 +3549,11 @@ function verifyDisabledBaselineLive(runner, request, identities, minimumGenerati
   );
   for (const [revision, role] of [[api, "api"], [worker, "worker"]]) {
     verifyCandidateWriterGuard(revision, request, minimumGeneration, role);
-    for (const gate of ["WORKER_ENABLED", "GRAPH_RUN_WORKER_ENABLED", "OUTREACH_WORKER_ENABLED", "SCHEDULER_ENABLED"]) {
+    for (const gate of ["GMAIL_WATCH_RENEWAL_ENABLED", "GRAPH_RUN_WORKER_ENABLED", "OUTREACH_WORKER_ENABLED", "SCHEDULER_ENABLED"]) {
       if (revisionEnv(revision, gate) !== "false") fail(`${role} disabled baseline ${gate} is not false`);
+    }
+    if (revisionEnv(revision, "WORKER_ENABLED") !== null) {
+      fail(`${role} disabled baseline retains retired WORKER_ENABLED`);
     }
     if ((revisionEnv(revision, "OUTREACH_LIVE_FOR_ORGS") ?? "") !== "") {
       fail(`${role} disabled baseline live-send allowlist is not empty`);
@@ -3580,8 +3587,11 @@ function verifyFirstClassWorkerLive(runner, request, revisionName, minimumGenera
     request.targetArtifacts.worker.image,
   );
   verifyCandidateWriterGuard(worker, request, minimumGeneration, "first-class worker");
-  for (const gate of ["WORKER_ENABLED", "GRAPH_RUN_WORKER_ENABLED", "OUTREACH_WORKER_ENABLED"]) {
+  for (const gate of ["GMAIL_WATCH_RENEWAL_ENABLED", "GRAPH_RUN_WORKER_ENABLED", "OUTREACH_WORKER_ENABLED"]) {
     if (revisionEnv(worker, gate) !== "true") fail(`first-class worker ${gate} is not true`);
+  }
+  if (revisionEnv(worker, "WORKER_ENABLED") !== null) {
+    fail("first-class worker retains retired WORKER_ENABLED");
   }
   if (revisionEnv(worker, "SCHEDULER_ENABLED") !== "false") fail("first-class worker scheduler is not disabled");
   if (revisionEnv(worker, "OUTREACH_LIVE_FOR_ORGS") !== "") {
@@ -3867,11 +3877,12 @@ function deployCompatible(runner, request, state, options) {
       }
       if (step === "api") {
         return updateApp(runner, request, "api", request.targetArtifacts.api.image, request.targetArtifacts.api.plannedRevision, [
-          "WORKER_ENABLED=false", "GRAPH_RUN_WORKER_ENABLED=false", "OUTREACH_WORKER_ENABLED=false", "SCHEDULER_ENABLED=false",
+          "GMAIL_WATCH_RENEWAL_ENABLED=false", "GRAPH_RUN_WORKER_ENABLED=false", "OUTREACH_WORKER_ENABLED=false", "SCHEDULER_ENABLED=false",
           `WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID=${request.attemptId}`,
           `WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION=${receipt.fencingGeneration}`,
           "OUTREACH_LIVE_FOR_ORGS=", "OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE=disabled", "OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH=outreach-delivery-unknown-v1", "OUTREACH_FAILED_STATUS_WRITES_ENABLED=false",
         ], 1, [
+          "WORKER_ENABLED",
           "OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK",
           "OUTREACH_FAILED_STATUS_WRITES_ACK",
           "OUTREACH_DELIVERY_UNKNOWN_STATUS_WRITES_ENABLED",
@@ -3880,11 +3891,12 @@ function deployCompatible(runner, request, state, options) {
       }
       if (step === "worker") {
         return updateApp(runner, request, "worker", request.targetArtifacts.worker.image, request.targetArtifacts.worker.plannedRevision, [
-          "WORKER_ENABLED=false", "GRAPH_RUN_WORKER_ENABLED=false", "OUTREACH_WORKER_ENABLED=false", "SCHEDULER_ENABLED=false",
+          "GMAIL_WATCH_RENEWAL_ENABLED=false", "GRAPH_RUN_WORKER_ENABLED=false", "OUTREACH_WORKER_ENABLED=false", "SCHEDULER_ENABLED=false",
           `WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID=${request.attemptId}`,
           `WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION=${receipt.fencingGeneration}`,
           "OUTREACH_LIVE_FOR_ORGS=", "OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE=disabled", "OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH=outreach-delivery-unknown-v1", "OUTREACH_FAILED_STATUS_WRITES_ENABLED=false",
         ], 0, [
+          "WORKER_ENABLED",
           "OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK",
           "OUTREACH_FAILED_STATUS_WRITES_ACK",
           "OUTREACH_DELIVERY_UNKNOWN_STATUS_WRITES_ENABLED",
@@ -4087,7 +4099,7 @@ function activateFirstClass(runner, request, state, options) {
       request.targetArtifacts.worker.image,
       request.activationWorkerRevision,
       [
-        "WORKER_ENABLED=true",
+        "GMAIL_WATCH_RENEWAL_ENABLED=true",
         "GRAPH_RUN_WORKER_ENABLED=true",
         "OUTREACH_WORKER_ENABLED=true",
         "SCHEDULER_ENABLED=false",
@@ -4342,13 +4354,18 @@ function assertResumeQueueSet(queues, paused, label) {
       "paused", "waiting", "active", "delayed", "prioritized", "completed",
       "failed", "waitingChildren", "pausedJobs", "workerCount",
     ], `${label}.${key}`);
-    if (queue.paused !== paused) fail(`${label}.${key} pause state is invalid`);
+    const expectedPaused = key === "agentRuns" ? true : paused;
+    if (queue.paused !== expectedPaused) fail(`${label}.${key} pause state is invalid`);
     for (const count of [
       "waiting", "active", "delayed", "prioritized", "completed", "failed",
       "waitingChildren", "pausedJobs", "workerCount",
     ]) safeInteger(queue[count], `${label}.${key}.${count}`, 0);
-    if ((paused && queue.active !== 0) || queue.workerCount < 1) {
-      fail(`${label}.${key} does not prove a connected, drained first-class consumer`);
+    if (key === "agentRuns") {
+      if (queue.active !== 0 || queue.workerCount !== 0) {
+        fail(`${label}.${key} does not prove the retired queue paused, idle, and worker-free`);
+      }
+    } else if ((paused && queue.active !== 0) || queue.workerCount < 1) {
+      fail(`${label}.${key} does not prove a connected, drained supported consumer`);
     }
   }
   return queues;
@@ -4385,12 +4402,12 @@ function assertRuntimeResumeEvidence(runtime, request, intent) {
   if (runtime.bootstrapAttemptId !== request.attemptId || runtime.queuesResumed !== true) {
     fail("runtime resume evidence identity is invalid");
   }
-  if (!Array.isArray(runtime.steps) || runtime.steps.length !== 5) {
-    fail("runtime resume evidence does not contain the exact five runtime steps");
+  if (!Array.isArray(runtime.steps) || runtime.steps.length !== 4) {
+    fail("runtime resume evidence does not contain the exact four runtime steps");
   }
   const actions = [
-    "release-writer-fence", "start-first-class-consumers", "resume-agent-runs",
-    "resume-graph-runs", "resume-outreach-send",
+    "release-writer-fence", "start-first-class-consumers", "resume-graph-runs",
+    "resume-outreach-send",
   ];
   let previousCompletion = null;
   runtime.steps.forEach((step, index) => {
@@ -4527,10 +4544,13 @@ function captureFreshCompletionReadback(runner, request, state, options) {
     fail("fresh completion revision requires a writer-fence generation newer than terminal OPEN");
   }
   for (const gate of [
-    "WORKER_ENABLED", "GRAPH_RUN_WORKER_ENABLED", "OUTREACH_WORKER_ENABLED",
+    "GMAIL_WATCH_RENEWAL_ENABLED", "GRAPH_RUN_WORKER_ENABLED", "OUTREACH_WORKER_ENABLED",
     "SCHEDULER_ENABLED",
   ]) {
     if (revisionEnv(api, gate) !== "false") fail(`completion API ${gate} is not false`);
+  }
+  if (revisionEnv(api, "WORKER_ENABLED") !== null) {
+    fail("completion API retains retired WORKER_ENABLED");
   }
   if (revisionEnv(api, "OUTREACH_LIVE_FOR_ORGS") !== "" ||
     revisionEnv(api, "OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE") !== "disabled" ||
@@ -4711,7 +4731,7 @@ function resumeBootstrap(runner, request, state, options) {
     const apiIngress = enableApiIngress(runner, request, next);
     const apiCompletedAt = nowSecond();
     const apiStep = bootstrapStep(
-      6,
+      5,
       "unblock-api-mutations",
       apiStartedAt,
       apiCompletedAt,

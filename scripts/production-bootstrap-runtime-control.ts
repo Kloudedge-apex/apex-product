@@ -319,7 +319,13 @@ async function openQueueSnapshot(
     );
     const workers = await queue.getWorkers();
     const paused = await queue.isPaused();
-    if (paused || (requireWorkers && workers.length < 1)) {
+    if (key === "agentRuns") {
+      if (!paused || (counts.active ?? 0) !== 0 || workers.length !== 0) {
+        throw new Error(
+          `${queue.name} is retired but is not paused, idle, and worker-free`,
+        );
+      }
+    } else if (paused || (requireWorkers && workers.length < 1)) {
       throw new Error(
         requireWorkers
           ? `${queue.name} is not resumed with a connected worker`
@@ -356,7 +362,13 @@ async function waitForPausedConnectedWorkers(
       );
       const workers = await queue.getWorkers();
       const paused = await queue.isPaused();
-      if (!paused || (counts.active ?? 0) !== 0 || workers.length < 1) ready = false;
+      if (
+        !paused ||
+        (counts.active ?? 0) !== 0 ||
+        (key === "agentRuns" ? workers.length !== 0 : workers.length < 1)
+      ) {
+        ready = false;
+      }
       result[key] = {
         paused,
         waiting: counts.waiting ?? 0,
@@ -373,7 +385,9 @@ async function waitForPausedConnectedWorkers(
     if (ready) return result;
     if (poll + 1 < 180) await new Promise((resolvePromise) => setTimeout(resolvePromise, 1_000));
   }
-  throw new Error("first-class consumers did not attach while all queues remained paused");
+  throw new Error(
+    "supported consumers did not attach or the retired agent-runs queue was not worker-free while all queues remained paused",
+  );
 }
 
 function sanitizedError(error: unknown): string {
@@ -678,9 +692,8 @@ async function main(): Promise<void> {
         const steps = [
           step(1, "release-writer-fence", releaseStartedAt, releaseCompletedAt),
           step(2, "start-first-class-consumers", consumersStartedAt, consumersCompletedAt),
-          step(3, "resume-agent-runs", queuesStartedAt, queuesCompletedAt),
-          step(4, "resume-graph-runs", queuesCompletedAt, queuesCompletedAt),
-          step(5, "resume-outreach-send", queuesCompletedAt, queuesCompletedAt),
+          step(3, "resume-graph-runs", queuesStartedAt, queuesCompletedAt),
+          step(4, "resume-outreach-send", queuesCompletedAt, queuesCompletedAt),
         ];
         const releaseWithoutHash = {
           bootstrapAttemptId: options.attemptId,
