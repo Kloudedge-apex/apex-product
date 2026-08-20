@@ -26,14 +26,12 @@ import {
   getEmailDispatchOutcome,
   isMockModeResult,
 } from "../runtime/tools/send-email.tool";
-import { LinkedInSendMessageTool } from "../runtime/tools/linkedin-send-message.tool";
 import {
   IntegrationCredentials,
   ToolContext,
   ToolResult,
 } from "../runtime/tools/tool.interface";
 import { IntegrationsService } from "../integrations/integrations.service";
-import { LinkedInService } from "../integrations/linkedin/linkedin.service";
 import { EvidenceLedgerService } from "../observability/evidence-ledger.service";
 import { isLiveSendAllowedForOrg } from "./outreach-allowlist.util";
 import { SuppressionService } from "./suppression.service";
@@ -114,7 +112,7 @@ export function failedStatusWritesEnabled(
 
 /**
  * Per-org allowlist for real outbound sends. Without this gate, any org with
- * connected Gmail/Outlook credentials would real-send post-approval — there
+ * connected Gmail credentials would real-send post-approval — there
  * is no other dry-run check on the LangGraph approval path (the legacy
  * SideEffectPolicy.defaultDryRun only applies to the direct executor).
  *
@@ -123,10 +121,10 @@ export function failedStatusWritesEnabled(
  *   OUTREACH_LIVE_FOR_ORGS="*"           → all orgs (dev convenience only)
  *
  * Orgs NOT in the allowlist still progress through the worker, but their
- * integrations Map is left empty so SendEmailTool / LinkedInSendMessageTool
- * fall back to their mock branches. Artifacts get marked SIMULATED with a
- * mock receipt — the audit trail records the attempt without an external
- * call, and dashboards never count it as delivered mail.
+ * integrations Map is left empty so SendEmailTool uses its explicit
+ * simulation branch. Artifacts get marked SIMULATED with a mock receipt —
+ * the audit trail records the attempt without an external call, and
+ * dashboards never count it as delivered mail.
  */
 const IN_MEMORY_POLL_INTERVAL_MS = 5_000;
 const IN_MEMORY_BATCH_SIZE = 10;
@@ -271,29 +269,16 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
   private reconcileInFlight = false;
 
   private readonly sendEmailTool = new SendEmailTool();
-  private readonly linkedinSendTool: LinkedInSendMessageTool;
-
   constructor(
     private readonly prisma: PrismaService,
     private readonly queue: OutreachSendQueueService,
     private readonly integrations: IntegrationsService,
     private readonly suppression: SuppressionService,
     @Optional() private readonly evidenceLedger?: EvidenceLedgerService,
-    @Optional() private readonly linkedinService?: LinkedInService,
     @Optional() private readonly conversationStore?: ConversationStoreService,
     @Optional()
     private readonly productionBootstrapWriterFence?: ProductionBootstrapWriterFenceService,
-  ) {
-    // Build the LinkedIn tool with the optional service + ledger so worker-
-    // dispatched sends use the same code path as in-loop agent calls. When
-    // LinkedInService is absent (e.g. dev with no IntegrationsModule wiring),
-    // the tool returns a mock receipt — for non-allowlisted orgs that ends as
-    // SIMULATED; for liveAllowed orgs the GL2 guard in processArtifact treats
-    // it as a failed dispatch (mock mode must never be recorded as SENT).
-    this.linkedinSendTool = new LinkedInSendMessageTool(
-      this.linkedinService,
-    );
-  }
+  ) {}
 
   async onModuleInit(): Promise<void> {
     if (!isOutreachWorkerEnabled()) {
@@ -564,6 +549,13 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
         `Artifact ${artifactId} is ${artifact.status} — already processed, skipping`,
       );
       return;
+    }
+
+    // The mounted release is Gmail-only. Fail legacy APPROVED rows before a
+    // reservation, credential read, or provider invocation so retired
+    // LinkedIn/HubSpot artifacts cannot regain a hidden dispatch path.
+    if (artifact.channel !== OutreachChannel.EMAIL) {
+      assertArtifactDispatchEligible(artifact);
     }
 
     // Evaluate the live-send gate once so the dispatch branch and the
@@ -1278,66 +1270,10 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
           );
         }
       }
-      case OutreachChannel.LINKEDIN: {
-        const integrations = await loadIntegrationsIfAllowed();
-        const context: ToolContext = {
-          orgId: artifact.orgId,
-          agentId: "outreach-worker",
-          runId: artifact.graphRunId ?? "outreach-worker",
-          integrations,
-        };
-        // The artifact payload was authored either by an agent's tool call or
-        // by an approval-review UI. Expected fields: recipient_urn, body.
-        // Fall back to artifact.recipientRef / bodyText for artifacts created
-        // before the linkedin tool was wired so we don't reject otherwise-good
-        // rows.
-        const payload = (artifact.payload as Record<string, unknown>) ?? {};
-        const args: Record<string, unknown> = {
-          recipient_urn:
-            typeof payload.recipient_urn === "string"
-              ? payload.recipient_urn
-              : (artifact.recipientRef ?? ""),
-          body:
-            typeof payload.body === "string"
-              ? payload.body
-              : (artifact.bodyText ?? ""),
-        };
-        if (typeof payload.integration_id === "string") {
-          args.integration_id = payload.integration_id;
-        }
-        try {
-          await assertProductionBootstrapWriterLease(
-            this.productionBootstrapWriterFence,
-          );
-          return await this.linkedinSendTool.execute(args, context);
-        } catch (err) {
-          if (!liveAllowed) throw err;
-          throw new ProviderDispatchUnknownError(
-            `LinkedIn provider invocation rejected without a delivery outcome: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-        }
-      }
-      case OutreachChannel.HUBSPOT_NOTE: {
-        // HubSpot notes aren't a "send" in the outbound-message sense. Leaving
-        // unwired until product confirms whether this channel should actually
-        // hit HubSpot post-approval.
-        return {
-          success: false,
-          data: null,
-          error: "hubspot_note send not yet wired",
-        };
-      }
       default: {
-        // Exhaustiveness check at the type level.
-        const _exhaustive: never = artifact.channel;
-        void _exhaustive;
-        return {
-          success: false,
-          data: null,
-          error: `unsupported channel: ${artifact.channel as string}`,
-        };
+        throw new BadRequestException(
+          `${artifact.channel} dispatch is unavailable because this release supports email outreach only`,
+        );
       }
     }
   }
@@ -1740,10 +1676,7 @@ export class SendOutreachWorker implements OnModuleInit, OnModuleDestroy {
 }
 
 /**
- * Decide whether a live failure may have been accepted by its provider.
- * Email has an explicit tool contract. LinkedIn response status proves a
- * rejection; known local credential errors prove no attempt; a status-less
- * transport failure remains ambiguous. HUBSPOT_NOTE never invokes a provider.
+ * Decide whether a live email failure may have been accepted by Gmail.
  */
 function isAmbiguousLiveFailure(
   channel: OutreachChannel,
@@ -1755,25 +1688,6 @@ function isAmbiguousLiveFailure(
         EMAIL_DISPATCH_OUTCOME.DELIVERY_UNKNOWN ||
       getEmailDispatchOutcome(result) === null
     );
-  }
-  if (channel === OutreachChannel.LINKEDIN) {
-    if (
-      !result.data ||
-      typeof result.data !== "object" ||
-      Array.isArray(result.data)
-    ) {
-      return true;
-    }
-    const data = result.data as Record<string, unknown>;
-    if (typeof data.status === "number") return false;
-    return ![
-      "linkedin_not_connected",
-      "linkedin_mock_credentials",
-      "linkedin_circuit_open",
-      "linkedin_api_not_available",
-      "linkedin_recipient_not_found",
-      "linkedin_invalid_request",
-    ].includes(typeof data.error === "string" ? data.error : "");
   }
   return false;
 }

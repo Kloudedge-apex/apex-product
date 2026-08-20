@@ -58,18 +58,14 @@ function extractLangsmithRunId(payload: unknown): string | null {
 }
 
 /**
- * Maps the tool name reported by the executor to the channel enum we store
- * on the artifact. Keep this in sync with TOOL_POLICY_METADATA — every tool
- * whose dry-run produces an artifact must map to a channel here.
+ * Maps the sole supported release-side outreach tool to its persisted
+ * channel. Legacy executor tools are deliberately absent: the mounted
+ * customer loop may create only reviewable email artifacts.
  */
 function channelForTool(toolName: string): OutreachChannel | null {
   switch (toolName) {
     case "send_email":
       return OutreachChannel.EMAIL;
-    case "hubspot":
-      return OutreachChannel.HUBSPOT_NOTE;
-    case "linkedin_send_message":
-      return OutreachChannel.LINKEDIN;
     default:
       return null;
   }
@@ -103,6 +99,14 @@ export class OutreachArtifactsService {
   ): Promise<OutreachArtifact | null> {
     const channel = channelForTool(input.toolName);
     if (!channel) {
+      if (
+        input.toolName === "hubspot" ||
+        input.toolName === "linkedin_send_message"
+      ) {
+        throw new BadRequestException(
+          `${input.toolName} outreach artifacts are unavailable because this release supports email outreach only`,
+        );
+      }
       this.logger.warn(
         `Skipping artifact for ${input.toolName} — no channel mapping`,
       );
@@ -464,23 +468,6 @@ function extractFromArgs(
       bodyText: str(args.body) ?? str(args.bodyText) ?? str(args.text),
       bodyHtml: str(args.html) ?? str(args.bodyHtml),
       recipientRef: str(args.to) ?? str(args.recipient) ?? str(args.email),
-    };
-  }
-  if (toolName === "hubspot") {
-    return {
-      subject: str(args.summary) ?? str(args.title),
-      bodyText: str(args.note) ?? str(args.body),
-      bodyHtml: null,
-      recipientRef:
-        str(args.contactEmail) ?? str(args.contactId) ?? str(args.companyId),
-    };
-  }
-  if (toolName === "linkedin_send_message") {
-    return {
-      subject: null,
-      bodyText: str(args.body),
-      bodyHtml: null,
-      recipientRef: str(args.recipient_urn),
     };
   }
   return { subject: null, bodyText: null, bodyHtml: null, recipientRef: null };

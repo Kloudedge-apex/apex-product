@@ -4,6 +4,8 @@ import { describe, expect, it } from "vitest";
 import { GmailModule } from "../gmail/gmail.module";
 import { IntegrationsController } from "../integrations.controller";
 import { IntegrationsModule } from "../integrations.module";
+import { IntegrationsService } from "../integrations.service";
+import { OAuthAttemptService } from "../oauth-attempt.service";
 import { AdminOrManagerGuard } from "../../common/admin-or-manager.guard";
 
 const PATH_METADATA = "path";
@@ -26,7 +28,7 @@ function exposedRoutes() {
 }
 
 describe("IntegrationsModule guarded release boundary", () => {
-  it("mounts only the canonical integration controller and Gmail module", () => {
+  it("mounts only the canonical integration controller and Gmail providers", () => {
     expect(
       Reflect.getMetadata(MODULE_METADATA.CONTROLLERS, IntegrationsModule),
     ).toEqual([IntegrationsController]);
@@ -35,7 +37,14 @@ describe("IntegrationsModule guarded release boundary", () => {
     ).toEqual([GmailModule]);
     expect(
       Reflect.getMetadata(MODULE_METADATA.PROVIDERS, IntegrationsModule),
-    ).toContain(AdminOrManagerGuard);
+    ).toEqual([
+      IntegrationsService,
+      AdminOrManagerGuard,
+      OAuthAttemptService,
+    ]);
+    expect(
+      Reflect.getMetadata(MODULE_METADATA.EXPORTS, IntegrationsModule),
+    ).toEqual([IntegrationsService, GmailModule]);
   });
 
   it("publishes only the exact Gmail release operations", () => {
