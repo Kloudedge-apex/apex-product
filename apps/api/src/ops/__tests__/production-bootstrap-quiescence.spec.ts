@@ -307,7 +307,6 @@ describe("production bootstrap quiescence", () => {
     for (const queue of Object.values(queues)) queue.isGloballyPaused = true;
     await resumeProductionBootstrapQueues(runtime, ATTEMPT, () => undefined);
     expect(events).toEqual([
-      "resume:agent-runs",
       "resume:graph-runs",
       "resume:outreach-send",
     ]);
@@ -320,13 +319,13 @@ describe("production bootstrap quiescence", () => {
     const { runtime, queues, events, fence } = fakeRuntime();
     fence.values.set(PRODUCTION_BOOTSTRAP_FENCE_KEY, ATTEMPT);
     for (const queue of Object.values(queues)) queue.isGloballyPaused = true;
-    queues.graphRuns.failResume = true;
+    queues.outreachSend.failResume = true;
     await expect(resumeProductionBootstrapQueues(runtime, ATTEMPT, () => undefined)).rejects.toThrow(
-      "resume failed: graph-runs",
+      "resume failed: outreach-send",
     );
     expect(events).toEqual([
-      "resume:agent-runs",
       "resume:graph-runs",
+      "resume:outreach-send",
       "pause:outreach-send",
       "pause:graph-runs",
       "pause:agent-runs",
@@ -341,12 +340,12 @@ describe("production bootstrap quiescence", () => {
     const { runtime, queues, events, fence } = fakeRuntime();
     fence.values.set(PRODUCTION_BOOTSTRAP_FENCE_KEY, ATTEMPT);
     for (const queue of Object.values(queues)) queue.isGloballyPaused = true;
-    queues.agentRuns.failResumeAfterStateChange = true;
+    queues.graphRuns.failResumeAfterStateChange = true;
     await expect(resumeProductionBootstrapQueues(runtime, ATTEMPT, () => undefined)).rejects.toThrow(
-      "resume result uncertain: agent-runs",
+      "resume result uncertain: graph-runs",
     );
     expect(events).toEqual([
-      "resume:agent-runs",
+      "resume:graph-runs",
       "pause:outreach-send",
       "pause:graph-runs",
       "pause:agent-runs",
@@ -365,7 +364,6 @@ describe("production bootstrap quiescence", () => {
       "compare-and-delete failed",
     );
     expect(events).toEqual([
-      "resume:agent-runs",
       "resume:graph-runs",
       "resume:outreach-send",
       "pause:outreach-send",
@@ -444,10 +442,9 @@ describe("production bootstrap quiescence", () => {
   it("allows connected post-entry workers while queues remain paused and idle", async () => {
     const { runtime, queues, fence } = fakeRuntime();
     fence.values.set(PRODUCTION_BOOTSTRAP_FENCE_KEY, ATTEMPT);
-    for (const queue of Object.values(queues)) {
-      queue.isGloballyPaused = true;
-      queue.workerCount = 1;
-    }
+    for (const queue of Object.values(queues)) queue.isGloballyPaused = true;
+    queues.graphRuns.workerCount = 1;
+    queues.outreachSend.workerCount = 1;
 
     const snapshot = await createProductionBootstrapSnapshot(
       runtime,
@@ -460,7 +457,7 @@ describe("production bootstrap quiescence", () => {
         workerPosture: "connected",
       },
     );
-    expect(snapshot.queues.agentRuns.workerCount).toBe(1);
+    expect(snapshot.queues.agentRuns.workerCount).toBe(0);
     expect(snapshot.queues.graphRuns.workerCount).toBe(1);
     expect(snapshot.queues.outreachSend.workerCount).toBe(1);
     expect(
@@ -470,13 +467,35 @@ describe("production bootstrap quiescence", () => {
     ).toBe(true);
   });
 
+  it("rejects a connected worker on the retired agent-runs queue", async () => {
+    const { runtime, queues, fence } = fakeRuntime();
+    fence.values.set(PRODUCTION_BOOTSTRAP_FENCE_KEY, ATTEMPT);
+    for (const queue of Object.values(queues)) queue.isGloballyPaused = true;
+    queues.agentRuns.workerCount = 1;
+    queues.graphRuns.workerCount = 1;
+    queues.outreachSend.workerCount = 1;
+
+    await expect(
+      createProductionBootstrapSnapshot(
+        runtime,
+        ATTEMPT,
+        "post-migration",
+        1,
+        {
+          beforeWriterFenceRead: () => undefined,
+          expectedDatabaseIdentityHash: FAKE_DATABASE_IDENTITY_HASH,
+          workerPosture: "connected",
+        },
+      ),
+    ).rejects.toThrow("agent-runs is retired but still has connected workers");
+  });
+
   it("still rejects active work in a post-entry connected-worker snapshot", async () => {
     const { runtime, queues, fence, database } = fakeRuntime();
     fence.values.set(PRODUCTION_BOOTSTRAP_FENCE_KEY, ATTEMPT);
-    for (const queue of Object.values(queues)) {
-      queue.isGloballyPaused = true;
-      queue.workerCount = 1;
-    }
+    for (const queue of Object.values(queues)) queue.isGloballyPaused = true;
+    queues.graphRuns.workerCount = 1;
+    queues.outreachSend.workerCount = 1;
     database.afterTransaction = () => {
       queues.graphRuns.activeCounts = [1];
     };
@@ -499,10 +518,9 @@ describe("production bootstrap quiescence", () => {
   it("rejects a B6 connected posture when any queue has zero workers", async () => {
     const { runtime, queues, fence } = fakeRuntime();
     fence.values.set(PRODUCTION_BOOTSTRAP_FENCE_KEY, ATTEMPT);
-    for (const queue of Object.values(queues)) {
-      queue.isGloballyPaused = true;
-      queue.workerCount = 1;
-    }
+    for (const queue of Object.values(queues)) queue.isGloballyPaused = true;
+    queues.graphRuns.workerCount = 1;
+    queues.outreachSend.workerCount = 1;
     queues.graphRuns.workerCount = 0;
 
     await expect(

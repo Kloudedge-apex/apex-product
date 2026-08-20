@@ -143,8 +143,8 @@ After that receipt passes exact-source verification, the same blocking CI job
 builds the candidate production image and runs
 `scripts/rehearse-runtime-candidate.sh`. This second hermetic gate starts that
 image twice, using the default production command: first as the worker with all
-three BullMQ consumer gates enabled, then as the API with those local consumer
-gates disabled. Both roles connect only to the guarded
+two supported BullMQ consumer gates and Gmail watch renewal enabled, then as
+the API with those local worker gates disabled. Both roles connect only to the guarded
 `workforce_rehearsal_*` PostgreSQL fixture and an empty, credential-free
 loopback Redis database. Before boot, the controller proves that the database still contains
 exactly the two reserved synthetic tenants and refreshes only the synthetic
@@ -152,8 +152,8 @@ RUNNING graph's activity clock so orphan recovery cannot enqueue provider
 work during the test.
 
 The runtime gate requires liveness and PostgreSQL/Redis readiness from both
-roles, fleet-visible consumers for `agent-runs`, `graph-runs`, and
-`outreach-send`, HTTP 401 from an unauthenticated tenant route, and bounded
+roles, fleet-visible consumers for `graph-runs` and `outreach-send`, HTTP 401
+from an unauthenticated tenant route, and bounded
 SIGTERM shutdown without a forced-kill exit. It rejects remote database or
 Redis hosts, non-rehearsal database names, credentials other than the fixed CI
 PostgreSQL identity, Redis credentials, and an image whose OCI revision label
@@ -1037,7 +1037,7 @@ curl -fsS "https://${API_FQDN}/api/health/worker" | jq .
 - `200 {"status":"ok", ...}` — healthy.
 - `503 {"status":"degraded", ...}` — at least one queue unhealthy; `queues[].reasons` says why.
 
-Per queue (`graph-runs`, `outreach-send`, `agent-runs`) it reports `mode`
+Per supported queue (`graph-runs`, `outreach-send`) it reports `mode`
 (`bullmq`/`fallback`), `healthy`, `reasons`, `workerCount` (fleet-wide),
 `backlog` (waiting+active), full `counts`, and `observedWindowMs`. Failure
 conditions — exactly two:
@@ -1045,7 +1045,7 @@ conditions — exactly two:
 1. **No consumers** — zero attached consumers while backlog > 0, or while the
    probed process itself sets the supported queue gate env
    (`GRAPH_RUN_WORKER_ENABLED` / `OUTREACH_WORKER_ENABLED`) to `true`. In
-   production, all three consumers are required even when the probe is served
+   production, both consumers are required even when the probe is served
    by an API process whose local worker gates are false, so API-ingress checks
    still assess the fleet-wide worker deployment.
 2. **Stalled** — backlog was non-zero a full stall window ago (default 5 min;

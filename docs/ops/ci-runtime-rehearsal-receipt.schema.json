@@ -85,8 +85,8 @@
         "healthy": { "const": true },
         "queues": {
           "type": "array",
-          "minItems": 3,
-          "maxItems": 3,
+          "minItems": 2,
+          "maxItems": 2,
           "items": { "$ref": "#/$defs/queue" }
         }
       }
@@ -127,7 +127,7 @@
       "required": ["name", "workerCount"],
       "properties": {
         "name": {
-          "enum": ["agent-runs", "graph-runs", "outreach-send"]
+          "enum": ["graph-runs", "outreach-send"]
         },
         "workerCount": { "type": "integer", "minimum": 1 }
       }

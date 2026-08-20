@@ -1780,8 +1780,12 @@ function assertRuntimeHeldEvidence(evidence, request, generation) {
       fail(`runtime hold evidence does not prove ${key} paused and idle`);
     }
     // A candidate worker may be connected after B5. Only the B2 entry
-    // contract requires workerCount=0.
+    // contract requires all worker counts to be zero. The retired AgentRun
+    // queue is the exception and must remain worker-free in every phase.
     safeInteger(queue.workerCount, `runtime hold ${key}.workerCount`, 0);
+    if (key === "agentRuns" && queue.workerCount !== 0) {
+      fail("runtime hold evidence retains a worker on retired agentRuns");
+    }
   }
   string(evidence.evidenceHash, /^sha256:[0-9a-f]{64}$/, "runtime hold evidence hash");
   return evidence;
@@ -4350,13 +4354,18 @@ function assertResumeQueueSet(queues, paused, label) {
       "paused", "waiting", "active", "delayed", "prioritized", "completed",
       "failed", "waitingChildren", "pausedJobs", "workerCount",
     ], `${label}.${key}`);
-    if (queue.paused !== paused) fail(`${label}.${key} pause state is invalid`);
+    const expectedPaused = key === "agentRuns" ? true : paused;
+    if (queue.paused !== expectedPaused) fail(`${label}.${key} pause state is invalid`);
     for (const count of [
       "waiting", "active", "delayed", "prioritized", "completed", "failed",
       "waitingChildren", "pausedJobs", "workerCount",
     ]) safeInteger(queue[count], `${label}.${key}.${count}`, 0);
-    if ((paused && queue.active !== 0) || queue.workerCount < 1) {
-      fail(`${label}.${key} does not prove a connected, drained first-class consumer`);
+    if (key === "agentRuns") {
+      if (queue.active !== 0 || queue.workerCount !== 0) {
+        fail(`${label}.${key} does not prove the retired queue paused, idle, and worker-free`);
+      }
+    } else if ((paused && queue.active !== 0) || queue.workerCount < 1) {
+      fail(`${label}.${key} does not prove a connected, drained supported consumer`);
     }
   }
   return queues;
@@ -4393,12 +4402,12 @@ function assertRuntimeResumeEvidence(runtime, request, intent) {
   if (runtime.bootstrapAttemptId !== request.attemptId || runtime.queuesResumed !== true) {
     fail("runtime resume evidence identity is invalid");
   }
-  if (!Array.isArray(runtime.steps) || runtime.steps.length !== 5) {
-    fail("runtime resume evidence does not contain the exact five runtime steps");
+  if (!Array.isArray(runtime.steps) || runtime.steps.length !== 4) {
+    fail("runtime resume evidence does not contain the exact four runtime steps");
   }
   const actions = [
-    "release-writer-fence", "start-first-class-consumers", "resume-agent-runs",
-    "resume-graph-runs", "resume-outreach-send",
+    "release-writer-fence", "start-first-class-consumers", "resume-graph-runs",
+    "resume-outreach-send",
   ];
   let previousCompletion = null;
   runtime.steps.forEach((step, index) => {
@@ -4722,7 +4731,7 @@ function resumeBootstrap(runner, request, state, options) {
     const apiIngress = enableApiIngress(runner, request, next);
     const apiCompletedAt = nowSecond();
     const apiStep = bootstrapStep(
-      6,
+      5,
       "unblock-api-mutations",
       apiStartedAt,
       apiCompletedAt,

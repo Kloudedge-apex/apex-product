@@ -961,12 +961,12 @@ function validateB8(evidence, receipt, previousReceipt) {
     "writerFenceRelease", "apiMutations", "ambiguityControl",
     "liveSendAllowlistEmpty", "evidenceHash",
   ], `${label}.resume`);
-  if (!Array.isArray(resume.steps) || resume.steps.length !== 6) {
-    fail(`${label}.resume.steps must contain the exact six-step terminal-OPEN resume order`);
+  if (!Array.isArray(resume.steps) || resume.steps.length !== 5) {
+    fail(`${label}.resume.steps must contain the exact five-step terminal-OPEN resume order`);
   }
   const actions = [
-    "release-writer-fence", "start-first-class-consumers", "resume-agent-runs",
-    "resume-graph-runs", "resume-outreach-send", "unblock-api-mutations",
+    "release-writer-fence", "start-first-class-consumers", "resume-graph-runs",
+    "resume-outreach-send", "unblock-api-mutations",
   ];
   let priorCompleted = null;
   resume.steps.forEach((step, index) => {
@@ -993,7 +993,14 @@ function validateB8(evidence, receipt, previousReceipt) {
   }
   assertExactKeys(resume.queues, QUEUES_KEYS, `${label}.resume.queues`);
   for (const queue of QUEUES_KEYS) {
-    validateQueueState(resume.queues[queue], `${label}.resume.queues.${queue}`, false);
+    validateQueueState(
+      resume.queues[queue],
+      `${label}.resume.queues.${queue}`,
+      queue === "agentRuns",
+    );
+    if (queue === "agentRuns" && resume.queues[queue].workerCount !== 0) {
+      fail(`${label}.resume.queues.agentRuns must remain worker-free`);
+    }
   }
   assertExactKeys(resume.terminalOpenIntent, [
     "bootstrapAttemptId", "generation", "previousStateHash", "persistedAt",
@@ -1020,8 +1027,9 @@ function validateB8(evidence, receipt, previousReceipt) {
   for (const queue of QUEUES_KEYS) {
     validateQueueState(resume.pausedConsumerProof.queues[queue],
       `${label}.resume.pausedConsumerProof.queues.${queue}`, true);
-    if (resume.pausedConsumerProof.queues[queue].workerCount < 1) {
-      fail(`${label}.resume paused consumer proof has no ${queue} worker`);
+    const workerCount = resume.pausedConsumerProof.queues[queue].workerCount;
+    if (queue === "agentRuns" ? workerCount !== 0 : workerCount < 1) {
+      fail(`${label}.resume paused consumer proof has invalid ${queue} worker posture`);
     }
   }
   if (resume.pausedConsumerProof.provedAt !== resume.steps[1].completedAt) {
@@ -1061,7 +1069,7 @@ function validateB8(evidence, receipt, previousReceipt) {
   ], `${label}.resume.apiMutations`);
   if (resume.apiMutations.blocked !== false || resume.apiMutations.ingressEnabled !== true ||
     resume.apiMutations.readinessPassed !== true ||
-    resume.apiMutations.restoredAt !== resume.steps[5].completedAt ||
+    resume.apiMutations.restoredAt !== resume.steps[4].completedAt ||
     resume.liveSendAllowlistEmpty !== true) {
     fail(`${label}.resume did not restore API mutations last with the allowlist empty`);
   }

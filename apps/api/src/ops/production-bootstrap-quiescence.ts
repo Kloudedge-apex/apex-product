@@ -166,7 +166,6 @@ const PAUSE_ORDER: readonly ProductionBootstrapQueueKey[] = [
 ];
 
 const RESUME_ORDER: readonly ProductionBootstrapQueueKey[] = [
-  "agentRuns",
   "graphRuns",
   "outreachSend",
 ];
@@ -483,8 +482,13 @@ function assertQueuesPausedAndIdle(
     if (workerPosture === "stopped" && queue.workerCount !== 0) {
       throw new Error(`${queue.name} still has connected workers`);
     }
-    if (workerPosture === "connected" && queue.workerCount < 1) {
-      throw new Error(`${queue.name} has no connected worker`);
+    if (workerPosture === "connected") {
+      if (key === "agentRuns" && queue.workerCount !== 0) {
+        throw new Error(`${queue.name} is retired but still has connected workers`);
+      }
+      if (key !== "agentRuns" && queue.workerCount < 1) {
+        throw new Error(`${queue.name} has no connected worker`);
+      }
     }
   }
 }

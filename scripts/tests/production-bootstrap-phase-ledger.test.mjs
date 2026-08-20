@@ -606,7 +606,7 @@ function phaseEvidence(state, targetPhase, fencingGeneration, minute) {
     };
   }
   const actions = [
-    "release-writer-fence", "start-first-class-consumers", "resume-agent-runs", "resume-graph-runs",
+    "release-writer-fence", "start-first-class-consumers", "resume-graph-runs",
     "resume-outreach-send", "unblock-api-mutations",
   ];
   const steps = actions.map((action, index) => ({
@@ -624,6 +624,7 @@ function phaseEvidence(state, targetPhase, fencingGeneration, minute) {
     paused: true, waiting, active: 0, delayed: 0, prioritized: 0,
     completed: 10, failed: 0, waitingChildren: 0, pausedJobs: 0, workerCount: 1,
   });
+  const retiredQueue = (waiting) => ({ ...pausedQueue(waiting), workerCount: 0 });
   return {
     deployments: structuredClone(previous.evidence.deployments),
     writeGates: structuredClone(previous.evidence.writeGates),
@@ -640,13 +641,13 @@ function phaseEvidence(state, targetPhase, fencingGeneration, minute) {
       steps,
       pausedConsumerProof: {
         queues: {
-          agentRuns: pausedQueue(0), graphRuns: pausedQueue(0), outreachSend: pausedQueue(0),
+          agentRuns: retiredQueue(0), graphRuns: pausedQueue(0), outreachSend: pausedQueue(0),
         },
         provedAt: steps[1].completedAt,
         evidenceHash: hash("8"),
       },
       queues: {
-        agentRuns: resumedQueue(0), graphRuns: resumedQueue(0), outreachSend: resumedQueue(0),
+        agentRuns: retiredQueue(0), graphRuns: resumedQueue(0), outreachSend: resumedQueue(0),
       },
       writerFenceRelease: {
         bootstrapAttemptId: IDENTITY.attemptId, generation: fencingGeneration,
@@ -659,7 +660,7 @@ function phaseEvidence(state, targetPhase, fencingGeneration, minute) {
       },
       apiMutations: {
         blocked: false, ingressEnabled: true, readinessPassed: true,
-        restoredAt: steps[5].completedAt, evidenceHash: hash("b"),
+        restoredAt: steps[4].completedAt, evidenceHash: hash("b"),
       },
       ambiguityControl: {
         policy: "repause-deactivate-stable-zero-and-hold-terminal-open-forward-only-v1",
