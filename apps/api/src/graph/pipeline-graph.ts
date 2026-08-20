@@ -562,6 +562,23 @@ export function buildPipelineGraph(deps: Deps) {
         "apex.node": NODE.APPROVAL,
       },
       async () => {
+        if (upstreamFailed(state, STAGE.RESEARCH)) {
+          log.warn(
+            `skipping ${STAGE.APPROVAL} — upstream ${STAGE.RESEARCH} failed`,
+          );
+          return {
+            approved: false,
+            approvedBy: null,
+            stagesCompleted: [STAGE.APPROVAL],
+            ...stageStatus(STAGE.APPROVAL, "FAILED"),
+            ...nowMsg(
+              NODE.APPROVAL,
+              `skipped — upstream ${STAGE.RESEARCH} failed`,
+              "error",
+            ),
+          };
+        }
+
         // Top tier-A/B leads we'd send to outreach if approved.
         const candidates = state.scoredLeads
           .filter((s) => s.tier === "A" || s.tier === "B")
@@ -605,16 +622,21 @@ export function buildPipelineGraph(deps: Deps) {
         "apex.node": NODE.OUTREACH,
       },
       async () => {
-        if (upstreamFailed(state, STAGE.SCORING)) {
+        const failedUpstream = upstreamFailed(state, STAGE.SCORING)
+          ? STAGE.SCORING
+          : upstreamFailed(state, STAGE.RESEARCH)
+            ? STAGE.RESEARCH
+            : null;
+        if (failedUpstream) {
           log.warn(
-            `skipping ${STAGE.OUTREACH} — upstream ${STAGE.SCORING} failed`,
+            `skipping ${STAGE.OUTREACH} — upstream ${failedUpstream} failed`,
           );
           return {
             stagesCompleted: [STAGE.OUTREACH],
             ...stageStatus(STAGE.OUTREACH, "FAILED"),
             ...nowMsg(
               NODE.OUTREACH,
-              `skipped — upstream ${STAGE.SCORING} failed`,
+              `skipped — upstream ${failedUpstream} failed`,
               "warn",
             ),
           };

@@ -18,6 +18,15 @@ interface AppendEventInput<TPayload extends EvidenceEventPayload> {
   readonly payload: TPayload;
 }
 
+export type SignalPersistenceResult =
+  | "CREATED"
+  | "EXISTING"
+  | "DISABLED"
+  | "REJECTED"
+  | "FAILED";
+
+type AppendResult = "CREATED" | "DISABLED" | "FAILED";
+
 @Injectable()
 export class EvidenceLedgerService {
   private readonly logger = new Logger(EvidenceLedgerService.name);
@@ -28,10 +37,10 @@ export class EvidenceLedgerService {
     return env.EVIDENCE_LEDGER_ENABLED !== "false";
   }
 
-  private async append<TPayload extends EvidenceEventPayload>(
+  private async appendResult<TPayload extends EvidenceEventPayload>(
     input: AppendEventInput<TPayload>,
-  ): Promise<void> {
-    if (!this.isEnabled()) return;
+  ): Promise<AppendResult> {
+    if (!this.isEnabled()) return "DISABLED";
 
     const active = trace.getActiveSpan();
     const traceId = active?.spanContext().traceId;
@@ -48,11 +57,12 @@ export class EvidenceLedgerService {
           payload: input.payload,
         },
       });
+      return "CREATED";
     } catch (err) {
-      // Best-effort ledger: a write failure must not fail the run. But it MUST be
-      // observable — record it on the active span so a write-failure spike is
-      // alertable in tracing rather than silently looking healthy (a logger.warn
-      // alone is easy to miss when the stage still reports COMPLETE).
+      // Do not throw from the shared ledger writer: generic observability events
+      // remain best-effort, while critical callers (such as research) can treat
+      // the explicit FAILED result as a stage gate. The span makes a failure
+      // spike alertable rather than silently losing auditability.
       active?.recordException(
         err instanceof Error ? err : new Error(String(err)),
       );
@@ -65,7 +75,14 @@ export class EvidenceLedgerService {
           err instanceof Error ? err.message : String(err)
         }`,
       );
+      return "FAILED";
     }
+  }
+
+  private async append<TPayload extends EvidenceEventPayload>(
+    input: AppendEventInput<TPayload>,
+  ): Promise<void> {
+    await this.appendResult(input);
   }
 
   async leadSourced(input: {
@@ -126,7 +143,7 @@ export class EvidenceLedgerService {
         "kind" | "source" | "date" | "summary" | "confidence"
       >
     >;
-  }): Promise<void> {
+  }): Promise<SignalPersistenceResult> {
     // Fail-closed on the citation invariant AT THE WRITER: no signal is ever
     // persisted without a real source + date. The contract no longer depends on
     // every caller pre-filtering empties (e.g. a future extractor or a refactor
@@ -135,8 +152,10 @@ export class EvidenceLedgerService {
       this.logger.warn(
         `Skipped uncitable signal kind=${input.kind} (empty source or date) for org=${input.orgId} run=${input.runId ?? "-"}`,
       );
-      return;
+      return "REJECTED";
     }
+
+    if (!this.isEnabled()) return "DISABLED";
 
     const refType: EvidenceRefType = input.companyId ? "company" : "person";
     const refId = input.companyId ?? input.personId ?? "unknown";
@@ -146,7 +165,7 @@ export class EvidenceLedgerService {
     // after some companies were already written — does not duplicate facts. This
     // is a pre-INSERT READ, compatible with the append-only trigger (which
     // forbids UPDATE/DELETE on evidence_event).
-    if (this.isEnabled()) {
+    try {
       const existing = await this.prisma.evidenceEvent.findFirst({
         where: {
           orgId: input.orgId,
@@ -158,10 +177,25 @@ export class EvidenceLedgerService {
         },
         select: { id: true },
       });
-      if (existing) return;
+      if (existing) return "EXISTING";
+    } catch (err) {
+      const active = trace.getActiveSpan();
+      active?.recordException(
+        err instanceof Error ? err : new Error(String(err)),
+      );
+      active?.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: "evidence_event_idempotency_read_failed",
+      });
+      this.logger.warn(
+        `Failed to check EvidenceEvent idempotency kind=${input.kind} refType=${refType} refId=${refId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return "FAILED";
     }
 
-    return this.append({
+    return this.appendResult({
       orgId: input.orgId,
       runId: input.runId ?? null,
       kind: input.kind,

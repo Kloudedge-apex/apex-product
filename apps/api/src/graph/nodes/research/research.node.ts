@@ -17,9 +17,10 @@ export interface ResearchNodeDeps {
  * RESEARCH node — runs after SCORING, before APPROVAL. For each unique
  * qualified (tier A/B) company among scoredLeads, extracts dated prospect
  * signals and writes them to the evidence ledger. Best-effort PER COMPANY: a
- * single company's extraction failure is isolated and never fails the stage
- * (the lead simply refuses at draft time, which is the correct behavior, not an
- * error). Zero signals is a valid COMPLETE outcome.
+ * single company's extraction failure is isolated. Zero extracted signals is
+ * a valid COMPLETE outcome, but extracted evidence is not counted until the
+ * ledger confirms it is durable (or already existed after a retry). If every
+ * extracted signal fails persistence, the stage fails before approval.
  *
  * The person→company RESOLVE queries below are deliberately NOT best-effort: a
  * Prisma throw there is genuine infra failure (DB outage), not "this company
@@ -71,24 +72,31 @@ export function buildResearchNode(deps: ResearchNodeDeps) {
           : [];
 
         const now = new Date();
-        // NOTE: `signalsWritten` counts write ATTEMPTS, and `companiesWithError`
-        // / PARTIAL reflect EXTRACTION failures only. EvidenceLedgerService.append
-        // swallows its own Prisma errors (best-effort ledger), so a DB-level
-        // recordSignal failure resolves successfully here and does NOT flip the
-        // stage to PARTIAL. Such failures are still observable: append records the
-        // exception on the active OTel span (alertable in tracing). If they ever
-        // need to gate the stage, have recordSignal return a written-boolean and
-        // count confirmed writes here — don't remove append's swallow.
-        let signalsWritten = 0;
+        let signalsExtracted = 0;
+        let signalsDurable = 0;
+        let signalsFailed = 0;
         let companiesWithError = 0;
         for (const company of companies) {
+          let inputs: Awaited<
+            ReturnType<SignalExtractionService["extractForCompany"]>
+          >;
           try {
-            const inputs = await deps.signalExtraction.extractForCompany(
+            inputs = await deps.signalExtraction.extractForCompany(
               company as CompanyForExtraction,
               now,
             );
-            for (const input of inputs) {
-              await deps.evidenceLedger.recordSignal({
+          } catch (err) {
+            companiesWithError += 1;
+            log.warn(
+              `research extraction failed for company ${company.id}: ${err instanceof Error ? err.message : String(err)}`,
+            );
+            continue;
+          }
+
+          signalsExtracted += inputs.length;
+          for (const input of inputs) {
+            try {
+              const persistence = await deps.evidenceLedger.recordSignal({
                 orgId: state.orgId,
                 runId: state.runId,
                 companyId: company.id,
@@ -99,22 +107,35 @@ export function buildResearchNode(deps: ResearchNodeDeps) {
                 confidence: input.confidence,
                 fields: input.fields,
               });
-              signalsWritten += 1;
+              if (persistence === "CREATED" || persistence === "EXISTING") {
+                signalsDurable += 1;
+              } else {
+                signalsFailed += 1;
+                log.warn(
+                  `research evidence was not persisted for company ${company.id}: ${persistence}`,
+                );
+              }
+            } catch (err) {
+              signalsFailed += 1;
+              log.warn(
+                `research evidence persistence failed for company ${company.id}: ${err instanceof Error ? err.message : String(err)}`,
+              );
             }
-          } catch (err) {
-            companiesWithError += 1;
-            log.warn(
-              `research failed for company ${company.id}: ${err instanceof Error ? err.message : String(err)}`,
-            );
           }
         }
 
-        const status: StageStatus = companiesWithError > 0 ? "PARTIAL" : "COMPLETE";
+        const status: StageStatus =
+          signalsExtracted > 0 && signalsDurable === 0 && signalsFailed > 0
+            ? "FAILED"
+            : companiesWithError > 0 || signalsFailed > 0
+              ? "PARTIAL"
+              : "COMPLETE";
         return {
           stagesCompleted: [STAGE.RESEARCH],
           stageStatuses: { [STAGE.RESEARCH]: status },
           ...msg(
-            `researched ${companies.length} compan${companies.length === 1 ? "y" : "ies"}, wrote ${signalsWritten} signal(s)`,
+            `researched ${companies.length} compan${companies.length === 1 ? "y" : "ies"}, confirmed ${signalsDurable}/${signalsExtracted} signal(s) durable${signalsFailed > 0 ? `, ${signalsFailed} persistence failure(s)` : ""}`,
+            status === "FAILED" ? "error" : status === "PARTIAL" ? "warn" : "info",
           ),
         };
       },
