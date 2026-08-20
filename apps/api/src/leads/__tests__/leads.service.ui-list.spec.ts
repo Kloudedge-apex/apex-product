@@ -45,6 +45,7 @@ describe("LeadsService.listLeadsForUi", () => {
       },
       outreachArtifact: { findMany: vi.fn().mockResolvedValue([]) },
       meetingLedger: { findMany: vi.fn().mockResolvedValue([]) },
+      conversation: { findMany: vi.fn().mockResolvedValue([]) },
     } as unknown as PrismaService;
 
     const result = await buildService(prisma).listLeadsForUi("org_1", {
@@ -54,6 +55,78 @@ describe("LeadsService.listLeadsForUi", () => {
 
     expect(result.leads).toHaveLength(1);
     expect(result.leads[0]?.score).toBeNull();
+    expect(result.leads[0]?.lastContactedAt).toBeNull();
+  });
+
+  it("derives replied stage and last contact from persisted conversation history", async () => {
+    const sentAt = new Date("2026-08-18T09:00:00.000Z");
+    const lastOutboundAt = new Date("2026-08-19T10:00:00.000Z");
+    const lastInboundAt = new Date("2026-08-19T12:00:00.000Z");
+    const prisma = {
+      person: {
+        findMany: vi.fn().mockResolvedValue([
+          {
+            id: "person_replied",
+            firstName: "Ari",
+            lastName: "Rivera",
+            title: "VP Sales",
+            createdAt: new Date("2026-08-12T00:00:00.000Z"),
+            company: {
+              name: "Example",
+              domain: "example.com",
+              industry: "Software",
+              employeeRange: "51-200",
+              techStack: [],
+            },
+            scores: [{ score: 88, qualifiedAt: sentAt, breakdown: {} }],
+            emails: [{ email: "ari@example.com" }],
+          },
+        ]),
+        count: vi.fn().mockResolvedValue(1),
+      },
+      outreachArtifact: {
+        findMany: vi.fn().mockResolvedValue([
+          {
+            recipientRef: "ari@example.com",
+            status: "SENT",
+            sentAt,
+          },
+        ]),
+      },
+      meetingLedger: { findMany: vi.fn().mockResolvedValue([]) },
+      conversation: {
+        findMany: vi.fn().mockResolvedValue([
+          {
+            personId: "person_replied",
+            lastOutboundAt,
+            lastInboundAt,
+          },
+        ]),
+      },
+    } as unknown as PrismaService;
+
+    const result = await buildService(prisma).listLeadsForUi("org_1", {
+      page: 1,
+      perPage: 20,
+    });
+
+    expect(result.leads[0]).toMatchObject({
+      stage: "replied",
+      emailStatus: "replied",
+      lastContactedAt: lastOutboundAt.toISOString(),
+      timeline: [
+        { stage: "contacted", at: lastOutboundAt.toISOString() },
+        { stage: "replied", at: lastInboundAt.toISOString() },
+      ],
+    });
+    expect(prisma.conversation.findMany).toHaveBeenCalledWith({
+      where: { orgId: "org_1", personId: { in: ["person_replied"] } },
+      select: {
+        personId: true,
+        lastInboundAt: true,
+        lastOutboundAt: true,
+      },
+    });
   });
 });
 
@@ -113,6 +186,16 @@ describe("LeadsService.getPersonDetail", () => {
           createdAt: now,
         }]),
       },
+      outreachArtifact: {
+        findFirst: vi.fn().mockResolvedValue({
+          sentAt: new Date("2026-08-18T09:00:00.000Z"),
+        }),
+      },
+      conversation: {
+        findFirst: vi.fn().mockResolvedValue({
+          lastOutboundAt: new Date("2026-08-19T10:00:00.000Z"),
+        }),
+      },
     } as unknown as PrismaService;
 
     const result = await buildService(prisma).getPersonDetail("org_1", "person_1");
@@ -131,11 +214,32 @@ describe("LeadsService.getPersonDetail", () => {
         },
       }),
     );
+    expect(prisma.outreachArtifact.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          orgId: "org_1",
+          status: "SENT",
+          recipientRef: { in: ["person_1", "ari@example.com"] },
+        },
+      }),
+    );
+    expect(prisma.conversation.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          orgId: "org_1",
+          personId: "person_1",
+          lastOutboundAt: { not: null },
+        },
+      }),
+    );
     expect(result.scoreBreakdown).toEqual({ fit: 100, intent: 80, engagement: 90, timing: 80 });
     expect(result.intentSignals).toEqual([
       { label: "Hiring for Account Executive", confidence: 0.9 },
     ]);
     expect(result.researchBrief).toContain("Recent attributable evidence");
     expect(result.recentEvidenceEvents).toHaveLength(1);
+    expect(result.lastContactedAt).toEqual(
+      new Date("2026-08-19T10:00:00.000Z"),
+    );
   });
 });

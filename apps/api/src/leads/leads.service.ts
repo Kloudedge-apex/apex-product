@@ -59,6 +59,16 @@ interface PeopleFilters {
   minScore?: number;
 }
 
+function latestDate(
+  ...values: readonly (Date | null | undefined)[]
+): Date | null {
+  let latest: Date | null = null;
+  for (const value of values) {
+    if (value && (!latest || value.getTime() > latest.getTime())) latest = value;
+  }
+  return latest;
+}
+
 @Injectable()
 export class LeadsService {
   private readonly logger = new Logger(LeadsService.name);
@@ -1111,18 +1121,40 @@ export class LeadsService {
     });
 
     const score = p.scores[0] ?? null;
-    const evidence = await this.prisma.evidenceEvent.findMany({
-      where: {
-        orgId,
-        OR: [
-          { refType: "person", refId: p.id },
-          { refType: "company", refId: p.companyId },
-        ],
-      },
-      select: { id: true, kind: true, payload: true, createdAt: true },
-      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-      take: 25,
-    });
+    const recipientRefs = [p.id, ...p.emails.map((email) => email.email)];
+    const [evidence, latestSentArtifact, latestOutboundConversation] =
+      await Promise.all([
+        this.prisma.evidenceEvent.findMany({
+          where: {
+            orgId,
+            OR: [
+              { refType: "person", refId: p.id },
+              { refType: "company", refId: p.companyId },
+            ],
+          },
+          select: { id: true, kind: true, payload: true, createdAt: true },
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          take: 25,
+        }),
+        this.prisma.outreachArtifact.findFirst({
+          where: {
+            orgId,
+            status: OutreachArtifactStatus.SENT,
+            recipientRef: { in: recipientRefs },
+          },
+          select: { sentAt: true },
+          orderBy: { sentAt: "desc" },
+        }),
+        this.prisma.conversation.findFirst({
+          where: { orgId, personId: p.id, lastOutboundAt: { not: null } },
+          select: { lastOutboundAt: true },
+          orderBy: { lastOutboundAt: "desc" },
+        }),
+      ]);
+    const lastContactedAt = latestDate(
+      latestSentArtifact?.sentAt,
+      latestOutboundConversation?.lastOutboundAt,
+    );
     const intentSignals = toIntentSignals(evidence);
 
     return {
@@ -1145,6 +1177,7 @@ export class LeadsService {
       bestEmail: p.emails[0]?.email ?? null,
       score: score?.score ?? null,
       qualifiedAt: score?.qualifiedAt ?? null,
+      lastContactedAt,
       emails: p.emails.map((e) => ({
         email: e.email,
         pattern: e.pattern,
@@ -1257,6 +1290,7 @@ export class LeadsService {
       source: string;
       emailStatus: "not_sent" | "sent" | "opened" | "replied" | "bounced";
       timeline: Array<{ stage: string; at: string }>;
+      lastContactedAt: string | null;
       createdAt: string;
     }>;
     total: number;
@@ -1310,7 +1344,7 @@ export class LeadsService {
       }
     }
 
-    const [artifactsByRecipient, meetingsByPerson] = await Promise.all([
+    const [artifactsByRecipient, meetingsByPerson, conversationsByPerson] = await Promise.all([
       recipientRefs.size
         ? this.prisma.outreachArtifact.findMany({
             where: {
@@ -1327,15 +1361,57 @@ export class LeadsService {
             select: { personId: true, status: true },
           })
         : Promise.resolve([]),
+      personIds.length
+        ? this.prisma.conversation.findMany({
+            where: { orgId, personId: { in: personIds } },
+            select: {
+              personId: true,
+              lastInboundAt: true,
+              lastOutboundAt: true,
+            },
+          })
+        : Promise.resolve([]),
     ]);
 
-    const contactedSet = new Set<string>();
+    // Last contact is outbound-only. An inbound reply advances stage but must
+    // not be mislabelled as the operator's most recent contact attempt.
+    const lastContactedByPerson = new Map<string, Date>();
+    const lastReplyByPerson = new Map<string, Date>();
+    const retainLatest = (
+      target: Map<string, Date>,
+      personId: string,
+      at: Date,
+    ) => {
+      const existing = target.get(personId);
+      if (!existing || at.getTime() > existing.getTime()) {
+        target.set(personId, at);
+      }
+    };
     for (const a of artifactsByRecipient) {
       const recipientRef = a.recipientRef?.trim();
       const personId = recipientRef
-        ? recipientToPersonId.get(recipientRef) ?? recipientToPersonId.get(recipientRef.toLowerCase())
+        ? recipientToPersonId.get(recipientRef) ??
+          recipientToPersonId.get(recipientRef.toLowerCase())
         : undefined;
-      if (personId && a.sentAt) contactedSet.add(personId);
+      if (personId && a.sentAt)
+        retainLatest(lastContactedByPerson, personId, a.sentAt);
+    }
+    for (const conversation of conversationsByPerson) {
+      if (!conversation.personId) continue;
+      if (conversation.lastOutboundAt) {
+        retainLatest(
+          lastContactedByPerson,
+          conversation.personId,
+          conversation.lastOutboundAt,
+        );
+      }
+      if (conversation.lastInboundAt) {
+        retainLatest(
+          lastReplyByPerson,
+          conversation.personId,
+          conversation.lastInboundAt,
+        );
+      }
     }
     const meetingSet = new Set<string>();
     for (const m of meetingsByPerson) {
@@ -1348,8 +1424,11 @@ export class LeadsService {
       hasEmail: boolean,
       qualifiedAt: Date | null | undefined,
     ): Stage => {
+      // Present the furthest durable customer outcome, not the lead's older
+      // enrichment or scoring milestone.
       if (meetingSet.has(personId)) return "meeting";
-      if (contactedSet.has(personId)) return "contacted";
+      if (lastReplyByPerson.has(personId)) return "replied";
+      if (lastContactedByPerson.has(personId)) return "contacted";
       if (qualifiedAt) return "qualified";
       if (hasEmail) return "enriched";
       return "sourced";
@@ -1384,6 +1463,16 @@ export class LeadsService {
       const email = p.emails[0]?.email ?? "";
       const score = p.scores[0]?.score ?? null;
       const stage = deriveStage(p.id, !!email, p.scores[0]?.qualifiedAt);
+      const lastContactedAt = lastContactedByPerson.get(p.id) ?? null;
+      const lastReplyAt = lastReplyByPerson.get(p.id) ?? null;
+      const timeline = [
+        ...(lastContactedAt
+          ? [{ stage: "contacted", at: lastContactedAt.toISOString() }]
+          : []),
+        ...(lastReplyAt
+          ? [{ stage: "replied", at: lastReplyAt.toISOString() }]
+          : []),
+      ].sort((a, b) => a.at.localeCompare(b.at));
       return {
         id: p.id,
         name: `${p.firstName} ${p.lastName}`.trim(),
@@ -1398,13 +1487,18 @@ export class LeadsService {
         scoreBreakdown: normalizeBreakdown(p.scores[0]?.breakdown),
         stage,
         source: "discovery",
-        emailStatus: (stage === "contacted" || stage === "meeting" ? "sent" : "not_sent") as
+        emailStatus: (stage === "replied"
+          ? "replied"
+          : stage === "contacted" || stage === "meeting"
+            ? "sent"
+            : "not_sent") as
           | "not_sent"
           | "sent"
           | "opened"
           | "replied"
           | "bounced",
-        timeline: [],
+        timeline,
+        lastContactedAt: lastContactedAt?.toISOString() ?? null,
         createdAt: p.createdAt.toISOString(),
       };
     });
