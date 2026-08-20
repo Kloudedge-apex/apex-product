@@ -37,6 +37,13 @@ const MAX_THREAD_MESSAGES = 20;
 const MAX_DETAIL_MESSAGES = 200;
 const MAX_MESSAGE_CHARS = 4_000;
 const MAX_REPLY_CHARS = 8_000;
+const ARCHIVE_STOPPABLE_REPLY_STATUSES = [
+  OutreachArtifactStatus.DRAFT,
+  OutreachArtifactStatus.PENDING_REVIEW,
+  OutreachArtifactStatus.APPROVED,
+] as const;
+const ARCHIVE_REPLY_STOP_NOTE =
+  "policy-skip: conversation archived before reply dispatch";
 
 const personInclude = {
   person: { include: { company: true } },
@@ -222,11 +229,80 @@ export class ConversationsService {
   async archive(orgId: string, id: string) {
     const row = await this.requireConversation(orgId, id);
     if (row.archivedAt) return { affected: 0 };
-    const result = await this.prisma.conversation.updateMany({
-      where: { id, orgId, archivedAt: null },
-      data: { archivedAt: new Date(), unreadCount: 0 },
+
+    return this.prisma.$transaction(async (tx) => {
+      await acquireOrgSendReservationLock(tx, orgId);
+      await acquireReplySingleFlightLock(
+        tx,
+        orgId,
+        [
+          conversationReplyThreadScope(id),
+          providerReplyThreadScope(row.providerThreadId),
+        ],
+        null,
+      );
+
+      const current = await tx.conversation.findFirst({
+        where: { id, orgId },
+        select: { archivedAt: true, providerThreadId: true },
+      });
+      if (!current) throw new NotFoundException(`Conversation ${id} not found`);
+      if (current.archivedAt) return { affected: 0 };
+
+      const threadIdentityWhere: Prisma.OutreachArtifactWhereInput = {
+        OR: [
+          { conversationId: id },
+          { providerThreadId: current.providerThreadId },
+        ],
+      };
+      const deliveryInProgress = await tx.outreachArtifact.findFirst({
+        where: {
+          orgId,
+          purpose: OutreachArtifactPurpose.REPLY,
+          AND: [
+            threadIdentityWhere,
+            {
+              OR: [
+                { status: OutreachArtifactStatus.SENDING },
+                deliveryUnknownArtifactWhere(),
+              ],
+            },
+          ],
+        },
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        select: { id: true, status: true, reviewerNote: true },
+      });
+      if (deliveryInProgress) {
+        const status = effectiveArtifactStatus(deliveryInProgress);
+        throw new ConflictException(
+          `Reply artifact ${deliveryInProgress.id} is ${status}. Reconcile its delivery outcome before archiving this conversation.`,
+        );
+      }
+
+      // Archive is a durable stop boundary, not a visual-only inbox filter.
+      // Any reply that has not crossed APPROVED -> SENDING is made
+      // non-dispatchable while the same org/thread locks used by creation and
+      // the worker are held. A queued stale job then observes SUPPRESSED and
+      // exits without touching credentials or the provider.
+      await tx.outreachArtifact.updateMany({
+        where: {
+          orgId,
+          purpose: OutreachArtifactPurpose.REPLY,
+          status: { in: [...ARCHIVE_STOPPABLE_REPLY_STATUSES] },
+          AND: [threadIdentityWhere],
+        },
+        data: {
+          status: OutreachArtifactStatus.SUPPRESSED,
+          reviewerNote: ARCHIVE_REPLY_STOP_NOTE,
+        },
+      });
+
+      const result = await tx.conversation.updateMany({
+        where: { id, orgId, archivedAt: null },
+        data: { archivedAt: new Date(), unreadCount: 0 },
+      });
+      return { affected: result.count };
     });
-    return { affected: result.count };
   }
 
   async unarchive(orgId: string, id: string) {
@@ -254,6 +330,7 @@ export class ConversationsService {
     if (!conversation) {
       throw new NotFoundException(`Conversation ${id} not found`);
     }
+    if (conversation.archivedAt) throw archivedConversationConflict();
     if (conversation.integration.provider !== "gmail") {
       throw new BadRequestException(
         `Reply drafting is not supported for provider ${conversation.integration.provider}`,
@@ -401,6 +478,7 @@ export class ConversationsService {
     if (!conversation) {
       throw new NotFoundException(`Conversation ${id} not found`);
     }
+    if (conversation.archivedAt) throw archivedConversationConflict();
     if (conversation.integration.provider !== "gmail") {
       throw new BadRequestException(
         `Reply drafting is not supported for provider ${conversation.integration.provider}`,
@@ -621,6 +699,19 @@ export class ConversationsService {
           input.sourceMessageId,
         );
 
+        // The initial conversation read happens before model work and can race
+        // an operator archiving the thread. Re-check under the same locks as
+        // archive before creating a new reviewable artifact.
+        const activeConversation = await tx.conversation.findFirst({
+          where: {
+            id: input.conversationId,
+            orgId: input.orgId,
+            archivedAt: null,
+          },
+          select: { id: true },
+        });
+        if (!activeConversation) throw archivedConversationConflict();
+
         // The LLM call happens outside the transaction. Re-check the source
         // after acquiring the same thread/source locks used by creation and
         // dispatch so an inbound message that arrived mid-generation cannot
@@ -823,6 +914,12 @@ function replyIntelligenceData(
 function staleReplySourceConflict(): ConflictException {
   return new ConflictException(
     "A newer inbound message arrived while the reply was being prepared. Refresh the conversation and draft against the latest message.",
+  );
+}
+
+function archivedConversationConflict(): ConflictException {
+  return new ConflictException(
+    "This conversation is archived. Restore it before creating another reply draft.",
   );
 }
 
