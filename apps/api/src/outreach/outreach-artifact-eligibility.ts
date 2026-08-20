@@ -22,14 +22,9 @@ import {
 export function assertArtifactDispatchEligible(
   artifact: OutreachArtifact,
 ): void {
-  if (artifact.channel === OutreachChannel.HUBSPOT_NOTE) {
-    throw new BadRequestException(
-      "HubSpot note approval is unavailable because dispatch is not implemented",
-    );
-  }
   if (artifact.channel !== OutreachChannel.EMAIL) {
     throw new BadRequestException(
-      `${artifact.channel} approval is unavailable because only email dispatch is supported in this release`,
+      `${artifact.channel} artifacts cannot be approved because this release supports email outreach only`,
     );
   }
 

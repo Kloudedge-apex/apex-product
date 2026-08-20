@@ -22,7 +22,6 @@ import {
   EMAIL_DISPATCH_OUTCOME,
   SendEmailTool,
 } from "../../runtime/tools/send-email.tool";
-import { LinkedInSendMessageTool } from "../../runtime/tools/linkedin-send-message.tool";
 import {
   ProductionBootstrapWriterFenceClosedError,
   ProductionBootstrapWriterFenceUnavailableError,
@@ -834,168 +833,35 @@ describe("SendOutreachWorker.processArtifact", () => {
     }
   });
 
-  it("dispatches LINKEDIN artifacts via LinkedInSendMessageTool and flips to SENT on success", async () => {
-    process.env.OUTREACH_LIVE_FOR_ORGS = "org_1";
-    try {
-      prisma.outreachArtifact.findUnique.mockResolvedValue(
-        artifactRow({
-          channel: OutreachChannel.LINKEDIN,
-          recipientRef: "urn:li:person:abc",
-          bodyText: "hi from apex",
-          payload: { recipient_urn: "urn:li:person:abc", body: "hi from apex" },
-        }),
-      );
-      prisma.outreachArtifact.update.mockResolvedValue(
-        artifactRow({ status: OutreachArtifactStatus.SENT }),
-      );
-      vi.spyOn(
-        LinkedInSendMessageTool.prototype,
-        "execute",
-      ).mockResolvedValueOnce({
-        success: true,
-        data: {
-          sent: true,
-          provider: "linkedin",
-          messageId: "linkedin_msg_42",
-          recipient_urn: "urn:li:person:abc",
-        },
-      });
+  it.each([OutreachChannel.LINKEDIN, OutreachChannel.HUBSPOT_NOTE])(
+    "rejects legacy approved %s rows before reservation or provider access",
+    async (channel) => {
+      process.env.OUTREACH_LIVE_FOR_ORGS = "org_1";
+      try {
+        prisma.outreachArtifact.findUnique.mockResolvedValue(
+          artifactRow({
+            channel,
+            recipientRef: "legacy-recipient",
+            payload: { body: "legacy body" },
+          }),
+        );
+        const sendSpy = vi.spyOn(SendEmailTool.prototype, "execute");
 
-      await worker.processArtifact("art_1", "org_1");
+        await expect(
+          worker.processArtifact("art_1", "org_1"),
+        ).rejects.toThrow(
+          `${channel} artifacts cannot be approved because this release supports email outreach only`,
+        );
 
-      expect(prisma.outreachArtifact.update).toHaveBeenCalledWith({
-        where: { id: "art_1" },
-        data: expect.objectContaining({
-          status: OutreachArtifactStatus.SENT,
-          sendReceiptId: "linkedin_msg_42",
-          sentAt: expect.any(Date),
-        }),
-      });
-      expect(ledger.messageSent).toHaveBeenCalledWith(
-        expect.objectContaining({
-          artifactId: "art_1",
-          channel: OutreachChannel.LINKEDIN,
-          recipientRef: "urn:li:person:abc",
-          sendReceiptId: "linkedin_msg_42",
-          provider: "linkedin",
-        }),
-      );
-    } finally {
-      delete process.env.OUTREACH_LIVE_FOR_ORGS;
-    }
-  });
-
-  it("rethrows when LinkedIn tool reports failure (e.g. 403 api_not_available)", async () => {
-    process.env.OUTREACH_LIVE_FOR_ORGS = "org_1";
-    try {
-      prisma.outreachArtifact.findUnique.mockResolvedValue(
-        artifactRow({
-          channel: OutreachChannel.LINKEDIN,
-          recipientRef: "urn:li:person:abc",
-          bodyText: "hi",
-          payload: { recipient_urn: "urn:li:person:abc", body: "hi" },
-        }),
-      );
-      vi.spyOn(
-        LinkedInSendMessageTool.prototype,
-        "execute",
-      ).mockResolvedValueOnce({
-        success: false,
-        data: {
-          sent: false,
-          provider: "linkedin",
-          error: "linkedin_api_not_available",
-          status: 403,
-        },
-        error: "linkedin_api_not_available",
-      });
-
-      await expect(worker.processArtifact("art_1", "org_1")).rejects.toThrow(
-        /linkedin_api_not_available/,
-      );
-      expect(prisma.outreachArtifact.updateMany).toHaveBeenLastCalledWith({
-        where: { id: "art_1", status: OutreachArtifactStatus.SENDING },
-        data: { status: OutreachArtifactStatus.APPROVED },
-      });
-      expect(prisma.outreachArtifact.update).not.toHaveBeenCalled();
-      expect(ledger.messageSent).not.toHaveBeenCalled();
-    } finally {
-      delete process.env.OUTREACH_LIVE_FOR_ORGS;
-    }
-  });
-
-  it("quarantines a status-less LinkedIn transport failure", async () => {
-    process.env.OUTREACH_LIVE_FOR_ORGS = "org_1";
-    try {
-      prisma.outreachArtifact.findUnique.mockResolvedValue(
-        artifactRow({
-          channel: OutreachChannel.LINKEDIN,
-          recipientRef: "urn:li:person:abc",
-          bodyText: "hi",
-          payload: { recipient_urn: "urn:li:person:abc", body: "hi" },
-        }),
-      );
-      vi.spyOn(
-        LinkedInSendMessageTool.prototype,
-        "execute",
-      ).mockResolvedValueOnce({
-        success: false,
-        data: {
-          sent: false,
-          provider: "linkedin",
-          error: "linkedin_send_failed",
-        },
-        error: "ECONNRESET",
-      });
-
-      await worker.processArtifact("art_1", "org_1");
-
-      expect(prisma.outreachArtifact.updateMany).toHaveBeenLastCalledWith({
-        where: { id: "art_1", status: OutreachArtifactStatus.SENDING },
-        data: expect.objectContaining({
-          status: OutreachArtifactStatus.DELIVERY_UNKNOWN,
-        }),
-      });
-    } finally {
-      delete process.env.OUTREACH_LIVE_FOR_ORGS;
-    }
-  });
-
-  it("falls back to artifact.recipientRef/bodyText when payload lacks the LinkedIn fields", async () => {
-    prisma.outreachArtifact.findUnique.mockResolvedValue(
-      artifactRow({
-        channel: OutreachChannel.LINKEDIN,
-        recipientRef: "urn:li:person:legacy",
-        bodyText: "legacy body",
-        // payload was authored for the old EMAIL shape — no recipient_urn/body.
-        payload: { to: "ignored@example.com" },
-      }),
-    );
-    prisma.outreachArtifact.update.mockResolvedValue(
-      artifactRow({ status: OutreachArtifactStatus.SENT }),
-    );
-    const spy = vi
-      .spyOn(LinkedInSendMessageTool.prototype, "execute")
-      .mockResolvedValueOnce({
-        success: true,
-        data: {
-          sent: true,
-          provider: "linkedin",
-          messageId: "id_1",
-          recipient_urn: "urn:li:person:legacy",
-        },
-      });
-
-    await worker.processArtifact("art_1", "org_1");
-
-    expect(spy).toHaveBeenCalledWith(
-      expect.objectContaining({
-        recipient_urn: "urn:li:person:legacy",
-        body: "legacy body",
-      }),
-      expect.any(Object),
-    );
-  });
+        expect(prisma.outreachArtifact.updateMany).not.toHaveBeenCalled();
+        expect(prisma.integration.findMany).not.toHaveBeenCalled();
+        expect(sendSpy).not.toHaveBeenCalled();
+        expect(ledger.messageSent).not.toHaveBeenCalled();
+      } finally {
+        delete process.env.OUTREACH_LIVE_FOR_ORGS;
+      }
+    },
+  );
 
   it("strips integrations when orgId is not in OUTREACH_LIVE_FOR_ORGS (forces mock branch)", async () => {
     process.env.OUTREACH_LIVE_FOR_ORGS = "org_live_a,org_live_b";
@@ -1245,36 +1111,6 @@ describe("SendOutreachWorker GL2 — mock-mode result while live send is require
       /mock mode/,
     );
     expect(prisma.outreachArtifact.update).not.toHaveBeenCalled();
-  });
-
-  it("also refuses a LinkedIn mock receipt (mock:true, provider:'linkedin') for a liveAllowed org", async () => {
-    process.env.OUTREACH_LIVE_FOR_ORGS = "org_1";
-    prisma.outreachArtifact.findUnique.mockResolvedValue(
-      artifactRow({
-        channel: OutreachChannel.LINKEDIN,
-        recipientRef: "urn:li:person:abc",
-        bodyText: "hi",
-        payload: { recipient_urn: "urn:li:person:abc", body: "hi" },
-      }),
-    );
-    vi.spyOn(
-      LinkedInSendMessageTool.prototype,
-      "execute",
-    ).mockResolvedValueOnce({
-      success: true,
-      data: {
-        sent: false,
-        mock: true,
-        provider: "linkedin",
-        messageId: "mock_linkedin_1",
-      },
-    });
-
-    await expect(worker.processArtifact("art_1", "org_1")).rejects.toThrow(
-      /mock mode/,
-    );
-    expect(prisma.outreachArtifact.update).not.toHaveBeenCalled();
-    expect(ledger.messageSent).not.toHaveBeenCalled();
   });
 
   it("keeps the honest SIMULATED path for non-allowlisted orgs (mock result, no throw)", async () => {
@@ -1716,10 +1552,9 @@ describe("SendOutreachWorker conversation safety gates", () => {
         typeof SendOutreachWorker
       >[3],
       ledger,
-      undefined,
       conversationStore as unknown as ConstructorParameters<
         typeof SendOutreachWorker
-      >[6],
+      >[5],
     );
   });
 
@@ -2605,7 +2440,6 @@ describe("SendOutreachWorker production-bootstrap quiescence", () => {
       suppression,
       mockLedger(),
       undefined,
-      undefined,
       fence,
     );
     const errorLog = vi
@@ -2664,7 +2498,6 @@ describe("SendOutreachWorker production-bootstrap quiescence", () => {
       mockIntegrations(),
       suppression,
       mockLedger(),
-      undefined,
       undefined,
       fence,
     );
@@ -2729,7 +2562,6 @@ describe("SendOutreachWorker production-bootstrap quiescence", () => {
       mockIntegrations(),
       suppression,
       mockLedger(),
-      undefined,
       undefined,
       fence,
     );

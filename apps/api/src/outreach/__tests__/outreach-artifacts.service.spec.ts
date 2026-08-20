@@ -220,57 +220,21 @@ describe("OutreachArtifactsService.recordDryRun", () => {
     expect(evidenceLedger.artifactPersisted).toHaveBeenCalledTimes(1);
   });
 
-  it("persists hubspot args as a HUBSPOT_NOTE channel artifact", async () => {
-    prisma.outreachArtifact.create.mockResolvedValue(
-      artifactRow({
-        toolName: "hubspot",
-        channel: OutreachChannel.HUBSPOT_NOTE,
-      }),
-    );
-    await service.recordDryRun({
-      orgId: "org_1",
-      toolName: "hubspot",
-      toolArgs: { contactEmail: "x@y.z", note: "Followed up" },
-    });
-    expect(prisma.outreachArtifact.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        channel: OutreachChannel.HUBSPOT_NOTE,
-        recipientRef: "x@y.z",
-        bodyText: "Followed up",
-      }),
-    });
-  });
-
-  it("persists LinkedIn args as a LINKEDIN channel artifact", async () => {
-    prisma.outreachArtifact.create.mockResolvedValue(
-      artifactRow({
-        toolName: "linkedin_send_message",
-        channel: OutreachChannel.LINKEDIN,
-        recipientRef: "urn:li:person:abc123",
-        subject: null,
-        bodyText: "Hello on LinkedIn",
-      }),
-    );
-    await service.recordDryRun({
-      orgId: "org_1",
-      toolName: "linkedin_send_message",
-      toolArgs: {
-        recipient_urn: "urn:li:person:abc123",
-        body: "Hello on LinkedIn",
-      },
-    });
-    expect(prisma.outreachArtifact.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        toolName: "linkedin_send_message",
-        channel: OutreachChannel.LINKEDIN,
-        recipientRef: "urn:li:person:abc123",
-        subject: null,
-        bodyText: "Hello on LinkedIn",
-        bodyHtml: null,
-        status: OutreachArtifactStatus.PENDING_REVIEW,
-      }),
-    });
-  });
+  it.each(["hubspot", "linkedin_send_message"])(
+    "rejects unsupported %s artifacts in the email-only release",
+    async (toolName) => {
+      await expect(
+        service.recordDryRun({
+          orgId: "org_1",
+          toolName,
+          toolArgs: { recipient: "unsupported", body: "not deliverable" },
+        }),
+      ).rejects.toThrow(
+        `${toolName} outreach artifacts are unavailable because this release supports email outreach only`,
+      );
+      expect(prisma.outreachArtifact.create).not.toHaveBeenCalled();
+    },
+  );
 
   it("returns null for tools that do not map to a channel", async () => {
     const result = await service.recordDryRun({
@@ -439,15 +403,20 @@ describe("OutreachArtifactsService.approve / reject", () => {
     );
   });
 
-  it("refuses HubSpot-note approval while dispatch is unwired", async () => {
-    prisma.outreachArtifact.findUnique.mockResolvedValue(
-      artifactRow({ channel: OutreachChannel.HUBSPOT_NOTE }),
-    );
-    await expect(service.approve("org_1", "art_1", "user_x")).rejects.toThrow(
-      "HubSpot note approval is unavailable because dispatch is not implemented",
-    );
-    expect(prisma.outreachArtifact.update).not.toHaveBeenCalled();
-  });
+  it.each([OutreachChannel.HUBSPOT_NOTE, OutreachChannel.LINKEDIN])(
+    "refuses unsupported %s approval in the email-only release",
+    async (channel) => {
+      prisma.outreachArtifact.findUnique.mockResolvedValue(
+        artifactRow({ channel }),
+      );
+      await expect(
+        service.approve("org_1", "art_1", "user_x"),
+      ).rejects.toThrow(
+        `${channel} artifacts cannot be approved because this release supports email outreach only`,
+      );
+      expect(prisma.outreachArtifact.update).not.toHaveBeenCalled();
+    },
+  );
 
   it("refuses a draft whose final QA pass still has issues", async () => {
     prisma.outreachArtifact.findUnique.mockResolvedValue(
