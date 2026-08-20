@@ -255,6 +255,7 @@ export class KpiCalculatorService {
             orgId,
             since,
             OutreachArtifactStatus.PENDING_REVIEW,
+            "createdAt",
           ),
         }),
         this.prisma.outreachArtifact.count({
@@ -262,17 +263,28 @@ export class KpiCalculatorService {
             orgId,
             since,
             OutreachArtifactStatus.APPROVED,
+            "reviewedAt",
           ),
         }),
         this.prisma.outreachArtifact.count({
           where: {
-            ...whereOutreachArtifactsInWindow(orgId, since),
+            ...whereOutreachArtifactsInWindow(
+              orgId,
+              since,
+              undefined,
+              "reviewedAt",
+            ),
             ...humanRejectedArtifactWhere(),
           },
         }),
         this.prisma.outreachArtifact.count({
           where: {
-            ...whereOutreachArtifactsInWindow(orgId, since),
+            ...whereOutreachArtifactsInWindow(
+              orgId,
+              since,
+              undefined,
+              "failedAt",
+            ),
             ...failedArtifactWhere(),
           },
         }),
@@ -281,6 +293,7 @@ export class KpiCalculatorService {
             orgId,
             since,
             OutreachArtifactStatus.SENT,
+            "sentAt",
           ),
         }),
         this.prisma.leadScore.findMany({
