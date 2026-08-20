@@ -33,7 +33,7 @@ import type {
   Prisma,
   EmailSource,
 } from "@prisma/client";
-import { OutreachArtifactStatus } from "@prisma/client";
+import { MeetingStatus, OutreachArtifactStatus } from "@prisma/client";
 import { isIcpExcludedDomain } from "./icp-domain-exclusions";
 
 const SOURCE_CONFIRMED_EMAIL_SOURCES = new Set<EmailSource>([
@@ -57,6 +57,32 @@ interface PeopleFilters {
   seniority?: Seniority;
   department?: Department;
   minScore?: number;
+}
+
+type UiLeadStage =
+  | "sourced"
+  | "enriched"
+  | "qualified"
+  | "in_crm"
+  | "contacted"
+  | "replied"
+  | "meeting";
+
+function deriveUiLeadStage(input: {
+  hasMeeting: boolean;
+  hasReply: boolean;
+  hasContact: boolean;
+  qualifiedAt: Date | null | undefined;
+  hasEmail: boolean;
+}): UiLeadStage {
+  // Present the furthest durable customer outcome, not the lead's older
+  // enrichment or scoring milestone.
+  if (input.hasMeeting) return "meeting";
+  if (input.hasReply) return "replied";
+  if (input.hasContact) return "contacted";
+  if (input.qualifiedAt) return "qualified";
+  if (input.hasEmail) return "enriched";
+  return "sourced";
 }
 
 function latestDate(
@@ -1122,8 +1148,13 @@ export class LeadsService {
 
     const score = p.scores[0] ?? null;
     const recipientRefs = [p.id, ...p.emails.map((email) => email.email)];
-    const [evidence, latestSentArtifact, latestOutboundConversation] =
-      await Promise.all([
+    const [
+      evidence,
+      latestSentArtifact,
+      latestOutboundConversation,
+      latestInboundConversation,
+      activeMeeting,
+    ] = await Promise.all([
         this.prisma.evidenceEvent.findMany({
           where: {
             orgId,
@@ -1150,11 +1181,31 @@ export class LeadsService {
           select: { lastOutboundAt: true },
           orderBy: { lastOutboundAt: "desc" },
         }),
+        this.prisma.conversation.findFirst({
+          where: { orgId, personId: p.id, lastInboundAt: { not: null } },
+          select: { lastInboundAt: true },
+          orderBy: { lastInboundAt: "desc" },
+        }),
+        this.prisma.meetingLedger.findFirst({
+          where: {
+            orgId,
+            personId: p.id,
+            status: { not: MeetingStatus.CANCELLED },
+          },
+          select: { id: true },
+        }),
       ]);
     const lastContactedAt = latestDate(
       latestSentArtifact?.sentAt,
       latestOutboundConversation?.lastOutboundAt,
     );
+    const stage = deriveUiLeadStage({
+      hasMeeting: !!activeMeeting,
+      hasReply: !!latestInboundConversation?.lastInboundAt,
+      hasContact: !!lastContactedAt,
+      qualifiedAt: score?.qualifiedAt,
+      hasEmail: p.emails.length > 0,
+    });
     const intentSignals = toIntentSignals(evidence);
 
     return {
@@ -1177,6 +1228,7 @@ export class LeadsService {
       bestEmail: p.emails[0]?.email ?? null,
       score: score?.score ?? null,
       qualifiedAt: score?.qualifiedAt ?? null,
+      stage,
       lastContactedAt,
       emails: p.emails.map((e) => ({
         email: e.email,
@@ -1267,7 +1319,7 @@ export class LeadsService {
   async listLeadsForUi(
     orgId: string,
     opts: {
-      stage?: "sourced" | "enriched" | "qualified" | "in_crm" | "contacted" | "replied" | "meeting";
+      stage?: UiLeadStage;
       minScore?: number;
       page: number;
       perPage: number;
@@ -1286,7 +1338,7 @@ export class LeadsService {
       techStack: string[];
       score: number | null;
       scoreBreakdown: Array<{ label: string; value: number }>;
-      stage: "sourced" | "enriched" | "qualified" | "in_crm" | "contacted" | "replied" | "meeting";
+      stage: UiLeadStage;
       source: string;
       emailStatus: "not_sent" | "sent" | "opened" | "replied" | "bounced";
       timeline: Array<{ stage: string; at: string }>;
@@ -1357,7 +1409,11 @@ export class LeadsService {
         : Promise.resolve([]),
       personIds.length
         ? this.prisma.meetingLedger.findMany({
-            where: { orgId, personId: { in: personIds } },
+            where: {
+              orgId,
+              personId: { in: personIds },
+              status: { not: MeetingStatus.CANCELLED },
+            },
             select: { personId: true, status: true },
           })
         : Promise.resolve([]),
@@ -1418,22 +1474,6 @@ export class LeadsService {
       if (m.personId) meetingSet.add(m.personId);
     }
 
-    type Stage = "sourced" | "enriched" | "qualified" | "in_crm" | "contacted" | "replied" | "meeting";
-    const deriveStage = (
-      personId: string,
-      hasEmail: boolean,
-      qualifiedAt: Date | null | undefined,
-    ): Stage => {
-      // Present the furthest durable customer outcome, not the lead's older
-      // enrichment or scoring milestone.
-      if (meetingSet.has(personId)) return "meeting";
-      if (lastReplyByPerson.has(personId)) return "replied";
-      if (lastContactedByPerson.has(personId)) return "contacted";
-      if (qualifiedAt) return "qualified";
-      if (hasEmail) return "enriched";
-      return "sourced";
-    };
-
     const normalizeBreakdown = (
       raw: unknown,
     ): Array<{ label: string; value: number }> => {
@@ -1462,7 +1502,13 @@ export class LeadsService {
     const leads = raw.map((p) => {
       const email = p.emails[0]?.email ?? "";
       const score = p.scores[0]?.score ?? null;
-      const stage = deriveStage(p.id, !!email, p.scores[0]?.qualifiedAt);
+      const stage = deriveUiLeadStage({
+        hasMeeting: meetingSet.has(p.id),
+        hasReply: lastReplyByPerson.has(p.id),
+        hasContact: lastContactedByPerson.has(p.id),
+        qualifiedAt: p.scores[0]?.qualifiedAt,
+        hasEmail: !!email,
+      });
       const lastContactedAt = lastContactedByPerson.get(p.id) ?? null;
       const lastReplyAt = lastReplyByPerson.get(p.id) ?? null;
       const timeline = [
