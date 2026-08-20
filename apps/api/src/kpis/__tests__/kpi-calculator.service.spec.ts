@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type { Prisma } from "@prisma/client";
 import { OutreachArtifactStatus } from "@prisma/client";
 import {
@@ -190,6 +190,52 @@ describe("KpiCalculatorService", () => {
       failed: 5,
       sent: 6,
     });
+  });
+
+  it("uses authoritative lifecycle timestamps for quality windows", async () => {
+    const count = vi.fn(
+      async (_args: Prisma.OutreachArtifactCountArgs): Promise<number> => 0,
+    );
+    const svc = new KpiCalculatorService({
+      evidenceEvent: { findMany: async () => [] },
+      graphRun: { count: async () => 0 },
+      outreachArtifact: { count },
+      leadScore: {
+        findMany: async () => [],
+        count: async () => 0,
+      },
+    });
+
+    await svc.quality("org_a", { windowDays: 7 });
+
+    const wheres = count.mock.calls.map(([args]) => args.where);
+    expect(wheres).toHaveLength(5);
+    expect(wheres[0]).toMatchObject({
+      orgId: "org_a",
+      status: OutreachArtifactStatus.PENDING_REVIEW,
+      createdAt: { gte: expect.any(Date) },
+    });
+    expect(wheres[1]).toMatchObject({
+      orgId: "org_a",
+      status: OutreachArtifactStatus.APPROVED,
+      reviewedAt: { gte: expect.any(Date) },
+    });
+    expect(wheres[2]).toMatchObject({
+      orgId: "org_a",
+      reviewedAt: { gte: expect.any(Date) },
+    });
+    expect(wheres[3]).toMatchObject({
+      orgId: "org_a",
+      failedAt: { gte: expect.any(Date) },
+    });
+    expect(wheres[4]).toMatchObject({
+      orgId: "org_a",
+      status: OutreachArtifactStatus.SENT,
+      sentAt: { gte: expect.any(Date) },
+    });
+    for (const where of wheres) {
+      expect(where).not.toHaveProperty("updatedAt");
+    }
   });
 
   it("isolates orgId and keeps reviewed suppressions in guaranteeDefense", async () => {

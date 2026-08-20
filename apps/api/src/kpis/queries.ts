@@ -32,12 +32,13 @@ export function whereGraphRunsInWindow(
 export function whereOutreachArtifactsInWindow(
   orgId: string,
   since: Date,
-  status?: OutreachArtifactStatus,
+  status: OutreachArtifactStatus | undefined,
+  lifecycleTimestamp: "createdAt" | "reviewedAt" | "failedAt" | "sentAt",
 ): Prisma.OutreachArtifactWhereInput {
   const safeOrgId = requireOrgId(orgId);
   return {
     orgId: safeOrgId,
-    updatedAt: { gte: since },
+    [lifecycleTimestamp]: { gte: since },
     ...(status ? { status } : {}),
   };
 }
