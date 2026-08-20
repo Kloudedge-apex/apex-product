@@ -350,6 +350,15 @@ for ENV_NAME in "${SHARED_NON_SECRET_ENV_NAMES[@]}"; do
   require_env_value_parity "${ENV_NAME}"
 done
 
+require_value \
+  "$(env_value "${API_JSON}" EVIDENCE_LEDGER_ENABLED)" \
+  "true" \
+  "API EVIDENCE_LEDGER_ENABLED"
+require_value \
+  "$(env_value "${WORKER_JSON}" EVIDENCE_LEDGER_ENABLED)" \
+  "true" \
+  "worker EVIDENCE_LEDGER_ENABLED"
+
 BOOTSTRAP_ATTEMPT_ID="$(env_value \
   "${API_JSON}" WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID)"
 BOOTSTRAP_MINIMUM_GENERATION="$(env_value \

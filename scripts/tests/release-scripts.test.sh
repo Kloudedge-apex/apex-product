@@ -2655,6 +2655,7 @@ write_containerapp_fixture() {
               {name: "FRONTEND_URL", value: "https://workforceos.xyz"},
               {name: "OUTREACH_LIVE_FOR_ORGS", value: ""},
               {name: "OUTREACH_ALLOW_WILDCARD", value: "false"},
+              {name: "EVIDENCE_LEDGER_ENABLED", value: "true"},
               {name: "CLERK_JWKS_URL", value: "https://clerk.workforceos.xyz/.well-known/jwks.json"},
               {name: "CLERK_ISSUER", value: "https://clerk.workforceos.xyz"},
               {name: "CLERK_DOMAIN", value: ""},
@@ -2749,6 +2750,20 @@ EOF
     API_REVISION_FILE="${harness}/api-revision.json" WORKER_REVISION_FILE="${harness}/worker-revision.json" \
     "${harness}/scripts/verify-containerapp-release-config.sh" \
     "${api_image}" "${worker_image}" >/dev/null
+  pass
+
+  jq '(.properties.template.containers[0].env[] |
+    select(.name == "EVIDENCE_LEDGER_ENABLED").value) = "false"' \
+    "${harness}/worker.json" >"${harness}/worker-evidence-disabled.json"
+  if env PATH="${harness}/bin:${PATH}" \
+    API_JSON_FILE="${harness}/api.json" \
+    WORKER_JSON_FILE="${harness}/worker-evidence-disabled.json" \
+    API_REVISION_FILE="${harness}/api-revision.json" \
+    WORKER_REVISION_FILE="${harness}/worker-revision.json" \
+    "${harness}/scripts/verify-containerapp-release-config.sh" \
+    "${api_image}" "${worker_image}" >/dev/null 2>&1; then
+    fail "Container App verifier accepted a disabled evidence ledger"
+  fi
   pass
 
   jq '.properties.template.containers[0].env += [{name: "WORKER_ENABLED", value: "true"}]' \

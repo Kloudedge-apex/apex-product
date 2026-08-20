@@ -29,6 +29,7 @@ import {
  *     - ADMIN_API_KEY must be set
  *
  *   When NODE_ENV="production" (i.e. running as a deployed image):
+ *     - EVIDENCE_LEDGER_ENABLED must be exactly "true"
  *     - A complete OpenAI-compatible LLM provider (public OpenAI or both Azure deployments)
  *     - At least one live web-search provider (TAVILY_API_KEY | SERPER_API_KEY)
  *     - GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET (Gmail OAuth, needed by api + worker)
@@ -142,6 +143,12 @@ export function validateEnv(
   }
 
   if (isProd) {
+    if (env.EVIDENCE_LEDGER_ENABLED !== "true") {
+      issues.push(
+        "EVIDENCE_LEDGER_ENABLED must be exactly true when NODE_ENV=production",
+      );
+    }
+
     if (!env.METRICS_AUTH_TOKEN?.trim()) {
       issues.push("METRICS_AUTH_TOKEN is required when NODE_ENV=production");
     }

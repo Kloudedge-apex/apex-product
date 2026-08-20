@@ -42,6 +42,7 @@ function baseProdEnv(): NodeJS.ProcessEnv {
     API_PUBLIC_URL: "https://api.workforceos.xyz",
     OAUTH_STATE_SECRET: "s".repeat(32),
     FRONTEND_URL: "https://workforceos.xyz",
+    EVIDENCE_LEDGER_ENABLED: "true",
     WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID:
       "0123456789abcdef0123456789abcdef",
     WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION: "1",
@@ -160,6 +161,19 @@ describe("validateEnv", () => {
     const { issues } = validateEnv(baseProdEnv());
     expect(issues).toEqual([]);
   });
+
+  it.each([undefined, "", "false", "TRUE"])(
+    "requires the evidence ledger to be explicitly enabled in production (%s)",
+    (value) => {
+      const env = baseProdEnv();
+      if (value === undefined) delete env.EVIDENCE_LEDGER_ENABLED;
+      else env.EVIDENCE_LEDGER_ENABLED = value;
+
+      expect(validateEnv(env).issues).toContain(
+        "EVIDENCE_LEDGER_ENABLED must be exactly true when NODE_ENV=production",
+      );
+    },
+  );
 
   it("accepts a complete Azure OpenAI configuration when OPENAI_API_KEY is unset", () => {
     const env = baseProdEnv();

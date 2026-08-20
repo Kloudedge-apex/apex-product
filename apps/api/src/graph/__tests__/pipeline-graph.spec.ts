@@ -1159,6 +1159,42 @@ describe("pipeline-graph (supervisor routing)", () => {
     expect(callLog).not.toContain("enrichment-should-not-run");
   });
 
+  it("does not request approval when research evidence persistence failed", async () => {
+    const graph = buildPipelineGraph(deps).compile({
+      checkpointer: new MemorySaver(),
+    });
+    const config = {
+      configurable: { thread_id: "t_research_persistence_failed" },
+    };
+
+    const result = await graph.invoke(
+      {
+        orgId,
+        runId: "t_research_persistence_failed",
+        icpProfileIds: [icpId],
+        stagesCompleted: [
+          STAGE.SOURCING,
+          STAGE.ENRICHMENT,
+          STAGE.SCORING,
+          STAGE.RESEARCH,
+        ],
+        stageStatuses: { [STAGE.RESEARCH]: "FAILED" },
+        scoredLeads: [{ personId: "p1", score: 90, tier: "A" }],
+      },
+      config,
+    );
+
+    expect(isInterrupted(result)).toBe(false);
+    expect(result.approved).toBe(false);
+    expect(result.stagesCompleted).toContain(STAGE.APPROVAL);
+    expect(result.stageStatuses?.[STAGE.APPROVAL]).toBe("FAILED");
+    expect(
+      result.messages?.some((message) =>
+        message.text.includes("upstream research failed"),
+      ),
+    ).toBe(true);
+  });
+
   it("two parallel GraphRuns in same org see only their own leads (no cross-pollination)", async () => {
     // Simulates the bug-fix contract for 200-lead-leak: when two pipeline
     // runs execute against the same org concurrently, each run must see

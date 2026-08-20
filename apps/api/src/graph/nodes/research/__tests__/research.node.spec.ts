@@ -6,9 +6,9 @@ import { STAGE, type PipelineState } from "../../../state";
  * RESEARCH node — runs between SCORING and APPROVAL. For each unique qualified
  * (tier A/B) company among scoredLeads, it extracts dated prospect signals
  * (via SignalExtractionService) and writes them to the evidence ledger. The
- * node is best-effort: a per-company failure is isolated (PARTIAL, never throw),
- * zero signals is a valid COMPLETE outcome, and an upstream FAILED scoring stage
- * short-circuits the node to FAILED without touching the DB.
+ * node isolates per-company extraction failures, requires extracted signals to
+ * be durably confirmed before reporting success, accepts zero signals as a valid
+ * COMPLETE outcome, and short-circuits on upstream scoring failure.
  */
 describe("buildResearchNode", () => {
   const orgId = "org_test";
@@ -48,7 +48,7 @@ describe("buildResearchNode", () => {
         },
         { kind: "press_mention", source: "https://x.test/b", date: "2026-06-02", confidence: 0.6 },
       ]);
-    const recordSignal = over.recordSignal ?? vi.fn(async () => undefined);
+    const recordSignal = over.recordSignal ?? vi.fn(async () => "CREATED" as const);
 
     const deps = {
       prisma: { person: { findMany: personFindMany }, company: { findMany: companyFindMany } },
@@ -169,5 +169,41 @@ describe("buildResearchNode", () => {
     expect(recordSignal).not.toHaveBeenCalled();
     expect(update.stagesCompleted).toEqual([STAGE.RESEARCH]);
     expect(update.stageStatuses?.[STAGE.RESEARCH]).toBe("PARTIAL");
+  });
+
+  it("fails before approval when every extracted signal misses durable persistence", async () => {
+    const recordSignal = vi.fn(async () => "FAILED" as const);
+    const { deps } = makeDeps({ recordSignal });
+    const node = buildResearchNode(deps);
+
+    const update = await node(
+      stateWith({
+        scoredLeads: [{ personId: "p1", score: 90, tier: "A" }],
+      }),
+    );
+
+    expect(recordSignal).toHaveBeenCalledTimes(2);
+    expect(update.stageStatuses?.[STAGE.RESEARCH]).toBe("FAILED");
+    expect(update.messages?.at(-1)?.text).toContain("0/2 signal(s) durable");
+    expect(update.messages?.at(-1)?.level).toBe("error");
+  });
+
+  it("reports PARTIAL when some extracted evidence is durable and some fails", async () => {
+    const recordSignal = vi
+      .fn()
+      .mockResolvedValueOnce("CREATED")
+      .mockResolvedValueOnce("FAILED");
+    const { deps } = makeDeps({ recordSignal });
+    const node = buildResearchNode(deps);
+
+    const update = await node(
+      stateWith({
+        scoredLeads: [{ personId: "p1", score: 90, tier: "A" }],
+      }),
+    );
+
+    expect(update.stageStatuses?.[STAGE.RESEARCH]).toBe("PARTIAL");
+    expect(update.messages?.at(-1)?.text).toContain("1/2 signal(s) durable");
+    expect(update.messages?.at(-1)?.level).toBe("warn");
   });
 });
