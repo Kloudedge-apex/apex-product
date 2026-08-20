@@ -25,7 +25,7 @@ invite the partner.
   credential-drain checkpoint and schema-v2 controller evidence.
 - [ ] The protected bootstrap has completed B0-B8 with signed receipts and a
   verified immutable rollback baseline.
-- [ ] All eight migrations are applied in reviewed order with the signed
+- [ ] All nine migrations are applied in reviewed order with the signed
   production receipt, postconditions, old-reader drain, and writer attestation.
 - [ ] Clerk configuration is identical across API, worker, and console and a
   fresh-user smoke has passed without SQL/operator provisioning.

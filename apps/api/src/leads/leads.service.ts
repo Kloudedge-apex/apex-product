@@ -34,6 +34,7 @@ import type {
   EmailSource,
 } from "@prisma/client";
 import { OutreachArtifactStatus } from "@prisma/client";
+import { isIcpExcludedDomain } from "./icp-domain-exclusions";
 
 const SOURCE_CONFIRMED_EMAIL_SOURCES = new Set<EmailSource>([
   "TEAM_PAGE",
@@ -90,6 +91,7 @@ export class LeadsService {
       techStackSignals?: string[];
       intentKeywords?: string[];
       seedDomains?: string[];
+      exclusionDomains?: string[];
     },
   ) {
     return this.prisma.icpProfile.create({
@@ -104,6 +106,7 @@ export class LeadsService {
         techStackSignals: data.techStackSignals ?? [],
         intentKeywords: data.intentKeywords ?? [],
         seedDomains: data.seedDomains ?? [],
+        exclusionDomains: data.exclusionDomains ?? [],
       },
     });
   }
@@ -120,6 +123,7 @@ export class LeadsService {
       techStackSignals?: string[];
       intentKeywords?: string[];
       seedDomains?: string[];
+      exclusionDomains?: string[];
     },
   ) {
     return this.prisma.$transaction(async (tx) => {
@@ -143,6 +147,7 @@ export class LeadsService {
         techStackSignals: data.techStackSignals ?? [],
         intentKeywords: data.intentKeywords ?? [],
         seedDomains: data.seedDomains ?? [],
+        exclusionDomains: data.exclusionDomains ?? [],
       };
       if (current) {
         const update: Prisma.IcpProfileUpdateInput = { name: data.name };
@@ -154,6 +159,7 @@ export class LeadsService {
         if (data.techStackSignals !== undefined) update.techStackSignals = data.techStackSignals;
         if (data.intentKeywords !== undefined) update.intentKeywords = data.intentKeywords;
         if (data.seedDomains !== undefined) update.seedDomains = data.seedDomains;
+        if (data.exclusionDomains !== undefined) update.exclusionDomains = data.exclusionDomains;
         return tx.icpProfile.update({
           where: { id: current.id },
           data: update,
@@ -174,7 +180,7 @@ export class LeadsService {
 
   private async discoverCompanies(
     orgId: string,
-    icp: { targetTitles: string[]; targetIndustries: string[]; targetGeos: string[]; minEmployees?: number | null; maxEmployees?: number | null; techStackSignals: string[]; seedDomains?: string[]; intentKeywords?: string[] },
+    icp: { targetTitles: string[]; targetIndustries: string[]; targetGeos: string[]; minEmployees?: number | null; maxEmployees?: number | null; techStackSignals: string[]; seedDomains?: string[]; intentKeywords?: string[]; exclusionDomains?: string[] },
     jobId?: string,
   ): Promise<string[]> {
     const companyIds = new Set<string>();
@@ -182,8 +188,14 @@ export class LeadsService {
     let processed = 0;
     const totalSteps = 4;
 
-    const upsertCompany = async (co: { domain: string; name: string; industry?: string; country?: string; employeeRange?: string; atsProvider?: string; atsSlug?: string; source?: string; linkedinCompanyUrl?: string }) => {
-      if (!co.domain || co.domain.length === 0) return;
+    const upsertCompany = async (co: { domain: string; name: string; industry?: string; country?: string; employeeRange?: string; atsProvider?: string; atsSlug?: string; source?: string; linkedinCompanyUrl?: string }): Promise<boolean> => {
+      if (!co.domain || co.domain.length === 0) return false;
+      if (isIcpExcludedDomain(co.domain, icp.exclusionDomains ?? [])) {
+        this.logger.log(
+          `[lead-quality] Skipping ICP-excluded company domain: ${co.domain}`,
+        );
+        return false;
+      }
       // Block aggregator / SEO / social / parking domains BEFORE we touch the
       // DB. Catches dnb.com, consultancy-me.com, legal500.com, cultureamp.com
       // and friends — see lead-quality.validators.ts for the full list and
@@ -192,7 +204,7 @@ export class LeadsService {
         this.logger.warn(
           `[lead-quality] Skipping aggregator/noise company domain: ${co.domain}`,
         );
-        return;
+        return false;
       }
       const firstObservation = !seenDomains.has(co.domain);
       seenDomains.add(co.domain);
@@ -215,8 +227,10 @@ export class LeadsService {
         if (!firstObservation) {
           this.logger.debug(`[lead-quality] Merged another source for ${co.domain}`);
         }
+        return true;
       } catch (err) {
         this.logger.warn(`Failed to upsert company ${co.domain}: ${err instanceof Error ? err.message : String(err)}`);
+        return false;
       }
     };
 
@@ -231,13 +245,14 @@ export class LeadsService {
     // Step 2: TheirStack (hiring intent)
     const theirStackCompanies = await withRetry(() => this.theirStack.discoverHiringCompanies(icp));
     for (const co of theirStackCompanies) {
-      await upsertCompany({
+      const accepted = await upsertCompany({
         domain: co.domain,
         name: co.name,
         country: co.country,
         industry: co.industry,
         employeeRange: co.employeeRange,
       });
+      if (!accepted) continue;
       // Score intent from TheirStack job data
       if (co.jobTitles.length > 0) {
         try {
@@ -267,7 +282,12 @@ export class LeadsService {
       await upsertCompany(co);
     }
     // Also probe ATS for SERP-discovered domains
-    const newDomains = serpCompanies.map((c) => c.domain).filter((d) => !atsCompanies.some((a) => a.domain === d));
+    const newDomains = serpCompanies.map((c) => c.domain).filter(
+      (domain) =>
+        !isIcpExcludedDomain(domain, icp.exclusionDomains ?? []) &&
+        !isAggregatorDomain(domain) &&
+        !atsCompanies.some((company) => company.domain === domain),
+    );
     if (newDomains.length > 0) {
       const atsSlugs = await withRetry(() => this.atsScraper.discoverAtsSlugs(newDomains.slice(0, 20)));
       for (const detected of atsSlugs) {

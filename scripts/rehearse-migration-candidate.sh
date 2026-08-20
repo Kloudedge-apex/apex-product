@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Rehearse the reviewed eight-file migration sequence against a disposable,
+# Rehearse the reviewed nine-file migration sequence against a disposable,
 # loopback-only PostgreSQL database populated with two synthetic tenants.
 # This script never produces staging or production migration authority.
 
@@ -25,6 +25,7 @@ MIGRATIONS=(
   "docs/migrations/2026-08-12_conversation-reply-single-flight-expand.sql"
   "docs/migrations/2026-08-12_graph-run-activity-expand.sql"
   "docs/migrations/2026-08-12_graph-run-lifecycle-expand.sql"
+  "docs/migrations/2026-08-20_icp-exclusion-domains-expand.sql"
 )
 FIXTURE_PATH="scripts/fixtures/migration-rehearsal-data.sql"
 RECONCILIATION_PATH="scripts/fixtures/migration-rehearsal-identity-reconciliation.sql"

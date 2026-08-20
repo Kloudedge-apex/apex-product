@@ -1342,7 +1342,7 @@ describe("ConversationsService", () => {
 
   describe("meeting proposals", () => {
     it("links the proposal to the owned conversation, lead, and latest inbound message", async () => {
-      const scheduledFor = new Date("2026-08-20T10:00:00.000Z");
+      const scheduledFor = new Date("2099-08-20T10:00:00.000Z");
       prisma.conversation.findFirst.mockResolvedValue(
         conversationRow({ messages: [inboundMessage()] }),
       );
@@ -1385,7 +1385,7 @@ describe("ConversationsService", () => {
 
       await expect(
         service.proposeMeeting("org_1", "conversation_other", {
-          scheduledFor: new Date("2026-08-20T10:00:00.000Z"),
+          scheduledFor: new Date("2099-08-20T10:00:00.000Z"),
           createdBy: "user_1",
         }),
       ).rejects.toBeInstanceOf(NotFoundException);

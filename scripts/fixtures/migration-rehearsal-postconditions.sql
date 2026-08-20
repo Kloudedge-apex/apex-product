@@ -1,4 +1,4 @@
--- Fail-closed postconditions for the synthetic eight-file rehearsal.
+-- Fail-closed postconditions for the synthetic nine-file rehearsal.
 -- Successful execution emits no row data. The controller separately records
 -- only the resulting aggregate counts in its non-authoritative receipt.
 
@@ -122,6 +122,20 @@ BEGIN
       )
   ) <> 5 THEN
     RAISE EXCEPTION 'GraphRun expand-column postcondition failed';
+  END IF;
+
+  IF (
+    SELECT COUNT(*)
+    FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = 'IcpProfile'
+      AND column_name = 'exclusionDomains'
+      AND data_type = 'ARRAY'
+      AND udt_name = '_text'
+      AND is_nullable = 'NO'
+      AND column_default IS NOT NULL
+  ) <> 1 THEN
+    RAISE EXCEPTION 'IcpProfile exclusionDomains postcondition failed';
   END IF;
 
   IF NOT EXISTS (
