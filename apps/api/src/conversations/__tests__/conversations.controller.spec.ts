@@ -13,6 +13,7 @@ function createServiceMock() {
     get: vi.fn(),
     markRead: vi.fn(),
     archive: vi.fn(),
+    unarchive: vi.fn(),
     generateReplyDraft: vi.fn(),
     createHumanReplyDraft: vi.fn(),
     createFollowUp: vi.fn(),
@@ -29,6 +30,15 @@ describe("ConversationsController validation", () => {
     service = createServiceMock();
     controller = new ConversationsController(
       service as unknown as ConversationsService,
+    );
+  });
+
+  it("forwards archive restoration with tenant context unchanged", () => {
+    controller.unarchive("org_1", "conversation_1");
+
+    expect(service.unarchive).toHaveBeenCalledWith(
+      "org_1",
+      "conversation_1",
     );
   });
 

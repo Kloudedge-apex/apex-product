@@ -75,6 +75,11 @@ export class ConversationsController {
     return this.conversations.archive(orgId, id);
   }
 
+  @Post(":id/unarchive")
+  unarchive(@OrgId() orgId: string, @Param("id") id: string) {
+    return this.conversations.unarchive(orgId, id);
+  }
+
   @Post(":id/draft-reply")
   draftReply(@OrgId() orgId: string, @Param("id") id: string) {
     return this.conversations.generateReplyDraft(orgId, id);
