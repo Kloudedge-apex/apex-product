@@ -1112,7 +1112,7 @@ describe("production bootstrap HTTP classification", () => {
   it("classifies the complete mounted GET/HEAD-equivalent controller surface", () => {
     const sourceRoot = join(process.cwd(), "src");
     const routes = productionGetRoutes(sourceRoot);
-    expect(routes).toHaveLength(53);
+    expect(routes).toHaveLength(52);
     expect(new Set(routes).size).toBe(routes.length);
 
     const writerRoutes = new Set([
@@ -1146,6 +1146,7 @@ describe("production bootstrap HTTP classification", () => {
       "/api/workflows",
       "/api/integrations/hubspot",
       "/api/integrations/linkedin",
+      "/api/kpis/experimentation",
     ]) {
       expect(
         routes.filter((route) => route.startsWith(retiredPrefix)),

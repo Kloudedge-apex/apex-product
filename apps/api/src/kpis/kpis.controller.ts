@@ -13,16 +13,14 @@ export class KpisController {
   @Get()
   async all(@OrgId() orgId: string | undefined, @Query() window: WindowDto) {
     if (!orgId) throw new BadRequestException("orgId required");
-    const [operational, quality, commercial, guaranteeDefense, experimentation] =
-      await Promise.all([
-        this.kpis.operational(orgId, window),
-        this.kpis.quality(orgId, window),
-        this.kpis.commercial(orgId, window),
-        this.kpis.guaranteeDefense(orgId, window),
-        this.kpis.experimentation(orgId, window),
-      ]);
+    const [operational, quality, commercial, guaranteeDefense] = await Promise.all([
+      this.kpis.operational(orgId, window),
+      this.kpis.quality(orgId, window),
+      this.kpis.commercial(orgId, window),
+      this.kpis.guaranteeDefense(orgId, window),
+    ]);
 
-    return { operational, quality, commercial, guaranteeDefense, experimentation };
+    return { operational, quality, commercial, guaranteeDefense };
   }
 
   @Get("operational")
@@ -49,10 +47,4 @@ export class KpisController {
     return this.kpis.guaranteeDefense(orgId, window);
   }
 
-  @Get("experimentation")
-  experimentation(@OrgId() orgId: string | undefined, @Query() window: WindowDto) {
-    if (!orgId) throw new BadRequestException("orgId required");
-    return this.kpis.experimentation(orgId, window);
-  }
 }
-

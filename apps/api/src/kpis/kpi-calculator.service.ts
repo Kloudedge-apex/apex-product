@@ -98,16 +98,6 @@ export interface GuaranteeDefenseKpi {
   readonly rejection_rate: number | null;
 }
 
-export interface Variant {
-  readonly key: string;
-  readonly label: string;
-}
-
-export interface ExperimentationKpi {
-  readonly windowDays: number;
-  readonly variants: readonly Variant[];
-}
-
 function windowSince(windowDays: number): Date {
   const clamped = Math.max(1, Math.min(90, windowDays));
   return new Date(Date.now() - clamped * 24 * 60 * 60 * 1000);
@@ -385,10 +375,4 @@ export class KpiCalculatorService {
     };
   }
 
-  async experimentation(
-    _orgId: string,
-    window: { readonly windowDays: number },
-  ): Promise<ExperimentationKpi> {
-    return { windowDays: window.windowDays, variants: [] as const };
-  }
 }

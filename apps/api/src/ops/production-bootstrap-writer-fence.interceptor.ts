@@ -35,7 +35,7 @@ const SIDE_EFFECTFUL_GET_PATHS: readonly RegExp[] = [
 const READ_ONLY_GET_PATHS: readonly RegExp[] = [
   /^\/api\/health(?:\/(?:live|ready|worker))?\/?$/,
   /^\/api\/auth\/me$/,
-  /^\/api\/kpis(?:\/(?:operational|quality|commercial|guarantee-defense|experimentation))?\/?$/,
+  /^\/api\/kpis(?:\/(?:operational|quality|commercial|guarantee-defense))?\/?$/,
   /^\/api\/pipeline\/status$/,
   /^\/api\/policy-events\/?$/,
   /^\/api\/graph\/runs(?:\/[^/]+)?\/?$/,
