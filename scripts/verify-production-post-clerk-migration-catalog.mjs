@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Catalog-only verifier for the seven migrations that follow the Clerk
+ * Catalog-only verifier for the eight migrations that follow the Clerk
  * identity migration in the production bootstrap sequence.
  *
  * The SQL exported by this module reads pg_catalog only. It never reads an
@@ -24,6 +24,7 @@ export const POST_CLERK_MIGRATIONS = Object.freeze([
   "docs/migrations/2026-08-12_conversation-reply-single-flight-expand.sql",
   "docs/migrations/2026-08-12_graph-run-activity-expand.sql",
   "docs/migrations/2026-08-12_graph-run-lifecycle-expand.sql",
+  "docs/migrations/2026-08-20_icp-exclusion-domains-expand.sql",
 ]);
 
 export const POST_CLERK_MIGRATION_CONTRACT = deepFreeze([
@@ -54,6 +55,10 @@ export const POST_CLERK_MIGRATION_CONTRACT = deepFreeze([
   {
     path: POST_CLERK_MIGRATIONS[6],
     sha256: "sha256:a502874d67c222332b253859b40699a679daf24c27c9b0bbedbd3c63e8254e2b",
+  },
+  {
+    path: POST_CLERK_MIGRATIONS[7],
+    sha256: "sha256:0b29f8654efa3e21e3c0bfa29a5c8caf3a029967c9446e26b6340a68899b83db",
   },
 ]);
 
@@ -264,6 +269,10 @@ const columns = [
     notNull: true,
     defaultKind: "integer-zero",
   }),
+  column("IcpProfile", "exclusionDomains", "_text", {
+    notNull: true,
+    defaultKind: "empty-text-array",
+  }),
 ];
 
 const BTREE_TEXT = "pg_catalog.text_ops";
@@ -424,6 +433,7 @@ const contract = {
     relation("OutreachArtifact"),
     relation("MeetingLedger"),
     relation("GraphRun"),
+    relation("IcpProfile"),
     relation("Conversation", 26),
     relation("ConversationMessage", 17),
     relation("FollowUpTask", 15),
@@ -442,7 +452,7 @@ function deepFreeze(value) {
 }
 
 export const POST_CLERK_CATALOG_CONTRACT = deepFreeze(contract);
-export const POST_CLERK_CATALOG_CONTRACT_VERSION = 4;
+export const POST_CLERK_CATALOG_CONTRACT_VERSION = 5;
 export const POST_CLERK_MIGRATION_CONTRACT_HASH = sha256(
   canonicalJson(POST_CLERK_MIGRATION_CONTRACT),
 );
@@ -832,7 +842,7 @@ function validateSnapshot(snapshot) {
     enumKeys.add(entry.name);
   }
 
-  boundedArray(snapshot.relations, "catalog relations", 7);
+  boundedArray(snapshot.relations, "catalog relations", 8);
   const relationKeys = new Set();
   for (const [index, entry] of snapshot.relations.entries()) {
     const label = `catalog relations[${index}]`;
@@ -1330,6 +1340,20 @@ function classifyGraphLifecycle(snapshot, maps) {
   return classification("recoverable", ["EXACT_PARTIAL_LIFECYCLE_REPLAYABLE"]);
 }
 
+function classifyIcpExclusionDomains(snapshot, maps) {
+  if (!targetRelationReady(maps, "IcpProfile")) {
+    return classification("hold", ["TARGET_RELATION_MISSING_OR_WRONG"]);
+  }
+  const expectedColumn = contract.columns.find((entry) =>
+    entry.table === "IcpProfile" && entry.name === "exclusionDomains");
+  const observed = observedColumn(maps, expectedColumn);
+  if (!observed) return classification("absent", ["ABSENT_EXACT"]);
+  if (!columnMatches(expectedColumn, observed, snapshot)) {
+    return classification("hold", ["SAME_NAME_DEFINITION_MISMATCH"]);
+  }
+  return classification("complete", ["COMPLETE_EXACT"]);
+}
+
 export function decidePostClerkMigration({ path, classification: state, repairIndexes = [] }) {
   if (!POST_CLERK_MIGRATIONS.includes(path)) {
     fail("INVALID_DECISION_INPUT", "migration path is not in the reviewed post-Clerk sequence");
@@ -1374,6 +1398,7 @@ export function classifyPostClerkMigrationCatalog(snapshotInput) {
     classifyReplySingleFlight(snapshot, maps),
     classifyGraphActivity(snapshot, maps),
     classifyGraphLifecycle(snapshot, maps),
+    classifyIcpExclusionDomains(snapshot, maps),
   ];
   const migrationReports = POST_CLERK_MIGRATIONS.map((path, index) => {
     const result = results[index];

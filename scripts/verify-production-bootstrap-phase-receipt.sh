@@ -166,7 +166,7 @@ if ! ssh-keygen -Y verify \
   exit 1
 fi
 
-# B4 is also bound directly to the eight bytes in the exact expected commit;
+# B4 is also bound directly to the nine bytes in the exact expected commit;
 # hard-coded source pins in the schema/module are defense in depth, not a
 # substitute for reading the reviewed commit.
 if [[ "${EXPECTED_KIND}" == "production-schema-result" ]]; then
@@ -179,6 +179,7 @@ if [[ "${EXPECTED_KIND}" == "production-schema-result" ]]; then
     "docs/migrations/2026-08-12_conversation-reply-single-flight-expand.sql"
     "docs/migrations/2026-08-12_graph-run-activity-expand.sql"
     "docs/migrations/2026-08-12_graph-run-lifecycle-expand.sql"
+    "docs/migrations/2026-08-20_icp-exclusion-domains-expand.sql"
   )
   for index in "${!MIGRATIONS[@]}"; do
     path="${MIGRATIONS[$index]}"

@@ -70,8 +70,8 @@ if ! jq -e '
   and .properties.migrations.items.additionalProperties == false
   and .properties.environment.const == "ci-synthetic"
   and .properties.authority.const == "non-authoritative"
-  and .properties.migrations.minItems == 8
-  and .properties.migrations.maxItems == 8
+  and .properties.migrations.minItems == 9
+  and .properties.migrations.maxItems == 9
 ' >/dev/null "${REPO_ROOT}/docs/ops/ci-migration-rehearsal-receipt.schema.json"; then
   fail "CI receipt JSON Schema is not strict and non-authoritative"
 fi

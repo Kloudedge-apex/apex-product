@@ -127,6 +127,7 @@ function entryMigrations() {
     ["docs/migrations/2026-08-12_conversation-reply-single-flight-expand.sql", "observed", ["worker:gmail-reply-sync"]],
     ["docs/migrations/2026-08-12_graph-run-activity-expand.sql", "not-required", []],
     ["docs/migrations/2026-08-12_graph-run-lifecycle-expand.sql", "observed", ["api:graph-start", "scheduler:graph-start", "worker:graph-run"]],
+    ["docs/migrations/2026-08-20_icp-exclusion-domains-expand.sql", "not-required", []],
   ];
   const repositoryRoot = resolve(TEST_DIR, "../..");
   return entries.map(([path, writerPause, writerScopes]) => ({

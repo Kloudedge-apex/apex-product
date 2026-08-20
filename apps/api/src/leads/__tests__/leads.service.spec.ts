@@ -24,6 +24,9 @@ function mockPrisma() {
     company: {
       findMany: vi.fn().mockResolvedValue([]),
       findFirst: vi.fn().mockResolvedValue(null),
+      upsert: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
     },
     person: {
       findMany: vi.fn().mockResolvedValue([]),
@@ -47,6 +50,9 @@ function mockPrisma() {
     company: {
       findMany: ReturnType<typeof vi.fn>;
       findFirst: ReturnType<typeof vi.fn>;
+      upsert: ReturnType<typeof vi.fn>;
+      update: ReturnType<typeof vi.fn>;
+      updateMany: ReturnType<typeof vi.fn>;
     };
     person: {
       findMany: ReturnType<typeof vi.fn>;
@@ -71,6 +77,9 @@ function buildService(
   prisma: ReturnType<typeof mockPrisma>,
   overrides: {
     serpDiscovery?: SerpDiscoveryService;
+    atsScraper?: AtsScraper;
+    registryScraper?: RegistryScraper;
+    theirStack?: TheirStackService;
     emailPatternService?: EmailPatternService;
   } = {},
 ): LeadsService {
@@ -78,13 +87,13 @@ function buildService(
   const stub = {} as never;
   return new LeadsService(
     prisma,
-    stub as AtsScraper,
+    overrides.atsScraper ?? (stub as AtsScraper),
     stub as TeamPageScraper,
-    stub as RegistryScraper,
+    overrides.registryScraper ?? (stub as RegistryScraper),
     stub as GithubEnrichment,
     stub as JobSignalService,
     overrides.serpDiscovery ?? (stub as SerpDiscoveryService),
-    stub as TheirStackService,
+    overrides.theirStack ?? (stub as TheirStackService),
     overrides.emailPatternService ?? (stub as EmailPatternService),
     stub as IdentityResolver,
     stub as LeadScorer,
@@ -92,6 +101,16 @@ function buildService(
 }
 
 type ScopedLeadsInternals = {
+  discoverCompanies(
+    orgId: string,
+    icp: {
+      targetTitles: string[];
+      targetIndustries: string[];
+      targetGeos: string[];
+      techStackSignals: string[];
+      exclusionDomains?: string[];
+    },
+  ): Promise<string[]>;
   discoverPeople(
     orgId: string,
     icp: {
@@ -130,6 +149,7 @@ describe("LeadsService.upsertCurrentIcpProfile", () => {
     await service.upsertCurrentIcpProfile("org_1", {
       name: "Default ICP",
       targetTitles: ["VP Sales"],
+      exclusionDomains: ["competitor.com"],
     });
 
     expect(prisma.$queryRaw).toHaveBeenCalledOnce();
@@ -140,7 +160,10 @@ describe("LeadsService.upsertCurrentIcpProfile", () => {
     });
     expect(prisma.icpProfile.update).toHaveBeenCalledWith({
       where: { id: "icp_current" },
-      data: expect.objectContaining({ targetTitles: ["VP Sales"] }),
+      data: expect.objectContaining({
+        targetTitles: ["VP Sales"],
+        exclusionDomains: ["competitor.com"],
+      }),
     });
     expect(prisma.icpProfile.update).toHaveBeenCalledWith({
       where: { id: "icp_current" },
@@ -179,6 +202,61 @@ describe("LeadsService.upsertCurrentIcpProfile", () => {
       data: expect.objectContaining({ orgId: "org_1", name: "Default ICP" }),
     });
     expect(prisma.icpProfile.update).not.toHaveBeenCalled();
+  });
+});
+
+describe("LeadsService ICP domain exclusions", () => {
+  it("never persists or probes excluded source domains", async () => {
+    const prisma = mockPrisma();
+    prisma.company.upsert.mockImplementation(
+      async ({ create }: { create: { domain: string } }) => ({
+        id: `company_${create.domain}`,
+      }),
+    );
+    const serpDiscovery = {
+      discoverCompanies: vi.fn().mockResolvedValue([
+        { domain: "competitor.com", name: "Competitor" },
+        { domain: "allowed.example", name: "Allowed" },
+      ]),
+    } as unknown as SerpDiscoveryService;
+    const atsScraper = {
+      discoverCompanies: vi.fn().mockResolvedValue([]),
+      discoverAtsSlugs: vi.fn().mockResolvedValue([]),
+    } as unknown as AtsScraper;
+    const theirStack = {
+      discoverHiringCompanies: vi.fn().mockResolvedValue([]),
+    } as unknown as TheirStackService;
+    const registryScraper = {
+      discoverCompanies: vi.fn().mockResolvedValue([]),
+    } as unknown as RegistryScraper;
+    const service = buildService(prisma, {
+      serpDiscovery,
+      atsScraper,
+      theirStack,
+      registryScraper,
+    });
+
+    const companyIds = await scopedInternals(service).discoverCompanies(
+      "org_1",
+      {
+        targetTitles: [],
+        targetIndustries: [],
+        targetGeos: [],
+        techStackSignals: [],
+        exclusionDomains: ["competitor.com"],
+      },
+    );
+
+    expect(prisma.company.upsert).toHaveBeenCalledOnce();
+    expect(prisma.company.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({ domain: "allowed.example" }),
+      }),
+    );
+    expect(atsScraper.discoverAtsSlugs).toHaveBeenCalledWith([
+      "allowed.example",
+    ]);
+    expect(companyIds).toEqual(["company_allowed.example"]);
   });
 });
 

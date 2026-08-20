@@ -444,12 +444,13 @@
           }
         },
         "migrationExecution": {
-          "type": "array", "minItems": 8, "maxItems": 8,
+          "type": "array", "minItems": 9, "maxItems": 9,
           "prefixItems": [
             { "$ref": "#/$defs/migrationResult" }, { "$ref": "#/$defs/migrationResult" },
             { "$ref": "#/$defs/migrationResult" }, { "$ref": "#/$defs/migrationResult" },
             { "$ref": "#/$defs/migrationResult" }, { "$ref": "#/$defs/migrationResult" },
-            { "$ref": "#/$defs/migrationResult" }, { "$ref": "#/$defs/migrationResult" }
+            { "$ref": "#/$defs/migrationResult" }, { "$ref": "#/$defs/migrationResult" },
+            { "$ref": "#/$defs/migrationResult" }
           ],
           "items": false
         },

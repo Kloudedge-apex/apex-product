@@ -18,6 +18,7 @@ MIGRATIONS=(
   "docs/migrations/2026-08-12_conversation-reply-single-flight-expand.sql"
   "docs/migrations/2026-08-12_graph-run-activity-expand.sql"
   "docs/migrations/2026-08-12_graph-run-lifecycle-expand.sql"
+  "docs/migrations/2026-08-20_icp-exclusion-domains-expand.sql"
 )
 FIXTURE_PATH="scripts/fixtures/migration-rehearsal-data.sql"
 RECONCILIATION_PATH="scripts/fixtures/migration-rehearsal-identity-reconciliation.sql"
@@ -131,7 +132,7 @@ if ! jq -e \
     migrationPostconditionsPassed: true,
     tenantIsolationPassed: true
   }
-  and (.migrations | type == "array" and length == 8)
+  and (.migrations | type == "array" and length == 9)
   and all(.migrations[];
     (keys == ["applied", "path", "postconditionsPassed", "sha256"])
     and .applied == true
@@ -221,4 +222,4 @@ for index in "${!MIGRATIONS[@]}"; do
   fi
 done
 
-echo "Synthetic CI migration receipt verified for ${EXPECTED_COMMIT} (non-authoritative; eight reviewed migrations)"
+echo "Synthetic CI migration receipt verified for ${EXPECTED_COMMIT} (non-authoritative; nine reviewed migrations)"

@@ -585,6 +585,7 @@ model IcpProfile {
   techStackSignals String[]
   intentKeywords   String[]
   seedDomains      String[]
+  exclusionDomains String[]    @default([])
   scheduleEnabled  Boolean     @default(false)
   scheduleInterval Int         @default(24) // hours between runs
   lastRunAt        DateTime?

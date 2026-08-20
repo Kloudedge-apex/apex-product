@@ -168,6 +168,7 @@ MIGRATIONS=(
   "docs/migrations/2026-08-12_conversation-reply-single-flight-expand.sql"
   "docs/migrations/2026-08-12_graph-run-activity-expand.sql"
   "docs/migrations/2026-08-12_graph-run-lifecycle-expand.sql"
+  "docs/migrations/2026-08-20_icp-exclusion-domains-expand.sql"
 )
 WRITER_PAUSE=(
   "observed"
@@ -178,6 +179,7 @@ WRITER_PAUSE=(
   "observed"
   "not-required"
   "observed"
+  "not-required"
 )
 WRITER_SCOPES=(
   '["api:clerk-webhooks","api:identity-membership"]'
@@ -188,6 +190,7 @@ WRITER_SCOPES=(
   '["worker:gmail-reply-sync"]'
   '[]'
   '["api:graph-start","scheduler:graph-start","worker:graph-run"]'
+  '[]'
 )
 EXPECTED_MIGRATION_COUNT="${#MIGRATIONS[@]}"
 

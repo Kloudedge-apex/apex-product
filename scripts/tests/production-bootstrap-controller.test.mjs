@@ -424,7 +424,7 @@ test("the controller exposes the complete bounded action set", () => {
   ]);
 });
 
-test("the controller fixes the exact eight-migration order", () => {
+test("the controller fixes the exact nine-migration order", () => {
   assert.deepEqual(MIGRATIONS, [
     "docs/migrations/2026-08-13_clerk-identity-lifecycle-expand.sql",
     "docs/migrations/2026-06-01_outreach-artifact-unique.sql",
@@ -434,10 +434,11 @@ test("the controller fixes the exact eight-migration order", () => {
     "docs/migrations/2026-08-12_conversation-reply-single-flight-expand.sql",
     "docs/migrations/2026-08-12_graph-run-activity-expand.sql",
     "docs/migrations/2026-08-12_graph-run-lifecycle-expand.sql",
+    "docs/migrations/2026-08-20_icp-exclusion-domains-expand.sql",
   ]);
 });
 
-test("ordered migration recovery resumes every persisted prefix from 2 through 8", () => {
+test("ordered migration recovery resumes every persisted prefix from 2 through 9", () => {
   const ordered = MIGRATIONS.slice(1);
   for (let totalProgress = 2; totalProgress <= MIGRATIONS.length; totalProgress += 1) {
     const completed = MIGRATIONS.slice(1, totalProgress);

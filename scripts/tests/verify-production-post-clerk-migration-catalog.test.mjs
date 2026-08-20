@@ -162,14 +162,15 @@ function initialPostClerkSnapshot({ artifactIndex = false } = {}) {
       "purpose", "conversationId", "providerThreadId", "replyToMessageId", "failureReason", "failedAt",
     ].includes(entry.name)) &&
     !(entry.table === "MeetingLedger" && ["conversationId", "sourceMessageId"].includes(entry.name)) &&
-    entry.table !== "GraphRun");
+    entry.table !== "GraphRun" &&
+    !(entry.table === "IcpProfile" && entry.name === "exclusionDomains"));
   snapshot.indexes = snapshot.indexes.filter((entry) =>
     artifactIndex && entry.name === "OutreachArtifact_idempotency_uniq");
   snapshot.constraints = [];
   return snapshot;
 }
 
-test("the verifier fixes the seven migrations after Clerk in reviewed order", () => {
+test("the verifier fixes the eight migrations after Clerk in reviewed order", () => {
   assert.deepEqual(POST_CLERK_MIGRATIONS, [
     "docs/migrations/2026-06-01_outreach-artifact-unique.sql",
     "docs/migrations/2026-08-12_conversation-store-expand.sql",
@@ -178,6 +179,7 @@ test("the verifier fixes the seven migrations after Clerk in reviewed order", ()
     "docs/migrations/2026-08-12_conversation-reply-single-flight-expand.sql",
     "docs/migrations/2026-08-12_graph-run-activity-expand.sql",
     "docs/migrations/2026-08-12_graph-run-lifecycle-expand.sql",
+    "docs/migrations/2026-08-20_icp-exclusion-domains-expand.sql",
   ]);
   assert.deepEqual(POST_CLERK_MIGRATION_CONTRACT.map((entry) => entry.path), POST_CLERK_MIGRATIONS);
   for (const entry of POST_CLERK_MIGRATION_CONTRACT) {
@@ -192,7 +194,7 @@ test("the verifier fixes the seven migrations after Clerk in reviewed order", ()
 test("the catalog query is bounded, catalog-only, and contains no mutation", () => {
   assert.ok(Buffer.byteLength(POST_CLERK_CATALOG_QUERY) < 64 * 1024);
   assert.doesNotMatch(POST_CLERK_CATALOG_QUERY, /\b(?:INSERT|UPDATE|DELETE|ALTER|CREATE|DROP|TRUNCATE)\b/iu);
-  for (const table of ["OutreachArtifact", "Conversation", "ConversationMessage", "FollowUpTask", "GraphRun"]) {
+  for (const table of ["OutreachArtifact", "Conversation", "ConversationMessage", "FollowUpTask", "GraphRun", "IcpProfile"]) {
     assert.doesNotMatch(POST_CLERK_CATALOG_QUERY, new RegExp(`(?:FROM|JOIN)\\s+"${table}"`, "iu"));
   }
   assert.match(POST_CLERK_CATALOG_QUERY, /pg_catalog\.pg_index/u);
@@ -213,11 +215,11 @@ test("hostile public left and length functions cannot shadow catalog inspection"
   assert.doesNotMatch(source, /search_path=public,pg_catalog/u);
 });
 
-test("an exact complete catalog classifies all seven migrations complete", () => {
+test("an exact complete catalog classifies all eight migrations complete", () => {
   const report = classifyPostClerkMigrationCatalog(completeSnapshot());
   assert.equal(report.overall, "complete");
-  assert.deepEqual(report.migrations.map((entry) => entry.classification), Array(7).fill("complete"));
-  assert.deepEqual(report.migrations.map((entry) => entry.action), Array(7).fill("adopt"));
+  assert.deepEqual(report.migrations.map((entry) => entry.classification), Array(8).fill("complete"));
+  assert.deepEqual(report.migrations.map((entry) => entry.action), Array(8).fill("adopt"));
   assert.ok(report.migrations.every((entry) => entry.lostAckAdopted));
   assert.match(report.catalogHash, /^sha256:[0-9a-f]{64}$/u);
   assert.match(report.evidenceHash, /^sha256:[0-9a-f]{64}$/u);
@@ -228,8 +230,8 @@ test("an exact complete catalog classifies all seven migrations complete", () =>
 
 test("a clean initial post-Clerk catalog is absent for every later migration", () => {
   const report = classifyPostClerkMigrationCatalog(initialPostClerkSnapshot());
-  assert.deepEqual(report.migrations.map((entry) => entry.classification), Array(7).fill("absent"));
-  assert.deepEqual(report.migrations.map((entry) => entry.action), Array(7).fill("apply"));
+  assert.deepEqual(report.migrations.map((entry) => entry.classification), Array(8).fill("absent"));
+  assert.deepEqual(report.migrations.map((entry) => entry.action), Array(8).fill("apply"));
 });
 
 test("lost acknowledgement adopts only an exact complete next migration", () => {
@@ -395,6 +397,25 @@ test("graph migrations require exact defaults and exact index definitions", () =
   graphIndex.predicateSql = graphIndex.predicateSql.replace("AWAITING_APPROVAL", "COMPLETED");
   graphIndex.predicateLength = graphIndex.predicateSql.length;
   assert.equal(reportEntry(classifyPostClerkMigrationCatalog(wrongPredicate), POST_CLERK_MIGRATIONS[6]).classification, "hold");
+});
+
+test("ICP exclusion domains require the exact non-null empty-array column", () => {
+  const absent = completeSnapshot();
+  absent.columns = absent.columns.filter((entry) =>
+    !(entry.table === "IcpProfile" && entry.name === "exclusionDomains"));
+  assert.equal(
+    reportEntry(classifyPostClerkMigrationCatalog(absent), POST_CLERK_MIGRATIONS[7]).classification,
+    "absent",
+  );
+
+  const incompatible = completeSnapshot();
+  const column = incompatible.columns.find((entry) =>
+    entry.table === "IcpProfile" && entry.name === "exclusionDomains");
+  column.notNull = false;
+  assert.equal(
+    reportEntry(classifyPostClerkMigrationCatalog(incompatible), POST_CLERK_MIGRATIONS[7]).classification,
+    "hold",
+  );
 });
 
 test("decision API never adopts absent, recoverable, repairable, or hold states", () => {

@@ -66,6 +66,7 @@ MIGRATIONS=(
   "docs/migrations/2026-08-12_conversation-reply-single-flight-expand.sql"
   "docs/migrations/2026-08-12_graph-run-activity-expand.sql"
   "docs/migrations/2026-08-12_graph-run-lifecycle-expand.sql"
+  "docs/migrations/2026-08-20_icp-exclusion-domains-expand.sql"
 )
 WRITER_PAUSE=(
   "observed"
@@ -76,6 +77,7 @@ WRITER_PAUSE=(
   "observed"
   "not-required"
   "observed"
+  "not-required"
 )
 WRITER_SCOPES=(
   '["api:clerk-webhooks","api:identity-membership"]'
@@ -86,6 +88,7 @@ WRITER_SCOPES=(
   '["worker:gmail-reply-sync"]'
   '[]'
   '["api:graph-start","scheduler:graph-start","worker:graph-run"]'
+  '[]'
 )
 
 for path in "${MIGRATIONS[@]}"; do
@@ -605,7 +608,7 @@ make_bound_variant() {
 sign_receipt "${HARNESS}/receipt.json"
 
 # The published schema is a strict v2 contract and statically pins the same
-# eight migrations, ordering, writer pauses, and writer scopes as the verifier.
+# nine migrations, ordering, writer pauses, and writer scopes as the verifier.
 jq -e '
   .["$schema"] == "https://json-schema.org/draft/2020-12/schema"
   and .["$id"] == "https://workforceos.xyz/schemas/production-bootstrap-entry-receipt-v2.json"
@@ -658,9 +661,9 @@ jq -e '
   and .["$defs"].inventory.properties.graphLifecycleSchemaReady.const == false
   and .["$defs"].inventory.properties.outreachIdempotencyDuplicateGroups.const == 0
   and .["$defs"].inventory.properties.managerRoleRows.const == 0
-  and (.properties.migrations.prefixItems | length == 8)
-  and .properties.migrations.minItems == 8
-  and .properties.migrations.maxItems == 8
+  and (.properties.migrations.prefixItems | length == 9)
+  and .properties.migrations.minItems == 9
+  and .properties.migrations.maxItems == 9
   and .properties.migrations.items == false
 ' "${SCHEMA}" >/dev/null || fail "bootstrap entry JSON Schema v2 contract is incomplete"
 for index in "${!MIGRATIONS[@]}"; do

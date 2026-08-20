@@ -131,6 +131,7 @@ MIGRATIONS=(
   "docs/migrations/2026-08-12_conversation-reply-single-flight-expand.sql"
   "docs/migrations/2026-08-12_graph-run-activity-expand.sql"
   "docs/migrations/2026-08-12_graph-run-lifecycle-expand.sql"
+  "docs/migrations/2026-08-20_icp-exclusion-domains-expand.sql"
 )
 for path in "${MIGRATIONS[@]}"; do
   mkdir -p "${FIXTURE_REPO}/$(dirname "${path}")"

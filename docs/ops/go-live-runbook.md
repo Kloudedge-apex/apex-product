@@ -109,14 +109,14 @@ private snapshot used by `scripts/deploy-prod.sh`.
 
 ## (0) RELEASE ADMISSION AND SCHEMA ORDER
 
-The current guarded-SDR candidate is a production **NO-GO** until all eight
+The current guarded-SDR candidate is a production **NO-GO** until all nine
 review-only SQL files are rehearsed and then applied with separate operator
 approval. Codex did not apply them. Use the invocation, writer-pause,
 duplicate-inventory, retry, and postcondition instructions inside each file.
 
 The blocking `Migration Rehearsal (blocking)` CI job is a hermetic candidate
 check, not the staging rehearsal named by the production receipt. It applies
-the exact eight committed SQL blobs, in reviewed order, to a fresh PostgreSQL
+the exact nine committed SQL blobs, in reviewed order, to a fresh PostgreSQL
 16 + pgvector service populated with two reserved synthetic tenants. It proves
 the synthetic identity reconciliation/cutover invariants, fixed-index and
 schema postconditions, and a custom-format backup/restore fingerprint. Its
@@ -219,7 +219,7 @@ reviewed source change before a new signature can be admitted.
 `scripts/verify-migration-release-receipt.sh` rejects undeclared fields, copies
 the supplied trust file once, matches those exact bytes to the reviewed digest,
 and verifies the detached signature against the claimed approver. The reviewed
-digest and all eight migration bytes are read from the exact candidate commit
+digest and all nine migration bytes are read from the exact candidate commit
 with replacement objects disabled, never from mutable working-tree files. The
 verifier enforces their order and writer-pause requirements. The receipt,
 signature, and pinned allowed-signers trust root are mandatory inputs to
@@ -232,7 +232,7 @@ bootstrap shebang applies, using:
 
 The controller freezes the receipt, signature, and trust-root bytes into its
 private same-attempt runtime directory, then verifies the signature, freshness,
-and fixed eight-migration order. It binds the receipt to the exact active API,
+and fixed nine-migration order. It binds the receipt to the exact active API,
 worker, and console/BFF revision, image, and write mode. Immediately before
 every forward or rollback mutation it re-reads all three exact active
 identities, so a same-image configuration revision is still a mismatch.
@@ -249,7 +249,7 @@ revisions, and assigns API traffic explicitly to the signed revision name at
 ### Two-phase activation for first-class `DELIVERY_UNKNOWN` writes
 
 The `2026-08-12_outreach-delivery-unknown-expand.sql` enum expansion remains
-fourth in the fixed eight-migration sequence. There is no fallback writer
+fourth in the fixed nine-migration sequence. There is no fallback writer
 mode. Historical `REJECTED` rows with a reserved
 `delivery-unknown:` marker are read-only normalization input; new application
 code must never create them.
@@ -571,7 +571,7 @@ an RBAC audit must still prove that its service principal is the exclusive
 `Microsoft.App/containerApps/write` identity across `apex-gtm-api`,
 `apex-gtm-worker`, and `nikxius-web`, or is confined by the same coordinated
 three-resource mutation lease. The allowed-signers source pin is configured for
-`workforce-production-approver`, but all eight migrations still require staging
+`workforce-production-approver`, but all nine migrations still require staging
 rehearsal, separate production approval, apply, and signed receipt evidence.
 Therefore the authority attestation must remain unset until every external
 control and migration prerequisite is verified. Re-audit after any
@@ -601,6 +601,7 @@ Required dependency order:
 6. `docs/migrations/2026-08-12_conversation-reply-single-flight-expand.sql`
 7. `docs/migrations/2026-08-12_graph-run-activity-expand.sql`
 8. `docs/migrations/2026-08-12_graph-run-lifecycle-expand.sql`
+9. `docs/migrations/2026-08-20_icp-exclusion-domains-expand.sql`
 
 Before migration 3, retain the read-only legacy `Conversation` catalog
 inventory and row count with the change record. The reviewed migration accepts

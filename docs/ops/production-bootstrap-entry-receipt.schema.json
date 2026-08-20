@@ -56,8 +56,8 @@
     "quiescedState": { "$ref": "#/$defs/quiescedState" },
     "migrations": {
       "type": "array",
-      "minItems": 8,
-      "maxItems": 8,
+      "minItems": 9,
+      "maxItems": 9,
       "prefixItems": [
         {
           "allOf": [
@@ -159,6 +159,19 @@
                 "sha256": { "const": "sha256:a502874d67c222332b253859b40699a679daf24c27c9b0bbedbd3c63e8254e2b" },
                 "writerPause": { "const": "observed" },
                 "writerScopes": { "const": ["api:graph-start", "scheduler:graph-start", "worker:graph-run"] }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            { "$ref": "#/$defs/migrationEntry" },
+            {
+              "properties": {
+                "path": { "const": "docs/migrations/2026-08-20_icp-exclusion-domains-expand.sql" },
+                "sha256": { "const": "sha256:0b29f8654efa3e21e3c0bfa29a5c8caf3a029967c9446e26b6340a68899b83db" },
+                "writerPause": { "const": "not-required" },
+                "writerScopes": { "const": [] }
               }
             }
           ]

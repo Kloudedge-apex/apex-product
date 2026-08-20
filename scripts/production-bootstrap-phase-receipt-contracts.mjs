@@ -154,6 +154,12 @@ export const PHASE_MIGRATIONS = Object.freeze([
     writerPause: "observed",
     writerScopes: Object.freeze(["api:graph-start", "scheduler:graph-start", "worker:graph-run"]),
   }),
+  Object.freeze({
+    path: "docs/migrations/2026-08-20_icp-exclusion-domains-expand.sql",
+    sha256: "sha256:0b29f8654efa3e21e3c0bfa29a5c8caf3a029967c9446e26b6340a68899b83db",
+    writerPause: "not-required",
+    writerScopes: Object.freeze([]),
+  }),
 ]);
 
 const RECEIPT_KEYS = [
@@ -676,7 +682,7 @@ function validateRollbackBaseline(baseline, candidate, expectedDeployments, labe
 
 function validateMigrationExecution(execution, label) {
   if (!Array.isArray(execution) || execution.length !== PHASE_MIGRATIONS.length) {
-    fail(`${label} must contain exactly eight ordered migrations`);
+    fail(`${label} must contain exactly nine ordered migrations`);
   }
   execution.forEach((migration, index) => {
     const itemLabel = `${label}[${index}]`;

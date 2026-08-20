@@ -106,6 +106,7 @@ export const MIGRATIONS = Object.freeze([
   "docs/migrations/2026-08-12_conversation-reply-single-flight-expand.sql",
   "docs/migrations/2026-08-12_graph-run-activity-expand.sql",
   "docs/migrations/2026-08-12_graph-run-lifecycle-expand.sql",
+  "docs/migrations/2026-08-20_icp-exclusion-domains-expand.sql",
 ]);
 
 
@@ -3794,7 +3795,7 @@ function deployCompatible(runner, request, state, options) {
   const firstAttempt = replayMode === "first-attempt";
   const mutationReplay = replayMode === "mutation-replay";
   if (state.migrationProgress.length !== MIGRATIONS.length) {
-    fail("deploy-compatible requires all eight exact migrations or an exact persisted B4 replay");
+    fail("deploy-compatible requires all nine exact migrations or an exact persisted B4 replay");
   }
   verifyAzureLease(runner, request);
   verifyReleaseLock(runner, request);

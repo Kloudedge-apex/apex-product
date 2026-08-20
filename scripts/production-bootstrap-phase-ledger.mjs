@@ -347,6 +347,12 @@ const ENTRY_MIGRATIONS = Object.freeze([
     writerPause: "observed",
     writerScopes: ["api:graph-start", "scheduler:graph-start", "worker:graph-run"],
   }),
+  Object.freeze({
+    path: "docs/migrations/2026-08-20_icp-exclusion-domains-expand.sql",
+    sha256: "sha256:0b29f8654efa3e21e3c0bfa29a5c8caf3a029967c9446e26b6340a68899b83db",
+    writerPause: "not-required",
+    writerScopes: [],
+  }),
 ]);
 const EMBEDDED_RECEIPT_KEYS = [
   "kind",
@@ -1222,7 +1228,7 @@ function validateQuiescedState(quiescedState, sourceBaseline, context) {
 
 function validateEntryMigrations(migrations) {
   if (!Array.isArray(migrations) || migrations.length !== ENTRY_MIGRATIONS.length) {
-    fail("entry receipt must bind exactly eight ordered migrations");
+    fail("entry receipt must bind exactly nine ordered migrations");
   }
   migrations.forEach((migration, index) => {
     assertExactKeys(migration, MIGRATION_KEYS, `entry receipt migration ${index}`);

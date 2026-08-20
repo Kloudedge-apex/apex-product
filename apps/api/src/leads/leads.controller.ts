@@ -15,6 +15,7 @@ import type { Response } from "express";
 import { OrgId } from "../common/org-context.decorator";
 import { LeadsService } from "./leads.service";
 import type { Seniority, Department } from "@prisma/client";
+import { normalizeIcpDomain } from "./icp-domain-exclusions";
 
 type LeadsUiStage =
   | "sourced"
@@ -45,6 +46,7 @@ interface IcpProfileBody {
   techStackSignals?: string[];
   intentKeywords?: string[];
   seedDomains?: string[];
+  exclusionDomains?: string[];
 }
 
 @Controller("leads")
@@ -229,6 +231,16 @@ function normalizeIcpProfileBody(body: IcpProfileBody, preserveOmitted = false) 
   if (typeof minEmployees === "number" && typeof maxEmployees === "number" && minEmployees > maxEmployees) {
     throw new BadRequestException("minEmployees must not exceed maxEmployees");
   }
+  const rawExclusionDomains = cap(body.exclusionDomains, 50, "exclusionDomains");
+  const exclusionDomains = rawExclusionDomains?.map((value) => {
+    const normalized = normalizeIcpDomain(value);
+    if (!normalized) {
+      throw new BadRequestException(
+        `exclusionDomains contains an invalid web domain: ${value}`,
+      );
+    }
+    return normalized;
+  });
   return {
     name: body.name.slice(0, 200),
     targetTitles: cap(body.targetTitles, 20, "targetTitles"),
@@ -237,6 +249,10 @@ function normalizeIcpProfileBody(body: IcpProfileBody, preserveOmitted = false) 
     techStackSignals: cap(body.techStackSignals, 20, "techStackSignals"),
     intentKeywords: cap(body.intentKeywords, 30, "intentKeywords"),
     seedDomains: cap(body.seedDomains, 50, "seedDomains"),
+    exclusionDomains:
+      exclusionDomains === undefined
+        ? undefined
+        : [...new Set(exclusionDomains)],
     minEmployees,
     maxEmployees,
   };
