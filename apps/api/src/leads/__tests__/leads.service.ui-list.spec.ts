@@ -127,12 +127,29 @@ describe("LeadsService.listLeadsForUi", () => {
         lastOutboundAt: true,
       },
     });
+    expect(prisma.meetingLedger.findMany).toHaveBeenCalledWith({
+      where: {
+        orgId: "org_1",
+        personId: { in: ["person_replied"] },
+        status: { not: "CANCELLED" },
+      },
+      select: { personId: true, status: true },
+    });
   });
 });
 
 describe("LeadsService.getPersonDetail", () => {
   it("returns tenant-scoped research, score categories and attributable evidence", async () => {
     const now = new Date();
+    const lastOutboundAt = new Date("2026-08-19T10:00:00.000Z");
+    const lastInboundAt = new Date("2026-08-19T12:00:00.000Z");
+    const conversationFindFirst = vi.fn().mockImplementation(
+      (args: { where?: { lastInboundAt?: unknown } }) =>
+        args.where?.lastInboundAt
+          ? Promise.resolve({ lastInboundAt })
+          : Promise.resolve({ lastOutboundAt }),
+    );
+    const meetingFindFirst = vi.fn().mockResolvedValue(null);
     const prisma = {
       person: {
         findFirstOrThrow: vi.fn().mockResolvedValue({
@@ -192,10 +209,9 @@ describe("LeadsService.getPersonDetail", () => {
         }),
       },
       conversation: {
-        findFirst: vi.fn().mockResolvedValue({
-          lastOutboundAt: new Date("2026-08-19T10:00:00.000Z"),
-        }),
+        findFirst: conversationFindFirst,
       },
+      meetingLedger: { findFirst: meetingFindFirst },
     } as unknown as PrismaService;
 
     const result = await buildService(prisma).getPersonDetail("org_1", "person_1");
@@ -223,7 +239,7 @@ describe("LeadsService.getPersonDetail", () => {
         },
       }),
     );
-    expect(prisma.conversation.findFirst).toHaveBeenCalledWith(
+    expect(conversationFindFirst).toHaveBeenCalledWith(
       expect.objectContaining({
         where: {
           orgId: "org_1",
@@ -232,6 +248,23 @@ describe("LeadsService.getPersonDetail", () => {
         },
       }),
     );
+    expect(conversationFindFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          orgId: "org_1",
+          personId: "person_1",
+          lastInboundAt: { not: null },
+        },
+      }),
+    );
+    expect(meetingFindFirst).toHaveBeenCalledWith({
+      where: {
+        orgId: "org_1",
+        personId: "person_1",
+        status: { not: "CANCELLED" },
+      },
+      select: { id: true },
+    });
     expect(result.scoreBreakdown).toEqual({ fit: 100, intent: 80, engagement: 90, timing: 80 });
     expect(result.intentSignals).toEqual([
       { label: "Hiring for Account Executive", confidence: 0.9 },
@@ -239,7 +272,15 @@ describe("LeadsService.getPersonDetail", () => {
     expect(result.researchBrief).toContain("Recent attributable evidence");
     expect(result.recentEvidenceEvents).toHaveLength(1);
     expect(result.lastContactedAt).toEqual(
-      new Date("2026-08-19T10:00:00.000Z"),
+      lastOutboundAt,
     );
+    expect(result.stage).toBe("replied");
+
+    meetingFindFirst.mockResolvedValue({ id: "meeting_1" });
+    const withMeeting = await buildService(prisma).getPersonDetail(
+      "org_1",
+      "person_1",
+    );
+    expect(withMeeting.stage).toBe("meeting");
   });
 });
