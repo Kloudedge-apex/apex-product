@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { DashboardService } from "../dashboard.service";
 
 describe("DashboardService.stats", () => {
-  it("returns measured counts and keeps an unmeasured reply rate null", async () => {
+  it("returns only measured counts", async () => {
     const prisma = {
       leadScore: {
         count: vi.fn().mockResolvedValueOnce(12).mockResolvedValueOnce(5),
@@ -16,7 +16,6 @@ describe("DashboardService.stats", () => {
       leadsSourced: 12,
       leadsQualified: 5,
       emailsSent: 3,
-      replyRate: null,
       meetingsBooked: 2,
     });
   });
