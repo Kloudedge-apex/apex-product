@@ -18,18 +18,14 @@ const UNSUBSCRIBE_READ_PATH = /^\/api\/u\/[^/]+(?:\/post)?\/?$/i;
 const UNSUBSCRIBE_POST_PATH = /^\/api\/u\/[^/]+\/?$/i;
 
 /**
- * GET is normally read-only, but these legacy routes can mutate Redis, refresh
+ * GET is normally read-only, but these mounted routes can mutate Redis, refresh
  * credentials, call a provider, or synchronize a database projection.
  */
 const SIDE_EFFECTFUL_GET_PATHS: readonly RegExp[] = [
-  /^\/api\/agents\/templates$/,
   /^\/api\/billing\/?$/,
   /^\/api\/integrations\/gmail\/auth-url$/,
   /^\/api\/integrations\/gmail\/callback$/,
-  /^\/api\/integrations\/linkedin\/callback$/,
   /^\/api\/integrations\/gmail\/(?:messages|search|threads)(?:\/|$)/,
-  /^\/api\/integrations\/hubspot\//,
-  /^\/api\/workflows\/runs\/[^/]+$/,
 ];
 
 /**
@@ -43,16 +39,12 @@ const READ_ONLY_GET_PATHS: readonly RegExp[] = [
   /^\/api\/kpis(?:\/(?:operational|quality|commercial|guarantee-defense|experimentation))?\/?$/,
   /^\/api\/pipeline\/status$/,
   /^\/api\/policy-events\/?$/,
-  /^\/api\/runs(?:\/(?:agent\/[^/]+|[^/]+))?\/?$/,
   /^\/api\/graph\/runs(?:\/[^/]+)?\/?$/,
   /^\/api\/graph\/runs\/[^/]+\/outreach-artifacts$/,
   /^\/api\/outreach-artifacts(?:\/(?:review-capability|[^/]+))?\/?$/,
-  /^\/api\/workflows\/templates(?:\/[^/]+)?\/?$/,
-  /^\/api\/workflows\/runs\/?$/,
   /^\/api\/orgs\/(?:me|me\/(?:capabilities|health)|onboarding\/status|[^/]+|[^/]+\/stats)\/?$/,
   /^\/api\/outreach\/suppression\/?$/,
   /^\/api\/conversations(?:\/[^/]+)?\/?$/,
-  /^\/api\/(?:inbox|accounts|campaigns|playbooks|deliverability)\/?$/,
   /^\/api\/leads\/?$/,
   /^\/api\/leads\/(?:icp|companies|people|export\/csv|jobs|stats)\/?$/,
   /^\/api\/leads\/companies\/[^/]+\/people\/?$/,
@@ -61,12 +53,8 @@ const READ_ONLY_GET_PATHS: readonly RegExp[] = [
   /^\/api\/metrics\/?$/,
   /^\/api\/dashboard\/stats$/,
   /^\/api\/activity\/?$/,
-  /^\/api\/agents\/?$/,
-  /^\/api\/agents\/template-configs(?:\/[^/]+)?\/?$/,
-  /^\/api\/agents\/[^/]+(?:\/(?:analytics|runs|memories))?\/?$/,
   /^\/api\/integrations\/?$/,
   /^\/api\/integrations\/catalog$/,
-  /^\/api\/integrations\/linkedin\/connect$/,
 ];
 
 function requestPath(url: string): string {
