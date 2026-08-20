@@ -42,6 +42,7 @@ function mockPrisma() {
       findUnique: vi.fn(),
       findMany: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn().mockResolvedValue({ count: 0 }),
     },
     outreachArtifact: {
       findUnique: vi.fn(),
@@ -252,6 +253,13 @@ describe("MeetingsService", () => {
   });
 
   describe("update", () => {
+    it("rejects an empty update without touching persistence", async () => {
+      await expect(service.update("org_1", "mtg_1", {})).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+      expect(prisma.meetingLedger.updateMany).not.toHaveBeenCalled();
+    });
+
     it("forbids updating a CANCELLED meeting", async () => {
       (prisma.meetingLedger.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(
         meetingRow({ status: MeetingStatus.CANCELLED }),
@@ -270,39 +278,67 @@ describe("MeetingsService", () => {
       ).rejects.toBeInstanceOf(BadRequestException);
     });
 
+    it("forbids updating a NO_SHOW meeting", async () => {
+      (prisma.meetingLedger.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(
+        meetingRow({ status: MeetingStatus.NO_SHOW }),
+      );
+      await expect(
+        service.update("org_1", "mtg_1", { title: "New" }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
     it("only sends provided fields to prisma", async () => {
       (prisma.meetingLedger.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(
         meetingRow(),
       );
-      (prisma.meetingLedger.update as ReturnType<typeof vi.fn>).mockResolvedValue(
-        meetingRow(),
-      );
+      (prisma.meetingLedger.updateMany as ReturnType<typeof vi.fn>).mockResolvedValue({
+        count: 1,
+      });
       await service.update("org_1", "mtg_1", { title: "Updated" });
-      const updateArg = (prisma.meetingLedger.update as ReturnType<typeof vi.fn>).mock
+      const updateArg = (prisma.meetingLedger.updateMany as ReturnType<typeof vi.fn>).mock
         .calls[0][0];
       expect(updateArg.data).toEqual({ title: "Updated" });
+      expect(updateArg.where).toEqual({
+        id: "mtg_1",
+        orgId: "org_1",
+        status: { in: [MeetingStatus.PROPOSED, MeetingStatus.CONFIRMED] },
+      });
     });
   });
 
   describe("confirm", () => {
     it("transitions PROPOSED → CONFIRMED with confirmedBy", async () => {
+      (prisma.meetingLedger.updateMany as ReturnType<typeof vi.fn>).mockResolvedValue({
+        count: 1,
+      });
       (prisma.meetingLedger.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(
-        meetingRow(),
-      );
-      (prisma.meetingLedger.update as ReturnType<typeof vi.fn>).mockResolvedValue(
         meetingRow({ status: MeetingStatus.CONFIRMED, confirmedBy: "user_1" }),
       );
       const result = await service.confirm("org_1", "mtg_1", "user_1");
       expect(result.status).toBe(MeetingStatus.CONFIRMED);
-      const updateArg = (prisma.meetingLedger.update as ReturnType<typeof vi.fn>).mock
+      const updateArg = (prisma.meetingLedger.updateMany as ReturnType<typeof vi.fn>).mock
         .calls[0][0];
+      expect(updateArg.where).toEqual({
+        id: "mtg_1",
+        orgId: "org_1",
+        status: { in: [MeetingStatus.PROPOSED] },
+      });
       expect(updateArg.data.confirmedBy).toBe("user_1");
       expect(updateArg.data.confirmedAt).toBeInstanceOf(Date);
     });
 
-    it("refuses to confirm a non-PROPOSED meeting", async () => {
+    it("idempotently returns an already confirmed meeting", async () => {
       (prisma.meetingLedger.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(
         meetingRow({ status: MeetingStatus.CONFIRMED }),
+      );
+      await expect(service.confirm("org_1", "mtg_1", "user_1")).resolves.toMatchObject({
+        status: MeetingStatus.CONFIRMED,
+      });
+    });
+
+    it("refuses to confirm a terminal meeting", async () => {
+      (prisma.meetingLedger.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(
+        meetingRow({ status: MeetingStatus.CANCELLED }),
       );
       await expect(service.confirm("org_1", "mtg_1", "user_1")).rejects.toBeInstanceOf(
         BadRequestException,
@@ -312,22 +348,31 @@ describe("MeetingsService", () => {
 
   describe("cancel", () => {
     it("transitions PROPOSED → CANCELLED with reason", async () => {
+      (prisma.meetingLedger.updateMany as ReturnType<typeof vi.fn>).mockResolvedValue({
+        count: 1,
+      });
       (prisma.meetingLedger.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(
-        meetingRow(),
-      );
-      (prisma.meetingLedger.update as ReturnType<typeof vi.fn>).mockResolvedValue(
         meetingRow({ status: MeetingStatus.CANCELLED, cancelledReason: "rescheduled" }),
       );
       await service.cancel("org_1", "mtg_1", "rescheduled");
-      const updateArg = (prisma.meetingLedger.update as ReturnType<typeof vi.fn>).mock
+      const updateArg = (prisma.meetingLedger.updateMany as ReturnType<typeof vi.fn>).mock
         .calls[0][0];
       expect(updateArg.data.status).toBe(MeetingStatus.CANCELLED);
       expect(updateArg.data.cancelledReason).toBe("rescheduled");
     });
 
-    it("refuses to cancel an already CANCELLED meeting", async () => {
+    it("idempotently returns an already cancelled meeting", async () => {
       (prisma.meetingLedger.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(
         meetingRow({ status: MeetingStatus.CANCELLED }),
+      );
+      await expect(service.cancel("org_1", "mtg_1")).resolves.toMatchObject({
+        status: MeetingStatus.CANCELLED,
+      });
+    });
+
+    it("refuses to cancel a completed meeting", async () => {
+      (prisma.meetingLedger.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(
+        meetingRow({ status: MeetingStatus.COMPLETED }),
       );
       await expect(service.cancel("org_1", "mtg_1")).rejects.toBeInstanceOf(
         BadRequestException,
@@ -346,14 +391,53 @@ describe("MeetingsService", () => {
     });
 
     it("transitions CONFIRMED → COMPLETED", async () => {
+      (prisma.meetingLedger.updateMany as ReturnType<typeof vi.fn>).mockResolvedValue({
+        count: 1,
+      });
       (prisma.meetingLedger.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(
-        meetingRow({ status: MeetingStatus.CONFIRMED }),
-      );
-      (prisma.meetingLedger.update as ReturnType<typeof vi.fn>).mockResolvedValue(
         meetingRow({ status: MeetingStatus.COMPLETED }),
       );
       const result = await service.markCompleted("org_1", "mtg_1");
       expect(result.status).toBe(MeetingStatus.COMPLETED);
+    });
+
+    it("idempotently returns an already completed meeting", async () => {
+      (prisma.meetingLedger.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(
+        meetingRow({ status: MeetingStatus.COMPLETED }),
+      );
+      await expect(service.markCompleted("org_1", "mtg_1")).resolves.toMatchObject({
+        status: MeetingStatus.COMPLETED,
+      });
+    });
+  });
+
+  describe("markNoShow", () => {
+    it("transitions CONFIRMED → NO_SHOW and is retry-safe", async () => {
+      (prisma.meetingLedger.updateMany as ReturnType<typeof vi.fn>).mockResolvedValue({
+        count: 1,
+      });
+      (prisma.meetingLedger.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(
+        meetingRow({ status: MeetingStatus.NO_SHOW }),
+      );
+
+      await expect(service.markNoShow("org_1", "mtg_1")).resolves.toMatchObject({
+        status: MeetingStatus.NO_SHOW,
+      });
+      (prisma.meetingLedger.updateMany as ReturnType<typeof vi.fn>).mockResolvedValue({
+        count: 0,
+      });
+      await expect(service.markNoShow("org_1", "mtg_1")).resolves.toMatchObject({
+        status: MeetingStatus.NO_SHOW,
+      });
+    });
+
+    it("refuses to mark a proposed meeting as no-show", async () => {
+      (prisma.meetingLedger.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(
+        meetingRow({ status: MeetingStatus.PROPOSED }),
+      );
+      await expect(service.markNoShow("org_1", "mtg_1")).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
     });
   });
 
