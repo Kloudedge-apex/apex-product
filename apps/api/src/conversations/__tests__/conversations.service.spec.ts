@@ -356,6 +356,10 @@ describe("ConversationsService", () => {
     it("archives once, clears unread state, and is idempotent thereafter", async () => {
       prisma.conversation.findFirst
         .mockResolvedValueOnce(conversationRow())
+        .mockResolvedValueOnce({
+          archivedAt: null,
+          providerThreadId: "gmail-thread-1",
+        })
         .mockResolvedValueOnce(
           conversationRow({ archivedAt: new Date("2026-08-12T00:00:00.000Z") }),
         );
@@ -377,7 +381,81 @@ describe("ConversationsService", () => {
         where: { id: "conversation_1", orgId: "org_1", archivedAt: null },
         data: { archivedAt: expect.any(Date), unreadCount: 0 },
       });
+      expect(prisma.outreachArtifact.updateMany).toHaveBeenCalledWith({
+        where: {
+          orgId: "org_1",
+          purpose: OutreachArtifactPurpose.REPLY,
+          status: {
+            in: [
+              OutreachArtifactStatus.DRAFT,
+              OutreachArtifactStatus.PENDING_REVIEW,
+              OutreachArtifactStatus.APPROVED,
+            ],
+          },
+          AND: [
+            {
+              OR: [
+                { conversationId: "conversation_1" },
+                { providerThreadId: "gmail-thread-1" },
+              ],
+            },
+          ],
+        },
+        data: {
+          status: OutreachArtifactStatus.SUPPRESSED,
+          reviewerNote:
+            "policy-skip: conversation archived before reply dispatch",
+        },
+      });
+      expect(prisma.$queryRaw.mock.calls.map((call) => call[1])).toEqual(
+        expect.arrayContaining([
+          "outreach-send-reservation:org_1",
+          "outreach-reply-thread:org_1:conversation:conversation_1",
+          "outreach-reply-thread:org_1:provider-thread:gmail-thread-1",
+        ]),
+      );
     });
+
+    it.each([
+      {
+        label: "in-flight",
+        artifact: {
+          id: "reply_sending",
+          status: OutreachArtifactStatus.SENDING,
+          reviewerNote: null,
+        },
+        expectedStatus: OutreachArtifactStatus.SENDING,
+      },
+      {
+        label: "legacy delivery-unknown",
+        artifact: {
+          id: "reply_unknown",
+          status: OutreachArtifactStatus.REJECTED,
+          reviewerNote: "delivery-unknown: provider response was lost",
+        },
+        expectedStatus: OutreachArtifactStatus.DELIVERY_UNKNOWN,
+      },
+    ])(
+      "refuses to archive while a $label reply outcome is unresolved",
+      async ({ artifact, expectedStatus }) => {
+        prisma.conversation.findFirst
+          .mockResolvedValueOnce(conversationRow())
+          .mockResolvedValueOnce({
+            archivedAt: null,
+            providerThreadId: "gmail-thread-1",
+          });
+        prisma.outreachArtifact.findFirst.mockResolvedValue(artifact);
+
+        await expect(
+          service.archive("org_1", "conversation_1"),
+        ).rejects.toThrow(
+          `Reply artifact ${artifact.id} is ${expectedStatus}`,
+        );
+
+        expect(prisma.outreachArtifact.updateMany).not.toHaveBeenCalled();
+        expect(prisma.conversation.updateMany).not.toHaveBeenCalled();
+      },
+    );
 
     it("restores an archived conversation once and is idempotent thereafter", async () => {
       prisma.conversation.findFirst
@@ -419,6 +497,57 @@ describe("ConversationsService", () => {
   });
 
   describe("reply drafts", () => {
+    it("rejects generated and human reply drafts while the conversation is archived", async () => {
+      prisma.conversation.findFirst.mockResolvedValue(
+        conversationRow({
+          archivedAt: new Date("2026-08-12T00:00:00.000Z"),
+          messages: [inboundMessage()],
+        }),
+      );
+
+      await expect(
+        service.generateReplyDraft("org_1", "conversation_1"),
+      ).rejects.toThrow(
+        "This conversation is archived. Restore it before creating another reply draft.",
+      );
+      await expect(
+        service.createHumanReplyDraft("org_1", "conversation_1", {
+          body: "This must not become reviewable",
+        }),
+      ).rejects.toThrow(
+        "This conversation is archived. Restore it before creating another reply draft.",
+      );
+
+      expect(llm.chat).not.toHaveBeenCalled();
+      expect(prisma.outreachArtifact.create).not.toHaveBeenCalled();
+    });
+
+    it("re-checks active state under the reply locks when archive wins a creation race", async () => {
+      prisma.conversation.findFirst
+        .mockResolvedValueOnce(
+          conversationRow({ messages: [inboundMessage()] }),
+        )
+        .mockResolvedValueOnce(null);
+
+      await expect(
+        service.createHumanReplyDraft("org_1", "conversation_1", {
+          body: "This raced with archive",
+        }),
+      ).rejects.toThrow(
+        "This conversation is archived. Restore it before creating another reply draft.",
+      );
+
+      expect(prisma.conversation.findFirst).toHaveBeenLastCalledWith({
+        where: {
+          id: "conversation_1",
+          orgId: "org_1",
+          archivedAt: null,
+        },
+        select: { id: true },
+      });
+      expect(prisma.outreachArtifact.create).not.toHaveBeenCalled();
+    });
+
     it("reuses a pending reply artifact without invoking the model or creating another", async () => {
       prisma.conversation.findFirst.mockResolvedValue(
         conversationRow({ messages: [inboundMessage()] }),
