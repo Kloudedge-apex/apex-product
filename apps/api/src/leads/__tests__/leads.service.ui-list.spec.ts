@@ -16,7 +16,6 @@ function buildService(prisma: PrismaService): LeadsService {
     stub,
     stub,
     stub,
-    stub,
   );
 }
 
