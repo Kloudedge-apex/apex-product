@@ -4,7 +4,7 @@ import {
   NotFoundException,
   ServiceUnavailableException,
 } from "@nestjs/common";
-import { Prisma } from "@prisma/client";
+import { IntegrationStatus, Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { encryptCredentials, decryptCredentials } from "./crypto.util";
 import { fetchWithRetry, withCircuitBreaker } from "../common/http-retry.util";
@@ -564,10 +564,7 @@ export class IntegrationsService {
 
   async disconnect(id: string, orgId: string) {
     const integration = await this.findOne(id, orgId);
-    return this.prisma.integration.delete({
-      where: { id: integration.id },
-      select: PUBLIC_INTEGRATION_SELECT,
-    });
+    return this.revokeGmailIntegration(integration.id, orgId);
   }
 
   async disconnectByProvider(orgId: string, provider: string) {
@@ -577,9 +574,49 @@ export class IntegrationsService {
       select: { id: true },
     });
     if (!integration) throw new NotFoundException("Integration not found");
-    return this.prisma.integration.delete({
-      where: { id: integration.id },
-      select: PUBLIC_INTEGRATION_SELECT,
+    return this.revokeGmailIntegration(integration.id, orgId);
+  }
+
+  /**
+   * Disconnect Gmail without deleting the durable mailbox identity.
+   *
+   * Conversation history carries a tenant-safe NO ACTION foreign key to the
+   * Integration row. Hard deletion therefore fails as soon as the mailbox has
+   * produced a conversation, turning the visible Disconnect button into a
+   * dead action for real customers. Revocation erases both credential stores,
+   * the push-routing marker, watch cursor, scopes, and readiness timestamps in
+   * one guarded update while retaining only the non-secret row identity that
+   * historical conversations require. Keeping the REVOKED row also makes a
+   * repeated disconnect retry-safe; a later OAuth callback reactivates the
+   * same `(orgId, provider)` row through its existing upsert.
+   */
+  private async revokeGmailIntegration(id: string, orgId: string) {
+    return this.prisma.$transaction(async (tx) => {
+      const revoked = await tx.integration.updateMany({
+        where: { id, orgId, provider: "gmail" },
+        data: {
+          credentials: {} as Prisma.InputJsonValue,
+          encryptedCredentials: null,
+          status: IntegrationStatus.REVOKED,
+          scopes: [],
+          lastHistoryId: null,
+          lastSyncAt: null,
+          lastErrorAt: null,
+          lastErrorMessage: null,
+        },
+      });
+      if (revoked.count !== 1) {
+        throw new NotFoundException("Integration not found");
+      }
+
+      const integration = await tx.integration.findFirst({
+        where: { id, orgId, provider: "gmail" },
+        select: PUBLIC_INTEGRATION_SELECT,
+      });
+      if (!integration) {
+        throw new NotFoundException("Integration not found");
+      }
+      return integration;
     });
   }
 
