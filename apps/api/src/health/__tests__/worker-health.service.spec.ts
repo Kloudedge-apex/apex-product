@@ -7,7 +7,6 @@ import {
 import type { QueueStats } from "../../observability/metrics/metrics.service";
 import { GRAPH_RUN_QUEUE_NAME } from "../../graph/graph-run-queue.service";
 import { OUTREACH_SEND_QUEUE_NAME } from "../../outreach/outreach-send-queue.service";
-import { RUN_QUEUE_NAME } from "../../runtime/queue.service";
 
 type StatsLike = Partial<QueueStats> & { queueName: string };
 
@@ -41,9 +40,8 @@ function fakeSource(
 function makeService(
   graph: FakeQueueService,
   outreach: FakeQueueService,
-  run: FakeQueueService = fakeSource(stats({ queueName: RUN_QUEUE_NAME })),
 ): WorkerHealthService {
-  return new WorkerHealthService(graph as never, outreach as never, run as never);
+  return new WorkerHealthService(graph as never, outreach as never);
 }
 
 /** Bare env so ambient OUTREACH_WORKER_ENABLED etc. can't leak into tests. */
@@ -70,17 +68,17 @@ describe("workerStallWindowMs", () => {
 
 describe("WorkerHealthService.check", () => {
   it("reports healthy fallback mode when no Redis is configured (null stats)", async () => {
-    const svc = makeService(fakeSource(null), fakeSource(null), fakeSource(null));
+    const svc = makeService(fakeSource(null), fakeSource(null));
     const report = await svc.check(T0, ENV);
     expect(report.healthy).toBe(true);
-    expect(report.queues).toHaveLength(3);
+    expect(report.queues).toHaveLength(2);
     for (const q of report.queues) {
       expect(q.mode).toBe("fallback");
       expect(q.healthy).toBe(true);
     }
   });
 
-  it("covers all three worker queues by name", async () => {
+  it("covers both supported worker queues by name", async () => {
     const svc = makeService(
       fakeSource(stats({ queueName: GRAPH_RUN_QUEUE_NAME })),
       fakeSource(stats({ queueName: OUTREACH_SEND_QUEUE_NAME })),
@@ -89,32 +87,18 @@ describe("WorkerHealthService.check", () => {
     expect(report.queues.map((q) => q.queue)).toEqual([
       GRAPH_RUN_QUEUE_NAME,
       OUTREACH_SEND_QUEUE_NAME,
-      RUN_QUEUE_NAME,
     ]);
-  });
-
-  it("fails when the agent-runs gate is enabled without a consumer", async () => {
-    const svc = makeService(
-      fakeSource(stats({ queueName: GRAPH_RUN_QUEUE_NAME })),
-      fakeSource(stats({ queueName: OUTREACH_SEND_QUEUE_NAME })),
-      fakeSource(stats({ queueName: RUN_QUEUE_NAME, workerCount: 0 })),
-    );
-    const report = await svc.check(T0, { WORKER_ENABLED: "true" });
-
-    expect(report.healthy).toBe(false);
-    expect(report.queues[2]?.reasons.join(" ")).toMatch(/WORKER_ENABLED=true/);
   });
 
   it("requires all fleet consumers from an API process in production", async () => {
     const svc = makeService(
       fakeSource(stats({ queueName: GRAPH_RUN_QUEUE_NAME, workerCount: 0 })),
       fakeSource(stats({ queueName: OUTREACH_SEND_QUEUE_NAME, workerCount: 0 })),
-      fakeSource(stats({ queueName: RUN_QUEUE_NAME, workerCount: 0 })),
     );
     const report = await svc.check(T0, { NODE_ENV: "production" });
 
     expect(report.healthy).toBe(false);
-    expect(report.queues).toHaveLength(3);
+    expect(report.queues).toHaveLength(2);
     for (const queue of report.queues) {
       expect(queue.reasons.join(" ")).toMatch(/production requires an attached consumer/);
     }

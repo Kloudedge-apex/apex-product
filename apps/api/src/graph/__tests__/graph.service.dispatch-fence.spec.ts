@@ -44,7 +44,6 @@ function makeHarness(transitionCount: number) {
     {} as never,
     {} as never,
     {} as never,
-    {} as never,
     evidenceLedger as never,
     {} as never,
     evaluator as never,

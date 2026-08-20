@@ -48,7 +48,6 @@ function makeService(prisma: ReturnType<typeof makePrisma>) {
     {} as never,
     {} as never,
     {} as never,
-    {} as never,
     evidenceLedger as never,
     queue as never,
     {} as never,

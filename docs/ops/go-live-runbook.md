@@ -783,7 +783,8 @@ az containerapp update -n apex-gtm-worker -g workforce-os-prod \
 - No consumer on `outreach-send`; APPROVED rows and their jobs accumulate
   untouched. Nothing goes terminal. True pause.
 - Pipeline runs (`graph-runs`, gated by `GRAPH_RUN_WORKER_ENABLED`) and the
-  Gmail watch renewal sweep (gated by `WORKER_ENABLED`) keep running.
+  Gmail watch renewal sweep (gated by `GMAIL_WATCH_RENEWAL_ENABLED`) keep
+  running.
 - **Expected alarms while paused** (ack them, don't chase): `/api/health/worker`
   goes 503 once backlog > 0 with reason
   `N job(s) backlogged on "outreach-send" with zero BullMQ consumers attached`;
@@ -1042,8 +1043,8 @@ Per queue (`graph-runs`, `outreach-send`, `agent-runs`) it reports `mode`
 conditions — exactly two:
 
 1. **No consumers** — zero attached consumers while backlog > 0, or while the
-   probed process itself sets the queue's gate env (`WORKER_ENABLED` /
-   `GRAPH_RUN_WORKER_ENABLED` / `OUTREACH_WORKER_ENABLED`) to `true`. In
+   probed process itself sets the supported queue gate env
+   (`GRAPH_RUN_WORKER_ENABLED` / `OUTREACH_WORKER_ENABLED`) to `true`. In
    production, all three consumers are required even when the probe is served
    by an API process whose local worker gates are false, so API-ingress checks
    still assess the fleet-wide worker deployment.
@@ -1067,7 +1068,8 @@ retention cap with inflow ≈ outflow can rarely false-positive as stalled.
 
 Code: `apps/api/src/integrations/gmail/gmail.service.ts`. Gmail watches expire
 after ~7 days; without renewal, DSN bounce auto-suppression and
-reply→stop-outreach silently die. The worker (`WORKER_ENABLED=true` process
+reply→stop-outreach silently die. The worker
+(`GMAIL_WATCH_RENEWAL_ENABLED=true` process
 only) runs a renewal sweep **daily and once at boot**, re-registering the
 watch for every CONNECTED gmail integration. Requires `GMAIL_PUBSUB_TOPIC`
 set (GCP project `supple-design-494220-v3`, topic `gmail-inbound`).
@@ -1082,7 +1084,7 @@ az containerapp logs show -n apex-gtm-worker -g workforce-os-prod --tail 200 \
 - `gmail.users.watch registered` `{orgId, historyId, expiration}` — per-mailbox success; `expiration` is ms-epoch ~7 days out.
 - `gmail.watch renewal sweep complete` `{renewed, failed}` — sweep summary (only logged when it did something).
 - `gmail.watch renewal failed for org` `{orgId, error}` — per-org failure; the sweep continues for other orgs. Repeated failures for the same org usually mean a dead token → triage #4.
-- `Gmail watch renewal sweep disabled in this process (set WORKER_ENABLED=true to enable)` — you are looking at the api pod, or the worker gate is off.
+- `Gmail watch renewal sweep disabled in this process (set GMAIL_WATCH_RENEWAL_ENABLED=true to enable)` — you are looking at the api pod, or the Gmail renewal gate is off.
 
 Manual re-arm for one org (idempotent, org-scoped auth):
 `POST https://${API_FQDN}/api/integrations/gmail/watch` — returns

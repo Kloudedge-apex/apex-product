@@ -86,7 +86,6 @@ function graphService(
       {} as never,
       {} as never,
       {} as never,
-      {} as never,
       { enqueueGraphRun } as never,
       {} as never,
       {} as never,

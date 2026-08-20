@@ -5,16 +5,13 @@ import { PrismaModule } from "./prisma/prisma.module";
 import { HealthModule } from "./health/health.module";
 import { AuthModule } from "./auth/auth.module";
 import { OrgsModule } from "./orgs/orgs.module";
-import { AgentsModule } from "./agents/agents.module";
 import { IntegrationsModule } from "./integrations/integrations.module";
 import { BillingModule } from "./billing/billing.module";
-import { RunsModule } from "./runs/runs.module";
 import { RuntimeModule } from "./runtime/runtime.module";
 import { LeadsModule } from "./leads/leads.module";
 import { PipelineModule } from "./pipeline/pipeline.module";
 import { GraphModule } from "./graph/graph.module";
 import { OutreachModule } from "./outreach/outreach.module";
-import { WorkflowsModule } from "./workflows/workflows.module";
 import { MeetingsModule } from "./meetings/meetings.module";
 import { DashboardModule } from "./dashboard/dashboard.module";
 import { PolicyEventsModule } from "./policy-events/policy-events.module";
@@ -40,10 +37,8 @@ import { ProductionBootstrapWriterFenceInterceptor } from "./ops/production-boot
     HealthModule,
     AuthModule,
     OrgsModule,
-    AgentsModule,
     IntegrationsModule,
     BillingModule,
-    RunsModule,
     RuntimeModule,
     LeadsModule,
     PipelineModule,
@@ -51,7 +46,6 @@ import { ProductionBootstrapWriterFenceInterceptor } from "./ops/production-boot
     OutreachModule,
     ObservabilityModule,
     KpisModule,
-    WorkflowsModule,
     MeetingsModule,
     ConversationsModule,
     DashboardModule,

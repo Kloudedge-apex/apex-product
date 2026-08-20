@@ -117,13 +117,6 @@ describe("pipeline-graph (supervisor routing)", () => {
         },
       } as unknown as Parameters<typeof buildPipelineGraph>[0]["prisma"],
 
-      runtime: {
-        triggerRun: async (agentId: string) => {
-          callLog.push(`runtime.trigger:${agentId}`);
-          return { id: `run_${callLog.length}` };
-        },
-      } as unknown as Parameters<typeof buildPipelineGraph>[0]["runtime"],
-
       llm: {
         chat: async () => ({
           content:

@@ -20,7 +20,6 @@ import {
   Prisma,
 } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
-import { isWorkerEnabled } from "../../runtime/worker.service";
 import { SuppressionService } from "../../outreach/suppression.service";
 import { ConversationStoreService } from "../../conversation-store/conversation-store.service";
 import { encrypt, decrypt } from "../crypto.util";
@@ -78,6 +77,13 @@ interface GmailPushPayload {
 // every connected mailbox comfortably inside that window — losing the watch
 // silently kills DSN auto-suppress AND reply→stop-outreach. GL7.
 const WATCH_RENEWAL_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+/** Exact role gate for the Gmail watch-renewal loop. */
+export function isGmailWatchRenewalEnabled(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return env.GMAIL_WATCH_RENEWAL_ENABLED === "true";
+}
 
 // Gmail recommends a full sync when a history cursor falls outside its
 // retention window. Keep that recovery finite: dedicated SDR mailboxes below
@@ -142,9 +148,9 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
    * the same renewals.
    */
   async onModuleInit(): Promise<void> {
-    if (!isWorkerEnabled()) {
+    if (!isGmailWatchRenewalEnabled()) {
       this.logger.log(
-        "Gmail watch renewal sweep disabled in this process (set WORKER_ENABLED=true to enable)",
+        "Gmail watch renewal sweep disabled in this process (set GMAIL_WATCH_RENEWAL_ENABLED=true to enable)",
       );
       return;
     }

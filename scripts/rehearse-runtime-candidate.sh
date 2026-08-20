@@ -328,7 +328,7 @@ start_role() {
     --security-opt no-new-privileges \
     --network host \
     --env "API_PORT=${port}" \
-    --env "WORKER_ENABLED=${workers_enabled}" \
+    --env "GMAIL_WATCH_RENEWAL_ENABLED=${workers_enabled}" \
     --env "GRAPH_RUN_WORKER_ENABLED=${workers_enabled}" \
     --env "OUTREACH_WORKER_ENABLED=${workers_enabled}" \
     "${COMMON_ENV[@]}" \

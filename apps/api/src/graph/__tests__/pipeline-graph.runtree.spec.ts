@@ -138,10 +138,6 @@ describe("pipeline-graph parentRunId propagation (audit P0 #12)", () => {
         },
       } as unknown as Parameters<typeof buildPipelineGraph>[0]["prisma"],
 
-      runtime: {
-        triggerRun: async () => ({ id: "run_unused" }),
-      } as unknown as Parameters<typeof buildPipelineGraph>[0]["runtime"],
-
       // Mock LLM that records every call's options. The drafter is the only
       // node that calls llm.chat today, but if more callers are added the
       // assertion below catches any that forget to thread parentRunId.

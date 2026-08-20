@@ -1,31 +1,17 @@
 import { Module, OnModuleInit } from "@nestjs/common";
-import { RuntimeService } from "./runtime.service";
-import { QueueService } from "./queue.service";
-import { WorkerService } from "./worker.service";
 import { LLMService } from "./llm.service";
 import { LlmBudgetService } from "./llm-budget.service";
-import { ExecutorService } from "./executor.service";
-import { SchedulerService } from "./scheduler.service";
-import { MemoryService } from "./memory.service";
-import { IntegrationsModule } from "../integrations/integrations.module";
-import { OutreachModule } from "../outreach/outreach.module";
 import { ObservabilityModule } from "../observability/observability.module";
 import { EvaluatorRunnerService } from "../observability/evaluators/evaluator-runner.service";
 import { callJudge } from "../observability/evaluators/judge";
 
 @Module({
-  imports: [IntegrationsModule, OutreachModule, ObservabilityModule],
-  providers: [
-    RuntimeService,
-    QueueService,
-    WorkerService,
-    LLMService,
-    LlmBudgetService,
-    ExecutorService,
-    SchedulerService,
-    MemoryService,
-  ],
-  exports: [RuntimeService, LLMService, LlmBudgetService, MemoryService],
+  // The guarded release uses only the LLM + budget boundary. Legacy generic
+  // AgentRun execution, its scheduler, and its queue worker are deliberately
+  // not providers, so importing RuntimeModule cannot activate them.
+  imports: [ObservabilityModule],
+  providers: [LLMService, LlmBudgetService],
+  exports: [LLMService, LlmBudgetService],
 })
 export class RuntimeModule implements OnModuleInit {
   constructor(
