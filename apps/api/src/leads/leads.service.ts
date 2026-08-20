@@ -1,13 +1,9 @@
 import {
   Injectable,
   Logger,
-  ConflictException,
   NotFoundException,
-  Inject,
-  forwardRef,
 } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
-import { GraphService } from "../graph/graph.service";
 import { AtsScraper } from "./sources/ats-scraper.service";
 import { TeamPageScraper } from "./sources/team-page-scraper.service";
 import { RegistryScraper } from "./sources/registry-scraper.service";
@@ -78,8 +74,6 @@ export class LeadsService {
     private readonly emailPatternService: EmailPatternService,
     private readonly identityResolver: IdentityResolver,
     private readonly leadScorer: LeadScorer,
-    @Inject(forwardRef(() => GraphService))
-    private readonly graphService: GraphService,
   ) {}
 
   // ─── ICP ─────────────────────────────────────────────
@@ -176,134 +170,7 @@ export class LeadsService {
     });
   }
 
-  async updateIcpSchedule(orgId: string, icpId: string, enabled: boolean, intervalHours?: number) {
-    const icp = await this.prisma.icpProfile.findFirstOrThrow({
-      where: { id: icpId, orgId },
-    });
-
-    const data: Record<string, unknown> = { scheduleEnabled: enabled };
-    if (intervalHours !== undefined) data.scheduleInterval = intervalHours;
-
-    return this.prisma.icpProfile.update({
-      where: { id: icp.id },
-      data,
-    });
-  }
-
   // ─── Discovery Pipeline ──────────────────────────────
-
-  /**
-   * @deprecated Legacy direct executor for the discovery pipeline.
-   *
-   * Races with the LangGraph supervisor (`GraphService.runPipelineGraph`),
-   * which is now the single canonical entry point for pipeline runs.
-   * Gated behind `LEGACY_TRIGGER_DISCOVERY_ENABLED=true` (default OFF); when
-   * disabled it returns immediately without scheduling any work.
-   *
-   * Do not call from new code. Use `GraphService.runPipelineGraph` instead.
-   * See: apps/api/src/graph/graph.service.ts
-   */
-  async triggerDiscovery(orgId: string, icpProfileId: string) {
-    if (process.env.LEGACY_TRIGGER_DISCOVERY_ENABLED !== "true") {
-      const { runId, threadId } = await this.graphService.runPipelineGraph(
-        orgId,
-        [icpProfileId],
-      );
-      this.logger.log(
-        `Discovery routed through graph supervisor (runId=${runId})`,
-      );
-      return {
-        message: "Discovery pipeline started",
-        icpProfileId,
-        runId,
-        threadId,
-      };
-    }
-
-    const existingJob = await this.prisma.scrapeJob.findFirst({
-      where: { orgId, status: { in: ['QUEUED', 'RUNNING'] } },
-    });
-    if (existingJob) {
-      throw new ConflictException('Discovery pipeline already running for this org');
-    }
-
-    const icp = await this.prisma.icpProfile.findFirstOrThrow({
-      where: { id: icpProfileId, orgId },
-    });
-
-    this.logger.log(`Starting discovery pipeline for ICP "${icp.name}" (org: ${orgId})`);
-
-    // Update lastRunAt
-    await this.prisma.icpProfile.update({
-      where: { id: icpProfileId },
-      data: { lastRunAt: new Date() },
-    });
-
-    // Fire and forget: run pipeline stages sequentially in background
-    void this.runPipeline(orgId, icpProfileId, icp).catch((err: unknown) => {
-      this.logger.error(`Pipeline failed for ICP ${icpProfileId}`, err instanceof Error ? err.stack : String(err));
-    });
-
-    return { message: "Discovery pipeline started", icpProfileId };
-  }
-
-  private async runPipeline(
-    orgId: string,
-    icpProfileId: string,
-    icp: { targetTitles: string[]; targetIndustries: string[]; targetGeos: string[]; minEmployees: number | null; maxEmployees: number | null; techStackSignals: string[]; seedDomains?: string[]; intentKeywords?: string[] },
-  ) {
-    // Stage 1: Company Discovery
-    const companyJobId = await this.createJob(orgId, icpProfileId, "COMPANY_DISCOVERY");
-    try {
-      await this.markJobRunning(companyJobId);
-      const companies = await this.discoverCompanies(orgId, icp, companyJobId);
-      await this.markJobCompleted(companyJobId, companies.length);
-    } catch (err) {
-      await this.markJobFailed(companyJobId, err);
-    }
-
-    // Stage 2: People Discovery
-    const peopleJobId = await this.createJob(orgId, icpProfileId, "PEOPLE_DISCOVERY");
-    try {
-      await this.markJobRunning(peopleJobId);
-      const { count } = await this.discoverPeople(orgId, icp);
-      await this.markJobCompleted(peopleJobId, count);
-    } catch (err) {
-      await this.markJobFailed(peopleJobId, err);
-    }
-
-    // Stage 3: Identity Resolution
-    const identityJobId = await this.createJob(orgId, icpProfileId, "IDENTITY_RESOLUTION");
-    try {
-      await this.markJobRunning(identityJobId);
-      const merged = await this.identityResolver.resolveAll(orgId);
-      await this.markJobCompleted(identityJobId, merged);
-    } catch (err) {
-      await this.markJobFailed(identityJobId, err);
-    }
-
-    // Stage 4: Contact Enrichment
-    const contactJobId = await this.createJob(orgId, icpProfileId, "CONTACT_ENRICHMENT");
-    try {
-      await this.markJobRunning(contactJobId);
-      const { count: enriched } = await this.enrichContacts(orgId);
-      await this.markJobCompleted(contactJobId, enriched);
-    } catch (err) {
-      await this.markJobFailed(contactJobId, err);
-    }
-
-    // Stage 5: Scoring
-    const scoringJobId = await this.createJob(orgId, icpProfileId, "SCORING");
-    try {
-      await this.markJobRunning(scoringJobId);
-      const { count: scored } = await this.scoreLeads(orgId, icp);
-      await this.markJobCompleted(scoringJobId, scored);
-    } catch (err) {
-      await this.markJobFailed(scoringJobId, err);
-    }
-
-    this.logger.log(`Pipeline complete for ICP ${icpProfileId}`);
-  }
 
   private async discoverCompanies(
     orgId: string,

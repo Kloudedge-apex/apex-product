@@ -10,7 +10,6 @@ import {
   HttpCode,
   HttpStatus,
   BadRequestException,
-  Logger,
 } from "@nestjs/common";
 import type { Response } from "express";
 import { OrgId } from "../common/org-context.decorator";
@@ -50,8 +49,6 @@ interface IcpProfileBody {
 
 @Controller("leads")
 export class LeadsController {
-  private readonly logger = new Logger(LeadsController.name);
-
   constructor(private readonly leads: LeadsService) {}
 
   // ─── Unified UI list ─────────────────────────────────
@@ -110,38 +107,6 @@ export class LeadsController {
   listIcpProfiles(@OrgId() orgId: string | undefined) {
     if (!orgId) throw new BadRequestException("orgId required");
     return this.leads.listIcpProfiles(orgId);
-  }
-
-  @Post("icp/:id/schedule")
-  @HttpCode(HttpStatus.OK)
-  updateIcpSchedule(
-    @OrgId() orgId: string | undefined,
-    @Param("id") id: string,
-    @Body() body: { enabled: boolean; intervalHours?: number },
-  ) {
-    if (!orgId) throw new BadRequestException("orgId required");
-    const interval = body.intervalHours ? Math.max(1, Math.min(body.intervalHours, 168)) : undefined; // 1h to 7 days
-    return this.leads.updateIcpSchedule(orgId, id, body.enabled, interval);
-  }
-
-  // ─── Discovery ───────────────────────────────────────
-
-  @Post("discover")
-  @HttpCode(HttpStatus.ACCEPTED)
-  discover(
-    @OrgId() orgId: string | undefined,
-    @Body() body: { icpProfileId?: string; icpId?: string },
-  ) {
-    if (!orgId) throw new BadRequestException("orgId required");
-    const profileId = body.icpProfileId ?? body.icpId;
-    if (!profileId)
-      throw new BadRequestException("icpProfileId or icpId required");
-    if (process.env.LEGACY_TRIGGER_DISCOVERY_ENABLED !== "true") {
-      this.logger.warn(
-        "triggerDiscovery is deprecated — set LEGACY_TRIGGER_DISCOVERY_ENABLED=true to opt back in; graph supervisor is now the single entry point",
-      );
-    }
-    return this.leads.triggerDiscovery(orgId, profileId);
   }
 
   // ─── Companies ───────────────────────────────────────

@@ -126,6 +126,9 @@ describe("IcpAutoService.generateForOrg — JSON validation retry", () => {
       orgId: "org-1",
       metadata: { org_id: "org-1" },
     });
+    const createInput = vi.mocked(prisma.icpProfile.create).mock.calls[0]?.[0];
+    expect(createInput?.data).not.toHaveProperty("scheduleEnabled");
+    expect(createInput?.data).not.toHaveProperty("scheduleInterval");
   });
 
   it("throws BadRequestException when both LLM attempts fail to produce valid JSON", async () => {

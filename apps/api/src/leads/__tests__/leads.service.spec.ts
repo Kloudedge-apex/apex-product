@@ -1,8 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { ConflictException, NotFoundException } from "@nestjs/common";
+import { describe, it, expect, vi } from "vitest";
+import { NotFoundException } from "@nestjs/common";
 import { LeadsService } from "../leads.service";
 import { PrismaService } from "../../prisma/prisma.service";
-import { GraphService } from "../../graph/graph.service";
 import { AtsScraper } from "../sources/ats-scraper.service";
 import { TeamPageScraper } from "../sources/team-page-scraper.service";
 import { RegistryScraper } from "../sources/registry-scraper.service";
@@ -68,28 +67,14 @@ function mockPrisma() {
   return prisma;
 }
 
-function mockGraphService(): GraphService & {
-  runPipelineGraph: ReturnType<typeof vi.fn>;
-} {
-  return {
-    runPipelineGraph: vi.fn().mockResolvedValue({
-      runId: "graph_run_xyz",
-      threadId: "graph_run_xyz",
-    }),
-  } as unknown as GraphService & {
-    runPipelineGraph: ReturnType<typeof vi.fn>;
-  };
-}
-
 function buildService(
   prisma: ReturnType<typeof mockPrisma>,
-  graphService: ReturnType<typeof mockGraphService> = mockGraphService(),
   overrides: {
     serpDiscovery?: SerpDiscoveryService;
     emailPatternService?: EmailPatternService;
   } = {},
 ): LeadsService {
-  // The collaborators are not exercised by the flag gate; safe to stub as empty objects.
+  // These collaborators are not exercised by the focused unit cases.
   const stub = {} as never;
   return new LeadsService(
     prisma,
@@ -103,7 +88,6 @@ function buildService(
     overrides.emailPatternService ?? (stub as EmailPatternService),
     stub as IdentityResolver,
     stub as LeadScorer,
-    graphService,
   );
 }
 
@@ -135,70 +119,6 @@ type ScopedLeadsInternals = {
 function scopedInternals(service: LeadsService): ScopedLeadsInternals {
   return service as unknown as ScopedLeadsInternals;
 }
-
-describe("LeadsService.triggerDiscovery (legacy flag gate)", () => {
-  let prisma: ReturnType<typeof mockPrisma>;
-  let graph: ReturnType<typeof mockGraphService>;
-  let service: LeadsService;
-  const originalFlag = process.env.LEGACY_TRIGGER_DISCOVERY_ENABLED;
-
-  beforeEach(() => {
-    prisma = mockPrisma();
-    graph = mockGraphService();
-    service = buildService(prisma, graph);
-  });
-
-  afterEach(() => {
-    if (originalFlag === undefined) {
-      delete process.env.LEGACY_TRIGGER_DISCOVERY_ENABLED;
-    } else {
-      process.env.LEGACY_TRIGGER_DISCOVERY_ENABLED = originalFlag;
-    }
-  });
-
-  it("routes through the graph supervisor when flag is OFF (default)", async () => {
-    delete process.env.LEGACY_TRIGGER_DISCOVERY_ENABLED;
-
-    const result = await service.triggerDiscovery("org_1", "icp_1");
-
-    expect(graph.runPipelineGraph).toHaveBeenCalledWith("org_1", ["icp_1"]);
-    expect(result).toMatchObject({
-      icpProfileId: "icp_1",
-      runId: "graph_run_xyz",
-      threadId: "graph_run_xyz",
-    });
-    // Legacy path never runs: no ScrapeJob single-flight check, no icpProfile updates.
-    expect(prisma.scrapeJob.findFirst).not.toHaveBeenCalled();
-    expect(prisma.icpProfile.update).not.toHaveBeenCalled();
-  });
-
-  it("routes through the graph supervisor when flag is set to a value other than 'true'", async () => {
-    process.env.LEGACY_TRIGGER_DISCOVERY_ENABLED = "false";
-
-    const result = await service.triggerDiscovery("org_1", "icp_1");
-
-    expect(graph.runPipelineGraph).toHaveBeenCalledWith("org_1", ["icp_1"]);
-    expect(result).toMatchObject({ runId: "graph_run_xyz" });
-    expect(prisma.scrapeJob.findFirst).not.toHaveBeenCalled();
-  });
-
-  it("executes the legacy direct-executor path when flag is ON", async () => {
-    process.env.LEGACY_TRIGGER_DISCOVERY_ENABLED = "true";
-    // Simulate an in-flight job so we short-circuit before launching the
-    // background pipeline. The ConflictException proves the gate let us
-    // through to the real single-flight check — and proves the graph
-    // supervisor was NOT called for this path.
-    prisma.scrapeJob.findFirst.mockResolvedValue({ id: "job_existing" });
-
-    await expect(service.triggerDiscovery("org_1", "icp_1")).rejects.toBeInstanceOf(
-      ConflictException,
-    );
-    expect(prisma.scrapeJob.findFirst).toHaveBeenCalledWith({
-      where: { orgId: "org_1", status: { in: ["QUEUED", "RUNNING"] } },
-    });
-    expect(graph.runPipelineGraph).not.toHaveBeenCalled();
-  });
-});
 
 describe("LeadsService.upsertCurrentIcpProfile", () => {
   it("updates the newest org profile instead of creating targeting history", async () => {
@@ -292,7 +212,7 @@ describe("LeadsService per-run lead scopes", () => {
     const serpDiscovery = {
       discoverPeopleViaSERP: vi.fn().mockResolvedValue([]),
     } as unknown as SerpDiscoveryService;
-    const service = buildService(prisma, mockGraphService(), { serpDiscovery });
+    const service = buildService(prisma, { serpDiscovery });
 
     const result = await scopedInternals(service).discoverPeople("org_1", icp, []);
 
@@ -313,7 +233,7 @@ describe("LeadsService per-run lead scopes", () => {
         },
       ]),
     } as unknown as SerpDiscoveryService;
-    const service = buildService(prisma, mockGraphService(), { serpDiscovery });
+    const service = buildService(prisma, { serpDiscovery });
 
     await scopedInternals(service).discoverPeople("org_1", icp, ["company_in_run"]);
 
@@ -379,7 +299,7 @@ describe("LeadsService per-run lead scopes", () => {
       ),
       learnPattern: vi.fn().mockResolvedValue(undefined),
     } as unknown as EmailPatternService;
-    const service = buildService(prisma, mockGraphService(), {
+    const service = buildService(prisma, {
       emailPatternService,
     });
 
@@ -461,7 +381,7 @@ describe("LeadsService per-run lead scopes", () => {
       ),
       learnPattern: vi.fn().mockResolvedValue(undefined),
     } as unknown as EmailPatternService;
-    const service = buildService(prisma, mockGraphService(), {
+    const service = buildService(prisma, {
       emailPatternService,
     });
 
@@ -548,7 +468,7 @@ describe("LeadsService per-run lead scopes", () => {
       ),
       learnPattern: vi.fn().mockResolvedValue(undefined),
     } as unknown as EmailPatternService;
-    const service = buildService(prisma, mockGraphService(), {
+    const service = buildService(prisma, {
       emailPatternService,
     });
 
@@ -664,7 +584,7 @@ describe("LeadsService per-run lead scopes", () => {
         ),
       learnPattern: vi.fn().mockResolvedValue(undefined),
     } as unknown as EmailPatternService;
-    const service = buildService(prisma, mockGraphService(), {
+    const service = buildService(prisma, {
       emailPatternService,
     });
 

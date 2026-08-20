@@ -40,8 +40,7 @@ interface ExtractedIcp {
  *      LLM context window.
  *   4. Ask the LLM to extract a structured ICP (titles, industries, geos,
  *      keywords) plus a one-line product summary.
- *   5. Persist as an IcpProfile with scheduleEnabled=true so subsequent
- *      pipeline runs pick it up.
+ *   5. Persist as an IcpProfile for the current guarded pipeline run.
  */
 @Injectable()
 export class IcpAutoService {
@@ -89,8 +88,6 @@ export class IcpAutoService {
         seedDomains: [websiteUrl.replace(/^https?:\/\//, "").replace(/\/.*$/, "")],
         minEmployees: extracted.minEmployees ?? null,
         maxEmployees: extracted.maxEmployees ?? null,
-        scheduleEnabled: true,
-        scheduleInterval: 24,
       },
       select: { id: true, name: true },
     });
