@@ -222,11 +222,21 @@ export class ConversationsService {
   async archive(orgId: string, id: string) {
     const row = await this.requireConversation(orgId, id);
     if (row.archivedAt) return { affected: 0 };
-    await this.prisma.conversation.update({
-      where: { id },
+    const result = await this.prisma.conversation.updateMany({
+      where: { id, orgId, archivedAt: null },
       data: { archivedAt: new Date(), unreadCount: 0 },
     });
-    return { affected: 1 };
+    return { affected: result.count };
+  }
+
+  async unarchive(orgId: string, id: string) {
+    const row = await this.requireConversation(orgId, id);
+    if (!row.archivedAt) return { affected: 0 };
+    const result = await this.prisma.conversation.updateMany({
+      where: { id, orgId, archivedAt: { not: null } },
+      data: { archivedAt: null },
+    });
+    return { affected: result.count };
   }
 
   async generateReplyDraft(orgId: string, id: string) {

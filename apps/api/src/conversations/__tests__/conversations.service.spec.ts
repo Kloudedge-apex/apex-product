@@ -90,6 +90,7 @@ function createPrismaMock() {
     count: vi.fn(),
     findFirst: vi.fn(),
     update: vi.fn(),
+    updateMany: vi.fn(),
   };
   const outreachArtifact = {
     findFirst: vi.fn().mockResolvedValue(null),
@@ -358,9 +359,7 @@ describe("ConversationsService", () => {
         .mockResolvedValueOnce(
           conversationRow({ archivedAt: new Date("2026-08-12T00:00:00.000Z") }),
         );
-      prisma.conversation.update.mockResolvedValue(
-        conversationRow({ archivedAt: new Date("2026-08-12T00:00:00.000Z") }),
-      );
+      prisma.conversation.updateMany.mockResolvedValue({ count: 1 });
 
       await expect(service.archive("org_1", "conversation_1")).resolves.toEqual(
         {
@@ -373,10 +372,36 @@ describe("ConversationsService", () => {
         },
       );
 
-      expect(prisma.conversation.update).toHaveBeenCalledTimes(1);
-      expect(prisma.conversation.update).toHaveBeenCalledWith({
-        where: { id: "conversation_1" },
+      expect(prisma.conversation.updateMany).toHaveBeenCalledTimes(1);
+      expect(prisma.conversation.updateMany).toHaveBeenCalledWith({
+        where: { id: "conversation_1", orgId: "org_1", archivedAt: null },
         data: { archivedAt: expect.any(Date), unreadCount: 0 },
+      });
+    });
+
+    it("restores an archived conversation once and is idempotent thereafter", async () => {
+      prisma.conversation.findFirst
+        .mockResolvedValueOnce(
+          conversationRow({ archivedAt: new Date("2026-08-12T00:00:00.000Z") }),
+        )
+        .mockResolvedValueOnce(conversationRow());
+      prisma.conversation.updateMany.mockResolvedValue({ count: 1 });
+
+      await expect(
+        service.unarchive("org_1", "conversation_1"),
+      ).resolves.toEqual({ affected: 1 });
+      await expect(
+        service.unarchive("org_1", "conversation_1"),
+      ).resolves.toEqual({ affected: 0 });
+
+      expect(prisma.conversation.updateMany).toHaveBeenCalledTimes(1);
+      expect(prisma.conversation.updateMany).toHaveBeenCalledWith({
+        where: {
+          id: "conversation_1",
+          orgId: "org_1",
+          archivedAt: { not: null },
+        },
+        data: { archivedAt: null },
       });
     });
 
@@ -386,7 +411,10 @@ describe("ConversationsService", () => {
       await expect(
         service.archive("org_1", "conversation_other"),
       ).rejects.toBeInstanceOf(NotFoundException);
-      expect(prisma.conversation.update).not.toHaveBeenCalled();
+      await expect(
+        service.unarchive("org_1", "conversation_other"),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(prisma.conversation.updateMany).not.toHaveBeenCalled();
     });
   });
 
