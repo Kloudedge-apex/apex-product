@@ -1,5 +1,5 @@
-import { readdirSync, readFileSync } from "node:fs";
-import { join, relative } from "node:path";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { dirname, join, relative, resolve } from "node:path";
 import * as ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -1104,49 +1104,28 @@ describe("production bootstrap HTTP classification", () => {
         "/api/integrations/gmail/auth-url",
       ),
     ).toBe("writer");
-    expect(
-      classifyProductionBootstrapHttpRequest("GET", "/api/agents/templates"),
-    ).toBe("writer");
     expect(classifyProductionBootstrapHttpRequest("GET", "/api/billing")).toBe(
       "writer",
     );
-    expect(
-      classifyProductionBootstrapHttpRequest(
-        "GET",
-        "/api/integrations/linkedin/callback?code=x",
-      ),
-    ).toBe("writer");
-    expect(
-      classifyProductionBootstrapHttpRequest("GET", "/api/workflows/runs/run_1"),
-    ).toBe("writer");
     expect(classifyProductionBootstrapHttpRequest("POST", "/api/auth/webhook")).toBe(
       "writer",
     );
   });
 
-  it("classifies the complete reviewed GET/HEAD-equivalent controller surface", () => {
+  it("classifies the complete mounted GET/HEAD-equivalent controller surface", () => {
     const sourceRoot = join(process.cwd(), "src");
     const routes = productionGetRoutes(sourceRoot);
-    expect(routes).toHaveLength(77);
+    expect(routes).toHaveLength(54);
     expect(new Set(routes).size).toBe(routes.length);
 
     const writerRoutes = new Set([
-      "/api/agents/templates",
       "/api/billing",
       "/api/integrations/gmail/auth-url",
       "/api/integrations/gmail/callback",
-      "/api/integrations/linkedin/callback",
       "/api/integrations/gmail/messages",
       "/api/integrations/gmail/search",
       "/api/integrations/gmail/messages/fixture",
       "/api/integrations/gmail/threads/fixture",
-      "/api/integrations/hubspot/contacts/search",
-      "/api/integrations/hubspot/contacts/fixture",
-      "/api/integrations/hubspot/deals/search",
-      "/api/integrations/hubspot/deals/fixture",
-      "/api/integrations/hubspot/companies/search",
-      "/api/integrations/hubspot/companies/fixture",
-      "/api/workflows/runs/fixture",
     ]);
     for (const route of routes) {
       const expected = route.startsWith("/api/u/")
@@ -1162,6 +1141,19 @@ describe("production bootstrap HTTP classification", () => {
         classifyProductionBootstrapHttpRequest("HEAD", route),
         `review HEAD fallback route ${route}`,
       ).toBe(expected);
+    }
+
+    for (const retiredPrefix of [
+      "/api/agents",
+      "/api/runs",
+      "/api/workflows",
+      "/api/integrations/hubspot",
+      "/api/integrations/linkedin",
+    ]) {
+      expect(
+        routes.filter((route) => route.startsWith(retiredPrefix)),
+        `${retiredPrefix} must not be reachable from AppModule`,
+      ).toEqual([]);
     }
   });
 
@@ -1284,9 +1276,7 @@ function productionTypeScriptFiles(directory: string): string[] {
 
 function productionGetRoutes(sourceRoot: string): string[] {
   const routes: string[] = [];
-  for (const file of productionTypeScriptFiles(sourceRoot).filter((candidate) =>
-    candidate.endsWith(".controller.ts"),
-  )) {
+  for (const file of mountedControllerFiles(join(sourceRoot, "app.module.ts"))) {
     const source = ts.createSourceFile(
       file,
       readFileSync(file, "utf8"),
@@ -1313,6 +1303,156 @@ function productionGetRoutes(sourceRoot: string): string[] {
     }
   }
   return routes.sort();
+}
+
+function mountedControllerFiles(appModuleFile: string): string[] {
+  const controllers = new Set<string>();
+  const visitedModules = new Set<string>();
+
+  const visitModule = (moduleFile: string): void => {
+    if (visitedModules.has(moduleFile)) return;
+    visitedModules.add(moduleFile);
+
+    const source = ts.createSourceFile(
+      moduleFile,
+      readFileSync(moduleFile, "utf8"),
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const localImports = localTypeScriptImports(source, moduleFile);
+    const moduleMetadata = source.statements
+      .filter(ts.isClassDeclaration)
+      .map((statement) => decoratorObject(statement, "Module"))
+      .find((metadata): metadata is ts.ObjectLiteralExpression => metadata !== null);
+    if (!moduleMetadata) {
+      throw new Error(`No @Module metadata found in ${moduleFile}`);
+    }
+
+    for (const controllerName of metadataIdentifiers(moduleMetadata, "controllers")) {
+      const controllerFile = localImports.get(controllerName);
+      if (!controllerFile) {
+        throw new Error(
+          `Mounted controller ${controllerName} in ${moduleFile} is not a local import`,
+        );
+      }
+      controllers.add(controllerFile);
+    }
+
+    for (const importedModule of metadataIdentifiers(moduleMetadata, "imports")) {
+      const importedFile = localImports.get(importedModule);
+      if (importedFile) visitModule(importedFile);
+    }
+  };
+
+  visitModule(appModuleFile);
+  return [...controllers].sort();
+}
+
+function localTypeScriptImports(
+  source: ts.SourceFile,
+  containingFile: string,
+): Map<string, string> {
+  const imports = new Map<string, string>();
+  for (const statement of source.statements) {
+    if (
+      !ts.isImportDeclaration(statement) ||
+      !ts.isStringLiteralLike(statement.moduleSpecifier) ||
+      !statement.moduleSpecifier.text.startsWith(".")
+    ) {
+      continue;
+    }
+    const resolved = resolveTypeScriptImport(
+      dirname(containingFile),
+      statement.moduleSpecifier.text,
+    );
+    const clause = statement.importClause;
+    if (!clause) continue;
+    if (clause.name) imports.set(clause.name.text, resolved);
+    if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+      for (const element of clause.namedBindings.elements) {
+        imports.set(element.name.text, resolved);
+      }
+    }
+  }
+  return imports;
+}
+
+function resolveTypeScriptImport(directory: string, specifier: string): string {
+  const base = resolve(directory, specifier);
+  for (const candidate of [`${base}.ts`, join(base, "index.ts")]) {
+    if (existsSync(candidate)) return candidate;
+  }
+  throw new Error(`Cannot resolve local TypeScript import ${specifier} from ${directory}`);
+}
+
+function decoratorObject(
+  node: ts.Node,
+  decoratorName: string,
+): ts.ObjectLiteralExpression | null {
+  const decorators = ts.canHaveDecorators(node)
+    ? (ts.getDecorators(node) ?? [])
+    : [];
+  for (const decorator of decorators) {
+    if (!ts.isCallExpression(decorator.expression)) continue;
+    if (
+      !ts.isIdentifier(decorator.expression.expression) ||
+      decorator.expression.expression.text !== decoratorName
+    ) {
+      continue;
+    }
+    const argument = decorator.expression.arguments[0];
+    if (!argument || !ts.isObjectLiteralExpression(argument)) {
+      throw new Error(`@${decoratorName} metadata must be an object literal`);
+    }
+    return argument;
+  }
+  return null;
+}
+
+function metadataIdentifiers(
+  metadata: ts.ObjectLiteralExpression,
+  propertyName: string,
+): string[] {
+  const property = metadata.properties.find(
+    (candidate): candidate is ts.PropertyAssignment =>
+      ts.isPropertyAssignment(candidate) &&
+      ((ts.isIdentifier(candidate.name) && candidate.name.text === propertyName) ||
+        (ts.isStringLiteralLike(candidate.name) &&
+          candidate.name.text === propertyName)),
+  );
+  if (!property) return [];
+  if (!ts.isArrayLiteralExpression(property.initializer)) {
+    throw new Error(`@Module ${propertyName} must be an array literal`);
+  }
+  return property.initializer.elements.map((element) => {
+    if (ts.isIdentifier(element)) return element.text;
+    if (
+      ts.isCallExpression(element) &&
+      ts.isIdentifier(element.expression) &&
+      element.expression.text === "forwardRef" &&
+      element.arguments.length === 1
+    ) {
+      const factory = element.arguments[0];
+      if (
+        factory &&
+        (ts.isArrowFunction(factory) || ts.isFunctionExpression(factory)) &&
+        ts.isIdentifier(factory.body)
+      ) {
+        return factory.body.text;
+      }
+    }
+    if (
+      ts.isCallExpression(element) &&
+      ts.isPropertyAccessExpression(element.expression) &&
+      ts.isIdentifier(element.expression.expression)
+    ) {
+      return element.expression.expression.text;
+    }
+    throw new Error(
+      `@Module ${propertyName} contains an unsupported expression: ${element.getText()}`,
+    );
+  });
 }
 
 function decoratorPath(
