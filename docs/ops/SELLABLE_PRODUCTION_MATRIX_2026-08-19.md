@@ -46,6 +46,8 @@ Status meanings:
 
 Dashboard stats and Today KPI contracts contain only measured fields; former always-null reply-rate and calendar-day lead placeholders are absent. Rolling outreach-quality windows use each outcome's persisted lifecycle timestamp: draft creation for new review items, reviewer decision time for approvals and rejections, failure time for dispatch failures, and provider-confirmed send time for sends. A later unrelated row update therefore cannot make an old outcome appear recent.
 
+The canonical pipeline trigger returns HTTP 202 only after `GraphService` has durably created the run. A single-flight conflict retains its HTTP 409 and run identifier so the console can link the operator to the running or approval-blocked execution; unexpected graph-start failures retain their failure status instead of being rewritten as an accepted response with a null run id.
+
 ## Mandatory gates
 
 The release is sellable only when all of these are recorded for one exact source

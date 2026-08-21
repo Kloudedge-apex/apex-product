@@ -1,4 +1,4 @@
-import { BadRequestException } from "@nestjs/common";
+import { BadRequestException, ConflictException } from "@nestjs/common";
 import { describe, expect, it, vi } from "vitest";
 import { PipelineController } from "../pipeline.controller";
 import type { PrismaService } from "../../prisma/prisma.service";
@@ -91,4 +91,31 @@ describe("PipelineController current ICP contract", () => {
       stage: "full",
     });
   });
+
+  it.each([
+    new ConflictException(
+      "A pipeline graph is already awaiting_approval for this org (runId=run_blocked)",
+    ),
+    new Error("queue authority unavailable"),
+  ])(
+    "propagates graph-start failure %# instead of returning a false accepted response",
+    async (failure) => {
+      const prisma = {
+        icpProfile: {
+          findFirst: vi.fn().mockResolvedValue({ id: "icp_1", name: "ICP" }),
+        },
+      };
+      const graph = {
+        runPipelineGraph: vi.fn().mockRejectedValue(failure),
+      };
+      const controller = new PipelineController(
+        prisma as unknown as PrismaService,
+        { generateForOrg: vi.fn() } as unknown as IcpAutoService,
+        graph as unknown as GraphService,
+      );
+
+      await expect(controller.run("org_1", {})).rejects.toBe(failure);
+      expect(graph.runPipelineGraph).toHaveBeenCalledWith("org_1", ["icp_1"]);
+    },
+  );
 });
