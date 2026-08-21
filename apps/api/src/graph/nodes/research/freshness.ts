@@ -1,4 +1,5 @@
 import type { SignalEventKind } from "../../../observability/evidence-event.types";
+import { normalizeSignalDate } from "../../../observability/signal-citation";
 
 /**
  * Max age (days) a signal kind may be and still count toward grounding.
@@ -36,9 +37,9 @@ export function isFresh(kind: string, isoDate: string | undefined, now: Date = n
   const window = (FRESHNESS_WINDOWS as Record<string, number>)[kind];
   // `window === undefined` (no window for this kind), not `!window`, so a future
   // 0-day "same-day only" window would not be misread as "exclude all".
-  if (window === undefined || !isoDate) return false;
-  const d = new Date(isoDate);
-  if (Number.isNaN(d.getTime())) return false;
+  const normalizedDate = normalizeSignalDate(isoDate);
+  if (window === undefined || !normalizedDate) return false;
+  const d = new Date(`${normalizedDate}T00:00:00.000Z`);
   const age = now.getTime() - d.getTime();
   return age >= -SKEW_TOLERANCE_MS && age <= window * DAY_MS;
 }

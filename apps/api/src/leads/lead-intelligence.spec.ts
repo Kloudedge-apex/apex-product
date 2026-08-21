@@ -21,6 +21,28 @@ const evidence: LeadEvidenceRow[] = [
     createdAt: new Date("2026-08-10T10:00:00.000Z"),
   },
   {
+    id: "not-a-url",
+    kind: "recent_hire",
+    payload: {
+      source: "jobs.example.com/no-scheme",
+      date: "2026-08-10",
+      confidence: 0.9,
+      jobTitle: "Uncitable Role",
+    },
+    createdAt: new Date("2026-08-10T11:00:00.000Z"),
+  },
+  {
+    id: "impossible-date",
+    kind: "recent_hire",
+    payload: {
+      source: "https://jobs.example.com/impossible",
+      date: "2026-02-30",
+      confidence: 0.9,
+      jobTitle: "Impossible Role",
+    },
+    createdAt: new Date("2026-08-10T12:00:00.000Z"),
+  },
+  {
     id: "mock",
     kind: "funding_event",
     payload: { source: "mock", date: "2026-08-11", confidence: 0 },
@@ -45,9 +67,14 @@ describe("lead intelligence presentation", () => {
       { label: "Hiring for Account Executive", confidence: 0.92 },
     ]);
     expect(toEvidenceTimeline(evidence, now)).toHaveLength(1);
-    expect(toEvidenceTimeline(evidence, now)[0]?.description).toContain(
+    const event = toEvidenceTimeline(evidence, now)[0];
+    expect(event?.description).toContain(
       "https://jobs.example.com/account-executive",
     );
+    expect(event?.sourceUrl).toBe(
+      "https://jobs.example.com/account-executive",
+    );
+    expect(event?.timestamp).toBe("2026-08-10T00:00:00.000Z");
   });
 
   it("builds a factual brief and explicitly reports missing attributable intent", () => {
