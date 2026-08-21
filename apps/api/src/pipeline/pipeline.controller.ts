@@ -6,8 +6,10 @@ import {
   BadRequestException,
   HttpCode,
   HttpStatus,
+  UseGuards,
 } from "@nestjs/common";
 import { OrgId } from "../common/org-context.decorator";
+import { AdminOrManagerGuard } from "../common/admin-or-manager.guard";
 import { PrismaService } from "../prisma/prisma.service";
 import { IcpAutoService } from "./icp-auto.service";
 import { GraphService } from "../graph/graph.service";
@@ -56,6 +58,7 @@ export class PipelineController {
    */
   @Post("run")
   @HttpCode(HttpStatus.ACCEPTED)
+  @UseGuards(AdminOrManagerGuard)
   async run(
     @OrgId() orgId: string | undefined,
     @Body() body: { stage?: unknown } | undefined,
