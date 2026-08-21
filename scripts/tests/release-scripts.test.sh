@@ -3334,6 +3334,23 @@ EOF
   pass
 }
 
+test_go_live_runbook_uses_mounted_gmail_readiness() {
+  local runbook="${REPO_ROOT}/docs/ops/go-live-runbook.md"
+
+  if grep -Fq -- "/api/integrations/gmail/test" "${runbook}"; then
+    fail "go-live runbook references the removed Gmail test route"
+  fi
+  pass
+
+  grep -Fq -- "/api/orgs/onboarding/status" "${runbook}" ||
+    fail "go-live runbook omits server-authoritative mailbox readiness"
+  pass
+
+  grep -Fq -- "/api/integrations/gmail/messages?maxResults=1" "${runbook}" ||
+    fail "go-live runbook omits the mounted bounded Gmail provider read"
+  pass
+}
+
 test_registry_verifier
 test_deploy_admission
 test_deploy_rollback
@@ -3348,5 +3365,6 @@ test_github_ci_verifier
 test_migration_receipt_contract_parity
 test_migration_receipt_verifier
 test_containerapp_config_verifier
+test_go_live_runbook_uses_mounted_gmail_readiness
 
 echo "Release script tests passed: ${TESTS_PASSED}"
