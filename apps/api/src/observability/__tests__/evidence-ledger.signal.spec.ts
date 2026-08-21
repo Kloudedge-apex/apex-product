@@ -43,7 +43,7 @@ describe("recordSignal", () => {
     });
   });
 
-  it("fails closed on an empty source or date (the citation invariant lives in the writer)", async () => {
+  it("fails closed on malformed citation fields (the invariant lives in the writer)", async () => {
     const prisma = fakePrisma();
     const svc = new EvidenceLedgerService(prisma);
     const missingSource = await svc.recordSignal({
@@ -54,9 +54,31 @@ describe("recordSignal", () => {
       orgId: "o1", runId: "r1", companyId: "c1", kind: "recent_hire",
       source: "https://jobs.example.com/123", date: "   ", confidence: 0.9,
     });
+    const nonUrlSource = await svc.recordSignal({
+      orgId: "o1", runId: "r1", companyId: "c1", kind: "recent_hire",
+      source: "jobs.example.com/123", date: "2026-05-20", confidence: 0.9,
+    });
+    const credentialUrl = await svc.recordSignal({
+      orgId: "o1", runId: "r1", companyId: "c1", kind: "recent_hire",
+      source: "https://user:secret@jobs.example.com/123", date: "2026-05-20", confidence: 0.9,
+    });
+    const impossibleDate = await svc.recordSignal({
+      orgId: "o1", runId: "r1", companyId: "c1", kind: "recent_hire",
+      source: "https://jobs.example.com/123", date: "2026-02-30", confidence: 0.9,
+    });
+    const invalidConfidence = await svc.recordSignal({
+      orgId: "o1", runId: "r1", companyId: "c1", kind: "recent_hire",
+      source: "https://jobs.example.com/123", date: "2026-05-20", confidence: 90,
+    });
+    expect([
+      missingSource,
+      missingDate,
+      nonUrlSource,
+      credentialUrl,
+      impossibleDate,
+      invalidConfidence,
+    ]).toEqual(Array(6).fill("REJECTED"));
     expect(prisma.created).toHaveLength(0);
-    expect(missingSource).toBe("REJECTED");
-    expect(missingDate).toBe("REJECTED");
   });
 
   it("canonical citation keys cannot be overridden by fields", async () => {

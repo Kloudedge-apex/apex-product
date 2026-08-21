@@ -1,5 +1,10 @@
 import { isFresh } from "../graph/nodes/research/freshness";
 import { isMocked } from "../runtime/tools/mock-metadata";
+import {
+  normalizeSignalConfidence,
+  normalizeSignalDate,
+  normalizeSignalSourceUrl,
+} from "../observability/signal-citation";
 
 const SIGNAL_KINDS = new Set([
   "recent_hire",
@@ -33,6 +38,7 @@ export interface EvidenceEventSummary {
   eventType: string;
   description: string;
   timestamp: string;
+  sourceUrl: string | null;
 }
 
 function clampPercent(value: unknown): number {
@@ -152,15 +158,13 @@ export function isAttributableSignal(
   if (!SIGNAL_KINDS.has(event.kind)) return false;
   const payload = record(event.payload);
   if (isMocked(payload)) return false;
-  const source = stringAt(payload, "source");
-  const date = stringAt(payload, "date");
-  const confidence = payload.confidence;
+  const source = normalizeSignalSourceUrl(payload.source);
+  const date = normalizeSignalDate(payload.date);
+  const confidence = normalizeSignalConfidence(payload.confidence);
   return Boolean(
     source &&
     date &&
-    typeof confidence === "number" &&
-    Number.isFinite(confidence) &&
-    confidence > 0 &&
+    confidence !== null &&
     isFresh(event.kind, date, now),
   );
 }
@@ -173,9 +177,10 @@ export function toIntentSignals(
     .filter((event) => isAttributableSignal(event, now))
     .map((event) => {
       const payload = record(event.payload);
+      const confidence = normalizeSignalConfidence(payload.confidence);
       return {
         label: summarizeLeadEvidence(event.kind, payload).replace(/\.$/, ""),
-        confidence: Math.max(0, Math.min(1, payload.confidence as number)),
+        confidence: confidence!,
       };
     })
     .slice(0, 5);
@@ -192,9 +197,11 @@ export function toEvidenceTimeline(
     )
     .map((event) => {
       const payload = record(event.payload);
-      const source = SIGNAL_KINDS.has(event.kind)
-        ? stringAt(payload, "source")
+      const isSignal = SIGNAL_KINDS.has(event.kind);
+      const source = isSignal
+        ? normalizeSignalSourceUrl(payload.source)
         : null;
+      const signalDate = isSignal ? normalizeSignalDate(payload.date) : null;
       const description = summarizeLeadEvidence(event.kind, payload);
       return {
         id: event.id,
@@ -204,7 +211,10 @@ export function toEvidenceTimeline(
           .map((part) => part[0]!.toUpperCase() + part.slice(1))
           .join(" "),
         description: source ? `${description} Source: ${source}` : description,
-        timestamp: event.createdAt.toISOString(),
+        timestamp: signalDate
+          ? `${signalDate}T00:00:00.000Z`
+          : event.createdAt.toISOString(),
+        sourceUrl: source,
       };
     })
     .slice(0, 10);

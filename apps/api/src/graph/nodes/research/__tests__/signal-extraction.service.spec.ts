@@ -232,6 +232,26 @@ describe("SignalExtractionService", () => {
       expect(out).toHaveLength(0);
     });
 
+    it("REJECTS impossible calendar dates instead of letting JavaScript normalize them", async () => {
+      const search = fakeSearch(async () => ({
+        success: true,
+        data: {
+          results: [
+            {
+              title: "impossible",
+              url: "https://news.example.com/impossible",
+              date: "2026-02-30",
+            },
+          ],
+        },
+      }));
+      const service = new SignalExtractionService(search);
+
+      const out = await service.extractLiveTrigger(company, NOW);
+
+      expect(out).toHaveLength(0);
+    });
+
     it("skips an undated first hit and cites the next dated one", async () => {
       const search = fakeSearch(async () => ({
         success: true,
@@ -413,6 +433,12 @@ describe("SignalExtractionService", () => {
         raw: { jobs: [{ title: "Senior SDR", url: "https://jobs.example.com/1", postedAt: "05/20/2026" }] },
       });
       expect(slashForm.filter((s) => s.kind === "recent_hire")).toHaveLength(0);
+
+      const impossible = service.extractFromScraped({
+        ...company,
+        raw: { jobs: [{ title: "Senior SDR", url: "https://jobs.example.com/1", postedAt: "2026-02-30" }] },
+      });
+      expect(impossible.filter((s) => s.kind === "recent_hire")).toHaveLength(0);
     });
 
     it("accepts a full ISO datetime by normalizing to yyyy-mm-dd", () => {

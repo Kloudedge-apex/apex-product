@@ -18,6 +18,10 @@ describe("isFresh", () => {
     expect(isFresh("recent_hire", "2026-06-12", now)).toBe(false);
     expect(isFresh("funding_event", "2029-01-01", now)).toBe(false);
   });
+  it("excludes impossible and non-ISO calendar dates", () => {
+    expect(isFresh("recent_hire", "2026-02-30", now)).toBe(false);
+    expect(isFresh("recent_hire", "06/01/2026", now)).toBe(false);
+  });
   it("tolerates a one-day clock/TZ skew so a today/tomorrow source isn't false-stale", () => {
     expect(isFresh("recent_hire", "2026-06-07", now)).toBe(true);
     expect(isFresh("recent_hire", "2026-06-08", now)).toBe(true);

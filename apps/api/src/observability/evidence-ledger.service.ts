@@ -8,6 +8,11 @@ import {
   type SignalEventKind,
   type SignalRecordedPayload,
 } from "./evidence-event.types";
+import {
+  normalizeSignalConfidence,
+  normalizeSignalDate,
+  normalizeSignalSourceUrl,
+} from "./signal-citation";
 
 interface AppendEventInput<TPayload extends EvidenceEventPayload> {
   readonly orgId: string;
@@ -144,13 +149,16 @@ export class EvidenceLedgerService {
       >
     >;
   }): Promise<SignalPersistenceResult> {
-    // Fail-closed on the citation invariant AT THE WRITER: no signal is ever
-    // persisted without a real source + date. The contract no longer depends on
-    // every caller pre-filtering empties (e.g. a future extractor or a refactor
-    // of the upstream guards).
-    if (!input.source?.trim() || !input.date?.trim()) {
+    // Fail closed on the citation invariant AT THE WRITER. A non-empty string
+    // is not enough: require an absolute HTTP(S) URL without credentials, a
+    // strict real calendar date, and a bounded probability. The contract must
+    // not depend on every future extractor getting these checks right.
+    const source = normalizeSignalSourceUrl(input.source);
+    const date = normalizeSignalDate(input.date);
+    const confidence = normalizeSignalConfidence(input.confidence);
+    if (!source || !date || confidence === null) {
       this.logger.warn(
-        `Skipped uncitable signal kind=${input.kind} (empty source or date) for org=${input.orgId} run=${input.runId ?? "-"}`,
+        `Skipped uncitable signal kind=${input.kind} (invalid source, date, or confidence) for org=${input.orgId} run=${input.runId ?? "-"}`,
       );
       return "REJECTED";
     }
@@ -173,7 +181,7 @@ export class EvidenceLedgerService {
           refType,
           refId,
           kind: input.kind,
-          payload: { path: ["source"], equals: input.source },
+          payload: { path: ["source"], equals: source },
         },
         select: { id: true },
       });
@@ -206,10 +214,10 @@ export class EvidenceLedgerService {
       payload: {
         ...(input.fields ?? {}),
         kind: input.kind,
-        source: input.source,
-        date: input.date,
+        source,
+        date,
         summary: input.summary,
-        confidence: input.confidence,
+        confidence,
       } as SignalRecordedPayload,
     });
   }

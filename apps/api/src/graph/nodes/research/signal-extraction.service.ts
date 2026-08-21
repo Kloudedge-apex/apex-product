@@ -1,6 +1,7 @@
 import type { Tool, ToolContext } from "../../../runtime/tools/tool.interface";
 import { isMocked } from "../../../runtime/tools/mock-metadata";
 import type { SignalEventKind } from "../../../observability/evidence-event.types";
+import { normalizeSignalDate } from "../../../observability/signal-citation";
 
 /**
  * A dated, sourced prospect signal ready to be written to the evidence ledger
@@ -186,7 +187,7 @@ function isExcludedTriggerHost(host: string, companyDomain: string): boolean {
   return EXCLUDED_TRIGGER_PLATFORMS.some(matches);
 }
 
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const ISO_DATETIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})$/;
 
 /**
  * Normalize a raw date value to a strict ISO `yyyy-mm-dd`, or null if it isn't
@@ -197,9 +198,13 @@ const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
  */
 function toIsoDate(raw: unknown): string | null {
   if (typeof raw !== "string") return null;
-  const candidate = raw.slice(0, 10);
-  if (!ISO_DATE.test(candidate)) return null;
-  return Number.isNaN(Date.parse(`${candidate}T00:00:00Z`)) ? null : candidate;
+  const value = raw.trim();
+  const candidate = normalizeSignalDate(value.slice(0, 10));
+  if (!candidate) return null;
+  if (value === candidate) return candidate;
+  return ISO_DATETIME.test(value) && !Number.isNaN(Date.parse(value))
+    ? candidate
+    : null;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -253,7 +258,7 @@ function toTriggerDate(raw: unknown, now: Date): string | null {
     const candidate = `${absolute[3]}-${month}-${absolute[2].padStart(2, "0")}`;
     // Same round-trip guard as toIsoDate: rejects in-range-looking but invalid
     // dates (e.g. "Feb 30, 2026").
-    return Number.isNaN(Date.parse(`${candidate}T00:00:00Z`)) ? null : candidate;
+    return normalizeSignalDate(candidate);
   }
 
   return null;
