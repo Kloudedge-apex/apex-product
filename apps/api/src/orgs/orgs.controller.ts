@@ -100,6 +100,7 @@ export class OrgsController {
     @Req() req: Request,
   ): Promise<{
     canReviewArtifacts: boolean;
+    canManageWorkflow: boolean;
     canManageMailbox: boolean;
     canManageOrg: boolean;
     canManageSuppressions: boolean;
@@ -119,6 +120,7 @@ export class OrgsController {
     if (ownerOrAdmin) {
       return {
         canReviewArtifacts: true,
+        canManageWorkflow: true,
         canManageMailbox: true,
         canManageOrg: true,
         canManageSuppressions: true,
@@ -134,6 +136,7 @@ export class OrgsController {
     const canAdministerWork = adminOrManager !== null;
     return {
       canReviewArtifacts: canAdministerWork,
+      canManageWorkflow: canAdministerWork,
       canManageMailbox: canAdministerWork,
       canManageOrg: false,
       canManageSuppressions: false,

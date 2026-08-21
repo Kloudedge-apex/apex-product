@@ -54,6 +54,7 @@ describe("OrgsController GET /orgs/me/capabilities", () => {
         ),
       ).resolves.toEqual({
         canReviewArtifacts: true,
+        canManageWorkflow: true,
         canManageMailbox: true,
         canManageOrg: true,
         canManageSuppressions: true,
@@ -72,6 +73,7 @@ describe("OrgsController GET /orgs/me/capabilities", () => {
       ),
     ).resolves.toEqual({
       canReviewArtifacts: true,
+      canManageWorkflow: true,
       canManageMailbox: true,
       canManageOrg: false,
       canManageSuppressions: false,
@@ -89,6 +91,7 @@ describe("OrgsController GET /orgs/me/capabilities", () => {
       ),
     ).resolves.toEqual({
       canReviewArtifacts: false,
+      canManageWorkflow: false,
       canManageMailbox: false,
       canManageOrg: false,
       canManageSuppressions: false,
@@ -106,6 +109,7 @@ describe("OrgsController GET /orgs/me/capabilities", () => {
       ),
     ).resolves.toEqual({
       canReviewArtifacts: true,
+      canManageWorkflow: true,
       canManageMailbox: true,
       canManageOrg: false,
       canManageSuppressions: false,
@@ -120,6 +124,7 @@ describe("OrgsController GET /orgs/me/capabilities", () => {
       controller.getCapabilities(ORG_ID, makeReq(CLERK_USER_ID)),
     ).resolves.toEqual({
       canReviewArtifacts: true,
+      canManageWorkflow: true,
       canManageMailbox: true,
       canManageOrg: true,
       canManageSuppressions: true,

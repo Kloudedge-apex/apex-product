@@ -22,6 +22,7 @@ import { TheirStackService } from "./sources/theirstack.service";
 import { EmailPatternService } from "./enrichment/email-pattern.service";
 import { IdentityResolver } from "./enrichment/identity-resolver.service";
 import { LeadScorer } from "./scoring/lead-scorer.service";
+import { AdminOrManagerGuard } from "../common/admin-or-manager.guard";
 
 @Module({
   imports: [RuntimeModule],
@@ -38,6 +39,7 @@ import { LeadScorer } from "./scoring/lead-scorer.service";
     EmailPatternService,
     IdentityResolver,
     LeadScorer,
+    AdminOrManagerGuard,
   ],
   exports: [LeadsService],
 })

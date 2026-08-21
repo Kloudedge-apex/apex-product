@@ -1,11 +1,29 @@
 import { BadRequestException, ConflictException } from "@nestjs/common";
+import { GUARDS_METADATA } from "@nestjs/common/constants";
 import { describe, expect, it, vi } from "vitest";
+import { AdminOrManagerGuard } from "../../common/admin-or-manager.guard";
 import { PipelineController } from "../pipeline.controller";
 import type { PrismaService } from "../../prisma/prisma.service";
 import type { IcpAutoService } from "../icp-auto.service";
 import type { GraphService } from "../../graph/graph.service";
 
 describe("PipelineController current ICP contract", () => {
+  it("requires admin or manager authority before starting provider work", () => {
+    const guards = Reflect.getMetadata(
+      GUARDS_METADATA,
+      PipelineController.prototype.run,
+    ) as unknown[];
+    expect(guards).toContain(AdminOrManagerGuard);
+  });
+
+  it("keeps run status readable to authenticated workspace members", () => {
+    const guards = (Reflect.getMetadata(
+      GUARDS_METADATA,
+      PipelineController.prototype.status,
+    ) ?? []) as unknown[];
+    expect(guards).not.toContain(AdminOrManagerGuard);
+  });
+
   it("runs only the newest profile when historical rows exist", async () => {
     const prisma = {
       icpProfile: {

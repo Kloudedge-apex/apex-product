@@ -10,9 +10,11 @@ import {
   HttpCode,
   HttpStatus,
   BadRequestException,
+  UseGuards,
 } from "@nestjs/common";
 import type { Response } from "express";
 import { OrgId } from "../common/org-context.decorator";
+import { AdminOrManagerGuard } from "../common/admin-or-manager.guard";
 import { LeadsService } from "./leads.service";
 import type { Seniority, Department } from "@prisma/client";
 import { normalizeIcpDomain } from "./icp-domain-exclusions";
@@ -80,6 +82,7 @@ export class LeadsController {
 
   @Post("icp")
   @HttpCode(HttpStatus.CREATED)
+  @UseGuards(AdminOrManagerGuard)
   createIcp(
     @OrgId() orgId: string | undefined,
     @Body()
@@ -94,6 +97,7 @@ export class LeadsController {
    * in place, or creates it once for a clean tenant, under an org-scoped lock.
    */
   @Patch("icp/current")
+  @UseGuards(AdminOrManagerGuard)
   upsertCurrentIcp(
     @OrgId() orgId: string | undefined,
     @Body() body: IcpProfileBody,
