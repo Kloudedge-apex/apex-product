@@ -58,7 +58,8 @@ export class HealthController {
   @Get("ready")
   @HttpCode(HttpStatus.OK)
   async ready(env: NodeJS.ProcessEnv = process.env) {
-    const checks: Record<string, "ok" | string> = {};
+    const checks: Record<string, "ok" | "failed"> = {};
+    const failureDetails: Record<string, string> = {};
     const timeoutMs = healthCheckTimeoutMs(env);
 
     // Postgres — a real query against the connection.
@@ -70,7 +71,8 @@ export class HealthController {
       );
       checks.postgres = "ok";
     } catch (err) {
-      checks.postgres = err instanceof Error ? err.message : "unknown error";
+      checks.postgres = "failed";
+      failureDetails.postgres = healthFailureDetail(err);
     }
 
     // Redis (via BullMQ queue's underlying ioredis client). The queue is null
@@ -97,13 +99,16 @@ export class HealthController {
         checks.redis = "ok"; // dev fallback mode — not a readiness failure
       }
     } catch (err) {
-      checks.redis = err instanceof Error ? err.message : "unknown error";
+      checks.redis = "failed";
+      failureDetails.redis = healthFailureDetail(err);
     }
 
     const failing = Object.entries(checks).filter(([, v]) => v !== "ok");
     if (failing.length > 0) {
       this.logger.warn(
-        `Readiness probe failing: ${failing.map(([k, v]) => `${k}=${v}`).join(", ")}`,
+        `Readiness probe failing: ${Object.entries(failureDetails)
+          .map(([dependency, detail]) => `${dependency}=${detail}`)
+          .join(", ")}`,
       );
       throw new ServiceUnavailableException({
         status: "degraded",
@@ -160,4 +165,8 @@ export class HealthController {
       timestamp: new Date().toISOString(),
     };
   }
+}
+
+function healthFailureDetail(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

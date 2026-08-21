@@ -1,4 +1,4 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, Logger } from "@nestjs/common";
 import {
   GraphRunQueueService,
   GRAPH_RUN_QUEUE_NAME,
@@ -114,6 +114,7 @@ export interface WorkerHealthReport {
 
 @Injectable()
 export class WorkerHealthService {
+  private readonly logger = new Logger(WorkerHealthService.name);
   private readonly history = new Map<string, QueueSnapshot[]>();
 
   constructor(
@@ -167,14 +168,19 @@ export class WorkerHealthService {
     } catch (err) {
       // Redis unreachable → we cannot confirm consumption. Fail the probe;
       // /health/ready fails on the same condition, so this adds no new
-      // flakiness class.
+      // flakiness class. Preserve the provider detail in protected logs, but
+      // never return it from the unauthenticated health endpoint because it
+      // can contain internal hosts or connection metadata.
+      this.logger.warn(
+        `${name} queue stats unavailable: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
       return {
         queue: name,
         mode: "bullmq",
         healthy: false,
-        reasons: [
-          `queue stats unavailable: ${err instanceof Error ? err.message : String(err)}`,
-        ],
+        reasons: ["queue stats unavailable"],
         workerCount: null,
         backlog: null,
         counts: null,

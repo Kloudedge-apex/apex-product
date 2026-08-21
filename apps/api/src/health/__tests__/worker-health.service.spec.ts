@@ -274,7 +274,8 @@ describe("WorkerHealthService.check", () => {
     );
     const report = await svc.check(T0, ENV);
     expect(report.healthy).toBe(false);
-    expect(report.queues[0]?.reasons.join(" ")).toMatch(/stats unavailable/);
+    expect(report.queues[0]?.reasons).toEqual(["queue stats unavailable"]);
+    expect(JSON.stringify(report)).not.toContain("ECONNREFUSED");
   });
 
   it("fails promptly when queue stats never settle", async () => {
@@ -285,6 +286,7 @@ describe("WorkerHealthService.check", () => {
     const report = await svc.check(T0, { HEALTH_CHECK_TIMEOUT_MS: "5" });
 
     expect(report.healthy).toBe(false);
-    expect(report.queues[0]?.reasons.join(" ")).toMatch(/timed out after 5ms/);
+    expect(report.queues[0]?.reasons).toEqual(["queue stats unavailable"]);
+    expect(JSON.stringify(report)).not.toContain("timed out after 5ms");
   });
 });
