@@ -85,15 +85,26 @@ describe("HealthController", () => {
   });
 
   it("/ready throws 503 when postgres is down", async () => {
-    prisma = makePrisma({ failsWith: new Error("connect ECONNREFUSED") });
+    prisma = makePrisma({
+      failsWith: new Error("connect ECONNREFUSED internal-postgres.example:5432"),
+    });
     controller = new HealthController(prisma as never, queueSvc as never, workerHealth as never);
-    await expect(controller.ready()).rejects.toBeInstanceOf(ServiceUnavailableException);
+    const err = await controller.ready().catch((error: unknown) => error);
+    expect(err).toBeInstanceOf(ServiceUnavailableException);
+    const body = (err as ServiceUnavailableException).getResponse() as Record<string, unknown>;
+    expect(body.checks).toEqual({ postgres: "failed", redis: "ok" });
+    expect(JSON.stringify(body)).not.toContain("internal-postgres.example");
+    expect(JSON.stringify(body)).not.toContain("ECONNREFUSED");
   });
 
   it("/ready throws 503 when redis ping fails", async () => {
     queueSvc = makeQueueService({ redisOk: false });
     controller = new HealthController(prisma as never, queueSvc as never, workerHealth as never);
-    await expect(controller.ready()).rejects.toBeInstanceOf(ServiceUnavailableException);
+    const err = await controller.ready().catch((error: unknown) => error);
+    expect(err).toBeInstanceOf(ServiceUnavailableException);
+    const body = (err as ServiceUnavailableException).getResponse() as Record<string, unknown>;
+    expect(body.checks).toEqual({ postgres: "ok", redis: "failed" });
+    expect(JSON.stringify(body)).not.toContain("redis down");
   });
 
   it("/ready times out and throws 503 when redis ping never settles", async () => {
