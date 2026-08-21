@@ -1161,14 +1161,27 @@ FROM "Integration"
 WHERE "orgId" = 'cmpe63k370000ap01vsiehbj2' AND provider = 'gmail';
 ```
 
-- `status = 'CONNECTED'` → done. The GL1 fix means even a credential stored
-  before 2026-06-12 (no `expires_at`) is treated as expired and auto-refreshed
-  at first use; the refreshed token is persisted to both storage shapes.
-  Optional positive check: `POST https://${API_FQDN}/api/integrations/gmail/test`
-  (authed, org-scoped) → `{ "ok": true, "message": "gmail credentials are valid." }`.
+- `status = 'CONNECTED'` is necessary but is not a readiness verdict. The GL1
+  fix means even a credential stored before 2026-06-12 (no `expires_at`) is
+  treated as expired and auto-refreshed at first provider use; the refreshed
+  token is persisted to both storage shapes.
 - `status = 'ERROR'` with `lastErrorMessage` `OAuth token refresh failed: invalid_grant. Reconnect required.`
   → reconnect Gmail via the dashboard OAuth flow (GL3), then re-run the query
   and confirm `CONNECTED`.
+- Any other status is a stop. Do not infer mailbox readiness from the
+  Integration row alone.
+
+Using the same authenticated admin/manager session as the production console:
+
+1. `GET https://${API_FQDN}/api/orgs/onboarding/status` must return both
+   `mailbox.connected = true` and `sendReadiness.mailboxConnected = true`.
+   This is the server-authoritative projection for an identified mailbox with
+   a durable history cursor and a fresh provider watch.
+2. `GET https://${API_FQDN}/api/integrations/gmail/messages?maxResults=1` must
+   return HTTP 200. Discard the response body and do not copy mailbox metadata
+   into release evidence. This bounded, read-only provider call is the mounted
+   credential-refresh check; the retired Gmail test operation is not part of
+   the sellable release.
 
 **Step 2 — produce one PENDING_REVIEW artifact**
 
