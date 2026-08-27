@@ -120,7 +120,7 @@ export const PHASE_MIGRATIONS = Object.freeze([
   }),
   Object.freeze({
     path: "docs/migrations/2026-08-12_conversation-store-expand.sql",
-    sha256: "sha256:b27e2f5d0e23299404c9a423110d1e5af324037246d70e75e1cb46e59b90e49e",
+    sha256: "sha256:b34ff5fc9dbd4d4c4adcf7adb044e238d6d427f7e03fd2dec1b356807a7408ba",
     writerPause: "not-required",
     writerScopes: Object.freeze([]),
   }),
