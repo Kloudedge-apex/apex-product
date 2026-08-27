@@ -95,6 +95,12 @@ rejected("the audited DDL authority output cannot be hard-coded", (source) =>
     "true",
   ));
 
+rejected("production registry login cannot be removed", (source) =>
+  source.replace(
+    "      - name: Authenticate Docker to production registry\n        run: az acr login --name workforceosprodacr --only-show-errors\n",
+    "",
+  ));
+
 rejected("the system PostgreSQL trust store cannot be removed", (source) =>
   source.replace(
     "          PGSSLROOTCERT: ${{ contains(fromJSON('[\"invoke-clerk\",\"apply-schema\"]'), inputs.action) && 'system' || '' }}\n",
