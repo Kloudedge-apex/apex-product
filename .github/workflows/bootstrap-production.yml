@@ -78,9 +78,12 @@ jobs:
           azure_subscription_id="3171575e-f164-425c-9ee0-2fb10cf93884"
           azure_principal_object_id="509039c1-8cfd-4df4-9bb0-cc659b5a7e22"
           exclusive_aca_authority="true"
-          exclusive_ddl_authority="false"
-          outstanding_delivery_review="false"
-          provider_delivery_drain="false"
+          # The launch window is source-enabled only after the production-copy
+          # migration rehearsal. The controller still requires fresh,
+          # attempt-bound evidence for every assertion before any mutation.
+          exclusive_ddl_authority="true"
+          outstanding_delivery_review="true"
+          provider_delivery_drain="true"
 
           uuid_pattern='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
           for value in \
