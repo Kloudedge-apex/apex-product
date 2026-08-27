@@ -1284,6 +1284,15 @@ function verifyPublishedCandidates(runner, request) {
 
 function verifyArtifact(runner, artifact, role) {
   const repository = role === "console" ? "workforceos-fe" : "apex-api";
+  const metadata = runner.json("az", [
+    "acr", "manifest", "show-metadata",
+    "--registry", REGISTRY,
+    "--name", `${repository}@${artifact.manifestDigest}`,
+    "--output", "json",
+    "--only-show-errors",
+  ], { label: `${role} registry manifest metadata` });
+  const observedDigest = metadata.digest ?? metadata.changeableAttributes?.digest;
+  if (observedDigest !== artifact.manifestDigest) fail(`${role} registry manifest digest drift detected`);
   const manifest = runner.json("az", [
     "acr", "manifest", "show",
     "--registry", REGISTRY,
@@ -1291,14 +1300,23 @@ function verifyArtifact(runner, artifact, role) {
     "--output", "json",
     "--only-show-errors",
   ], { label: `${role} registry manifest` });
-  const observedDigest = manifest.digest ?? manifest.changeableAttributes?.digest;
-  if (observedDigest !== artifact.manifestDigest) fail(`${role} registry manifest digest drift detected`);
   let platformManifest = manifest;
   if (Array.isArray(manifest.manifests)) {
     const descriptors = manifest.manifests.filter((descriptor) =>
       descriptor?.platform?.os === "linux" && descriptor?.platform?.architecture === "amd64");
     if (descriptors.length !== 1 || !/^sha256:[0-9a-f]{64}$/.test(descriptors[0]?.digest ?? "")) {
       fail(`${role} registry index does not select exactly one linux/amd64 manifest`);
+    }
+    const childMetadata = runner.json("az", [
+      "acr", "manifest", "show-metadata",
+      "--registry", REGISTRY,
+      "--name", `${repository}@${descriptors[0].digest}`,
+      "--output", "json",
+      "--only-show-errors",
+    ], { label: `${role} registry linux/amd64 manifest metadata` });
+    const childMetadataDigest = childMetadata.digest ?? childMetadata.changeableAttributes?.digest;
+    if (childMetadataDigest !== descriptors[0].digest) {
+      fail(`${role} registry platform descriptor does not bind the fetched manifest`);
     }
     platformManifest = runner.json("az", [
       "acr", "manifest", "show",
@@ -1307,10 +1325,6 @@ function verifyArtifact(runner, artifact, role) {
       "--output", "json",
       "--only-show-errors",
     ], { label: `${role} registry linux/amd64 manifest` });
-    const childDigest = platformManifest.digest ?? platformManifest.changeableAttributes?.digest;
-    if (childDigest !== descriptors[0].digest) {
-      fail(`${role} registry platform descriptor does not bind the fetched manifest`);
-    }
   }
   if (platformManifest?.config?.digest !== artifact.platformDigest) {
     fail(`${role} registry platform manifest does not bind the admitted image config digest`);
