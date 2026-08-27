@@ -59,10 +59,22 @@ rejected("downgraded Container Apps authority is rejected", (source) =>
     'exclusive_aca_authority="false"',
   ));
 
-rejected("source-enabled database DDL authority is rejected", (source) =>
+rejected("downgraded database DDL authority is rejected", (source) =>
   source.replace(
-    'exclusive_ddl_authority="false"',
     'exclusive_ddl_authority="true"',
+    'exclusive_ddl_authority="false"',
+  ));
+
+rejected("downgraded outstanding-delivery admission is rejected", (source) =>
+  source.replace(
+    'outstanding_delivery_review="true"',
+    'outstanding_delivery_review="false"',
+  ));
+
+rejected("downgraded provider-drain admission is rejected", (source) =>
+  source.replace(
+    'provider_delivery_drain="true"',
+    'provider_delivery_drain="false"',
   ));
 
 rejected("workflow-token Environment administration queries are rejected", (source) =>

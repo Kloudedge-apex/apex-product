@@ -129,9 +129,9 @@ require_literal 'azure_tenant_id="d4b3813d-146f-4d03-96b8-d6e5862d58a2"'
 require_literal 'azure_subscription_id="3171575e-f164-425c-9ee0-2fb10cf93884"'
 require_literal 'azure_principal_object_id="509039c1-8cfd-4df4-9bb0-cc659b5a7e22"'
 require_literal 'exclusive_aca_authority="true"'
-require_literal 'exclusive_ddl_authority="false"'
-require_literal 'outstanding_delivery_review="false"'
-require_literal 'provider_delivery_drain="false"'
+require_literal 'exclusive_ddl_authority="true"'
+require_literal 'outstanding_delivery_review="true"'
+require_literal 'provider_delivery_drain="true"'
 require_literal 'client-id: ${{ steps.production_environment.outputs.azure_client_id }}'
 require_literal 'tenant-id: ${{ steps.production_environment.outputs.azure_tenant_id }}'
 require_literal 'subscription-id: ${{ steps.production_environment.outputs.azure_subscription_id }}'
@@ -166,7 +166,9 @@ reject_pattern '\$\{\{[[:space:]]*vars\.' "repository or organization variable f
 reject_pattern 'repos/\$\{GITHUB_REPOSITORY\}/actions/(variables|secrets)' "repository-scoped release configuration is forbidden"
 reject_pattern 'repos/\$\{GITHUB_REPOSITORY\}/environments' "workflow token cannot query Environment administration APIs"
 reject_pattern 'exclusive_aca_authority="false"' "reviewed Container Apps authority must not be downgraded"
-reject_pattern 'exclusive_ddl_authority="true"' "database DDL authority must remain fail-closed"
+reject_pattern 'exclusive_ddl_authority="false"' "reviewed database DDL authority must not be downgraded"
+reject_pattern 'outstanding_delivery_review="false"' "reviewed outstanding-delivery admission must not be downgraded"
+reject_pattern 'provider_delivery_drain="false"' "reviewed provider-drain admission must not be downgraded"
 reject_pattern '^[[:space:]]+(DATABASE_URL|REDIS_URL|PGPASS_B64):[[:space:]]+\$\{\{[[:space:]]*secrets\.' "production database or Redis secrets must be action-scoped and absent from audit"
 
 assert_before "Validate protected manual authority" "Checkout exact protected master source"
