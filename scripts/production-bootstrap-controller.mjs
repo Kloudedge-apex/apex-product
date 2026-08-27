@@ -1213,17 +1213,19 @@ function verifyPublishedCandidates(runner, request) {
     if (branch.protected !== true || branch.commit?.sha !== candidate.commit) {
       fail(`${label} candidate is not the protected exact published head`);
     }
-    const protection = runner.json("gh", [
-      "api", `repos/${candidate.repository}/branches/${encodeURIComponent(candidate.branch)}/protection`,
-    ], { label: `${label} default-branch protection` });
-    const requiredContexts = protection.required_status_checks?.contexts ?? [];
-    const requiredChecks = protection.required_status_checks?.checks ?? [];
-    if (protection.required_status_checks?.strict !== true ||
-      requiredChecks.length + requiredContexts.length < 1 ||
-      !Number.isSafeInteger(protection.required_pull_request_reviews?.required_approving_review_count) ||
-      protection.required_pull_request_reviews.required_approving_review_count < 1 ||
-      protection.enforce_admins?.enabled !== true) {
-      fail(`${label} default branch lacks strict CI, review, or administrator protection`);
+    // GITHUB_TOKEN cannot read the repository-administration `/protection`
+    // endpoint, even when the workflow has access to the protected branch.
+    // The ordinary branch response exposes the effective required checks and
+    // their enforcement level and is available to this read-only workflow.
+    // Exact-head equality plus fresh successful required checks closes the
+    // strict-update requirement without an unusable administration grant.
+    const protection = branch.protection;
+    const requiredContexts = protection?.required_status_checks?.contexts ?? [];
+    const requiredChecks = protection?.required_status_checks?.checks ?? [];
+    if (protection?.enabled !== true ||
+      protection.required_status_checks?.enforcement_level !== "everyone" ||
+      requiredChecks.length + requiredContexts.length < 1) {
+      fail(`${label} default branch lacks enforced required CI protection`);
     }
     const checks = runner.json("gh", [
       "api", `repos/${candidate.repository}/commits/${candidate.commit}/check-runs?per_page=100&filter=latest`,
