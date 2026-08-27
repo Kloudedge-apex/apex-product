@@ -74,6 +74,8 @@ const RELEASE_LOCK_REF = "refs/heads/workforce-os-release-lock/production-gtm-pl
 const API_APP = "apex-gtm-api";
 const WORKER_APP = "apex-gtm-worker";
 const CONSOLE_APP = "nikxius-web";
+const CONSOLE_API_UPSTREAM_URL =
+  "https://apex-gtm-api.braveflower-6d3bb66b.eastus.azurecontainerapps.io";
 const RESOURCE_GROUP = "workforce-os-prod";
 const REGISTRY = "workforceosprodacr";
 const CLERK_EXECUTOR_PATH = "scripts/production-clerk-reconciliation-executor.mjs";
@@ -3873,7 +3875,7 @@ function deployCompatible(runner, request, state, options) {
           "console",
           request.targetArtifacts.console.image,
           request.targetArtifacts.console.plannedRevision,
-          [],
+          [`API_UPSTREAM_URL=${CONSOLE_API_UPSTREAM_URL}`],
           1,
           [],
           true,

@@ -245,6 +245,10 @@ any production mutation. `invoke-clerk` re-verifies all three exact byte sets
 against the entry receipt and refuses the irreversible migration if any byte,
 expected count, cutoff, executor identity, signature, or freshness value has
 changed. The plan is never printed or uploaded as a workflow artifact.
+The plan supports both Clerk Organization memberships and personal Clerk
+accounts. A `personal-owner` operation is valid only for an unbound local
+workspace, an exact existing Clerk user id, no Clerk membership id, and OWNER
+authority; it seeds a user lifecycle row so deletion remains fail closed.
 
 No controller source change, test double, CI receipt, synthetic rehearsal, or
 locally generated signature satisfies one of these external gates.

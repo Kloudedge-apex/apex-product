@@ -301,7 +301,7 @@ const MIGRATION_KEYS = ["path", "sha256", "writerPause", "writerScopes"];
 const ENTRY_MIGRATIONS = Object.freeze([
   Object.freeze({
     path: "docs/migrations/2026-08-13_clerk-identity-lifecycle-expand.sql",
-    sha256: "sha256:356f4b660edd6aab07b523785e3cbc9b962a0f3f07b97e3dcfc155e1ea7fefdc",
+    sha256: "sha256:c6aae895548ab702908d7844a71fd45351ccdc0c9461616993a3b596b6bf5a41",
     writerPause: "observed",
     writerScopes: ["api:clerk-webhooks", "api:identity-membership"],
   }),

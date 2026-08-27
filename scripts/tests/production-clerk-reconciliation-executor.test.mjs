@@ -255,11 +255,16 @@ printf '%s\\n' '{"ref":"refs/heads/workforce-os-release-lock/production-gtm-plat
       ).stdout.trim();
     }
 
-    function seed(database, plan, { localOwnerClerkId = null } = {}) {
+    function seed(database, plan, { localOwnerClerkId } = {}) {
       const organization = plan.operations.find((operation) => operation.type === "organization");
       const membership = plan.operations.find((operation) => operation.type === "membership");
-      const localOwner = plan.operations.find((operation) => operation.type === "local-owner");
-      const localOwnerClerkSql = localOwnerClerkId === null ? "NULL" : sqlText(localOwnerClerkId);
+      const localOwner = plan.operations.find((operation) =>
+        operation.type === "local-owner" || operation.type === "personal-owner");
+      const seededLocalOwnerClerkId = localOwnerClerkId ??
+        (localOwner.type === "personal-owner" ? localOwner.clerkUserId : null);
+      const localOwnerClerkSql = seededLocalOwnerClerkId === null
+        ? "NULL"
+        : sqlText(seededLocalOwnerClerkId);
       query(database, `
         INSERT INTO "Org" ("id") VALUES (${sqlText(organization.localOrgId)}), (${sqlText(localOwner.localOrgId)});
         INSERT INTO "User" ("id", "orgId", "clerkId", "role", "membershipActive") VALUES
@@ -505,6 +510,54 @@ printf '%s\\n' '{"ref":"refs/heads/workforce-os-release-lock/production-gtm-plat
         assert.equal(second.result.stderr, "");
         assert.equal(snapshot(database), firstState, "idempotent apply changed committed state");
         assert.deepEqual(JSON.parse(readFileSync(second.outputPath, "utf8")).invariants, firstEvidence.invariants);
+      });
+    });
+
+    await t.test("apply preserves a verified personal Clerk owner without Organizations", async () => {
+      await withDatabase("personal_owner", (database) => {
+        const plan = planFor();
+        const localOwner = plan.operations.at(-1);
+        plan.operations[plan.operations.length - 1] = {
+          type: "personal-owner",
+          localOrgId: localOwner.localOrgId,
+          localUserId: localOwner.localUserId,
+          clerkUserId: "user_personal_1",
+          userLastEventId: "inventory_user_personal_1",
+        };
+        plan.cutover.expectedActiveUserCount = 2;
+        seed(database, plan);
+
+        const first = invoke(database, "apply", plan);
+        assert.equal(first.result.status, 0, first.result.stderr);
+        assert.deepEqual(JSON.parse(readFileSync(first.outputPath, "utf8")).invariants, {
+          organizationCount: 1,
+          membershipCount: 1,
+          userCount: 2,
+          projectionMismatchRows: 0,
+          orphanActiveAuthorityRows: 0,
+          readinessViolationRows: 0,
+        });
+        assert.equal(
+          query(database, `
+            SELECT u."membershipActive"
+              AND u."role" = 'OWNER'
+              AND u."clerkMembershipId" IS NULL
+              AND l."membershipActive"
+              AND NOT l."deleted"
+              AND l."clerkMembershipId" IS NULL
+              AND l."clerkOrgId" IS NULL
+              AND l."membershipEventVersion" IS NULL
+              AND l."membershipEventRank" IS NULL
+              AND l."role" = 'OWNER'
+            FROM "User" AS u
+            JOIN "clerk_user_lifecycle" AS l ON l."clerkUserId" = u."clerkId"
+            WHERE u."id" = 'local-owner-1';
+          `),
+          "t",
+        );
+
+        const second = invoke(database, "apply", plan);
+        assert.equal(second.result.status, 0, second.result.stderr);
       });
     });
 

@@ -884,6 +884,10 @@ $clerk_identity_index_postcondition$;
 --    is the eventVersion; it must be positive, JS-safe, and no newer than the
 --    provider snapshot cutoff. Event ranks are created=1, updated=2, deleted=3.
 --    Active rows use deleted=false and matching membership/user cursor values.
+--    For a verified Clerk personal account in an unbound local workspace,
+--    retain clerkId, keep organization/membership ids and membership cursor
+--    null, require OWNER, and seed an active clerk_user_lifecycle row. A local
+--    owner with no Clerk identity remains valid without a lifecycle row.
 --    Do not put row values in logs.
 -- SELECT "id", "slug", "clerkOrgId" FROM "Org" ORDER BY "id";
 -- SELECT "id", "orgId", "clerkId", "clerkMembershipId",
@@ -905,8 +909,17 @@ $clerk_identity_index_postcondition$;
 --   AND (
 --     (o."clerkOrgId" IS NULL AND (
 --       u."clerkMembershipId" IS NOT NULL
---       OR u."clerkId" IS NOT NULL
 --       OR u."role" <> 'OWNER'
+--       OR (u."clerkId" IS NOT NULL AND (
+--         ul."clerkUserId" IS NULL
+--         OR ul."deleted"
+--         OR NOT ul."membershipActive"
+--         OR ul."clerkMembershipId" IS NOT NULL
+--         OR ul."clerkOrgId" IS NOT NULL
+--         OR ul."membershipEventVersion" IS NOT NULL
+--         OR ul."membershipEventRank" IS NOT NULL
+--         OR ul."role" <> 'OWNER'
+--       ))
 --     ))
 --     OR
 --     (o."clerkOrgId" IS NOT NULL AND (
@@ -966,9 +979,25 @@ $clerk_identity_index_postcondition$;
 -- FROM "clerk_user_lifecycle" AS ul
 -- LEFT JOIN "clerk_membership_lifecycle" AS ml
 --   ON ml."clerkMembershipId" = ul."clerkMembershipId"
+-- LEFT JOIN "User" AS u ON u."clerkId" = ul."clerkUserId"
+-- LEFT JOIN "Org" AS o ON o."id" = u."orgId"
 -- WHERE NOT ul."deleted"
 --   AND ul."membershipActive"
---   AND (ml."clerkMembershipId" IS NULL OR ml."deleted");
+--   AND (
+--     (ul."clerkMembershipId" IS NULL AND (
+--       ul."clerkOrgId" IS NOT NULL
+--       OR ul."membershipEventVersion" IS NOT NULL
+--       OR ul."membershipEventRank" IS NOT NULL
+--       OR ul."role" <> 'OWNER'
+--       OR u."id" IS NULL
+--       OR NOT u."membershipActive"
+--       OR u."clerkMembershipId" IS NOT NULL
+--       OR o."clerkOrgId" IS NOT NULL
+--     ))
+--     OR (ul."clerkMembershipId" IS NOT NULL AND (
+--       ml."clerkMembershipId" IS NULL OR ml."deleted"
+--     ))
+--   );
 --
 -- 3. Only after both queries return zero, arm the cutover with the sanitized
 --    provider-inventory evidence hash and the three counts captured directly

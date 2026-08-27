@@ -221,5 +221,11 @@ describe("Clerk identity lifecycle migration", () => {
     expect(migrationSql).toContain(
       "Attach the redacted reconciliation inventory",
     );
+    expect(migrationSql).toContain(
+      "For a verified Clerk personal account in an unbound local workspace",
+    );
+    expect(migrationSql).toContain(
+      'ul."clerkMembershipId" IS NULL AND (',
+    );
   });
 });
