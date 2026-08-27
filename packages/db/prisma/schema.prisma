@@ -83,6 +83,12 @@ enum OutreachArtifactStatus {
   APPROVED
   REJECTED
   SENT
+  // Retained legacy states. Current workers do not write them, but the
+  // production PostgreSQL enum already contains these labels and historical
+  // rows must remain readable during the one-time compatibility migration.
+  QUEUED
+  REPLIED
+  BOUNCED
   // Recipient is on the OutreachSuppression list — worker skipped real send.
   // Terminal state, same shape as REJECTED for UI purposes but produced by
   // the system (CAN-SPAM compliance), not by a human reviewer.

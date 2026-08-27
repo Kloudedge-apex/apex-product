@@ -190,6 +190,7 @@ jobs:
           PGDATABASE: ${{ contains(fromJSON('["invoke-clerk","apply-schema"]'), inputs.action) && vars.PRODUCTION_PGDATABASE || '' }}
           PGUSER: ${{ contains(fromJSON('["invoke-clerk","apply-schema"]'), inputs.action) && vars.PRODUCTION_PGUSER || '' }}
           PGSSLMODE: ${{ contains(fromJSON('["invoke-clerk","apply-schema"]'), inputs.action) && 'verify-full' || '' }}
+          PGSSLROOTCERT: ${{ contains(fromJSON('["invoke-clerk","apply-schema"]'), inputs.action) && 'system' || '' }}
           DATABASE_URL: ${{ inputs.action != 'audit' && secrets.PRODUCTION_DATABASE_URL || '' }}
           REDIS_URL: ${{ inputs.action != 'audit' && secrets.PRODUCTION_REDIS_URL || '' }}
         run: |

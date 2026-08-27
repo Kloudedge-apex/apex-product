@@ -497,6 +497,9 @@ function main() {
   for (const name of ["PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGSSLMODE", "PGPASSFILE"]) {
     if (!process.env[name]) fail(`protected PostgreSQL environment ${name} is absent`);
   }
+  if (process.env.PGSSLMODE === "verify-full" && process.env.PGSSLROOTCERT !== "system") {
+    fail("protected PostgreSQL verify-full mode requires the system trust store");
+  }
   externalPath(process.env.PGPASSFILE, "PGPASSFILE", true);
   if ((statSync(process.env.PGPASSFILE).mode & 0o777) !== 0o600) fail("PGPASSFILE must have mode 0600");
   const planBytes = readFileSync(options.plan);

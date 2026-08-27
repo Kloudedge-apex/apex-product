@@ -34,7 +34,7 @@ export const POST_CLERK_MIGRATION_CONTRACT = deepFreeze([
   },
   {
     path: POST_CLERK_MIGRATIONS[1],
-    sha256: "sha256:b27e2f5d0e23299404c9a423110d1e5af324037246d70e75e1cb46e59b90e49e",
+    sha256: "sha256:b34ff5fc9dbd4d4c4adcf7adb044e238d6d427f7e03fd2dec1b356807a7408ba",
   },
   {
     path: POST_CLERK_MIGRATIONS[2],
@@ -85,6 +85,9 @@ const BASE_OUTREACH_STATUS_LABELS = Object.freeze([
   "APPROVED",
   "REJECTED",
   "SENT",
+  "QUEUED",
+  "REPLIED",
+  "BOUNCED",
   "SUPPRESSED",
   "SENDING",
   "SIMULATED",
@@ -1196,6 +1199,39 @@ function classifyConversationStore(snapshot, maps) {
     return classification("hold", ["TARGET_RELATION_MISSING_OR_WRONG"]);
   }
 
+  // The production predecessor contains a known, empty 13-column
+  // Conversation table. The migration itself verifies its complete catalog
+  // signature and row count before renaming it, so the catalog-only planner
+  // may classify that precise predecessor shape as eligible to apply. Exact
+  // compatible additive columns on existing tables are also allowed because
+  // the migration uses ADD COLUMN IF NOT EXISTS and the post-image is checked
+  // again before the next step.
+  const legacyConversation = maps.relations.get("Conversation");
+  const legacyOnly = relationMatches({
+    name: "Conversation",
+    kind: "r",
+    persistence: "p",
+    columnCount: 13,
+  }, legacyConversation) &&
+    !maps.relations.has("ConversationMessage") &&
+    !maps.relations.has("FollowUpTask") &&
+    ownedEnums.every(([name]) => !maps.enums.has(name)) &&
+    ownedColumns.filter((entry) => entry.table !== "Conversation").every((entry) => {
+      const observed = observedColumn(maps, entry);
+      return observed === undefined || columnMatches(entry, observed, snapshot);
+    }) &&
+    ownedIndexes.every((entry) => {
+      const observed = maps.indexes.get(entry.name);
+      if (observed === undefined) return true;
+      return entry.name === "Conversation_pkey";
+    }) &&
+    ownedConstraints.every((entry) => {
+      const observed = maps.constraints.get(`${entry.table}\u0000${entry.name}`);
+      if (observed === undefined) return true;
+      return entry.name === "Conversation_pkey" || entry.name === "Conversation_orgId_fkey";
+    });
+  if (legacyOnly) return classification("absent", ["ABSENT_EXACT"]);
+
   const exact = ownedEnums.every(([name, labels]) => enumMatches(labels, maps.enums.get(name))) &&
     ownedRelations.every((entry) => relationMatches(entry, maps.relations.get(entry.name))) &&
     ownedColumns.every((entry) => columnMatches(entry, observedColumn(maps, entry), snapshot)) &&
@@ -1565,6 +1601,9 @@ function assertProtectedPostgresEnvironment() {
   }
   if (!/^\d{1,5}$/u.test(process.env.PGPORT) || Number(process.env.PGPORT) > 65535) {
     fail("PROTECTED_POSTGRES_ENVIRONMENT_REQUIRED", "protected PostgreSQL port is invalid");
+  }
+  if (process.env.PGSSLMODE === "verify-full" && process.env.PGSSLROOTCERT !== "system") {
+    fail("PROTECTED_POSTGRES_ENVIRONMENT_REQUIRED", "verify-full requires the system trust store");
   }
   const passfile = process.env.PGPASSFILE;
   if (!isAbsolute(passfile)) {

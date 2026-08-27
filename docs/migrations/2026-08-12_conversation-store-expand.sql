@@ -22,6 +22,10 @@
 --     verified below and it is preserved as LegacyConversation before the
 --     canonical Conversation table is created. Any rows or signature drift
 --     fail the migration before a rename occurs.
+--   - Exact, compatible additive columns already present on OutreachArtifact
+--     or MeetingLedger are accepted by the catalog preflight and preserved by
+--     ADD COLUMN IF NOT EXISTS. A same-name column with a different catalog
+--     definition remains a hard hold before this file is invoked.
 --   - No existing send/approval status or allowlist gate is changed.
 --   - Run the preflight SELECTs and retain their output with the change
 --     record. Apply production separately through the normal operator gate.
@@ -318,14 +322,14 @@ CREATE UNIQUE INDEX "OutreachArtifact_id_orgId_key"
   ON "OutreachArtifact" ("id", "orgId");
 
 ALTER TABLE "OutreachArtifact"
-  ADD COLUMN "purpose" "OutreachArtifactPurpose" NOT NULL DEFAULT 'OUTBOUND',
-  ADD COLUMN "conversationId" TEXT,
-  ADD COLUMN "providerThreadId" TEXT,
-  ADD COLUMN "replyToMessageId" TEXT;
+  ADD COLUMN IF NOT EXISTS "purpose" "OutreachArtifactPurpose" NOT NULL DEFAULT 'OUTBOUND',
+  ADD COLUMN IF NOT EXISTS "conversationId" TEXT,
+  ADD COLUMN IF NOT EXISTS "providerThreadId" TEXT,
+  ADD COLUMN IF NOT EXISTS "replyToMessageId" TEXT;
 
 ALTER TABLE "MeetingLedger"
-  ADD COLUMN "conversationId" TEXT,
-  ADD COLUMN "sourceMessageId" TEXT;
+  ADD COLUMN IF NOT EXISTS "conversationId" TEXT,
+  ADD COLUMN IF NOT EXISTS "sourceMessageId" TEXT;
 
 CREATE TABLE "Conversation" (
   "id"                    TEXT NOT NULL,
