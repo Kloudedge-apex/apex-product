@@ -998,3 +998,16 @@ test("published-check admission is bounded and ignores unrelated skipped checks"
   assert.match(checks, /checks\.total_count !== checks\.check_runs\.length/);
   assert.doesNotMatch(checks, /check_runs\.some/);
 });
+
+test("published-candidate admission uses workflow-readable protected branch metadata", () => {
+  const source = readFileSync(CONTROLLER, "utf8");
+  const start = source.indexOf("function verifyPublishedCandidates");
+  const end = source.indexOf("function verifyArtifact", start);
+  const admission = source.slice(start, end);
+  assert.doesNotMatch(admission, /branches\/\$\{encodeURIComponent\(candidate\.branch\)\}\/protection/);
+  assert.match(admission, /const protection = branch\.protection/);
+  assert.match(admission, /branch\.protected !== true/);
+  assert.match(admission, /branch\.commit\?\.sha !== candidate\.commit/);
+  assert.match(admission, /protection\?\.enabled !== true/);
+  assert.match(admission, /required_status_checks\?\.enforcement_level !== "everyone"/);
+});
