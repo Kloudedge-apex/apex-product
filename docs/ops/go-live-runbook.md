@@ -630,6 +630,13 @@ counts, the sanitized inventory evidence hash, and the verified
 provider-snapshot cutoff in Unix milliseconds as the final paused identity
 write. The arming trigger rejects count drift and any seeded cursor newer than
 that cutoff. Run the migration's final readiness query and require zero rows.
+For Clerk instances where Organizations is disabled, represent each verified
+Clerk-backed personal workspace owner with a `personal-owner` plan operation.
+It binds the existing local user to the immutable Clerk user id, keeps both
+organization and membership ids null, and seeds the matching active user
+lifecycle row. Reserve `local-owner` for a reviewed local principal with no
+Clerk user id. Never coerce a personal Clerk user into `local-owner` merely to
+make the invariant pass.
 Do not substitute the database clock for the provider watermark. Until the row
 is ready, the API returns a
 retryable failure for every authority-creating Clerk webhook; signed deletion

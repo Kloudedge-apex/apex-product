@@ -996,8 +996,17 @@ export async function readProductionBootstrapDatabaseInventory(
                 AND (
                   (o."clerkOrgId" IS NULL AND (
                     u."clerkMembershipId" IS NOT NULL
-                    OR u."clerkId" IS NOT NULL
                     OR u."role"::text <> 'OWNER'
+                    OR (u."clerkId" IS NOT NULL AND (
+                      ul."clerkUserId" IS NULL
+                      OR ul."deleted"
+                      OR NOT ul."membershipActive"
+                      OR ul."clerkMembershipId" IS NOT NULL
+                      OR ul."clerkOrgId" IS NOT NULL
+                      OR ul."membershipEventVersion" IS NOT NULL
+                      OR ul."membershipEventRank" IS NOT NULL
+                      OR ul."role"::text <> 'OWNER'
+                    ))
                   ))
                   OR (o."clerkOrgId" IS NOT NULL AND (
                     u."clerkId" IS NULL
@@ -1061,9 +1070,27 @@ export async function readProductionBootstrapDatabaseInventory(
               FROM "clerk_user_lifecycle" AS ul
               LEFT JOIN "clerk_membership_lifecycle" AS ml
                 ON ml."clerkMembershipId" = ul."clerkMembershipId"
+              LEFT JOIN "User" AS u
+                ON u."clerkId" = ul."clerkUserId"
+              LEFT JOIN "Org" AS o
+                ON o."id" = u."orgId"
               WHERE NOT ul."deleted"
                 AND ul."membershipActive"
-                AND (ml."clerkMembershipId" IS NULL OR ml."deleted")
+                AND (
+                  (ul."clerkMembershipId" IS NULL AND (
+                    ul."clerkOrgId" IS NOT NULL
+                    OR ul."membershipEventVersion" IS NOT NULL
+                    OR ul."membershipEventRank" IS NOT NULL
+                    OR ul."role"::text <> 'OWNER'
+                    OR u."id" IS NULL
+                    OR NOT u."membershipActive"
+                    OR u."clerkMembershipId" IS NOT NULL
+                    OR o."clerkOrgId" IS NOT NULL
+                  ))
+                  OR (ul."clerkMembershipId" IS NOT NULL AND (
+                    ml."clerkMembershipId" IS NULL OR ml."deleted"
+                  ))
+                )
             ) AS orphan_authorities
           `,
         );

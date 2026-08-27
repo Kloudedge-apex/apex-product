@@ -975,6 +975,19 @@ test("every post-acquisition ACA mutation revalidates both Azure lease and Git r
   assert.match(activate, /verifyReleaseLock\(runner, request\)/);
 });
 
+test("compatible console deployment pins the isolated production API origin", () => {
+  const source = readFileSync(CONTROLLER, "utf8");
+  assert.match(
+    source,
+    /CONSOLE_API_UPSTREAM_URL\s*=\s*\n\s*"https:\/\/apex-gtm-api\.braveflower-6d3bb66b\.eastus\.azurecontainerapps\.io"/,
+  );
+  const deploy = source.slice(
+    source.indexOf("function deployCompatible"),
+    source.indexOf("function activateFirstClass"),
+  );
+  assert.match(deploy, /`API_UPSTREAM_URL=\$\{CONSOLE_API_UPSTREAM_URL\}`/);
+});
+
 test("published-check admission is bounded and ignores unrelated skipped checks", () => {
   const source = readFileSync(CONTROLLER, "utf8");
   const start = source.indexOf("function verifyPublishedCandidates");

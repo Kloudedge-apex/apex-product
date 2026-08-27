@@ -162,7 +162,7 @@ function validatePlan(plan, options) {
     const label = `operation ${index}`;
     if (!operation || typeof operation !== "object" || Array.isArray(operation)) fail(`${label} must be an object`);
     if (operation.type === "organization") {
-      if (stage > 0) fail("organization operations must precede membership and local-owner operations");
+      if (stage > 0) fail("organization operations must precede membership and personal/local-owner operations");
       exactKeys(operation, ["type", "localOrgId", "clerkOrgId", "eventVersion", "eventRank", "lastEventId"], label);
       for (const key of ["localOrgId", "clerkOrgId", "lastEventId"]) text(operation[key], ID, `${label}.${key}`);
       integer(operation.eventVersion, `${label}.eventVersion`, 1);
@@ -174,7 +174,7 @@ function validatePlan(plan, options) {
       organizations.set(operation.clerkOrgId, operation.localOrgId);
       localOrganizations.add(operation.localOrgId);
     } else if (operation.type === "membership") {
-      if (stage > 1) fail("membership operations must precede local-owner operations");
+      if (stage > 1) fail("membership operations must precede personal/local-owner operations");
       stage = 1;
       exactKeys(operation, [
         "type", "localOrgId", "localUserId", "clerkOrgId", "clerkUserId",
@@ -196,6 +196,20 @@ function validatePlan(plan, options) {
         fail(`${label} duplicates a Clerk membership, Clerk user, or local user`);
       }
       memberships.add(operation.clerkMembershipId);
+      users.add(operation.clerkUserId);
+      localUsers.add(operation.localUserId);
+    } else if (operation.type === "personal-owner") {
+      stage = 2;
+      exactKeys(operation, [
+        "type", "localOrgId", "localUserId", "clerkUserId", "userLastEventId",
+      ], label);
+      for (const key of ["localOrgId", "localUserId", "clerkUserId", "userLastEventId"]) {
+        text(operation[key], ID, `${label}.${key}`);
+      }
+      if (users.has(operation.clerkUserId) || localUsers.has(operation.localUserId) ||
+        localOwners.has(operation.localUserId)) {
+        fail(`${label} duplicates a Clerk user, local owner, or reconciled user`);
+      }
       users.add(operation.clerkUserId);
       localUsers.add(operation.localUserId);
     } else if (operation.type === "local-owner") {
@@ -268,6 +282,18 @@ function operationSql(operation, index) {
       `INSERT INTO "clerk_user_lifecycle" ("clerkUserId", "deleted", "clerkMembershipId", "clerkOrgId", "membershipEventVersion", "membershipEventRank", "membershipActive", "role", "lastEventId", "updatedAt") VALUES (${decoded(`${prefix}_clerk_user`)}, false, ${decoded(`${prefix}_clerk_membership`)}, ${decoded(`${prefix}_clerk_org`)}, (${decoded(`${prefix}_event_version`)})::bigint, (${decoded(`${prefix}_event_rank`)})::integer, true, (${decoded(`${prefix}_role`)})::"UserRole", ${decoded(`${prefix}_user_event`)}, clock_timestamp()) ON CONFLICT ("clerkUserId") DO NOTHING;`,
     ].join("\n");
   }
+  if (operation.type === "personal-owner") {
+    return [
+      variable(`${prefix}_local_org`, operation.localOrgId),
+      variable(`${prefix}_local_user`, operation.localUserId),
+      variable(`${prefix}_clerk_user`, operation.clerkUserId),
+      variable(`${prefix}_user_event`, operation.userLastEventId),
+      assertion(`(SELECT COUNT(*) = 1 FROM "User" AS u JOIN "Org" AS o ON o."id" = u."orgId" WHERE u."id" = ${decoded(`${prefix}_local_user`)} AND u."orgId" = ${decoded(`${prefix}_local_org`)} AND o."clerkOrgId" IS NULL AND u."clerkId" = ${decoded(`${prefix}_clerk_user`)})`),
+      `UPDATE "User" SET "clerkMembershipId" = NULL, "membershipActive" = true, "role" = 'OWNER' WHERE "id" = ${decoded(`${prefix}_local_user`)} AND "orgId" = ${decoded(`${prefix}_local_org`)};`,
+      assertion(`NOT EXISTS (SELECT 1 FROM "clerk_user_lifecycle" WHERE "clerkUserId" = ${decoded(`${prefix}_clerk_user`)} AND ("deleted" OR "clerkMembershipId" IS NOT NULL OR "clerkOrgId" IS NOT NULL OR "membershipEventVersion" IS NOT NULL OR "membershipEventRank" IS NOT NULL OR NOT "membershipActive" OR "role" <> 'OWNER'::"UserRole" OR "lastEventId" <> ${decoded(`${prefix}_user_event`)}))`),
+      `INSERT INTO "clerk_user_lifecycle" ("clerkUserId", "deleted", "clerkMembershipId", "clerkOrgId", "membershipEventVersion", "membershipEventRank", "membershipActive", "role", "lastEventId", "updatedAt") VALUES (${decoded(`${prefix}_clerk_user`)}, false, NULL, NULL, NULL, NULL, true, 'OWNER'::"UserRole", ${decoded(`${prefix}_user_event`)}, clock_timestamp()) ON CONFLICT ("clerkUserId") DO NOTHING;`,
+    ].join("\n");
+  }
   return [
     variable(`${prefix}_local_org`, operation.localOrgId),
     variable(`${prefix}_local_user`, operation.localUserId),
@@ -321,8 +347,17 @@ SELECT
       AND (
         (o."clerkOrgId" IS NULL AND (
           u."clerkMembershipId" IS NOT NULL
-          OR u."clerkId" IS NOT NULL
           OR u."role"::text <> 'OWNER'
+          OR (u."clerkId" IS NOT NULL AND (
+            ul."clerkUserId" IS NULL
+            OR ul."deleted"
+            OR NOT ul."membershipActive"
+            OR ul."clerkMembershipId" IS NOT NULL
+            OR ul."clerkOrgId" IS NOT NULL
+            OR ul."membershipEventVersion" IS NOT NULL
+            OR ul."membershipEventRank" IS NOT NULL
+            OR ul."role"::text <> 'OWNER'
+          ))
         ))
         OR (o."clerkOrgId" IS NOT NULL AND (
           u."clerkId" IS NULL
@@ -380,9 +415,27 @@ SELECT
     FROM "clerk_user_lifecycle" AS ul
     LEFT JOIN "clerk_membership_lifecycle" AS ml
       ON ml."clerkMembershipId" = ul."clerkMembershipId"
+    LEFT JOIN "User" AS u
+      ON u."clerkId" = ul."clerkUserId"
+    LEFT JOIN "Org" AS o
+      ON o."id" = u."orgId"
     WHERE NOT ul."deleted"
       AND ul."membershipActive"
-      AND (ml."clerkMembershipId" IS NULL OR ml."deleted")
+      AND (
+        (ul."clerkMembershipId" IS NULL AND (
+          ul."clerkOrgId" IS NOT NULL
+          OR ul."membershipEventVersion" IS NOT NULL
+          OR ul."membershipEventRank" IS NOT NULL
+          OR ul."role"::text <> 'OWNER'
+          OR u."id" IS NULL
+          OR NOT u."membershipActive"
+          OR u."clerkMembershipId" IS NOT NULL
+          OR o."clerkOrgId" IS NOT NULL
+        ))
+        OR (ul."clerkMembershipId" IS NOT NULL AND (
+          ml."clerkMembershipId" IS NULL OR ml."deleted"
+        ))
+      )
   ) AS orphan_authorities) AS orphan_active_authority_rows,
   (SELECT COUNT(*)::integer FROM (
     WITH singleton AS (

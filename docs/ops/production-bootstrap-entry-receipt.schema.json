@@ -65,7 +65,7 @@
             {
               "properties": {
                 "path": { "const": "docs/migrations/2026-08-13_clerk-identity-lifecycle-expand.sql" },
-                "sha256": { "const": "sha256:356f4b660edd6aab07b523785e3cbc9b962a0f3f07b97e3dcfc155e1ea7fefdc" },
+                "sha256": { "const": "sha256:c6aae895548ab702908d7844a71fd45351ccdc0c9461616993a3b596b6bf5a41" },
                 "writerPause": { "const": "observed" },
                 "writerScopes": { "const": ["api:clerk-webhooks", "api:identity-membership"] }
               }
