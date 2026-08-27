@@ -1011,3 +1011,14 @@ test("published-candidate admission uses workflow-readable protected branch meta
   assert.match(admission, /protection\?\.enabled !== true/);
   assert.match(admission, /required_status_checks\?\.enforcement_level !== "everyone"/);
 });
+
+test("registry verification binds digests through Azure manifest metadata", () => {
+  const source = readFileSync(CONTROLLER, "utf8");
+  const start = source.indexOf("function verifyArtifact");
+  const end = source.indexOf("function verifyContractClosure", start);
+  const verification = source.slice(start, end);
+  assert.match(verification, /"acr", "manifest", "show-metadata"/);
+  assert.match(verification, /metadata\.digest \?\? metadata\.changeableAttributes\?\.digest/);
+  assert.match(verification, /childMetadata\.digest \?\? childMetadata\.changeableAttributes\?\.digest/);
+  assert.doesNotMatch(verification, /const observedDigest = manifest\.digest/);
+});
