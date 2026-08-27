@@ -167,6 +167,9 @@ is a hard hold, not permission to assume there is no active index build. The
 only bounded repair drops the exact verifier-selected reply indexes, one
 `DROP INDEX CONCURRENTLY` invocation at a time, with a fresh lease and release
 lock check before each command and a fresh catalog verification before replay.
+The protected workflow uses `sslmode=verify-full` with
+`sslrootcert=system`; PostgreSQL 16 therefore verifies both the Azure server
+hostname and its certificate chain against the runner's system trust store.
 
 ## Workflow secret scope
 

@@ -82,3 +82,9 @@ rejected("the audited DDL authority output cannot be hard-coded", (source) =>
     "steps.production_environment.outputs.exclusive_ddl_authority",
     "true",
   ));
+
+rejected("the system PostgreSQL trust store cannot be removed", (source) =>
+  source.replace(
+    "          PGSSLROOTCERT: ${{ contains(fromJSON('[\"invoke-clerk\",\"apply-schema\"]'), inputs.action) && 'system' || '' }}\n",
+    "",
+  ));

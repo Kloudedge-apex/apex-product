@@ -143,6 +143,7 @@ require_literal 'ACA_EXCLUSIVE_MUTATION_AUTHORITY_CONFIRMED: ${{ steps.productio
 require_literal "OUTSTANDING_DELIVERY_REVIEW_CONFIRMED: \${{ inputs.action == 'prepare' && steps.production_environment.outputs.outstanding_delivery_review || '' }}"
 require_literal "PROVIDER_DELIVERY_DRAIN_CONFIRMED: \${{ inputs.action == 'prepare' && steps.production_environment.outputs.provider_delivery_drain || '' }}"
 require_literal "DATABASE_DDL_EXCLUSIVE_AUTHORITY_CONFIRMED: \${{ contains(fromJSON('[\"prepare\",\"invoke-clerk\",\"apply-schema\"]'), inputs.action) && steps.production_environment.outputs.exclusive_ddl_authority || '' }}"
+require_literal "PGSSLROOTCERT: \${{ contains(fromJSON('[\"invoke-clerk\",\"apply-schema\"]'), inputs.action) && 'system' || '' }}"
 require_literal '--outstanding-delivery-review'
 require_literal '--provider-delivery-drain'
 require_literal '--database-ddl-authority-evidence'

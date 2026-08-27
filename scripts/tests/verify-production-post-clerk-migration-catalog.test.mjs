@@ -27,7 +27,8 @@ import {
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const VERIFIER = resolve(TEST_DIR, "../verify-production-post-clerk-migration-catalog.mjs");
 const BASE_STATUS_LABELS = [
-  "DRAFT", "PENDING_REVIEW", "APPROVED", "REJECTED", "SENT", "SUPPRESSED", "SENDING", "SIMULATED",
+  "DRAFT", "PENDING_REVIEW", "APPROVED", "REJECTED", "SENT", "QUEUED", "REPLIED", "BOUNCED",
+  "SUPPRESSED", "SENDING", "SIMULATED",
 ];
 const REPO_ROOT = resolve(TEST_DIR, "../..");
 const ADMITTED_MIGRATIONS = structuredClone(POST_CLERK_MIGRATION_CONTRACT);
@@ -170,6 +171,30 @@ function initialPostClerkSnapshot({ artifactIndex = false } = {}) {
   return snapshot;
 }
 
+function legacyConversationSnapshot() {
+  const snapshot = initialPostClerkSnapshot({ artifactIndex: true });
+  const complete = completeSnapshot();
+  snapshot.relations.push({
+    name: "Conversation",
+    kind: "r",
+    persistence: "p",
+    columnCount: 13,
+  });
+  snapshot.columns.push({
+    ...complete.columns.find((entry) =>
+      entry.table === "OutreachArtifact" && entry.name === "conversationId"),
+  });
+  snapshot.indexes.push({
+    ...complete.indexes.find((entry) => entry.name === "Conversation_pkey"),
+  });
+  for (const name of ["Conversation_pkey", "Conversation_orgId_fkey"]) {
+    snapshot.constraints.push({
+      ...complete.constraints.find((entry) => entry.name === name),
+    });
+  }
+  return snapshot;
+}
+
 test("the verifier fixes the eight migrations after Clerk in reviewed order", () => {
   assert.deepEqual(POST_CLERK_MIGRATIONS, [
     "docs/migrations/2026-06-01_outreach-artifact-unique.sql",
@@ -232,6 +257,19 @@ test("a clean initial post-Clerk catalog is absent for every later migration", (
   const report = classifyPostClerkMigrationCatalog(initialPostClerkSnapshot());
   assert.deepEqual(report.migrations.map((entry) => entry.classification), Array(8).fill("absent"));
   assert.deepEqual(report.migrations.map((entry) => entry.action), Array(8).fill("apply"));
+});
+
+test("the exact empty legacy Conversation predecessor is eligible for guarded migration", () => {
+  const report = classifyPostClerkMigrationCatalog(legacyConversationSnapshot());
+  assert.equal(reportEntry(report, POST_CLERK_MIGRATIONS[1]).classification, "absent");
+  assert.equal(reportEntry(report, POST_CLERK_MIGRATIONS[1]).action, "apply");
+
+  const partial = legacyConversationSnapshot();
+  partial.relations.push({ name: "ConversationMessage", kind: "r", persistence: "p", columnCount: 1 });
+  assert.equal(
+    reportEntry(classifyPostClerkMigrationCatalog(partial), POST_CLERK_MIGRATIONS[1]).classification,
+    "hold",
+  );
 });
 
 test("lost acknowledgement adopts only an exact complete next migration", () => {
