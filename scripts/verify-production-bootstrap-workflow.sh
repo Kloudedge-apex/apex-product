@@ -128,7 +128,7 @@ require_literal 'azure_client_id="2efd64b0-87c1-43a7-a064-30679ce8b764"'
 require_literal 'azure_tenant_id="d4b3813d-146f-4d03-96b8-d6e5862d58a2"'
 require_literal 'azure_subscription_id="3171575e-f164-425c-9ee0-2fb10cf93884"'
 require_literal 'azure_principal_object_id="509039c1-8cfd-4df4-9bb0-cc659b5a7e22"'
-require_literal 'exclusive_aca_authority="false"'
+require_literal 'exclusive_aca_authority="true"'
 require_literal 'exclusive_ddl_authority="false"'
 require_literal 'outstanding_delivery_review="false"'
 require_literal 'provider_delivery_drain="false"'
@@ -164,11 +164,12 @@ reject_pattern 'uses:[[:space:]]+[^[:space:]@]+@(main|master|v[0-9]+)([[:space:]
 reject_pattern '\$\{\{[[:space:]]*vars\.' "repository or organization variable fallback is forbidden"
 reject_pattern 'repos/\$\{GITHUB_REPOSITORY\}/actions/(variables|secrets)' "repository-scoped release configuration is forbidden"
 reject_pattern 'repos/\$\{GITHUB_REPOSITORY\}/environments' "workflow token cannot query Environment administration APIs"
-reject_pattern 'exclusive_(aca|ddl)_authority="true"' "source-pinned mutation authority must remain fail-closed"
+reject_pattern 'exclusive_aca_authority="false"' "reviewed Container Apps authority must not be downgraded"
+reject_pattern 'exclusive_ddl_authority="true"' "database DDL authority must remain fail-closed"
 reject_pattern '^[[:space:]]+(DATABASE_URL|REDIS_URL|PGPASS_B64):[[:space:]]+\$\{\{[[:space:]]*secrets\.' "production database or Redis secrets must be action-scoped and absent from audit"
 
 assert_before "Validate protected manual authority" "Checkout exact protected master source"
-assert_before 'exclusive_aca_authority="false"' 'Checkout exact protected master source'
+assert_before 'exclusive_aca_authority="true"' 'Checkout exact protected master source'
 assert_before "Checkout exact protected master source" "Authenticate to Azure with protected OIDC"
 assert_before "Authenticate to Azure with protected OIDC" "Run one exact-snapshot bootstrap action"
 assert_before 'unset REQUEST_B64' 'node scripts/production-bootstrap-controller.mjs'

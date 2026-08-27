@@ -166,7 +166,7 @@ export class LeadsService {
       await tx.$queryRaw`
         SELECT pg_advisory_xact_lock(
           hashtextextended(${`workforce-current-icp:${orgId}`}, 0::bigint)
-        )
+        ) IS NULL AS acquired
       `;
       const current = await tx.icpProfile.findFirst({
         where: { orgId },

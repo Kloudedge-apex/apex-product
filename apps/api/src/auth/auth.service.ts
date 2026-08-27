@@ -579,7 +579,7 @@ async function acquireIdentityLocks(
   });
   for (const key of keys) {
     await tx.$queryRaw`
-      SELECT pg_advisory_xact_lock(hashtextextended(${`workforce-os:clerk:${key}`}, 0))
+      SELECT pg_advisory_xact_lock(hashtextextended(${`workforce-os:clerk:${key}`}, 0)) IS NULL AS acquired
     `;
   }
 }

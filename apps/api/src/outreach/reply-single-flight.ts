@@ -52,7 +52,7 @@ export async function acquireReplySingleFlightLock(
           ${`outreach-reply-thread:${orgId}:${scope}`},
           0::bigint
         )
-      )
+      ) IS NULL AS acquired
     `;
   }
 
@@ -64,7 +64,7 @@ export async function acquireReplySingleFlightLock(
             ${`outreach-reply-source:${orgId}:${scope}:${sourceMessageId}`},
             0::bigint
           )
-        )
+        ) IS NULL AS acquired
       `;
     }
   }

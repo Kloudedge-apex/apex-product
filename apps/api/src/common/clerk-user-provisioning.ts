@@ -32,7 +32,7 @@ export async function withProvisionableClerkUser<T>(
     await tx.$queryRaw`
       SELECT pg_advisory_xact_lock(
         hashtextextended(${`workforce-os:clerk:user:${clerkUserId}`}, 0)
-      )
+      ) IS NULL AS acquired
     `;
 
     await assertClerkUserNotDeleted(tx, clerkUserId);

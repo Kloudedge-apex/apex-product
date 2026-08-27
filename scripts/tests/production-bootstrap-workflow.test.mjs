@@ -53,10 +53,10 @@ rejected("repository-level variable fallback is rejected", (source) =>
     "${{ vars.AZURE_CLIENT_ID }}",
   ));
 
-rejected("source-enabled Container Apps authority is rejected", (source) =>
+rejected("downgraded Container Apps authority is rejected", (source) =>
   source.replace(
-    'exclusive_aca_authority="false"',
     'exclusive_aca_authority="true"',
+    'exclusive_aca_authority="false"',
   ));
 
 rejected("source-enabled database DDL authority is rejected", (source) =>
