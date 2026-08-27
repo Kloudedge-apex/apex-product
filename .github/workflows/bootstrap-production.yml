@@ -160,6 +160,9 @@ jobs:
           tenant-id: ${{ steps.production_environment.outputs.azure_tenant_id }}
           subscription-id: ${{ steps.production_environment.outputs.azure_subscription_id }}
 
+      - name: Authenticate Docker to production registry
+        run: az acr login --name workforceosprodacr --only-show-errors
+
       - name: Run one exact-snapshot bootstrap action
         id: controller
         env:

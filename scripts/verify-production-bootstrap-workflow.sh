@@ -153,6 +153,7 @@ require_literal "inputs.action != 'audit'"
 require_literal 'WORKFORCE_PRODUCTION_BOOTSTRAP_AUTHORITY_CONFIRMED: "true"'
 require_literal 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262'
 require_literal 'azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5'
+require_literal 'az acr login --name workforceosprodacr --only-show-errors'
 require_literal 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
 require_controller_literal 'azureMutationAuthorityStructuralEvidenceHash'
 require_controller_literal 'PRODUCTION_AUTHORITY_DRAIN_CONTRACT.blobName'
@@ -174,7 +175,8 @@ reject_pattern '^[[:space:]]+(DATABASE_URL|REDIS_URL|PGPASS_B64):[[:space:]]+\$\
 assert_before "Validate protected manual authority" "Checkout exact protected master source"
 assert_before 'exclusive_aca_authority="true"' 'Checkout exact protected master source'
 assert_before "Checkout exact protected master source" "Authenticate to Azure with protected OIDC"
-assert_before "Authenticate to Azure with protected OIDC" "Run one exact-snapshot bootstrap action"
+assert_before "Authenticate to Azure with protected OIDC" "Authenticate Docker to production registry"
+assert_before "Authenticate Docker to production registry" "Run one exact-snapshot bootstrap action"
 assert_before 'unset REQUEST_B64' 'node scripts/production-bootstrap-controller.mjs'
 
 printf 'Production bootstrap workflow contract verified\n'
