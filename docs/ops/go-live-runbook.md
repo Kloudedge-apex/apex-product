@@ -535,9 +535,9 @@ equals the requested SHA. GitHub natively admits the job through the exact
 administrator bypass is disabled, reviewer rules are absent for accountable
 direct owner dispatch, and only protected branches may deploy. A workflow token
 cannot read Environment administration endpoints, so public OIDC coordinates,
-the shared control-blob identity, and the current `false` authority verdict are
-source-pinned on protected `master`. Changing that verdict requires a reviewed,
-CI-proven source change after the Azure authority audit returns GO. The workflow
+the shared control-blob identity, and the current reviewed authority verdict are
+source-pinned on protected `master`. The verdict was changed only through a reviewed,
+CI-proven source change after protected audit run `33075989120` returned `GO`. The workflow
 deliberately never consumes the fallback `${{ vars.* }}` context. Trusted
 workflow and exact-CI helpers run only
 from the separately checked-out `master` source. The candidate is checked out
@@ -546,7 +546,9 @@ and only then supplies the signer pin and release controller.
 
 The one-time bootstrap workflow uses the same native Environment admission
 before checkout or OIDC. Its public Azure coordinates and every current NO-GO
-authority verdict are source-pinned fail-closed on protected `master`; only the
+authority verdicts are source-pinned on protected `master`; Container Apps authority is
+admitted from protected audit run `33075989120`, while database DDL authority remains
+fail-closed until its separate evidence is reviewed. Only the
 action that needs a protected secret receives it. Generic `${{ vars.* }}`
 fallback and workflow-token Environment administration queries are rejected by
 the source contract.

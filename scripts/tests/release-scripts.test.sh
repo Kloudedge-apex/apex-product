@@ -1887,11 +1887,11 @@ test_production_release_workflow_verifier() {
   fi
   pass
 
-  fixture="${harness}/source-authority-enabled.yml"
-  sed 's/exclusive_mutation_authority="false"/exclusive_mutation_authority="true"/' \
+  fixture="${harness}/source-authority-downgraded.yml"
+  sed 's/exclusive_mutation_authority="true"/exclusive_mutation_authority="false"/' \
     "${workflow}" >"${fixture}"
   if "${verifier}" "${fixture}" >/dev/null 2>&1; then
-    fail "workflow verifier accepted source-enabled mutation authority"
+    fail "workflow verifier accepted downgraded mutation authority"
   fi
   pass
 

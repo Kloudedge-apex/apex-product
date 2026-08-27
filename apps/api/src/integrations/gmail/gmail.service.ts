@@ -1085,7 +1085,7 @@ export class GmailService implements OnModuleInit, OnModuleDestroy {
     await this.prisma.$transaction(async (tx) => {
       const mailboxLockKey = `gmail-mailbox:${input.accountEmail}`;
       await tx.$queryRaw`
-        SELECT pg_advisory_xact_lock(hashtextextended(${mailboxLockKey}, 0))
+        SELECT pg_advisory_xact_lock(hashtextextended(${mailboxLockKey}, 0)) IS NULL AS acquired
       `;
       const duplicate = await tx.integration.findFirst({
         where: {

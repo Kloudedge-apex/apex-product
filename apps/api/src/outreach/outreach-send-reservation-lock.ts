@@ -15,6 +15,6 @@ export async function acquireOrgSendReservationLock(
   await tx.$queryRaw`
     SELECT pg_advisory_xact_lock(
       hashtextextended(${`outreach-send-reservation:${orgId}`}, 0::bigint)
-    )
+    ) IS NULL AS acquired
   `;
 }

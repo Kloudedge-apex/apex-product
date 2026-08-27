@@ -247,7 +247,7 @@ require_literal 'and .commit.sha == $sha'
 require_literal 'azure_client_id="2efd64b0-87c1-43a7-a064-30679ce8b764"'
 require_literal 'azure_tenant_id="d4b3813d-146f-4d03-96b8-d6e5862d58a2"'
 require_literal 'azure_subscription_id="3171575e-f164-425c-9ee0-2fb10cf93884"'
-require_literal 'exclusive_mutation_authority="false"'
+require_literal 'exclusive_mutation_authority="true"'
 require_literal '[[ "${exclusive_mutation_authority}" != "true" ]]'
 require_literal 'production_control_storage_account="workforceosprodctrl"'
 require_literal 'production_control_storage_container="production-control"'
@@ -258,8 +258,8 @@ require_literal '"${production_control_storage_blob}" != "workforce-os/initial-p
 require_literal 'providers/Microsoft.Storage/storageAccounts/${production_control_storage_account}$'
 reject_pattern 'repos/\$\{GITHUB_REPOSITORY\}/environments' \
   "workflow token cannot query Environment administration APIs"
-reject_pattern 'exclusive_mutation_authority="true"' \
-  "source-pinned exclusive authority must remain fail-closed"
+reject_pattern 'exclusive_mutation_authority="false"' \
+  "reviewed source-pinned exclusive authority must not be downgraded"
 require_literal 'printf '\''azure_client_id=%s\n'\'' "${azure_client_id}" >>"${GITHUB_OUTPUT}"'
 require_literal 'printf '\''azure_tenant_id=%s\n'\'' "${azure_tenant_id}" >>"${GITHUB_OUTPUT}"'
 require_literal 'printf '\''azure_subscription_id=%s\n'\'' "${azure_subscription_id}" >>"${GITHUB_OUTPUT}"'
@@ -372,7 +372,7 @@ reject_pattern '(^|[[:space:]])(bash|sh)[[:space:]]+[^#\n]*scripts/deploy-prod\.
 assert_before "Verify protected production environment" "Checkout trusted master workflow source"
 assert_before '[[ "${remote_master_sha}" != "${WORKFLOW_SHA}" ]]' "Checkout trusted master workflow source"
 assert_before 'and .commit.sha == $sha' "Checkout trusted master workflow source"
-assert_before 'exclusive_mutation_authority="false"' \
+assert_before 'exclusive_mutation_authority="true"' \
   "Checkout trusted master workflow source"
 assert_before "Checkout trusted master workflow source" "Verify trusted master workflow source"
 assert_before "release-control/scripts/verify-production-release-workflow.sh" "Verify exact release CI"

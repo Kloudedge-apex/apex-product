@@ -70,12 +70,14 @@ jobs:
           jq -e --arg sha "${WORKFLOW_SHA}" '.protected == true and .commit.sha == $sha' >/dev/null <<<"${master_json}"
           # GitHub's workflow token cannot read Environment administration APIs.
           # The job declaration enforces the reviewed Environment. Public Azure
-          # coordinates and every current NO-GO admission verdict are source-pinned.
+          # coordinates and every reviewed admission verdict are source-pinned.
+          # Container Apps authority was admitted after protected audit run
+          # 33075989120 returned GO with zero findings and a complete ten-day drain.
           azure_client_id="2efd64b0-87c1-43a7-a064-30679ce8b764"
           azure_tenant_id="d4b3813d-146f-4d03-96b8-d6e5862d58a2"
           azure_subscription_id="3171575e-f164-425c-9ee0-2fb10cf93884"
           azure_principal_object_id="509039c1-8cfd-4df4-9bb0-cc659b5a7e22"
-          exclusive_aca_authority="false"
+          exclusive_aca_authority="true"
           exclusive_ddl_authority="false"
           outstanding_delivery_review="false"
           provider_delivery_drain="false"
