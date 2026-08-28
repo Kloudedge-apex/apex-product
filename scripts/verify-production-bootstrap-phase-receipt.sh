@@ -15,6 +15,7 @@ EXPECTED_ATTEMPT_ID="${6:-}"
 EXPECTED_KIND="${7:-}"
 PREVIOUS_RECEIPT="${8:-}"
 PHASE_CONTEXT="${9:-}"
+VERIFICATION_EPOCH="${10:-}"
 
 TRUST_ROOT_PIN_PATH="docs/ops/production-migration-allowed-signers.sha256"
 MAX_RECEIPT_BYTES=131072
@@ -23,16 +24,19 @@ MAX_SIGNATURE_BYTES=16384
 MAX_ALLOWED_SIGNERS_BYTES=65536
 
 usage() {
-  echo "Usage: $0 <receipt.json> <receipt.sig> <allowed-signers> <backend-commit> <console-commit> <32-hex-attempt-id> <production-schema-result|enum-aware-disabled-baseline|first-class-activation|bootstrap-complete> <previous-receipt.json> <controller-phase-context.json>" >&2
+  echo "Usage: $0 <receipt.json> <receipt.sig> <allowed-signers> <backend-commit> <console-commit> <32-hex-attempt-id> <production-schema-result|enum-aware-disabled-baseline|first-class-activation|bootstrap-complete> <previous-receipt.json> <controller-phase-context.json> [verification-epoch]" >&2
   exit 2
 }
 
-if [[ "${#}" -ne 9 ]] ||
+if [[ "${#}" -lt 9 || "${#}" -gt 10 ]] ||
   [[ -z "${RECEIPT}" || -z "${SIGNATURE}" || -z "${ALLOWED_SIGNERS}" ||
     -z "${PREVIOUS_RECEIPT}" || -z "${PHASE_CONTEXT}" ]] ||
   [[ ! "${EXPECTED_BACKEND_COMMIT}" =~ ^[0-9a-f]{40}$ ]] ||
   [[ ! "${EXPECTED_CONSOLE_COMMIT}" =~ ^[0-9a-f]{40}$ ]] ||
   [[ ! "${EXPECTED_ATTEMPT_ID}" =~ ^[0-9a-f]{32}$ ]]; then
+  usage
+fi
+if [[ -n "${VERIFICATION_EPOCH}" && ! "${VERIFICATION_EPOCH}" =~ ^[0-9]+$ ]]; then
   usage
 fi
 case "${EXPECTED_KIND}" in
@@ -145,7 +149,7 @@ verify_contract_at() {
     "${EXPECTED_ATTEMPT_ID}" "${EXPECTED_KIND}" "${epoch}"
 }
 
-CURRENT_EPOCH="$(date -u +%s)"
+CURRENT_EPOCH="${VERIFICATION_EPOCH:-$(date -u +%s)}"
 if ! CONTRACT_SUMMARY="$(verify_contract_at "${CURRENT_EPOCH}")"; then
   echo "ERROR: final bootstrap phase receipt or controller context is invalid" >&2
   exit 1
@@ -199,7 +203,7 @@ if [[ "${EXPECTED_KIND}" == "production-schema-result" ]]; then
 fi
 
 # Signature and committed-source verification can cross the expiry boundary.
-FINAL_CURRENT_EPOCH="$(date -u +%s)"
+FINAL_CURRENT_EPOCH="${VERIFICATION_EPOCH:-$(date -u +%s)}"
 if ! verify_contract_at "${FINAL_CURRENT_EPOCH}" >/dev/null; then
   echo "ERROR: final bootstrap phase receipt expired before verification completed" >&2
   exit 1

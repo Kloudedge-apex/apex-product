@@ -1286,10 +1286,11 @@ function assertProtectedRuntime(action) {
 
 function assertExactProtectedSnapshot(runner, request, action) {
   if (action === "audit" && process.env.GITHUB_ACTIONS !== "true") return;
+  const snapshotCommit = process.env.WORKFORCE_BOOTSTRAP_SNAPSHOT_COMMIT;
   if (process.env.WORKFORCE_BOOTSTRAP_EXACT_SNAPSHOT !== "true" ||
-    process.env.WORKFORCE_BOOTSTRAP_SNAPSHOT_COMMIT !== request.backendCandidate.commit ||
-    process.env.GITHUB_SHA !== request.backendCandidate.commit) {
-    fail("controller is not executing from the exact protected backend candidate snapshot");
+    !/^[0-9a-f]{40}$/.test(snapshotCommit ?? "") ||
+    process.env.GITHUB_SHA !== snapshotCommit) {
+    fail("controller is not executing from the exact protected snapshot");
   }
   const snapshotRoot = process.env.WORKFORCE_BOOTSTRAP_SNAPSHOT_ROOT;
   const root = validateExternalPath(snapshotRoot, "private source snapshot", { directory: true });
@@ -1300,7 +1301,7 @@ function assertExactProtectedSnapshot(runner, request, action) {
   const head = runner.run(git, ["-C", REPO_ROOT, "rev-parse", "HEAD"], {
     label: "private snapshot HEAD",
   }).stdout.toString("utf8").trim();
-  if (head !== request.backendCandidate.commit) fail("private snapshot HEAD drift detected");
+  if (head !== snapshotCommit) fail("private snapshot HEAD drift detected");
   const status = runner.run(git, [
     "-C", REPO_ROOT, "status", "--porcelain", "--untracked-files=no",
   ], { label: "private snapshot tracked status" }).stdout.toString("utf8");
@@ -1311,9 +1312,37 @@ function assertExactProtectedSnapshot(runner, request, action) {
   if (replacements !== "") fail("private snapshot contains forbidden replacement refs");
   const controllerBytes = readFileSync(requireSnapshotFile("scripts/production-bootstrap-controller.mjs", true));
   const committedController = runner.run(git, [
-    "-C", REPO_ROOT, "show", `${request.backendCandidate.commit}:scripts/production-bootstrap-controller.mjs`,
+    "-C", REPO_ROOT, "show", `${snapshotCommit}:scripts/production-bootstrap-controller.mjs`,
   ], { label: "exact committed bootstrap controller" }).stdout;
   if (!controllerBytes.equals(committedController)) fail("executing controller bytes differ from the admitted commit");
+  if (snapshotCommit === request.backendCandidate.commit) return;
+
+  const recoveryActions = new Set([
+    "deploy-compatible", "activate-first-class", "resume", "complete", "hold", "renew-hold",
+  ]);
+  if (!recoveryActions.has(action)) {
+    fail("a recovery controller successor is permitted only after schema application");
+  }
+  const ancestor = runner.run(git, [
+    "-C", REPO_ROOT, "merge-base", "--is-ancestor", request.backendCandidate.commit, snapshotCommit,
+  ], { label: "recovery controller ancestry", allowFailure: true });
+  if (ancestor.status !== 0) fail("recovery controller is not a descendant of the admitted candidate");
+  const changed = runner.run(git, [
+    "-C", REPO_ROOT, "diff", "--name-only", request.backendCandidate.commit, snapshotCommit, "--",
+  ], { label: "recovery controller scope" }).stdout.toString("utf8").trim().split("\n").filter(Boolean);
+  const allowed = new Set([
+    ".github/workflows/bootstrap-production.yml",
+    "docs/ops/initial-production-bootstrap-controller.md",
+    "scripts/production-bootstrap-controller.mjs",
+    "scripts/verify-production-bootstrap-phase-receipt.sh",
+    "scripts/verify-production-bootstrap-workflow.sh",
+    "scripts/tests/production-bootstrap-controller.test.mjs",
+    "scripts/tests/production-bootstrap-phase-receipt.test.sh",
+  ]);
+  if (changed.length === 0 || !changed.includes("scripts/production-bootstrap-controller.mjs") ||
+    changed.some((path) => !allowed.has(path))) {
+    fail("protected recovery controller successor changed files outside the reviewed recovery scope");
+  }
 }
 
 export function productionAuthorityDrainCheckpointSnapshot(value) {
@@ -3007,6 +3036,20 @@ function verifyPhaseReceipt(
     previousReceiptPath,
     evidencePath,
   ];
+  if (predecessorOffset > 1) {
+    const admitted = verifiedLedger.ledger.receipts.at(-1);
+    if (admitted?.kind !== kind ||
+      admitted.bytesBase64 !== readFileSync(options.receipt).toString("base64")) {
+      fail(`${kind} replay receipt is not the exact historically admitted receipt`);
+    }
+    const admittedEpoch = Math.floor(
+      Date.parse(admitted.admittedAt) / 1000,
+    );
+    if (!Number.isSafeInteger(admittedEpoch) || admittedEpoch < 1) {
+      fail(`${kind} replay admission time is invalid`);
+    }
+    args.push(String(admittedEpoch));
+  }
   runner.run(requireSnapshotFile("scripts/verify-production-bootstrap-phase-receipt.sh", true), args, { label: `signed ${kind} verification` });
   return readFileSync(options.receipt);
 }
@@ -4098,8 +4141,44 @@ function updateApp(
     minReplicas,
     role,
   );
-  const preexisting = revisionList(runner, request, app)
+  let preexisting = revisionList(runner, request, app)
     .find((entry) => entry?.name === revision);
+  if (preexisting) {
+    const health = preexisting.properties?.healthState ?? preexisting.properties?.runningState;
+    const healthy = new Set(["Healthy", "Running", "Provisioned"]).has(health) &&
+      (preexisting.properties?.provisioningState === undefined ||
+        preexisting.properties.provisioningState === "Provisioned");
+    if (!healthy) {
+      const active = revisionList(runner, request, app)
+        .filter((entry) => entry?.properties?.active === true);
+      const fallback = active.find((entry) => entry.name !== revision &&
+        new Set(["Healthy", "Running", "Provisioned"]).has(
+          entry.properties?.healthState ?? entry.properties?.runningState,
+        ));
+      if (preexisting.properties?.template?.containers?.[0]?.image !== image || !fallback ||
+        before.properties?.latestReadyRevisionName === revision) {
+        fail(`${role} unhealthy bootstrap revision is not safely replaceable`);
+      }
+      azureMutation(
+        runner,
+        request,
+        [
+          "rest", "--method", "delete",
+          "--url", `${resourceId}/revisions/${revision}?api-version=2024-03-01`,
+          "--output", "none",
+        ],
+        `${role} unhealthy bootstrap revision replacement`,
+        releaseLockRequired,
+      );
+      for (let observation = 0; observation < 12; observation += 1) {
+        preexisting = revisionList(runner, request, app)
+          .find((entry) => entry?.name === revision);
+        if (!preexisting) break;
+        runner.run("sleep", ["5"], { label: `${role} unhealthy revision deletion interval` });
+      }
+      if (preexisting) fail(`${role} unhealthy bootstrap revision deletion was not observed`);
+    }
+  }
   if (!preexisting) {
     azureMutation(
       runner,
@@ -4218,11 +4297,12 @@ function verifyDisabledBaselineLive(runner, request, identities, minimumGenerati
     if ((revisionEnv(revision, "OUTREACH_FAILED_STATUS_WRITES_ENABLED") ?? "false") !== "false") {
       fail(`${role} FAILED mode is not disabled`);
     }
-    if (revisionEnv(revision, "OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH") !== "outreach-delivery-unknown-v1") {
-      fail(`${role} disabled baseline compatibility epoch is absent`);
+    if (revisionEnv(revision, "EVIDENCE_LEDGER_ENABLED") !== "true") {
+      fail(`${role} disabled baseline evidence ledger is not enabled`);
     }
     for (const forbidden of [
       "OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK",
+      "OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH",
       "OUTREACH_FAILED_STATUS_WRITES_ACK",
       "OUTREACH_DELIVERY_UNKNOWN_STATUS_WRITES_ENABLED",
       "OUTREACH_DELIVERY_UNKNOWN_STATUS_WRITES_ACK",
@@ -4534,10 +4614,11 @@ function deployCompatible(runner, request, state, options) {
           "GMAIL_WATCH_RENEWAL_ENABLED=false", "GRAPH_RUN_WORKER_ENABLED=false", "OUTREACH_WORKER_ENABLED=false", "SCHEDULER_ENABLED=false",
           `WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID=${request.attemptId}`,
           `WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION=${receipt.fencingGeneration}`,
-          "OUTREACH_LIVE_FOR_ORGS=", "OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE=disabled", "OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH=outreach-delivery-unknown-v1", "OUTREACH_FAILED_STATUS_WRITES_ENABLED=false",
+          "OUTREACH_LIVE_FOR_ORGS=", "OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE=disabled", "OUTREACH_FAILED_STATUS_WRITES_ENABLED=false", "EVIDENCE_LEDGER_ENABLED=true",
         ], 1, [
           "WORKER_ENABLED",
           "OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK",
+          "OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH",
           "OUTREACH_FAILED_STATUS_WRITES_ACK",
           "OUTREACH_DELIVERY_UNKNOWN_STATUS_WRITES_ENABLED",
           "OUTREACH_DELIVERY_UNKNOWN_STATUS_WRITES_ACK",
@@ -4548,10 +4629,11 @@ function deployCompatible(runner, request, state, options) {
           "GMAIL_WATCH_RENEWAL_ENABLED=false", "GRAPH_RUN_WORKER_ENABLED=false", "OUTREACH_WORKER_ENABLED=false", "SCHEDULER_ENABLED=false",
           `WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID=${request.attemptId}`,
           `WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION=${receipt.fencingGeneration}`,
-          "OUTREACH_LIVE_FOR_ORGS=", "OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE=disabled", "OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH=outreach-delivery-unknown-v1", "OUTREACH_FAILED_STATUS_WRITES_ENABLED=false",
+          "OUTREACH_LIVE_FOR_ORGS=", "OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE=disabled", "OUTREACH_FAILED_STATUS_WRITES_ENABLED=false", "EVIDENCE_LEDGER_ENABLED=true",
         ], 0, [
           "WORKER_ENABLED",
           "OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK",
+          "OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH",
           "OUTREACH_FAILED_STATUS_WRITES_ACK",
           "OUTREACH_DELIVERY_UNKNOWN_STATUS_WRITES_ENABLED",
           "OUTREACH_DELIVERY_UNKNOWN_STATUS_WRITES_ACK",
