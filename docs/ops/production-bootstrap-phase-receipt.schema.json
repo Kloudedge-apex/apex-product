@@ -411,17 +411,45 @@
           "type": "object",
           "additionalProperties": false,
           "required": [
-            "schemaVersion", "kind", "reasonCode", "predecessor", "successor",
-            "sourceEntrypointHash", "pausedQueueEvidenceHash", "queuesRemainedPaused",
+            "schemaVersion", "kind", "reasonCodes", "predecessors", "successors",
+            "sourceEntrypointHashes", "pausedQueueEvidenceHash", "queuesRemainedPaused",
             "liveSendAllowlistEmpty", "recoveredAt", "evidenceHash"
           ],
           "properties": {
             "schemaVersion": { "const": 1 },
-            "kind": { "const": "first-class-worker-entrypoint-recovery" },
-            "reasonCode": { "const": "quiescence-entrypoint-inheritance" },
-            "predecessor": { "$ref": "#/$defs/deployment" },
-            "successor": { "$ref": "#/$defs/deployment" },
-            "sourceEntrypointHash": { "$ref": "#/$defs/sha256" },
+            "kind": { "const": "first-class-api-worker-template-recovery" },
+            "reasonCodes": {
+              "type": "object", "additionalProperties": false,
+              "required": ["api", "worker"],
+              "properties": {
+                "api": { "const": "containment-revision-supersession" },
+                "worker": { "const": "quiescence-entrypoint-inheritance" }
+              }
+            },
+            "predecessors": {
+              "type": "object", "additionalProperties": false,
+              "required": ["api", "worker"],
+              "properties": {
+                "api": { "$ref": "#/$defs/deployment" },
+                "worker": { "$ref": "#/$defs/deployment" }
+              }
+            },
+            "successors": {
+              "type": "object", "additionalProperties": false,
+              "required": ["api", "worker"],
+              "properties": {
+                "api": { "$ref": "#/$defs/deployment" },
+                "worker": { "$ref": "#/$defs/deployment" }
+              }
+            },
+            "sourceEntrypointHashes": {
+              "type": "object", "additionalProperties": false,
+              "required": ["api", "worker"],
+              "properties": {
+                "api": { "$ref": "#/$defs/sha256" },
+                "worker": { "$ref": "#/$defs/sha256" }
+              }
+            },
             "pausedQueueEvidenceHash": { "$ref": "#/$defs/sha256" },
             "queuesRemainedPaused": { "const": true },
             "liveSendAllowlistEmpty": { "const": true },

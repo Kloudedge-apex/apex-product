@@ -950,18 +950,31 @@ function validateActivationRecovery(recovery, receipt, armed, deployments, label
     return null;
   }
   assertExactKeys(recovery, [
-    "schemaVersion", "kind", "reasonCode", "predecessor", "successor",
-    "sourceEntrypointHash", "pausedQueueEvidenceHash", "queuesRemainedPaused",
+    "schemaVersion", "kind", "reasonCodes", "predecessors", "successors",
+    "sourceEntrypointHashes", "pausedQueueEvidenceHash", "queuesRemainedPaused",
     "liveSendAllowlistEmpty", "recoveredAt", "evidenceHash",
   ], `${label}.activationRecovery`);
   if (recovery.schemaVersion !== 1 ||
-    recovery.kind !== "first-class-worker-entrypoint-recovery" ||
-    recovery.reasonCode !== "quiescence-entrypoint-inheritance" ||
+    recovery.kind !== "first-class-api-worker-template-recovery" ||
     recovery.queuesRemainedPaused !== true || recovery.liveSendAllowlistEmpty !== true) {
     fail(`${label}.activationRecovery identity is invalid`);
   }
-  assertHash(recovery.sourceEntrypointHash,
-    `${label}.activationRecovery.sourceEntrypointHash`);
+  assertExactKeys(recovery.reasonCodes, ["api", "worker"],
+    `${label}.activationRecovery.reasonCodes`);
+  assertExactKeys(recovery.predecessors, ["api", "worker"],
+    `${label}.activationRecovery.predecessors`);
+  assertExactKeys(recovery.successors, ["api", "worker"],
+    `${label}.activationRecovery.successors`);
+  assertExactKeys(recovery.sourceEntrypointHashes, ["api", "worker"],
+    `${label}.activationRecovery.sourceEntrypointHashes`);
+  if (recovery.reasonCodes.api !== "containment-revision-supersession" ||
+    recovery.reasonCodes.worker !== "quiescence-entrypoint-inheritance") {
+    fail(`${label}.activationRecovery reason codes are invalid`);
+  }
+  assertHash(recovery.sourceEntrypointHashes.api,
+    `${label}.activationRecovery.sourceEntrypointHashes.api`);
+  assertHash(recovery.sourceEntrypointHashes.worker,
+    `${label}.activationRecovery.sourceEntrypointHashes.worker`);
   assertHash(recovery.pausedQueueEvidenceHash,
     `${label}.activationRecovery.pausedQueueEvidenceHash`);
   assertHash(recovery.evidenceHash, `${label}.activationRecovery.evidenceHash`);
@@ -969,30 +982,42 @@ function validateActivationRecovery(recovery, receipt, armed, deployments, label
     recovery.recoveredAt,
     `${label}.activationRecovery.recoveredAt`,
   );
-  if (!sameJson(recovery.predecessor, armed.deployments.worker) ||
-    !sameJson(recovery.successor, deployments.worker) ||
-    !sameJson(deployments.api, armed.deployments.api) ||
-    !sameJson(deployments.console, armed.deployments.console) ||
-    recovery.successor.identity?.revision !==
-      `${recovery.predecessor.identity?.revision}-r1`) {
-    fail(`${label}.activationRecovery does not bind the signed predecessor and live successor`);
+  if (!sameJson(deployments.console, armed.deployments.console)) {
+    fail(`${label}.activationRecovery changed the signed console deployment`);
   }
   validateDeployments({
-    api: armed.deployments.api,
-    worker: recovery.predecessor,
+    api: recovery.predecessors.api,
+    worker: recovery.predecessors.worker,
     console: armed.deployments.console,
   }, receipt.candidate, `${label}.activationRecovery.predecessorDeploymentSet`);
-  for (const key of [
-    "image", "manifestDigest", "platformDigest", "ociRevision", "platform",
-    "secretReferencesHash",
-  ]) {
-    if (recovery.successor.identity[key] !== recovery.predecessor.identity[key]) {
-      fail(`${label}.activationRecovery changed immutable ${key}`);
+  for (const role of ["api", "worker"]) {
+    const predecessor = recovery.predecessors[role];
+    const successor = recovery.successors[role];
+    if (!sameJson(predecessor, armed.deployments[role]) ||
+      !sameJson(successor, deployments[role]) ||
+      !new RegExp(`^${predecessor.identity?.revision}-r[1-9]$`).test(
+        successor.identity?.revision ?? "",
+      )) {
+      fail(`${label}.activationRecovery does not bind the signed ${role} predecessor and live successor`);
+    }
+    for (const key of [
+      "image", "manifestDigest", "platformDigest", "ociRevision", "platform",
+      "secretReferencesHash",
+    ]) {
+      if (successor.identity[key] !== predecessor.identity[key]) {
+        fail(`${label}.activationRecovery changed immutable ${role} ${key}`);
+      }
     }
   }
-  if (recovery.successor.identity.configHash === recovery.predecessor.identity.configHash ||
-    recovery.successor.identity.templateHash === recovery.predecessor.identity.templateHash) {
-    fail(`${label}.activationRecovery did not replace the inherited template`);
+  if (recovery.successors.api.identity.configHash !==
+      recovery.predecessors.api.identity.configHash ||
+    recovery.successors.api.identity.templateHash !==
+      recovery.predecessors.api.identity.templateHash ||
+    recovery.successors.worker.identity.configHash ===
+      recovery.predecessors.worker.identity.configHash ||
+    recovery.successors.worker.identity.templateHash ===
+      recovery.predecessors.worker.identity.templateHash) {
+    fail(`${label}.activationRecovery did not preserve API config and replace the worker template`);
   }
   const { evidenceHash, ...withoutHash } = recovery;
   if (evidenceHash !== sha256Canonical(withoutHash)) {

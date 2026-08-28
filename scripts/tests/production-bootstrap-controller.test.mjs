@@ -1129,11 +1129,11 @@ test("first-class recovery restores captured entrypoints before consumers resume
     /state\.privateRestoreBundle\.workerRevision\.properties\.template/,
   );
   assert.match(activation, /RETIRED_WORKER_ENVIRONMENT/);
-  assert.match(resume, /ensureFirstClassWorkerForResume/);
-  assert.match(resume, /activationRecovery: workerRecovery\.recovery/);
+  assert.match(resume, /ensureFirstClassDeploymentsForResume/);
+  assert.match(resume, /activationRecovery: deploymentRecovery\.recovery/);
   assert.match(resume, /pausedRuntime\.evidenceHash/);
   assert.match(containment, /sourceRevisionName/);
-  assert.match(containment, /quiescence-entrypoint-inheritance|recoveryRevision/);
+  assert.match(containment, /bounded quiescence recovery sequence/);
 });
 
 test("protected recovery snapshots are descendant-only and file-scope bounded", () => {

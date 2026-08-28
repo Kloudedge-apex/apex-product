@@ -175,10 +175,10 @@ for kind in "${KINDS[@]}"; do
   pass
 done
 
-# B8 may bind the one reviewed recovery successor when the signed B6 worker
-# inherited the quiescence entrypoint. The successor keeps immutable image,
-# source, platform, and secret-reference identity while replacing the bad
-# config/template hashes before queues resume.
+# B8 may bind reviewed API and worker successors when containment must be
+# superseded and the signed B6 worker inherited the quiescence entrypoint.
+# Both successors keep immutable image, source, platform, and secret-reference
+# identity while the worker replaces the bad config/template before resume.
 RECOVERY_EVIDENCE="${HARNESS}/recovery-evidence"
 mkdir -p "${RECOVERY_EVIDENCE}"
 node "${FIXTURE_GENERATOR}" "${RECOVERY_EVIDENCE}" "${BACKEND_COMMIT}" \
@@ -238,6 +238,7 @@ jq -e '
   and .["$defs"].completeEvidence.additionalProperties == false
   and (.["$defs"].completeEvidence.required | index("activationRecovery") != null)
   and .["$defs"].activationRecovery.oneOf[1].additionalProperties == false
+  and .["$defs"].activationRecovery.oneOf[1].properties.kind.const == "first-class-api-worker-template-recovery"
   and .["$defs"].activationRecovery.oneOf[1].properties.queuesRemainedPaused.const == true
   and (.["$defs"].completeEvidence.properties.health.required |
     index("releaseConfigEvidenceHash") != null)

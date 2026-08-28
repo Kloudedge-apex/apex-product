@@ -2292,27 +2292,36 @@ function quiesceAppWithParentWrite(
     role,
     sourceRevisionName === undefined,
   );
-  let preexisting = revisionList(runner, request, app)
-    .find((entry) => entry?.name === revision);
-  if (preexisting) {
-    const actual = writableRevisionTemplate(preexisting.properties?.template ?? {});
+  const revisionsBefore = revisionList(runner, request, app);
+  const baseRevision = revision;
+  let preexisting;
+  for (let attempt = 0; attempt <= 9; attempt += 1) {
+    const candidateName = attempt === 0 ? baseRevision : `${baseRevision}-r${attempt}`;
+    if (candidateName.length > 54) {
+      fail(`${role} quiescence recovery revision name exceeds the Azure limit`);
+    }
+    const candidate = revisionsBefore.find((entry) => entry?.name === candidateName);
+    if (!candidate) {
+      revision = candidateName;
+      preexisting = undefined;
+      break;
+    }
+    const actual = writableRevisionTemplate(candidate.properties?.template ?? {});
     if (Array.isArray(actual.containers?.[0]?.env)) {
       actual.containers[0].env.sort((left, right) =>
         String(left?.name).localeCompare(String(right?.name)));
     }
-    const health = preexisting.properties?.healthState ?? preexisting.properties?.runningState;
+    const health = candidate.properties?.healthState ?? candidate.properties?.runningState;
     const healthy = new Set(["Healthy", "Running", "Provisioned"]).has(health) &&
-      (preexisting.properties?.provisioningState === undefined ||
-        preexisting.properties.provisioningState === "Provisioned");
-    if (canonicalJson(actual) !== canonicalJson(expectedTemplate) || !healthy) {
-      const recoveryRevision = `${revision}-r1`;
-      if (recoveryRevision.length > 54) {
-        fail(`${role} quiescence recovery revision name exceeds the Azure limit`);
-      }
-      revision = recoveryRevision;
-      preexisting = revisionList(runner, request, app)
-        .find((entry) => entry?.name === revision);
+      (candidate.properties?.provisioningState === undefined ||
+        candidate.properties.provisioningState === "Provisioned");
+    if (candidate.properties?.active === true && healthy &&
+      canonicalJson(actual) === canonicalJson(expectedTemplate)) {
+      revision = candidateName;
+      preexisting = candidate;
+      break;
     }
+    if (attempt === 9) fail(`${role} exhausted the bounded quiescence recovery sequence`);
   }
   if (!preexisting) {
     azureMutation(runner, request, [
@@ -4506,41 +4515,63 @@ function deploymentEvidence(runner, request, role, revisionName) {
   };
 }
 
-function validateFirstClassRecoveryEvidence(state, recovery, liveSuccessor) {
+function validateFirstClassRecoveryEvidence(state, recovery, liveDeployments) {
   exactKeys(recovery, [
-    "schemaVersion", "kind", "reasonCode", "predecessor", "successor",
-    "sourceEntrypointHash", "pausedQueueEvidenceHash", "queuesRemainedPaused",
+    "schemaVersion", "kind", "reasonCodes", "predecessors", "successors",
+    "sourceEntrypointHashes", "pausedQueueEvidenceHash", "queuesRemainedPaused",
     "liveSendAllowlistEmpty", "recoveredAt", "evidenceHash",
-  ], "first-class worker recovery evidence");
+  ], "first-class deployment recovery evidence");
   if (recovery.schemaVersion !== 1 ||
-    recovery.kind !== "first-class-worker-entrypoint-recovery" ||
-    recovery.reasonCode !== "quiescence-entrypoint-inheritance" ||
+    recovery.kind !== "first-class-api-worker-template-recovery" ||
     recovery.queuesRemainedPaused !== true || recovery.liveSendAllowlistEmpty !== true) {
-    fail("first-class worker recovery evidence identity is invalid");
+    fail("first-class deployment recovery evidence identity is invalid");
+  }
+  exactKeys(recovery.reasonCodes, ["api", "worker"], "first-class recovery reasons");
+  exactKeys(recovery.predecessors, ["api", "worker"], "first-class recovery predecessors");
+  exactKeys(recovery.successors, ["api", "worker"], "first-class recovery successors");
+  exactKeys(recovery.sourceEntrypointHashes, ["api", "worker"],
+    "first-class recovery entrypoint hashes");
+  if (recovery.reasonCodes.api !== "containment-revision-supersession" ||
+    recovery.reasonCodes.worker !== "quiescence-entrypoint-inheritance") {
+    fail("first-class deployment recovery reasons are invalid");
   }
   for (const [value, label] of [
-    [recovery.sourceEntrypointHash, "first-class recovery source entrypoint hash"],
+    [recovery.sourceEntrypointHashes.api, "API recovery source entrypoint hash"],
+    [recovery.sourceEntrypointHashes.worker, "worker recovery source entrypoint hash"],
     [recovery.pausedQueueEvidenceHash, "first-class recovery paused-queue hash"],
     [recovery.evidenceHash, "first-class recovery evidence hash"],
   ]) string(value, /^sha256:[0-9a-f]{64}$/, label);
   canonicalTimestamp(recovery.recoveredAt, "first-class recovery time");
-  const armedWorker = state.phaseEvidence.firstClassActivation?.evidence?.deployments?.worker;
-  if (!armedWorker || canonicalJson(recovery.predecessor) !== canonicalJson(armedWorker) ||
-    canonicalJson(recovery.successor) !== canonicalJson(liveSuccessor) ||
-    recovery.successor.identity?.revision !== `${recovery.predecessor.identity?.revision}-r1`) {
-    fail("first-class worker recovery does not bind the signed predecessor and live successor");
-  }
-  for (const key of [
-    "image", "manifestDigest", "platformDigest", "ociRevision", "platform",
-    "secretReferencesHash",
-  ]) {
-    if (recovery.successor.identity[key] !== recovery.predecessor.identity[key]) {
-      fail(`first-class worker recovery changed immutable ${key}`);
+  const armed = state.phaseEvidence.firstClassActivation?.evidence?.deployments;
+  if (!armed) fail("signed first-class deployment evidence is absent");
+  for (const role of ["api", "worker"]) {
+    const predecessor = recovery.predecessors[role];
+    const successor = recovery.successors[role];
+    if (canonicalJson(predecessor) !== canonicalJson(armed[role]) ||
+      canonicalJson(successor) !== canonicalJson(liveDeployments[role]) ||
+      !new RegExp(`^${predecessor.identity?.revision}-r[1-9]$`).test(
+        successor.identity?.revision ?? "",
+      )) {
+      fail(`first-class ${role} recovery does not bind the signed predecessor and live successor`);
+    }
+    for (const key of [
+      "image", "manifestDigest", "platformDigest", "ociRevision", "platform",
+      "secretReferencesHash",
+    ]) {
+      if (successor.identity[key] !== predecessor.identity[key]) {
+        fail(`first-class ${role} recovery changed immutable ${key}`);
+      }
     }
   }
-  if (recovery.successor.identity.configHash === recovery.predecessor.identity.configHash ||
-    recovery.successor.identity.templateHash === recovery.predecessor.identity.templateHash) {
-    fail("first-class worker recovery did not replace the inherited quiescence template");
+  if (recovery.successors.api.identity.configHash !==
+      recovery.predecessors.api.identity.configHash ||
+    recovery.successors.api.identity.templateHash !==
+      recovery.predecessors.api.identity.templateHash ||
+    recovery.successors.worker.identity.configHash ===
+      recovery.predecessors.worker.identity.configHash ||
+    recovery.successors.worker.identity.templateHash ===
+      recovery.predecessors.worker.identity.templateHash) {
+    fail("first-class recovery did not preserve API config and replace the worker template");
   }
   const { evidenceHash, ...withoutHash } = recovery;
   if (evidenceHash !== canonicalHash(withoutHash)) {
@@ -4549,7 +4580,21 @@ function validateFirstClassRecoveryEvidence(state, recovery, liveSuccessor) {
   return recovery;
 }
 
-function ensureFirstClassWorkerForResume(
+function nextRecoveryRevision(runner, request, app, predecessorName) {
+  const revisions = revisionList(runner, request, app);
+  const active = revisions.filter((entry) => entry?.properties?.active === true);
+  for (let attempt = 1; attempt <= 9; attempt += 1) {
+    const candidateName = `${predecessorName}-r${attempt}`;
+    if (candidateName.length > 54) fail(`${app} recovery revision name exceeds the Azure limit`);
+    const existing = revisions.find((entry) => entry?.name === candidateName);
+    if (!existing || (existing.properties?.active === true && active.length === 1)) {
+      return candidateName;
+    }
+  }
+  fail(`${app} exhausted the bounded recovery revision sequence`);
+}
+
+function ensureFirstClassDeploymentsForResume(
   runner,
   request,
   state,
@@ -4557,49 +4602,64 @@ function ensureFirstClassWorkerForResume(
   pausedQueueEvidenceHash,
   options,
 ) {
-  const sourceTemplate = state.privateRestoreBundle.workerRevision?.properties?.template;
-  const sourceEntrypoint = containerEntrypoint(
-    sourceTemplate,
+  const armed = state.phaseEvidence.firstClassActivation?.evidence?.deployments;
+  if (!armed) fail("signed first-class activation evidence is absent");
+  const apiPredecessorName = armed.api.identity?.revision;
+  const workerPredecessorName = armed.worker.identity?.revision;
+  const apiPredecessor = revisionList(runner, request, API_APP)
+    .find((entry) => entry?.name === apiPredecessorName);
+  const workerPredecessor = revisionList(runner, request, WORKER_APP)
+    .find((entry) => entry?.name === workerPredecessorName);
+  if (!apiPredecessor || !workerPredecessor) {
+    fail("a signed first-class predecessor revision is absent");
+  }
+  const apiSourceTemplate = apiPredecessor.properties?.template;
+  const workerSourceTemplate = state.privateRestoreBundle.workerRevision?.properties?.template;
+  const apiSourceEntrypoint = containerEntrypoint(apiSourceTemplate, "signed API source template");
+  const workerSourceEntrypoint = containerEntrypoint(
+    workerSourceTemplate,
     "captured source worker template",
   );
+  const apiActive = revisionList(runner, request, API_APP)
+    .filter((entry) => entry?.properties?.active === true);
+  const workerActive = revisionList(runner, request, WORKER_APP)
+    .filter((entry) => entry?.properties?.active === true);
   const storedRecovery = state.phaseEvidence.firstClassRecovery;
-  if (storedRecovery !== undefined) {
-    activateRevision(runner, request, "worker", state.activeIdentities.worker);
+  if (storedRecovery !== undefined &&
+    state.activeIdentities.api === storedRecovery.successors?.api?.identity?.revision &&
+    state.activeIdentities.worker === storedRecovery.successors?.worker?.identity?.revision &&
+    apiActive.length === 1 && apiActive[0].name === state.activeIdentities.api &&
+    workerActive.length === 1 && workerActive[0].name === state.activeIdentities.worker) {
+    const current = {
+      api: deploymentEvidence(runner, request, "api", state.activeIdentities.api),
+      worker: deploymentEvidence(runner, request, "worker", state.activeIdentities.worker),
+    };
     verifyFirstClassWorkerLive(
       runner,
       request,
       state.activeIdentities.worker,
       receipt.fencingGeneration,
-      sourceTemplate,
-    );
-    const successor = deploymentEvidence(
-      runner,
-      request,
-      "worker",
-      state.activeIdentities.worker,
+      workerSourceTemplate,
     );
     return {
       state,
-      recovery: validateFirstClassRecoveryEvidence(state, storedRecovery, successor),
+      recovery: validateFirstClassRecoveryEvidence(state, storedRecovery, current),
     };
   }
 
-  const predecessorName = state.activeIdentities.worker;
-  const predecessor = revisionList(runner, request, WORKER_APP)
-    .find((entry) => entry?.name === predecessorName);
-  if (!predecessor) fail("signed first-class worker revision is absent");
   const predecessorEntrypoint = containerEntrypoint(
-    predecessor.properties?.template,
+    workerPredecessor.properties?.template,
     "signed first-class worker template",
   );
-  if (canonicalJson(predecessorEntrypoint) === canonicalJson(sourceEntrypoint)) {
-    activateRevision(runner, request, "worker", predecessorName);
+  if (apiActive.length === 1 && apiActive[0].name === apiPredecessorName &&
+    workerActive.length === 1 && workerActive[0].name === workerPredecessorName &&
+    canonicalJson(predecessorEntrypoint) === canonicalJson(workerSourceEntrypoint)) {
     verifyFirstClassWorkerLive(
       runner,
       request,
-      predecessorName,
+      workerPredecessorName,
       receipt.fencingGeneration,
-      sourceTemplate,
+      workerSourceTemplate,
     );
     return { state, recovery: null };
   }
@@ -4609,41 +4669,54 @@ function ensureFirstClassWorkerForResume(
   })) {
     fail("first-class worker entrypoint drift is not the reviewed quiescence inheritance defect");
   }
-  const armedWorker = state.phaseEvidence.firstClassActivation?.evidence?.deployments?.worker;
-  if (!armedWorker || armedWorker.identity?.revision !== predecessorName) {
-    fail("first-class worker recovery predecessor is not the signed activation revision");
-  }
-  const recoveryRevision = `${predecessorName}-r1`;
-  if (recoveryRevision.length > 54) {
-    fail("first-class worker recovery revision name exceeds the Azure limit");
-  }
-  const revision = updateApp(
+  const apiRevision = updateApp(
+    runner,
+    request,
+    "api",
+    request.targetArtifacts.api.image,
+    nextRecoveryRevision(runner, request, API_APP, apiPredecessorName),
+    [],
+    1,
+    [],
+    true,
+    apiSourceTemplate,
+  );
+  const workerRevision = updateApp(
     runner,
     request,
     "worker",
     request.targetArtifacts.worker.image,
-    recoveryRevision,
+    nextRecoveryRevision(runner, request, WORKER_APP, workerPredecessorName),
     firstClassWorkerEnvironment(request, receipt.fencingGeneration),
     1,
     RETIRED_WORKER_ENVIRONMENT,
     true,
-    sourceTemplate,
+    workerSourceTemplate,
   );
   verifyFirstClassWorkerLive(
     runner,
     request,
-    revision,
+    workerRevision,
     receipt.fencingGeneration,
-    sourceTemplate,
+    workerSourceTemplate,
   );
-  const successor = deploymentEvidence(runner, request, "worker", revision);
+  const successors = {
+    api: deploymentEvidence(runner, request, "api", apiRevision),
+    worker: deploymentEvidence(runner, request, "worker", workerRevision),
+  };
   const withoutHash = {
     schemaVersion: 1,
-    kind: "first-class-worker-entrypoint-recovery",
-    reasonCode: "quiescence-entrypoint-inheritance",
-    predecessor: structuredClone(armedWorker),
-    successor,
-    sourceEntrypointHash: canonicalHash(sourceEntrypoint),
+    kind: "first-class-api-worker-template-recovery",
+    reasonCodes: {
+      api: "containment-revision-supersession",
+      worker: "quiescence-entrypoint-inheritance",
+    },
+    predecessors: { api: structuredClone(armed.api), worker: structuredClone(armed.worker) },
+    successors,
+    sourceEntrypointHashes: {
+      api: canonicalHash(apiSourceEntrypoint),
+      worker: canonicalHash(workerSourceEntrypoint),
+    },
     pausedQueueEvidenceHash,
     queuesRemainedPaused: true,
     liveSendAllowlistEmpty: true,
@@ -4652,7 +4725,11 @@ function ensureFirstClassWorkerForResume(
   const recovery = { ...withoutHash, evidenceHash: canonicalHash(withoutHash) };
   const next = {
     ...state,
-    activeIdentities: { ...state.activeIdentities, worker: revision },
+    activeIdentities: {
+      ...state.activeIdentities,
+      api: apiRevision,
+      worker: workerRevision,
+    },
     phaseEvidence: { ...state.phaseEvidence, firstClassRecovery: recovery },
     updatedAt: nowSecond(),
   };
@@ -5734,8 +5811,7 @@ function resumeBootstrap(runner, request, state, options) {
       /^sha256:[0-9a-f]{64}$/,
       "pre-resume paused queue evidence hash",
     );
-    activateRevision(runner, request, "api", next.activeIdentities.api);
-    const workerRecovery = ensureFirstClassWorkerForResume(
+    const deploymentRecovery = ensureFirstClassDeploymentsForResume(
       runner,
       request,
       next,
@@ -5743,7 +5819,7 @@ function resumeBootstrap(runner, request, state, options) {
       pausedRuntime.evidenceHash,
       options,
     );
-    next = workerRecovery.state;
+    next = deploymentRecovery.state;
     const runtime = assertRuntimeResumeEvidence(
       runRuntimeControl(
         runner,
@@ -5778,15 +5854,14 @@ function resumeBootstrap(runner, request, state, options) {
       worker: deploymentEvidence(runner, request, "worker", next.activeIdentities.worker),
       console: deploymentEvidence(runner, request, "console", next.activeIdentities.console),
     };
-    if (workerRecovery.recovery === null) {
+    if (deploymentRecovery.recovery === null) {
       if (canonicalJson(liveDeployments) !== canonicalJson(armed.deployments)) {
         fail("resumed live deployments drifted from the signed first-class activation evidence");
       }
     } else {
-      validateFirstClassRecoveryEvidence(next, workerRecovery.recovery, liveDeployments.worker);
-      if (canonicalJson(liveDeployments.api) !== canonicalJson(armed.deployments.api) ||
-        canonicalJson(liveDeployments.console) !== canonicalJson(armed.deployments.console)) {
-        fail("first-class worker recovery changed a signed API or console deployment");
+      validateFirstClassRecoveryEvidence(next, deploymentRecovery.recovery, liveDeployments);
+      if (canonicalJson(liveDeployments.console) !== canonicalJson(armed.deployments.console)) {
+        fail("first-class deployment recovery changed the signed console deployment");
       }
     }
     const releaseConfiguration = verifyLiveReleaseConfiguration(runner, request);
@@ -5872,9 +5947,9 @@ function resumeBootstrap(runner, request, state, options) {
     };
     const b8Evidence = {
       deployments: structuredClone(liveDeployments),
-      activationRecovery: workerRecovery.recovery === null
+      activationRecovery: deploymentRecovery.recovery === null
         ? null
-        : structuredClone(workerRecovery.recovery),
+        : structuredClone(deploymentRecovery.recovery),
       writeGates: structuredClone(armed.writeGates),
       rollbackBaseline: structuredClone(armed.rollbackBaseline),
       resume,
@@ -5922,19 +5997,29 @@ function resumeBootstrap(runner, request, state, options) {
       containmentFailures.push(`runtime:${sanitizeError(containmentError.message)}`);
     }
     try {
+      const activeContainmentSource = (role, app) => {
+        const active = revisionList(runner, request, app)
+          .filter((entry) => entry?.properties?.active === true &&
+            entry.properties?.template?.containers?.[0]?.image ===
+              request.targetArtifacts[role].image);
+        if (active.length !== 1) {
+          fail(`${role} containment source is not one exact active candidate revision`);
+        }
+        return active[0].name;
+      };
       quiesceAppWithParentWrite(
         runner,
         request,
         "api",
         `${API_APP}--bootstrap-hold-${terminalOpenIntent.generation}`,
-        next.activeIdentities.api,
+        activeContainmentSource("api", API_APP),
       );
       quiesceAppWithParentWrite(
         runner,
         request,
         "worker",
         `${WORKER_APP}--bootstrap-hold-${terminalOpenIntent.generation}`,
-        next.activeIdentities.worker,
+        activeContainmentSource("worker", WORKER_APP),
       );
     } catch (containmentError) {
       containmentFailures.push(`revisions:${sanitizeError(containmentError.message)}`);
