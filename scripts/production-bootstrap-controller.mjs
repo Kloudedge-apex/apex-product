@@ -5564,14 +5564,26 @@ function enableApiIngress(runner, request, state) {
     state.activeIdentities.api,
     request.targetArtifacts.api.image,
   );
+  const ingress = {
+    external: true,
+    targetPort,
+    transport: originalIngress.transport ?? "auto",
+    allowInsecure: false,
+    traffic: [{ latestRevision: true, weight: 100 }],
+  };
+  for (const key of [
+    "additionalPortMappings", "clientCertificateMode", "corsPolicy", "customDomains",
+    "exposedPort", "ipSecurityRestrictions", "stickySessions",
+  ]) {
+    if (originalIngress[key] !== undefined && originalIngress[key] !== null) {
+      ingress[key] = structuredClone(originalIngress[key]);
+    }
+  }
   azureMutation(runner, request, [
-    "containerapp", "ingress", "enable",
-    "--name", API_APP,
-    "--resource-group", RESOURCE_GROUP,
-    "--type", "external",
-    "--target-port", String(targetPort),
-    "--transport", originalIngress.transport ?? "auto",
-    "--allow-insecure", "false",
+    "rest",
+    "--method", "patch",
+    "--url", `${request.authority.apiContainerAppResourceId}?api-version=2024-03-01`,
+    "--body", canonicalJson({ properties: { configuration: { ingress } } }),
     "--output", "none",
   ], "API ingress enable");
 
@@ -5585,22 +5597,31 @@ function verifyApiIngressLive(runner, request, state, label = "API") {
     originalIngress?.external !== true) {
     fail("private source API ingress contract is invalid");
   }
-  const readback = appState(
-    runner,
-    request,
-    request.authority.apiContainerAppResourceId,
-    `${label} ingress`,
-  );
-  const ingress = readback.properties?.configuration?.ingress;
-  const traffic = ingress?.traffic;
   const expectedTransport = originalIngress.transport ?? "auto";
-  if (readback.properties?.configuration?.activeRevisionsMode !== "Single" ||
-    ingress?.external !== true || !Array.isArray(traffic) || traffic.length !== 1 ||
-    ingress.targetPort !== targetPort || ingress.transport !== expectedTransport ||
-    ingress.allowInsecure !== false ||
-    traffic[0]?.weight !== 100 || traffic[0]?.latestRevision !== true ||
-    (traffic[0]?.revisionName !== undefined && traffic[0]?.revisionName !== null) ||
-    readback.properties?.latestReadyRevisionName !== state.activeIdentities.api) {
+  let readback = null;
+  for (let observation = 0; observation < 36; observation += 1) {
+    const candidate = appState(
+      runner,
+      request,
+      request.authority.apiContainerAppResourceId,
+      `${label} ingress`,
+    );
+    const ingress = candidate.properties?.configuration?.ingress;
+    const traffic = ingress?.traffic;
+    if (candidate.properties?.provisioningState === "Succeeded" &&
+      candidate.properties?.configuration?.activeRevisionsMode === "Single" &&
+      ingress?.external === true && Array.isArray(traffic) && traffic.length === 1 &&
+      ingress.targetPort === targetPort && ingress.transport === expectedTransport &&
+      ingress.allowInsecure === false &&
+      traffic[0]?.weight === 100 && traffic[0]?.latestRevision === true &&
+      (traffic[0]?.revisionName === undefined || traffic[0]?.revisionName === null) &&
+      candidate.properties?.latestReadyRevisionName === state.activeIdentities.api) {
+      readback = candidate;
+      break;
+    }
+    runner.run("sleep", ["5"], { label: "API ingress enable readiness interval" });
+  }
+  if (readback === null) {
     fail("API ingress or exact revision traffic readback is ambiguous");
   }
   assertExactActiveRevision(
@@ -5611,7 +5632,7 @@ function verifyApiIngressLive(runner, request, state, label = "API") {
     request.targetArtifacts.api.image,
   );
   const fqdn = string(
-    ingress.fqdn,
+    readback.properties.configuration.ingress.fqdn,
     /^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/,
     "resumed API FQDN",
   );
