@@ -1009,15 +1009,15 @@ function validateActivationRecovery(recovery, receipt, armed, deployments, label
       }
     }
   }
-  if (recovery.successors.api.identity.configHash !==
+  if (recovery.successors.api.identity.configHash ===
       recovery.predecessors.api.identity.configHash ||
-    recovery.successors.api.identity.templateHash !==
+    recovery.successors.api.identity.templateHash ===
       recovery.predecessors.api.identity.templateHash ||
     recovery.successors.worker.identity.configHash ===
       recovery.predecessors.worker.identity.configHash ||
     recovery.successors.worker.identity.templateHash ===
       recovery.predecessors.worker.identity.templateHash) {
-    fail(`${label}.activationRecovery did not preserve API config and replace the worker template`);
+    fail(`${label}.activationRecovery did not create fresh API and worker templates`);
   }
   const { evidenceHash, ...withoutHash } = recovery;
   if (evidenceHash !== sha256Canonical(withoutHash)) {
