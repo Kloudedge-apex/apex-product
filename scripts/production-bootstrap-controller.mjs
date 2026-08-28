@@ -2367,9 +2367,17 @@ function disableApiIngress(runner, request, releaseLockRequired = true) {
     "--body", canonicalJson({ properties: { configuration: { ingress: null } } }),
     "--output", "none",
   ], "API ingress disable", releaseLockRequired);
-  const state = appState(runner, request, request.authority.apiContainerAppResourceId, "quiesced API");
-  if (state.properties?.configuration?.ingress?.external === true || state.properties?.configuration?.ingress?.fqdn) fail("API ingress disable readback is ambiguous");
-  return { adopted: false };
+  for (let observation = 0; observation < 36; observation += 1) {
+    const state = appState(
+      runner,
+      request,
+      request.authority.apiContainerAppResourceId,
+      "quiesced API",
+    );
+    if (state.properties?.configuration?.ingress === null) return { adopted: false };
+    runner.run("sleep", ["5"], { label: "API ingress disable readiness interval" });
+  }
+  fail("API ingress disable readback is ambiguous");
 }
 
 function replicaObservation(runner, request, app) {
@@ -5523,6 +5531,22 @@ function enableApiIngress(runner, request, state) {
   const originalIngress = state.privateRestoreBundle.apiResource.properties?.configuration?.ingress;
   const targetPort = originalIngress?.targetPort;
   if (!Number.isSafeInteger(targetPort) || targetPort < 1 || targetPort > 65535 || originalIngress?.external !== true) fail("private source API ingress contract is invalid");
+  const before = appState(
+    runner,
+    request,
+    request.authority.apiContainerAppResourceId,
+    "API ingress pre-enable",
+  );
+  if (before.properties?.configuration?.activeRevisionsMode !== "Single") {
+    fail("API ingress enable requires single revision mode");
+  }
+  assertExactActiveRevision(
+    runner,
+    request,
+    API_APP,
+    state.activeIdentities.api,
+    request.targetArtifacts.api.image,
+  );
   azureMutation(runner, request, [
     "containerapp", "ingress", "enable",
     "--name", API_APP,
@@ -5533,13 +5557,6 @@ function enableApiIngress(runner, request, state) {
     "--allow-insecure", "false",
     "--output", "none",
   ], "API ingress enable");
-  azureMutation(runner, request, [
-    "containerapp", "ingress", "traffic", "set",
-    "--name", API_APP,
-    "--resource-group", RESOURCE_GROUP,
-    "--revision-weight", `${state.activeIdentities.api}=100`,
-    "--output", "none",
-  ], "API exact revision traffic assignment");
 
   return verifyApiIngressLive(runner, request, state, "resumed API");
 }
@@ -5560,14 +5577,22 @@ function verifyApiIngressLive(runner, request, state, label = "API") {
   const ingress = readback.properties?.configuration?.ingress;
   const traffic = ingress?.traffic;
   const expectedTransport = originalIngress.transport ?? "auto";
-  if (ingress?.external !== true || !Array.isArray(traffic) || traffic.length !== 1 ||
+  if (readback.properties?.configuration?.activeRevisionsMode !== "Single" ||
+    ingress?.external !== true || !Array.isArray(traffic) || traffic.length !== 1 ||
     ingress.targetPort !== targetPort || ingress.transport !== expectedTransport ||
     ingress.allowInsecure !== false ||
-    traffic[0]?.revisionName !== state.activeIdentities.api ||
-    traffic[0]?.weight !== 100 || traffic[0]?.latestRevision === true ||
+    traffic[0]?.weight !== 100 || traffic[0]?.latestRevision !== true ||
+    (traffic[0]?.revisionName !== undefined && traffic[0]?.revisionName !== null) ||
     readback.properties?.latestReadyRevisionName !== state.activeIdentities.api) {
     fail("API ingress or exact revision traffic readback is ambiguous");
   }
+  assertExactActiveRevision(
+    runner,
+    request,
+    API_APP,
+    state.activeIdentities.api,
+    request.targetArtifacts.api.image,
+  );
   const fqdn = string(
     ingress.fqdn,
     /^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/,
