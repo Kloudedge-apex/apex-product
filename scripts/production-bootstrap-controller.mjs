@@ -1343,11 +1343,14 @@ function assertExactProtectedSnapshot(runner, request, action) {
   const allowed = new Set([
     ".github/workflows/bootstrap-production.yml",
     "docs/ops/initial-production-bootstrap-controller.md",
+    "docs/ops/production-bootstrap-phase-receipt.schema.json",
     "scripts/production-bootstrap-controller.mjs",
     "scripts/production-bootstrap-phase-receipt-contracts.mjs",
     "scripts/verify-production-bootstrap-phase-receipt.sh",
     "scripts/verify-production-bootstrap-workflow.sh",
     "scripts/tests/production-bootstrap-controller.test.mjs",
+    "scripts/tests/production-bootstrap-phase-ledger.test.mjs",
+    "scripts/tests/production-bootstrap-phase-receipt.fixture.mjs",
     "scripts/tests/production-bootstrap-phase-receipt.test.sh",
   ]);
   if (changed.length === 0 || !changed.includes("scripts/production-bootstrap-controller.mjs") ||
