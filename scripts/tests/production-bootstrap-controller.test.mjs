@@ -968,6 +968,36 @@ test("same-commit release-lock adoption requires the exact leased attempt journa
   assert.match(lock, /stale ref alone is therefore never authority/);
 });
 
+test("preparation rebind is limited to the source-capture pre-mutation boundary", () => {
+  const source = readFileSync(CONTROLLER, "utf8");
+  const validatorStart = source.indexOf("function validateRebindablePreparationJournal");
+  const validatorEnd = source.indexOf("function preparationJournal", validatorStart);
+  const validator = source.slice(validatorStart, validatorEnd);
+  assert.match(validator, /journal\.stage !== "B0_SOURCE_CAPTURE_INTENT"/);
+  assert.match(validator, /journal\.source !== null/);
+  assert.match(validator, /journal\.intent\.operation !== "capture-source-baseline"/);
+  assert.match(validator, /journal\.intent\.status !== "started"/);
+  assert.match(validator, /plan\.backendCandidateCommit === request\.backendCandidate\.commit/);
+
+  const rebindStart = source.indexOf("function rebindReleaseLockForPreparation");
+  const rebindEnd = source.indexOf("function readReleaseLock", rebindStart);
+  const rebind = source.slice(rebindStart, rebindEnd);
+  assert.match(rebind, /verifyAzureLease\(runner, request\)/);
+  assert.match(rebind, /existing\.object\?\.sha !== previousBackendCommit/);
+  assert.match(rebind, /--force-with-lease=\$\{RELEASE_LOCK_REF\}:\$\{previousBackendCommit\}/);
+  assert.match(rebind, /verifyReleaseLock\(runner, request\)/);
+
+  const prepareStart = source.indexOf("function prepare(");
+  const prepareEnd = source.indexOf("function verifyReceiptEnvelope", prepareStart);
+  const prepare = source.slice(prepareStart, prepareEnd);
+  const validate = prepare.indexOf("validateRebindablePreparationJournal");
+  const signatures = prepare.indexOf("verifySupersededPreparationSignatures", validate);
+  const lock = prepare.indexOf("rebindReleaseLockForPreparation", signatures);
+  const journal = prepare.indexOf("preparationJournal(request, clerkReconciliation)", lock);
+  const upload = prepare.indexOf("uploadState(runner, request, journal, options.statePath)", journal);
+  assert.ok(validate >= 0 && validate < signatures && signatures < lock && lock < journal && journal < upload);
+});
+
 test("every post-acquisition ACA mutation revalidates both Azure lease and Git release lock", () => {
   const source = readFileSync(CONTROLLER, "utf8");
   const start = source.indexOf("function azureMutation");
