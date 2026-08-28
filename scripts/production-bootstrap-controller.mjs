@@ -82,6 +82,11 @@ const QUIESCENCE_DISABLED_WORKERS = Object.freeze([
   "USAGE_ROLLUP_WORKER_ENABLED=false",
   "WORKER_ENABLED=false",
 ]);
+const WORKER_QUIESCENCE_COMMAND = Object.freeze(["node"]);
+const WORKER_QUIESCENCE_ARGS = Object.freeze([
+  "-e",
+  "require('node:http').createServer((_request, response) => { response.writeHead(200); response.end('ok'); }).listen(4000, '0.0.0.0')",
+]);
 const CONSOLE_API_UPSTREAM_URL =
   "https://apex-gtm-api.braveflower-6d3bb66b.eastus.azurecontainerapps.io";
 const LEGACY_SOURCE_IMAGE_REVISIONS = Object.freeze({
@@ -1812,7 +1817,8 @@ function refreshCapturedSourceForRebind(
       fail(`superseded preparation ${role} source binding is invalid`);
     }
     const liveApp = appState(runner, request, resourceId, `rebindable source ${role}`);
-    const liveRevision = activeRevision(revisionList(runner, request, appName), appName);
+    const activeRevisions = revisionList(runner, request, appName)
+      .filter((entry) => entry?.properties?.active === true);
     const liveConfiguration = structuredClone(liveApp.properties?.configuration);
     if (role === "api" && apiIngressPosture === "disabled") {
       if (liveConfiguration?.ingress !== null) {
@@ -1822,20 +1828,26 @@ function refreshCapturedSourceForRebind(
         bundle.apiResource?.properties?.configuration?.ingress,
       );
     }
-    const sourceMatches = liveRevision.name === snapshot.revision &&
-      liveRevision.properties?.template?.containers?.[0]?.image === snapshot.image &&
-      canonicalHash(liveRevision.properties?.template) === snapshot.templateHash;
-    const partialQuiescenceMatches = allowPartialQuiescence &&
+    const sourceMatches = (revision) => revision?.name === snapshot.revision &&
+      revision?.properties?.template?.containers?.[0]?.image === snapshot.image &&
+      canonicalHash(revision?.properties?.template) === snapshot.templateHash;
+    const quiescenceMatches = (revision, requireHealthy) => allowPartialQuiescence &&
       matchesCapturedQuiescenceRevision(
-        liveRevision,
+        revision,
         storedApp.properties?.template,
         snapshot.image,
         appName,
         role,
         request.attemptId,
+        requireHealthy,
       );
+    const soleExactRevision = activeRevisions.length === 1 &&
+      (sourceMatches(activeRevisions[0]) || quiescenceMatches(activeRevisions[0], true));
+    const exactInterruptedReplacement = role === "worker" && activeRevisions.length === 2 &&
+      activeRevisions.filter(sourceMatches).length === 1 &&
+      activeRevisions.filter((revision) => quiescenceMatches(revision, false)).length === 1;
     if (canonicalHash(liveConfiguration) !== snapshot.configHash ||
-      (!sourceMatches && !partialQuiescenceMatches)) {
+      (!soleExactRevision && !exactInterruptedReplacement)) {
       fail(`superseded preparation ${role} source changed after capture`);
     }
   }
@@ -2112,14 +2124,7 @@ function quiesceAppWithParentWrite(runner, request, role, revision) {
     /^[a-z0-9.-]+\/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$/,
     `${role} quiescence source image`,
   );
-  const expectedTemplate = expectedRevisionTemplate(
-    before.properties.template,
-    image,
-    QUIESCENCE_DISABLED_WORKERS,
-    [],
-    0,
-    role,
-  );
+  const expectedTemplate = expectedQuiescenceTemplate(before.properties.template, image, role);
   const preexisting = revisionList(runner, request, app)
     .find((entry) => entry?.name === revision);
   if (!preexisting) {
@@ -2668,7 +2673,7 @@ function prepare(runner, request, options) {
       runner,
       request,
       "worker",
-      `${WORKER_APP}--bootstrap-quiesce-${request.attemptId.slice(0, 7)}`,
+      `${WORKER_APP}--bootstrap-quiesce-idle-${request.attemptId.slice(0, 7)}`,
     );
     const legacyReplicaEvidence = proveStableZeroExecutionReplicas(runner, request);
     journal = journalMutation(runner, request, options, journal, "stop-app-revisions", "completed", "B0_APPS_STOPPED");
@@ -3772,9 +3777,13 @@ export function matchesCapturedQuiescenceRevision(
   appName,
   role,
   attemptId,
+  requireHealthy = true,
 ) {
-  if (role === "console" || liveRevision?.name !==
-    `${appName}--bootstrap-quiesce-${attemptId.slice(0, 7)}` ||
+  const legacyName = `${appName}--bootstrap-quiesce-${attemptId.slice(0, 7)}`;
+  const idleWorkerName = `${appName}--bootstrap-quiesce-idle-${attemptId.slice(0, 7)}`;
+  if (role === "console" ||
+    (liveRevision?.name !== legacyName &&
+      !(role === "worker" && liveRevision?.name === idleWorkerName)) ||
     liveRevision.properties?.active !== true) return false;
   const actual = writableRevisionTemplate(liveRevision.properties?.template ?? {});
   const container = actual.containers?.[0];
@@ -3782,19 +3791,21 @@ export function matchesCapturedQuiescenceRevision(
   if (Array.isArray(container.env)) {
     container.env.sort((left, right) => String(left?.name).localeCompare(String(right?.name)));
   }
-  const expected = expectedRevisionTemplate(
-    sourceTemplate,
-    sourceImage,
-    QUIESCENCE_DISABLED_WORKERS,
-    [],
-    0,
-    role,
-  );
+  const expected = liveRevision.name === idleWorkerName
+    ? expectedQuiescenceTemplate(sourceTemplate, sourceImage, role)
+    : expectedRevisionTemplate(
+      sourceTemplate,
+      sourceImage,
+      QUIESCENCE_DISABLED_WORKERS,
+      [],
+      0,
+      role,
+    );
   const health = liveRevision.properties?.healthState ?? liveRevision.properties?.runningState;
   const provisioned = liveRevision.properties?.provisioningState === undefined ||
     liveRevision.properties.provisioningState === "Provisioned";
   return canonicalJson(actual) === canonicalJson(expected) && provisioned &&
-    new Set(["Healthy", "Running", "Provisioned"]).has(health);
+    (!requireHealthy || new Set(["Healthy", "Running", "Provisioned"]).has(health));
 }
 
 function expectedRevisionTemplate(sourceTemplate, image, envValues, removeEnvValues, minReplicas, role) {
@@ -3826,6 +3837,22 @@ function expectedRevisionTemplate(sourceTemplate, image, envValues, removeEnvVal
   container.env = [...environment.values()].sort((left, right) => left.name.localeCompare(right.name));
   if (role !== "console") {
     expected.scale = { ...(expected.scale ?? {}), minReplicas, maxReplicas: 1 };
+  }
+  return expected;
+}
+
+function expectedQuiescenceTemplate(sourceTemplate, image, role) {
+  const expected = expectedRevisionTemplate(
+    sourceTemplate,
+    image,
+    QUIESCENCE_DISABLED_WORKERS,
+    [],
+    0,
+    role,
+  );
+  if (role === "worker") {
+    expected.containers[0].command = [...WORKER_QUIESCENCE_COMMAND];
+    expected.containers[0].args = [...WORKER_QUIESCENCE_ARGS];
   }
   return expected;
 }
