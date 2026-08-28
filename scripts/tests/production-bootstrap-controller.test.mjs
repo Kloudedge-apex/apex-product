@@ -1117,11 +1117,13 @@ test("first-class recovery restores captured entrypoints before consumers resume
   const source = readFileSync(CONTROLLER, "utf8");
   const activationStart = source.indexOf("function activateFirstClass");
   const activationEnd = source.indexOf("function verifyApiIngressLive", activationStart);
+  const recoveryStart = source.indexOf("function ensureFirstClassDeploymentsForResume");
   const resumeStart = source.indexOf("function resumeBootstrap");
   const resumeEnd = source.indexOf("function completeBootstrap", resumeStart);
   const containmentStart = source.indexOf("function quiesceAppWithParentWrite");
   const containmentEnd = source.indexOf("function disableApiIngress", containmentStart);
   const activation = source.slice(activationStart, activationEnd);
+  const recovery = source.slice(recoveryStart, resumeStart);
   const resume = source.slice(resumeStart, resumeEnd);
   const containment = source.slice(containmentStart, containmentEnd);
   assert.match(
@@ -1132,6 +1134,8 @@ test("first-class recovery restores captured entrypoints before consumers resume
   assert.match(resume, /ensureFirstClassDeploymentsForResume/);
   assert.match(resume, /activationRecovery: deploymentRecovery\.recovery/);
   assert.match(resume, /pausedRuntime\.evidenceHash/);
+  assert.match(recovery, /CLERK_WEBHOOK_SECRET=secretref:clerk-webhook-secret/);
+  assert.match(recovery, /workerSecretBinding/);
   assert.match(containment, /sourceRevisionName/);
   assert.match(containment, /bounded quiescence recovery sequence/);
 });
