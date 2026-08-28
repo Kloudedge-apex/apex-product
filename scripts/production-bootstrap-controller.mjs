@@ -2695,19 +2695,27 @@ function prepare(runner, request, options) {
     runRuntimeControl(runner, request, options.stateDir, "pause-only", 3);
     journal = journalMutation(runner, request, options, journal, "pause-queues", "completed", "B0_QUEUES_PAUSED");
     journal = journalMutation(runner, request, options, journal, "stop-app-revisions", "started", "B0_APP_STOP_INTENT");
-    const quiescenceRevisionIdentity =
-      `${request.attemptId.slice(0, 7)}-${request.backendCandidate.commit.slice(0, 7)}`;
     quiesceAppWithParentWrite(
       runner,
       request,
       "api",
-      `${API_APP}--bootstrap-quiesce-${quiescenceRevisionIdentity}`,
+      quiescenceRevisionName(
+        API_APP,
+        "api",
+        request.attemptId,
+        request.backendCandidate.commit,
+      ),
     );
     quiesceAppWithParentWrite(
       runner,
       request,
       "worker",
-      `${WORKER_APP}--bootstrap-quiesce-idle-${quiescenceRevisionIdentity}`,
+      quiescenceRevisionName(
+        WORKER_APP,
+        "worker",
+        request.attemptId,
+        request.backendCandidate.commit,
+      ),
     );
     const legacyReplicaEvidence = proveStableZeroExecutionReplicas(runner, request);
     journal = journalMutation(runner, request, options, journal, "stop-app-revisions", "completed", "B0_APPS_STOPPED");
@@ -3821,6 +3829,7 @@ export function matchesCapturedQuiescenceRevision(
   if (backendCommit !== undefined) {
     string(backendCommit, /^[0-9a-f]{40}$/, "quiescence backend commit");
     revisionNames.add(`${legacyName}-${backendCommit.slice(0, 7)}`);
+    revisionNames.add(quiescenceRevisionName(appName, role, attemptId, backendCommit));
     if (role === "worker") {
       revisionNames.add(`${idleWorkerName}-${backendCommit.slice(0, 7)}`);
     }
@@ -3833,7 +3842,8 @@ export function matchesCapturedQuiescenceRevision(
   if (Array.isArray(container.env)) {
     container.env.sort((left, right) => String(left?.name).localeCompare(String(right?.name)));
   }
-  const expected = liveRevision.name.startsWith(`${appName}--bootstrap-quiesce-idle-`)
+  const expected = liveRevision.name.startsWith(`${appName}--bootstrap-quiesce-idle-`) ||
+    liveRevision.name.startsWith(`${appName}--bqi-`)
     ? expectedQuiescenceTemplate(sourceTemplate, sourceImage, role)
     : expectedRevisionTemplate(
       sourceTemplate,
@@ -3848,6 +3858,18 @@ export function matchesCapturedQuiescenceRevision(
     liveRevision.properties.provisioningState === "Provisioned";
   return canonicalJson(actual) === canonicalJson(expected) && provisioned &&
     (!requireHealthy || new Set(["Healthy", "Running", "Provisioned"]).has(health));
+}
+
+function quiescenceRevisionName(appName, role, attemptId, backendCommit) {
+  string(attemptId, /^[0-9a-f]{32}$/, "quiescence attempt ID");
+  string(backendCommit, /^[0-9a-f]{40}$/, "quiescence backend commit");
+  const marker = role === "worker" ? "bqi" : "bq";
+  const revisionName =
+    `${appName}--${marker}-${attemptId.slice(0, 7)}-${backendCommit.slice(0, 7)}`;
+  if (revisionName.length > 54) {
+    fail(`${role} quiescence revision name exceeds the Azure limit`);
+  }
+  return revisionName;
 }
 
 function expectedRevisionTemplate(sourceTemplate, image, envValues, removeEnvValues, minReplicas, role) {
