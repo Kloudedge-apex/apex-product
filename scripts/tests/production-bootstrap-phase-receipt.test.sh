@@ -175,6 +175,23 @@ for kind in "${KINDS[@]}"; do
   pass
 done
 
+# B8 may bind the one reviewed recovery successor when the signed B6 worker
+# inherited the quiescence entrypoint. The successor keeps immutable image,
+# source, platform, and secret-reference identity while replacing the bad
+# config/template hashes before queues resume.
+RECOVERY_EVIDENCE="${HARNESS}/recovery-evidence"
+mkdir -p "${RECOVERY_EVIDENCE}"
+node "${FIXTURE_GENERATOR}" "${RECOVERY_EVIDENCE}" "${BACKEND_COMMIT}" \
+  "${CONSOLE_COMMIT}" "${NOW_EPOCH}" worker-entrypoint-recovery
+sign_receipt "${RECOVERY_EVIDENCE}/bootstrap-complete.json" "bootstrap-complete"
+run_verifier \
+  "${RECOVERY_EVIDENCE}/bootstrap-complete.json" \
+  "${RECOVERY_EVIDENCE}/bootstrap-complete.json.sig" "bootstrap-complete" \
+  "${RECOVERY_EVIDENCE}/first-class-activation.json" \
+  "${RECOVERY_EVIDENCE}/bootstrap-complete.context.json" >/dev/null ||
+  fail "valid worker-entrypoint recovery receipt was rejected"
+pass
+
 # Exact receipts embedded in the durable phase ledger remain independently
 # signature-verifiable at their recorded admission time during mutation replay.
 HISTORICAL_EPOCH=$((NOW_EPOCH - 3600))
@@ -219,6 +236,9 @@ jq -e '
   and .["$defs"].clerkReconciliationPlan.additionalProperties == false
   and .["$defs"].clerkReconciliationPlan.properties.signatureNamespace.const == "workforce-os-clerk-reconciliation-plan"
   and .["$defs"].completeEvidence.additionalProperties == false
+  and (.["$defs"].completeEvidence.required | index("activationRecovery") != null)
+  and .["$defs"].activationRecovery.oneOf[1].additionalProperties == false
+  and .["$defs"].activationRecovery.oneOf[1].properties.queuesRemainedPaused.const == true
   and (.["$defs"].completeEvidence.properties.health.required |
     index("releaseConfigEvidenceHash") != null)
   and (.["$defs"].completeEvidence.properties.health.required |
@@ -337,6 +357,9 @@ bound_reject "bootstrap-complete" "b8-final-inventory" \
 bound_reject "bootstrap-complete" "b8-activation-drift" \
   '.evidence.writeGates.worker.failedStatusWritesEnabled = false' \
   "drift from the signed B6 activation state"
+bound_reject "bootstrap-complete" "b8-worker-drift-without-recovery" \
+  '.evidence.deployments.worker.identity.revision = "apex-gtm-worker--first-class-a-r1"' \
+  "a worker successor without explicit recovery evidence"
 bound_reject "bootstrap-complete" "b8-missing-release-config-evidence" \
   'del(.evidence.health.releaseConfigEvidenceHash)' \
   "B8 health without exact release-configuration evidence"

@@ -80,7 +80,17 @@ const QUIESCENCE_DISABLED_WORKERS = Object.freeze([
   "OUTREACH_WORKER_ENABLED=false",
   "SCHEDULER_ENABLED=false",
   "USAGE_ROLLUP_WORKER_ENABLED=false",
-  "WORKER_ENABLED=false",
+]);
+const FIRST_CLASS_WORKER_ENVIRONMENT = Object.freeze([
+  "GMAIL_WATCH_RENEWAL_ENABLED=true",
+  "GRAPH_RUN_WORKER_ENABLED=true",
+  "OUTREACH_WORKER_ENABLED=true",
+  "SCHEDULER_ENABLED=false",
+]);
+const RETIRED_WORKER_ENVIRONMENT = Object.freeze([
+  "WORKER_ENABLED",
+  "OUTREACH_DELIVERY_UNKNOWN_STATUS_WRITES_ENABLED",
+  "OUTREACH_DELIVERY_UNKNOWN_STATUS_WRITES_ACK",
 ]);
 const WORKER_QUIESCENCE_COMMAND = Object.freeze(["node"]);
 const WORKER_QUIESCENCE_ARGS = Object.freeze([
@@ -2200,25 +2210,56 @@ function azureMutation(runner, request, args, label, releaseLockRequired = true)
   return runner.run("az", azArgs(request, args), { label });
 }
 
-function activateRevision(runner, request, app, revision) {
+function activateRevision(runner, request, role, revision, releaseLockRequired = true) {
+  const app = role === "api" ? API_APP : role === "worker" ? WORKER_APP : CONSOLE_APP;
   const existing = revisionList(runner, request, app).find((entry) => entry?.name === revision);
   if (!existing) fail(`${app} revision ${revision} is absent`);
-  if (existing.properties?.active === true) return { adopted: true };
-  azureMutation(runner, request, [
-    "containerapp", "revision", "activate",
-    "--name", app,
-    "--resource-group", RESOURCE_GROUP,
-    "--revision", revision,
-    "--output", "none",
-  ], `${app} exact revision activation`);
-  const readback = revisionList(runner, request, app).find((entry) => entry?.name === revision);
-  if (!readback || readback.properties?.active !== true) {
-    fail(`${app} revision activation readback is ambiguous`);
+  const expectedImage = request.targetArtifacts[role].image;
+  if (existing.properties?.template?.containers?.[0]?.image !== expectedImage) {
+    fail(`${app} revision ${revision} does not use the admitted image`);
   }
-  return { adopted: false };
+  const expectedTemplate = writableRevisionTemplate(existing.properties.template);
+  if (Array.isArray(expectedTemplate.containers?.[0]?.env)) {
+    expectedTemplate.containers[0].env.sort((left, right) =>
+      String(left?.name).localeCompare(String(right?.name)));
+  }
+  const initiallyAdopted = existing.properties?.active === true &&
+    revisionList(runner, request, app)
+      .filter((entry) => entry?.properties?.active === true).length === 1;
+  if (!initiallyAdopted) {
+    azureMutation(runner, request, [
+      "containerapp", "revision", "activate",
+      "--name", app,
+      "--resource-group", RESOURCE_GROUP,
+      "--revision", revision,
+      "--output", "none",
+    ], `${app} exact revision activation`, releaseLockRequired);
+  }
+  for (let observation = 0; observation < 36; observation += 1) {
+    const revisions = revisionList(runner, request, app);
+    const candidate = revisions.find((entry) => entry?.name === revision);
+    const activeRevisions = revisions.filter((entry) => entry?.properties?.active === true);
+    const health = candidate?.properties?.healthState ?? candidate?.properties?.runningState;
+    const provisioned = candidate?.properties?.provisioningState === undefined ||
+      candidate.properties.provisioningState === "Provisioned";
+    const healthy = candidate?.properties?.active === true && provisioned &&
+      new Set(["Healthy", "Running", "Provisioned"]).has(health);
+    if (healthy && activeRevisions.length === 1) {
+      assertRevisionMatchesUpdate(candidate, expectedTemplate, expectedImage, role);
+      return { adopted: initiallyAdopted };
+    }
+    runner.run("sleep", ["5"], { label: `${role} exact revision activation interval` });
+  }
+  fail(`${app} exact revision activation did not become solely healthy`);
 }
 
-function quiesceAppWithParentWrite(runner, request, role, revision) {
+function quiesceAppWithParentWrite(
+  runner,
+  request,
+  role,
+  revision,
+  sourceRevisionName,
+) {
   const app = role === "api" ? API_APP : WORKER_APP;
   const resourceId = role === "api"
     ? request.authority.apiContainerAppResourceId
@@ -2227,15 +2268,49 @@ function quiesceAppWithParentWrite(runner, request, role, revision) {
   if (before.properties?.configuration?.activeRevisionsMode !== "Single") {
     fail(`${role} quiescence requires single revision mode`);
   }
-  const image = before.properties?.template?.containers?.[0]?.image;
+  let sourceTemplate = before.properties?.template;
+  if (sourceRevisionName !== undefined) {
+    const sourceRevision = revisionList(runner, request, app)
+      .find((entry) => entry?.name === sourceRevisionName);
+    if (!sourceRevision || sourceRevision.properties?.active !== true) {
+      fail(`${role} containment source revision is absent or inactive`);
+    }
+    sourceTemplate = sourceRevision.properties?.template;
+  }
+  const image = sourceTemplate?.containers?.[0]?.image;
   string(
     image,
     /^[a-z0-9.-]+\/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$/,
     `${role} quiescence source image`,
   );
-  const expectedTemplate = expectedQuiescenceTemplate(before.properties.template, image, role);
-  const preexisting = revisionList(runner, request, app)
+  const expectedTemplate = expectedQuiescenceTemplate(
+    sourceTemplate,
+    image,
+    role,
+    sourceRevisionName === undefined,
+  );
+  let preexisting = revisionList(runner, request, app)
     .find((entry) => entry?.name === revision);
+  if (preexisting) {
+    const actual = writableRevisionTemplate(preexisting.properties?.template ?? {});
+    if (Array.isArray(actual.containers?.[0]?.env)) {
+      actual.containers[0].env.sort((left, right) =>
+        String(left?.name).localeCompare(String(right?.name)));
+    }
+    const health = preexisting.properties?.healthState ?? preexisting.properties?.runningState;
+    const healthy = new Set(["Healthy", "Running", "Provisioned"]).has(health) &&
+      (preexisting.properties?.provisioningState === undefined ||
+        preexisting.properties.provisioningState === "Provisioned");
+    if (canonicalJson(actual) !== canonicalJson(expectedTemplate) || !healthy) {
+      const recoveryRevision = `${revision}-r1`;
+      if (recoveryRevision.length > 54) {
+        fail(`${role} quiescence recovery revision name exceeds the Azure limit`);
+      }
+      revision = recoveryRevision;
+      preexisting = revisionList(runner, request, app)
+        .find((entry) => entry?.name === revision);
+    }
+  }
   if (!preexisting) {
     azureMutation(runner, request, [
       "rest",
@@ -4017,7 +4092,7 @@ export function matchesCapturedQuiescenceRevision(
     : expectedRevisionTemplate(
       sourceTemplate,
       sourceImage,
-      QUIESCENCE_DISABLED_WORKERS,
+      [...QUIESCENCE_DISABLED_WORKERS, "WORKER_ENABLED=false"],
       [],
       0,
       role,
@@ -4074,12 +4149,20 @@ function expectedRevisionTemplate(sourceTemplate, image, envValues, removeEnvVal
   return expected;
 }
 
-function expectedQuiescenceTemplate(sourceTemplate, image, role) {
+function expectedQuiescenceTemplate(
+  sourceTemplate,
+  image,
+  role,
+  retainLegacyWorkerGate = true,
+) {
+  const environment = retainLegacyWorkerGate
+    ? [...QUIESCENCE_DISABLED_WORKERS, "WORKER_ENABLED=false"]
+    : QUIESCENCE_DISABLED_WORKERS;
   const expected = expectedRevisionTemplate(
     sourceTemplate,
     image,
-    QUIESCENCE_DISABLED_WORKERS,
-    [],
+    environment,
+    retainLegacyWorkerGate ? [] : ["WORKER_ENABLED"],
     0,
     role,
   );
@@ -4123,6 +4206,7 @@ function updateApp(
   minReplicas,
   removeEnvValues = [],
   releaseLockRequired = true,
+  sourceTemplate,
 ) {
   const app = role === "api" ? API_APP : role === "worker" ? WORKER_APP : CONSOLE_APP;
   const resourceId = role === "api"
@@ -4135,7 +4219,7 @@ function updateApp(
     fail(`${role} bootstrap update requires single revision mode`);
   }
   const expectedTemplate = expectedRevisionTemplate(
-    before.properties?.template,
+    sourceTemplate ?? before.properties?.template,
     image,
     envValues,
     removeEnvValues,
@@ -4168,6 +4252,17 @@ function updateApp(
       preexisting = revisionList(runner, request, app)
         .find((entry) => entry?.name === revision);
     }
+  }
+  if (preexisting) {
+    const actual = writableRevisionTemplate(preexisting.properties?.template ?? {});
+    if (Array.isArray(actual.containers?.[0]?.env)) {
+      actual.containers[0].env.sort((left, right) =>
+        String(left?.name).localeCompare(String(right?.name)));
+    }
+    if (canonicalJson(actual) !== canonicalJson(expectedTemplate)) {
+      fail(`${role} preexisting bootstrap revision differs from the exact expected template`);
+    }
+    activateRevision(runner, request, role, revision, releaseLockRequired);
   }
   if (!preexisting) {
     azureMutation(
@@ -4302,7 +4397,31 @@ function verifyDisabledBaselineLive(runner, request, identities, minimumGenerati
   }
 }
 
-function verifyFirstClassWorkerLive(runner, request, revisionName, minimumGeneration) {
+function containerEntrypoint(template, label) {
+  const container = template?.containers?.[0];
+  if (!container || !Array.isArray(template.containers) || template.containers.length !== 1) {
+    fail(`${label} must contain exactly one container`);
+  }
+  const normalize = (value, field) => {
+    if (value === undefined || value === null) return null;
+    if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
+      fail(`${label} ${field} is invalid`);
+    }
+    return [...value];
+  };
+  return {
+    command: normalize(container.command, "command"),
+    args: normalize(container.args, "args"),
+  };
+}
+
+function verifyFirstClassWorkerLive(
+  runner,
+  request,
+  revisionName,
+  minimumGeneration,
+  sourceTemplate,
+) {
   const worker = assertExactActiveRevision(
     runner,
     request,
@@ -4329,6 +4448,12 @@ function verifyFirstClassWorkerLive(runner, request, revisionName, minimumGenera
   if (revisionEnv(worker, "OUTREACH_FAILED_STATUS_WRITES_ENABLED") !== "true" ||
     revisionEnv(worker, "OUTREACH_FAILED_STATUS_WRITES_ACK") !== "readers-drained-legacy-inventory-reviewed-v1") {
     fail("first-class FAILED activation is incomplete");
+  }
+  if (sourceTemplate !== undefined && canonicalJson(containerEntrypoint(
+    worker.properties?.template,
+    "first-class worker template",
+  )) !== canonicalJson(containerEntrypoint(sourceTemplate, "captured source worker template"))) {
+    fail("first-class worker did not restore the captured application entrypoint");
   }
 }
 
@@ -4376,6 +4501,160 @@ function deploymentEvidence(runner, request, role, revisionName) {
     healthy: true,
     provisioned: true,
   };
+}
+
+function validateFirstClassRecoveryEvidence(state, recovery, liveSuccessor) {
+  exactKeys(recovery, [
+    "schemaVersion", "kind", "reasonCode", "predecessor", "successor",
+    "sourceEntrypointHash", "pausedQueueEvidenceHash", "queuesRemainedPaused",
+    "liveSendAllowlistEmpty", "recoveredAt", "evidenceHash",
+  ], "first-class worker recovery evidence");
+  if (recovery.schemaVersion !== 1 ||
+    recovery.kind !== "first-class-worker-entrypoint-recovery" ||
+    recovery.reasonCode !== "quiescence-entrypoint-inheritance" ||
+    recovery.queuesRemainedPaused !== true || recovery.liveSendAllowlistEmpty !== true) {
+    fail("first-class worker recovery evidence identity is invalid");
+  }
+  for (const [value, label] of [
+    [recovery.sourceEntrypointHash, "first-class recovery source entrypoint hash"],
+    [recovery.pausedQueueEvidenceHash, "first-class recovery paused-queue hash"],
+    [recovery.evidenceHash, "first-class recovery evidence hash"],
+  ]) string(value, /^sha256:[0-9a-f]{64}$/, label);
+  canonicalTimestamp(recovery.recoveredAt, "first-class recovery time");
+  const armedWorker = state.phaseEvidence.firstClassActivation?.evidence?.deployments?.worker;
+  if (!armedWorker || canonicalJson(recovery.predecessor) !== canonicalJson(armedWorker) ||
+    canonicalJson(recovery.successor) !== canonicalJson(liveSuccessor) ||
+    recovery.successor.identity?.revision !== `${recovery.predecessor.identity?.revision}-r1`) {
+    fail("first-class worker recovery does not bind the signed predecessor and live successor");
+  }
+  for (const key of [
+    "image", "manifestDigest", "platformDigest", "ociRevision", "platform",
+    "secretReferencesHash",
+  ]) {
+    if (recovery.successor.identity[key] !== recovery.predecessor.identity[key]) {
+      fail(`first-class worker recovery changed immutable ${key}`);
+    }
+  }
+  if (recovery.successor.identity.configHash === recovery.predecessor.identity.configHash ||
+    recovery.successor.identity.templateHash === recovery.predecessor.identity.templateHash) {
+    fail("first-class worker recovery did not replace the inherited quiescence template");
+  }
+  const { evidenceHash, ...withoutHash } = recovery;
+  if (evidenceHash !== canonicalHash(withoutHash)) {
+    fail("first-class worker recovery evidence hash is invalid");
+  }
+  return recovery;
+}
+
+function ensureFirstClassWorkerForResume(
+  runner,
+  request,
+  state,
+  receipt,
+  pausedQueueEvidenceHash,
+  options,
+) {
+  const sourceTemplate = state.privateRestoreBundle.workerRevision?.properties?.template;
+  const sourceEntrypoint = containerEntrypoint(
+    sourceTemplate,
+    "captured source worker template",
+  );
+  const storedRecovery = state.phaseEvidence.firstClassRecovery;
+  if (storedRecovery !== undefined) {
+    activateRevision(runner, request, "worker", state.activeIdentities.worker);
+    verifyFirstClassWorkerLive(
+      runner,
+      request,
+      state.activeIdentities.worker,
+      receipt.fencingGeneration,
+      sourceTemplate,
+    );
+    const successor = deploymentEvidence(
+      runner,
+      request,
+      "worker",
+      state.activeIdentities.worker,
+    );
+    return {
+      state,
+      recovery: validateFirstClassRecoveryEvidence(state, storedRecovery, successor),
+    };
+  }
+
+  const predecessorName = state.activeIdentities.worker;
+  const predecessor = revisionList(runner, request, WORKER_APP)
+    .find((entry) => entry?.name === predecessorName);
+  if (!predecessor) fail("signed first-class worker revision is absent");
+  const predecessorEntrypoint = containerEntrypoint(
+    predecessor.properties?.template,
+    "signed first-class worker template",
+  );
+  if (canonicalJson(predecessorEntrypoint) === canonicalJson(sourceEntrypoint)) {
+    activateRevision(runner, request, "worker", predecessorName);
+    verifyFirstClassWorkerLive(
+      runner,
+      request,
+      predecessorName,
+      receipt.fencingGeneration,
+      sourceTemplate,
+    );
+    return { state, recovery: null };
+  }
+  if (canonicalJson(predecessorEntrypoint) !== canonicalJson({
+    command: [...WORKER_QUIESCENCE_COMMAND],
+    args: [...WORKER_QUIESCENCE_ARGS],
+  })) {
+    fail("first-class worker entrypoint drift is not the reviewed quiescence inheritance defect");
+  }
+  const armedWorker = state.phaseEvidence.firstClassActivation?.evidence?.deployments?.worker;
+  if (!armedWorker || armedWorker.identity?.revision !== predecessorName) {
+    fail("first-class worker recovery predecessor is not the signed activation revision");
+  }
+  const recoveryRevision = `${predecessorName}-r1`;
+  if (recoveryRevision.length > 54) {
+    fail("first-class worker recovery revision name exceeds the Azure limit");
+  }
+  const revision = updateApp(
+    runner,
+    request,
+    "worker",
+    request.targetArtifacts.worker.image,
+    recoveryRevision,
+    firstClassWorkerEnvironment(request, receipt.fencingGeneration),
+    1,
+    RETIRED_WORKER_ENVIRONMENT,
+    true,
+    sourceTemplate,
+  );
+  verifyFirstClassWorkerLive(
+    runner,
+    request,
+    revision,
+    receipt.fencingGeneration,
+    sourceTemplate,
+  );
+  const successor = deploymentEvidence(runner, request, "worker", revision);
+  const withoutHash = {
+    schemaVersion: 1,
+    kind: "first-class-worker-entrypoint-recovery",
+    reasonCode: "quiescence-entrypoint-inheritance",
+    predecessor: structuredClone(armedWorker),
+    successor,
+    sourceEntrypointHash: canonicalHash(sourceEntrypoint),
+    pausedQueueEvidenceHash,
+    queuesRemainedPaused: true,
+    liveSendAllowlistEmpty: true,
+    recoveredAt: nowSecond(),
+  };
+  const recovery = { ...withoutHash, evidenceHash: canonicalHash(withoutHash) };
+  const next = {
+    ...state,
+    activeIdentities: { ...state.activeIdentities, worker: revision },
+    phaseEvidence: { ...state.phaseEvidence, firstClassRecovery: recovery },
+    updatedAt: nowSecond(),
+  };
+  uploadState(runner, request, next, options.statePath);
+  return { state: next, recovery };
 }
 
 function disabledWriteGates() {
@@ -4506,6 +4785,21 @@ export function classifyPreOpenActionReplay(
     return "mutation-replay";
   }
   fail(`pre-OPEN action cannot enter from ${String(ledger?.phase)}/${String(ledger?.progressPhase)}`);
+}
+
+function firstClassWorkerEnvironment(request, minimumGeneration) {
+  return [
+    ...FIRST_CLASS_WORKER_ENVIRONMENT,
+    `WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID=${request.attemptId}`,
+    `WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION=${minimumGeneration}`,
+    "OUTREACH_LIVE_FOR_ORGS=",
+    "OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE=first-class",
+    "OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK=readers-drained-rollback-baselines-verified-v1",
+    "OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH=outreach-delivery-unknown-v1",
+    "OUTREACH_FAILED_STATUS_WRITES_ENABLED=true",
+    "OUTREACH_FAILED_STATUS_WRITES_ACK=readers-drained-legacy-inventory-reviewed-v1",
+    "EVIDENCE_LEDGER_ENABLED=true",
+  ];
 }
 
 function deployCompatible(runner, request, state, options) {
@@ -4824,23 +5118,11 @@ function activateFirstClass(runner, request, state, options) {
       "worker",
       request.targetArtifacts.worker.image,
       request.activationWorkerRevision,
-      [
-        "GMAIL_WATCH_RENEWAL_ENABLED=true",
-        "GRAPH_RUN_WORKER_ENABLED=true",
-        "OUTREACH_WORKER_ENABLED=true",
-        "SCHEDULER_ENABLED=false",
-        `WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID=${request.attemptId}`,
-        `WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION=${receipt.fencingGeneration}`,
-        "OUTREACH_LIVE_FOR_ORGS=",
-        "OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE=first-class",
-        "OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK=readers-drained-rollback-baselines-verified-v1",
-        "OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH=outreach-delivery-unknown-v1",
-        "OUTREACH_FAILED_STATUS_WRITES_ENABLED=true",
-        "OUTREACH_FAILED_STATUS_WRITES_ACK=readers-drained-legacy-inventory-reviewed-v1",
-      ],
+      firstClassWorkerEnvironment(request, receipt.fencingGeneration),
       1,
-      [],
+      RETIRED_WORKER_ENVIRONMENT,
       true,
+      state.privateRestoreBundle.workerRevision.properties.template,
     ),
     checkpoint: (completedSteps, _step, _index, revision) => {
       next = withPreOpenProgress(
@@ -4856,7 +5138,13 @@ function activateFirstClass(runner, request, state, options) {
     },
   });
   const revision = activationRun.results["worker-first-class"];
-  verifyFirstClassWorkerLive(runner, request, revision, receipt.fencingGeneration);
+  verifyFirstClassWorkerLive(
+    runner,
+    request,
+    revision,
+    receipt.fencingGeneration,
+    state.privateRestoreBundle.workerRevision.properties.template,
+  );
   next = { ...next, activeIdentities: { ...next.activeIdentities, worker: revision } };
   const deployments = {
     api: deploymentEvidence(runner, request, "api", next.activeIdentities.api),
@@ -5288,6 +5576,7 @@ function captureFreshCompletionReadback(runner, request, state, options) {
     request,
     state.activeIdentities.worker,
     workerGuardGeneration,
+    state.privateRestoreBundle.workerRevision.properties.template,
   );
   const deployments = {
     api: deploymentEvidence(runner, request, "api", state.activeIdentities.api),
@@ -5430,15 +5719,28 @@ function resumeBootstrap(runner, request, state, options) {
     // Every retry first contains any lost-ack partial resume. The terminal
     // OPEN epoch remains one-way; only ingress and queues are re-contained.
     disableApiIngress(runner, request);
-    runRuntimeControl(
+    const pausedRuntime = runRuntimeControl(
       runner,
       request,
       options.stateDir,
       "pause-only",
       terminalOpenIntent.generation,
     );
-    activateRevision(runner, request, API_APP, next.activeIdentities.api);
-    activateRevision(runner, request, WORKER_APP, next.activeIdentities.worker);
+    string(
+      pausedRuntime.evidenceHash,
+      /^sha256:[0-9a-f]{64}$/,
+      "pre-resume paused queue evidence hash",
+    );
+    activateRevision(runner, request, "api", next.activeIdentities.api);
+    const workerRecovery = ensureFirstClassWorkerForResume(
+      runner,
+      request,
+      next,
+      receipt,
+      pausedRuntime.evidenceHash,
+      options,
+    );
+    next = workerRecovery.state;
     const runtime = assertRuntimeResumeEvidence(
       runRuntimeControl(
         runner,
@@ -5473,8 +5775,16 @@ function resumeBootstrap(runner, request, state, options) {
       worker: deploymentEvidence(runner, request, "worker", next.activeIdentities.worker),
       console: deploymentEvidence(runner, request, "console", next.activeIdentities.console),
     };
-    if (canonicalJson(liveDeployments) !== canonicalJson(armed.deployments)) {
-      fail("resumed live deployments drifted from the signed first-class activation evidence");
+    if (workerRecovery.recovery === null) {
+      if (canonicalJson(liveDeployments) !== canonicalJson(armed.deployments)) {
+        fail("resumed live deployments drifted from the signed first-class activation evidence");
+      }
+    } else {
+      validateFirstClassRecoveryEvidence(next, workerRecovery.recovery, liveDeployments.worker);
+      if (canonicalJson(liveDeployments.api) !== canonicalJson(armed.deployments.api) ||
+        canonicalJson(liveDeployments.console) !== canonicalJson(armed.deployments.console)) {
+        fail("first-class worker recovery changed a signed API or console deployment");
+      }
     }
     const releaseConfiguration = verifyLiveReleaseConfiguration(runner, request);
     const operationalSmokeEvidence = assertPersistedOperationalSmokeEvidence(request, next);
@@ -5558,7 +5868,10 @@ function resumeBootstrap(runner, request, state, options) {
       evidenceHash: canonicalHash(inventoryWithoutHash),
     };
     const b8Evidence = {
-      deployments: structuredClone(armed.deployments),
+      deployments: structuredClone(liveDeployments),
+      activationRecovery: workerRecovery.recovery === null
+        ? null
+        : structuredClone(workerRecovery.recovery),
       writeGates: structuredClone(armed.writeGates),
       rollbackBaseline: structuredClone(armed.rollbackBaseline),
       resume,
@@ -5611,12 +5924,14 @@ function resumeBootstrap(runner, request, state, options) {
         request,
         "api",
         `${API_APP}--bootstrap-hold-${terminalOpenIntent.generation}`,
+        next.activeIdentities.api,
       );
       quiesceAppWithParentWrite(
         runner,
         request,
         "worker",
         `${WORKER_APP}--bootstrap-hold-${terminalOpenIntent.generation}`,
+        next.activeIdentities.worker,
       );
     } catch (containmentError) {
       containmentFailures.push(`revisions:${sanitizeError(containmentError.message)}`);

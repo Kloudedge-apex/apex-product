@@ -1113,6 +1113,29 @@ test("disabled production baselines satisfy the API startup contract", () => {
   );
 });
 
+test("first-class recovery restores captured entrypoints before consumers resume", () => {
+  const source = readFileSync(CONTROLLER, "utf8");
+  const activationStart = source.indexOf("function activateFirstClass");
+  const activationEnd = source.indexOf("function verifyApiIngressLive", activationStart);
+  const resumeStart = source.indexOf("function resumeBootstrap");
+  const resumeEnd = source.indexOf("function completeBootstrap", resumeStart);
+  const containmentStart = source.indexOf("function quiesceAppWithParentWrite");
+  const containmentEnd = source.indexOf("function disableApiIngress", containmentStart);
+  const activation = source.slice(activationStart, activationEnd);
+  const resume = source.slice(resumeStart, resumeEnd);
+  const containment = source.slice(containmentStart, containmentEnd);
+  assert.match(
+    activation,
+    /state\.privateRestoreBundle\.workerRevision\.properties\.template/,
+  );
+  assert.match(activation, /RETIRED_WORKER_ENVIRONMENT/);
+  assert.match(resume, /ensureFirstClassWorkerForResume/);
+  assert.match(resume, /activationRecovery: workerRecovery\.recovery/);
+  assert.match(resume, /pausedRuntime\.evidenceHash/);
+  assert.match(containment, /sourceRevisionName/);
+  assert.match(containment, /quiescence-entrypoint-inheritance|recoveryRevision/);
+});
+
 test("protected recovery snapshots are descendant-only and file-scope bounded", () => {
   const source = readFileSync(CONTROLLER, "utf8");
   const start = source.indexOf("function assertExactProtectedSnapshot");

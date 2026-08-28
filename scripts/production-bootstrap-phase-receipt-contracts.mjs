@@ -942,19 +942,84 @@ function validateB6(evidence, receipt, previousReceipt) {
   assertHash(evidence.activationEvidenceHash, `${label}.activationEvidenceHash`);
 }
 
+function validateActivationRecovery(recovery, receipt, armed, deployments, label) {
+  if (recovery === null) {
+    if (!sameJson(deployments, armed.deployments)) {
+      fail(`${label} deployments drifted without an explicit activation recovery`);
+    }
+    return null;
+  }
+  assertExactKeys(recovery, [
+    "schemaVersion", "kind", "reasonCode", "predecessor", "successor",
+    "sourceEntrypointHash", "pausedQueueEvidenceHash", "queuesRemainedPaused",
+    "liveSendAllowlistEmpty", "recoveredAt", "evidenceHash",
+  ], `${label}.activationRecovery`);
+  if (recovery.schemaVersion !== 1 ||
+    recovery.kind !== "first-class-worker-entrypoint-recovery" ||
+    recovery.reasonCode !== "quiescence-entrypoint-inheritance" ||
+    recovery.queuesRemainedPaused !== true || recovery.liveSendAllowlistEmpty !== true) {
+    fail(`${label}.activationRecovery identity is invalid`);
+  }
+  assertHash(recovery.sourceEntrypointHash,
+    `${label}.activationRecovery.sourceEntrypointHash`);
+  assertHash(recovery.pausedQueueEvidenceHash,
+    `${label}.activationRecovery.pausedQueueEvidenceHash`);
+  assertHash(recovery.evidenceHash, `${label}.activationRecovery.evidenceHash`);
+  const recoveredAt = parseIsoSecond(
+    recovery.recoveredAt,
+    `${label}.activationRecovery.recoveredAt`,
+  );
+  if (!sameJson(recovery.predecessor, armed.deployments.worker) ||
+    !sameJson(recovery.successor, deployments.worker) ||
+    !sameJson(deployments.api, armed.deployments.api) ||
+    !sameJson(deployments.console, armed.deployments.console) ||
+    recovery.successor.identity?.revision !==
+      `${recovery.predecessor.identity?.revision}-r1`) {
+    fail(`${label}.activationRecovery does not bind the signed predecessor and live successor`);
+  }
+  validateDeployments({
+    api: armed.deployments.api,
+    worker: recovery.predecessor,
+    console: armed.deployments.console,
+  }, receipt.candidate, `${label}.activationRecovery.predecessorDeploymentSet`);
+  for (const key of [
+    "image", "manifestDigest", "platformDigest", "ociRevision", "platform",
+    "secretReferencesHash",
+  ]) {
+    if (recovery.successor.identity[key] !== recovery.predecessor.identity[key]) {
+      fail(`${label}.activationRecovery changed immutable ${key}`);
+    }
+  }
+  if (recovery.successor.identity.configHash === recovery.predecessor.identity.configHash ||
+    recovery.successor.identity.templateHash === recovery.predecessor.identity.templateHash) {
+    fail(`${label}.activationRecovery did not replace the inherited template`);
+  }
+  const { evidenceHash, ...withoutHash } = recovery;
+  if (evidenceHash !== sha256Canonical(withoutHash)) {
+    fail(`${label}.activationRecovery evidence hash is invalid`);
+  }
+  return recoveredAt;
+}
+
 function validateB8(evidence, receipt, previousReceipt) {
   const label = "bootstrap-complete.evidence";
   assertExactKeys(evidence, [
-    "deployments", "writeGates", "rollbackBaseline", "resume", "health",
-    "finalInventory", "bootstrapEvidenceHash",
+    "deployments", "activationRecovery", "writeGates", "rollbackBaseline", "resume",
+    "health", "finalInventory", "bootstrapEvidenceHash",
   ], label);
   validateDeployments(evidence.deployments, receipt.candidate, `${label}.deployments`);
   const armed = previousReceipt?.evidence;
-  if (!armed || !sameJson(evidence.deployments, armed.deployments) ||
-    !sameJson(evidence.writeGates, armed.writeGates) ||
+  if (!armed || !sameJson(evidence.writeGates, armed.writeGates) ||
     !sameJson(evidence.rollbackBaseline, armed.rollbackBaseline)) {
     fail(`${label} drifted from the signed first-class activation state`);
   }
+  const recoveryTime = validateActivationRecovery(
+    evidence.activationRecovery,
+    receipt,
+    armed,
+    evidence.deployments,
+    label,
+  );
   validateWriteGates(evidence.writeGates, true, `${label}.writeGates`);
   validateRollbackBaseline(evidence.rollbackBaseline, receipt.candidate,
     {
@@ -998,6 +1063,10 @@ function validateB8(evidence, receipt, previousReceipt) {
     `${label}.resume.steps[0].startedAt`);
   if (firstStarted < previousIssued || priorCompleted > receiptIssued) {
     fail(`${label}.resume did not occur after activation and before receipt issuance`);
+  }
+  if (recoveryTime !== null &&
+    (recoveryTime < previousIssued || recoveryTime > firstStarted)) {
+    fail(`${label}.activationRecovery did not occur after signed activation and before resume`);
   }
   assertExactKeys(resume.queues, QUEUES_KEYS, `${label}.resume.queues`);
   for (const queue of QUEUES_KEYS) {
