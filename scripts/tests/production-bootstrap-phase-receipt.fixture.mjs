@@ -360,19 +360,27 @@ function evidenceFor(kind, generation, issuedOffset) {
   const finalDeployments = structuredClone(armed.deployments);
   let activationRecovery = null;
   if (recoveryMode === "worker-entrypoint-recovery") {
-    const predecessor = structuredClone(armed.deployments.worker);
-    const successor = structuredClone(predecessor);
-    successor.identity.revision = `${predecessor.identity.revision}-r1`;
-    successor.identity.configHash = hash("9");
-    successor.identity.templateHash = hash("a");
-    finalDeployments.worker = successor;
+    const predecessors = {
+      api: structuredClone(armed.deployments.api),
+      worker: structuredClone(armed.deployments.worker),
+    };
+    const successors = structuredClone(predecessors);
+    successors.api.identity.revision = `${predecessors.api.identity.revision}-r1`;
+    successors.worker.identity.revision = `${predecessors.worker.identity.revision}-r1`;
+    successors.worker.identity.configHash = hash("9");
+    successors.worker.identity.templateHash = hash("a");
+    finalDeployments.api = successors.api;
+    finalDeployments.worker = successors.worker;
     const recovery = {
       schemaVersion: 1,
-      kind: "first-class-worker-entrypoint-recovery",
-      reasonCode: "quiescence-entrypoint-inheritance",
-      predecessor,
-      successor,
-      sourceEntrypointHash: hash("b"),
+      kind: "first-class-api-worker-template-recovery",
+      reasonCodes: {
+        api: "containment-revision-supersession",
+        worker: "quiescence-entrypoint-inheritance",
+      },
+      predecessors,
+      successors,
+      sourceEntrypointHashes: { api: hash("b"), worker: hash("d") },
       pausedQueueEvidenceHash: hash("c"),
       queuesRemainedPaused: true,
       liveSendAllowlistEmpty: true,
