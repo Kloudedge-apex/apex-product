@@ -21,6 +21,7 @@ import {
   RECEIPT_SEQUENCE,
   advanceLedger,
   azureAuthorityIdentityHash,
+  canonicalJson,
   createLedger,
   holdLedger,
   runCli,
@@ -998,12 +999,18 @@ test("strict JSON rejects duplicate keys, trailing content, unsafe numbers, and 
   errorMatches(() => strictJsonParse(Buffer.from('{"a":1,"a":2}'), "fixture"), /duplicate key/);
   errorMatches(() => strictJsonParse(Buffer.from('{"a":1} true'), "fixture"), /trailing content/);
   errorMatches(() => strictJsonParse(Buffer.from('{"a":9007199254740992}'), "fixture"), /safe integer/);
-  errorMatches(() => strictJsonParse(Buffer.from('{"a":1.0}'), "fixture"), /object delimiter/);
   errorMatches(() => strictJsonParse(Buffer.from('{"a":-0}'), "fixture"), /safe integer/);
   const initial = makeInitial();
   const document = JSON.parse(initial.ledgerBytes.toString("utf8"));
   document.unexpected = true;
   errorMatches(() => verifyLedgerBytes(Buffer.from(JSON.stringify(document))), /unknown or missing fields/);
+});
+
+test("strict and canonical JSON accept finite provider decimal numbers", () => {
+  const parsed = strictJsonParse(Buffer.from('{"memory":1.0,"cpu":0.5,"ratio":2.5e-1}'), "fixture");
+  assert.deepEqual({ ...parsed }, { memory: 1, cpu: 0.5, ratio: 0.25 });
+  assert.equal(canonicalJson(parsed), '{"cpu":0.5,"memory":1,"ratio":0.25}');
+  errorMatches(() => strictJsonParse(Buffer.from('{"cpu":1e400}'), "fixture"), /finite numbers/);
 });
 
 test("denies resume evidence before activation and requires the activation receipt", () => {
