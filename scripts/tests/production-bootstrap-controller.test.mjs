@@ -1145,8 +1145,22 @@ test("first-class recovery restores captured entrypoints before consumers resume
   assert.match(recovery, /boundedRecoverySequence/);
   assert.match(recovery, /partialRecoveryObserved/);
   assert.match(recovery, /workerQuiescent\.some\(Boolean\)/);
+  assert.match(recovery, /allowIngressDisabledParentFailure: true/);
   assert.match(containment, /sourceRevisionName/);
   assert.match(containment, /bounded quiescence recovery sequence/);
+});
+
+test("stored recovery admits only the exact ingress-disabled API parent failure", () => {
+  const source = readFileSync(CONTROLLER, "utf8");
+  const start = source.indexOf("function deploymentEvidence");
+  const end = source.indexOf("function validateFirstClassRecoveryEvidence", start);
+  const deployment = source.slice(start, end);
+  assert.match(deployment, /role === "api" && allowIngressDisabledParentFailure/);
+  assert.match(deployment, /provisioningState === "Failed"/);
+  assert.match(deployment, /configuration\?\.ingress === null/);
+  assert.match(deployment, /activeRevisionsMode === "Single"/);
+  assert.match(deployment, /latestReadyRevisionName === revisionName/);
+  assert.match(deployment, /provisioningState !== "Succeeded" && !containedApiParentFailure/);
 });
 
 test("protected recovery snapshots are descendant-only and file-scope bounded", () => {
