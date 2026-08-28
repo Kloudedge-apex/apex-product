@@ -786,17 +786,27 @@ function leaseTokenHash(request) {
   ));
 }
 
+export function parseAzureLeaseCommandOutput(bytes, label = "Azure blob lease response") {
+  const value = strictJsonParse(bytes, label);
+  const leaseId = typeof value === "string"
+    ? value
+    : value && typeof value === "object" && !Array.isArray(value)
+      ? value.leaseId ?? value.lease_id
+      : undefined;
+  string(leaseId, /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/, label);
+  return leaseId.toLowerCase();
+}
+
 function acquireAzureLease(runner, request) {
   const result = runner.run("az", azArgs(request, [
     "storage", "blob", "lease", "acquire",
     ...blobLeaseArgs(request),
     "--lease-duration", "-1",
     "--proposed-lease-id", attemptLeaseId(request.attemptId),
-    "--output", "tsv",
-    "--query", "leaseId",
+    "--output", "json",
   ]), { label: "Azure bootstrap lease acquisition", allowFailure: true });
   if (result.status === 0) {
-    if (result.stdout.toString("utf8").trim() !== attemptLeaseId(request.attemptId)) {
+    if (parseAzureLeaseCommandOutput(result.stdout) !== attemptLeaseId(request.attemptId)) {
       fail("Azure bootstrap lease did not return the proposed attempt identity");
     }
     return { adopted: false };
@@ -813,10 +823,9 @@ function verifyAzureLease(runner, request) {
     "storage", "blob", "lease", "renew",
     ...blobLeaseArgs(request),
     "--lease-id", attemptLeaseId(request.attemptId),
-    "--output", "tsv",
-    "--query", "leaseId",
+    "--output", "json",
   ]), { label: "Azure bootstrap lease readback" });
-  if (result.stdout.toString("utf8").trim() !== attemptLeaseId(request.attemptId)) {
+  if (parseAzureLeaseCommandOutput(result.stdout) !== attemptLeaseId(request.attemptId)) {
     fail("Azure bootstrap lease is absent or owned by another attempt");
   }
 }

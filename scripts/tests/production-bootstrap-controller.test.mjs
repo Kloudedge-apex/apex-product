@@ -17,6 +17,7 @@ import {
   buildAdmissionContext,
   classifyPreOpenActionReplay,
   productionAuthorityDrainCheckpointSnapshot,
+  parseAzureLeaseCommandOutput,
   runReplayableMutationSteps,
   runReplayableOrderedSteps,
   validateRequest,
@@ -407,6 +408,14 @@ test("attempt ID deterministically yields the Azure proposed lease UUID", () => 
     "01234567-89ab-cdef-0123-456789abcdef",
   );
   assert.throws(() => attemptLeaseId("not-an-attempt"), /attemptId is invalid/);
+});
+
+test("Azure lease output accepts current string and legacy object response shapes", () => {
+  const leaseId = "01234567-89ab-4def-8123-456789abcdef";
+  assert.equal(parseAzureLeaseCommandOutput(Buffer.from(JSON.stringify(leaseId))), leaseId);
+  assert.equal(parseAzureLeaseCommandOutput(Buffer.from(JSON.stringify({ leaseId }))), leaseId);
+  assert.equal(parseAzureLeaseCommandOutput(Buffer.from(JSON.stringify({ lease_id: leaseId.toUpperCase() }))), leaseId);
+  assert.throws(() => parseAzureLeaseCommandOutput(Buffer.from("{}")), /Azure blob lease response is invalid/);
 });
 
 test("the controller exposes the complete bounded action set", () => {
