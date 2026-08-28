@@ -62,8 +62,11 @@ run_verifier() {
   local backend=${7:-${BACKEND_COMMIT}}
   local console=${8:-${CONSOLE_COMMIT}}
   local attempt=${9:-${ATTEMPT_ID}}
-  "${VERIFIER}" "${receipt}" "${signature}" "${signers}" \
-    "${backend}" "${console}" "${attempt}" "${kind}" "${previous}" "${context}"
+  local verification_epoch=${10:-}
+  local args=("${receipt}" "${signature}" "${signers}" \
+    "${backend}" "${console}" "${attempt}" "${kind}" "${previous}" "${context}")
+  if [[ -n "${verification_epoch}" ]]; then args+=("${verification_epoch}"); fi
+  "${VERIFIER}" "${args[@]}"
 }
 
 expect_rejected() {
@@ -171,6 +174,36 @@ for kind in "${KINDS[@]}"; do
     fail "valid signed ${kind} receipt was rejected"
   pass
 done
+
+# Exact receipts embedded in the durable phase ledger remain independently
+# signature-verifiable at their recorded admission time during mutation replay.
+HISTORICAL_EPOCH=$((NOW_EPOCH - 3600))
+HISTORICAL_EVIDENCE="${HARNESS}/historical-evidence"
+mkdir -p "${HISTORICAL_EVIDENCE}"
+node "${FIXTURE_GENERATOR}" "${HISTORICAL_EVIDENCE}" "${BACKEND_COMMIT}" \
+  "${CONSOLE_COMMIT}" "${HISTORICAL_EPOCH}"
+sign_receipt "${HISTORICAL_EVIDENCE}/production-schema-result.json" \
+  "production-schema-result"
+if "${VERIFIER}" \
+  "${HISTORICAL_EVIDENCE}/production-schema-result.json" \
+  "${HISTORICAL_EVIDENCE}/production-schema-result.json.sig" \
+  "${HARNESS}/allowed-signers" "${BACKEND_COMMIT}" "${CONSOLE_COMMIT}" \
+  "${ATTEMPT_ID}" "production-schema-result" \
+  "${HISTORICAL_EVIDENCE}/entry.json" \
+  "${HISTORICAL_EVIDENCE}/production-schema-result.context.json" >/dev/null 2>&1; then
+  fail "expired receipt was accepted without its durable admission epoch"
+fi
+pass
+"${VERIFIER}" \
+  "${HISTORICAL_EVIDENCE}/production-schema-result.json" \
+  "${HISTORICAL_EVIDENCE}/production-schema-result.json.sig" \
+  "${HARNESS}/allowed-signers" "${BACKEND_COMMIT}" "${CONSOLE_COMMIT}" \
+  "${ATTEMPT_ID}" "production-schema-result" \
+  "${HISTORICAL_EVIDENCE}/entry.json" \
+  "${HISTORICAL_EVIDENCE}/production-schema-result.context.json" \
+  "${HISTORICAL_EPOCH}" >/dev/null ||
+  fail "historically admitted receipt was rejected at its exact admission epoch"
+pass
 
 # The schemas expose four exact phase variants, strict seconds, strict nested
 # objects, the signed Clerk plan, and the fail-closed resume compensation.

@@ -235,8 +235,12 @@ jobs:
           request_backend="$(jq -er '.backendCandidate.branch' "${request}")"
           request_backend_sha="$(jq -er '.backendCandidate.commit' "${request}")"
           request_console="$(jq -er '.consoleCandidate.branch' "${request}")"
-          if [[ "${request_backend}" != "master" || "${request_backend_sha}" != "${GITHUB_SHA}" ||
-            "${request_console}" != "main" ]]; then
+          recovery_action=false
+          case "${ACTION}" in
+            deploy-compatible|activate-first-class|resume|complete|hold|renew-hold) recovery_action=true ;;
+          esac
+          if [[ "${request_backend}" != "master" || "${request_console}" != "main" ||
+            ("${request_backend_sha}" != "${GITHUB_SHA}" && "${recovery_action}" != "true") ]]; then
             echo "ERROR: request is not exact protected backend master and console main" >&2
             exit 1
           fi
