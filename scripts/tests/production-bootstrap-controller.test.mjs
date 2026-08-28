@@ -24,6 +24,7 @@ import {
   verifyDatabaseDdlAuthorityEvidence,
   verifyDeliverySafetyEvidence,
   verifyOperationalSmokeEvidence,
+  writableRevisionTemplate,
 } from "../production-bootstrap-controller.mjs";
 import {
   PRODUCTION_AZURE_AUTHORITY_CONTRACT,
@@ -1040,6 +1041,29 @@ test("Container App updates use parent-resource PATCH without secret reads or re
   assert.match(mutationPaths, /"--method", "patch"/);
   assert.doesNotMatch(mutationPaths, /listSecrets|list-secrets|"containerapp", "update"/);
   assert.doesNotMatch(source, /"containerapp", "revision", "deactivate"/);
+});
+
+test("Container App PATCH templates omit readback-only scale properties", () => {
+  const source = {
+    revisionSuffix: "old-revision",
+    scale: {
+      minReplicas: 1,
+      maxReplicas: 1,
+      cooldownPeriod: 300,
+      pollingInterval: 30,
+      rules: [],
+    },
+    containers: [{ name: "api", image: "example.invalid/api@sha256:deadbeef" }],
+  };
+  const writable = writableRevisionTemplate(source);
+
+  assert.deepEqual(writable, {
+    scale: { minReplicas: 1, maxReplicas: 1, rules: [] },
+    containers: [{ name: "api", image: "example.invalid/api@sha256:deadbeef" }],
+  });
+  assert.equal(source.revisionSuffix, "old-revision");
+  assert.equal(source.scale.cooldownPeriod, 300);
+  assert.equal(source.scale.pollingInterval, 30);
 });
 
 test("every post-acquisition ACA mutation revalidates both Azure lease and Git release lock", () => {

@@ -3724,12 +3724,23 @@ function plannedSuffix(revision, app) {
   return revision.slice(prefix.length);
 }
 
+export function writableRevisionTemplate(sourceTemplate) {
+  const template = structuredClone(sourceTemplate);
+  delete template.revisionSuffix;
+  if (template.scale && typeof template.scale === "object" && !Array.isArray(template.scale)) {
+    // Azure includes these preview-only values in Container App readbacks, but
+    // the pinned 2024-03-01 write API rejects them in ContainerAppScale.
+    delete template.scale.cooldownPeriod;
+    delete template.scale.pollingInterval;
+  }
+  return template;
+}
+
 function expectedRevisionTemplate(sourceTemplate, image, envValues, removeEnvValues, minReplicas, role) {
   if (!sourceTemplate || typeof sourceTemplate !== "object" || Array.isArray(sourceTemplate)) {
     fail(`${role} source template is absent`);
   }
-  const expected = structuredClone(sourceTemplate);
-  delete expected.revisionSuffix;
+  const expected = writableRevisionTemplate(sourceTemplate);
   if (!Array.isArray(expected.containers) || expected.containers.length !== 1) {
     fail(`${role} source template must contain exactly one container`);
   }
@@ -3762,8 +3773,7 @@ function assertRevisionMatchesUpdate(revision, expectedTemplate, image, role) {
   if (!revision || revision.properties?.active !== true) {
     fail(`${role} bootstrap revision is absent or inactive`);
   }
-  const actual = structuredClone(revision.properties?.template ?? {});
-  delete actual.revisionSuffix;
+  const actual = writableRevisionTemplate(revision.properties?.template ?? {});
   const container = actual.containers?.[0];
   if (!container || actual.containers.length !== 1 || container.image !== image) {
     fail(`${role} bootstrap revision container or image drift detected`);
