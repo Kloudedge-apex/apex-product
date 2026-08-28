@@ -975,8 +975,10 @@ test("preparation rebind is limited to pre-mutation boundaries with live source 
   const validator = source.slice(validatorStart, validatorEnd);
   assert.match(validator, /journal\.stage === "B0_SOURCE_CAPTURE_INTENT"/);
   assert.match(validator, /journal\.stage === "B0_API_INGRESS_DISABLE_INTENT"/);
+  assert.match(validator, /journal\.stage === "B0_QUEUE_PAUSE_INTENT"/);
   assert.match(validator, /journal\.intent\.operation === "capture-source-baseline"/);
   assert.match(validator, /journal\.intent\.operation === "disable-api-ingress"/);
+  assert.match(validator, /journal\.intent\.operation === "pause-queues"/);
   assert.match(validator, /plan\.backendCandidateCommit === request\.backendCandidate\.commit/);
 
   const rebindStart = source.indexOf("function rebindReleaseLockForPreparation");
@@ -992,12 +994,26 @@ test("preparation rebind is limited to pre-mutation boundaries with live source 
   const prepare = source.slice(prepareStart, prepareEnd);
   const validate = prepare.indexOf("validateRebindablePreparationJournal");
   const signatures = prepare.indexOf("verifySupersededPreparationSignatures", validate);
-  const sourceReadback = prepare.indexOf("assertCapturedSourceUnchangedForRebind", signatures);
+  const sourceReadback = prepare.indexOf("refreshCapturedSourceForRebind", signatures);
   const lock = prepare.indexOf("rebindReleaseLockForPreparation", sourceReadback);
   const journal = prepare.indexOf("preparationJournal(request, clerkReconciliation)", lock);
   const upload = prepare.indexOf("uploadState(runner, request, journal, options.statePath)", journal);
   assert.ok(validate >= 0 && validate < signatures && signatures < sourceReadback);
   assert.ok(sourceReadback < lock && lock < journal && journal < upload);
+});
+
+test("runtime control helpers are invoked through the Corepack-managed pnpm binary", () => {
+  const source = readFileSync(CONTROLLER, "utf8");
+  const runtimeStart = source.indexOf("function runRuntimeControl");
+  const runtimeEnd = source.indexOf("function assertRuntimeHeldEvidence", runtimeStart);
+  const runtime = source.slice(runtimeStart, runtimeEnd);
+  const quiescenceStart = source.indexOf("function runQuiescence");
+  const quiescenceEnd = source.indexOf("function azureMutation", quiescenceStart);
+  const quiescence = source.slice(quiescenceStart, quiescenceEnd);
+  assert.match(runtime, /runner\.run\("corepack", \["pnpm", \.\.\.args\]/);
+  assert.match(quiescence, /runner\.run\("corepack", \["pnpm",/);
+  assert.doesNotMatch(runtime, /runner\.run\("pnpm"/);
+  assert.doesNotMatch(quiescence, /runner\.run\("pnpm"/);
 });
 
 test("API ingress disable uses a least-privilege PATCH and never requests secret values", () => {
