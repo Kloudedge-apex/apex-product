@@ -1145,6 +1145,9 @@ test("protected recovery snapshots are descendant-only and file-scope bounded", 
   assert.match(assertion, /changed\.some\(\(path\) => !allowed\.has\(path\)\)/);
   assert.match(assertion, /a recovery controller successor is permitted only after schema application/);
   assert.match(assertion, /scripts\/production-bootstrap-controller\.mjs/);
+  assert.match(assertion, /docs\/ops\/production-bootstrap-phase-receipt\.schema\.json/);
+  assert.match(assertion, /scripts\/tests\/production-bootstrap-phase-ledger\.test\.mjs/);
+  assert.match(assertion, /scripts\/tests\/production-bootstrap-phase-receipt\.fixture\.mjs/);
 });
 
 test("B5 receipt contract permits only the exact first recovery revision suffix", () => {
