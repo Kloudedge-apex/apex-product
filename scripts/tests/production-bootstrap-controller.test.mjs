@@ -1065,3 +1065,17 @@ test("registry verification binds digests through Azure manifest metadata", () =
   assert.match(verification, /childMetadata\.digest \?\? childMetadata\.changeableAttributes\?\.digest/);
   assert.doesNotMatch(verification, /const observedDigest = manifest\.digest/);
 });
+
+test("legacy rollback provenance is accepted only for the exact pinned backend digest", () => {
+  const source = readFileSync(CONTROLLER, "utf8");
+  assert.match(
+    source,
+    /"workforceosprodacr\.azurecr\.io\/apex-api@sha256:111a470e65a22d27039d0d130d7d0c7aa33e7a23e0d8ce8fe7183c685dbf6f25":\s*\n\s*"324f831f31ca903f851b3e697ee94cc25af04217"/,
+  );
+  const start = source.indexOf("function inspectSourceImage");
+  const end = source.indexOf("function captureSourceBaseline", start);
+  const inspect = source.slice(start, end);
+  assert.match(inspect, /Labels\?\.\["org\.opencontainers\.image\.revision"\] \?\?/);
+  assert.match(inspect, /LEGACY_SOURCE_IMAGE_REVISIONS\[image\]/);
+  assert.match(inspect, /string\(ociRevision, \/\^\[0-9a-f\]\{40\}\$\//);
+});
