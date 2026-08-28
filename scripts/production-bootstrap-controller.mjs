@@ -4483,7 +4483,13 @@ function verifyFirstClassWorkerLive(
   }
 }
 
-function deploymentEvidence(runner, request, role, revisionName) {
+function deploymentEvidence(
+  runner,
+  request,
+  role,
+  revisionName,
+  { allowIngressDisabledParentFailure = false } = {},
+) {
   const appName = role === "api" ? API_APP : role === "worker" ? WORKER_APP : CONSOLE_APP;
   const resourceId = role === "api"
     ? request.authority.apiContainerAppResourceId
@@ -4504,7 +4510,12 @@ function deploymentEvidence(runner, request, role, revisionName) {
   if (!new Set(["Healthy", "Running", "Provisioned"]).has(health)) {
     fail(`${role} candidate revision is not healthy`);
   }
-  if (app.properties?.provisioningState !== "Succeeded") {
+  const containedApiParentFailure = role === "api" && allowIngressDisabledParentFailure &&
+    app.properties?.provisioningState === "Failed" &&
+    app.properties?.configuration?.ingress === null &&
+    app.properties?.configuration?.activeRevisionsMode === "Single" &&
+    app.properties?.latestReadyRevisionName === revisionName;
+  if (app.properties?.provisioningState !== "Succeeded" && !containedApiParentFailure) {
     fail(`${role} candidate application is not provisioned`);
   }
   return {
@@ -4692,7 +4703,13 @@ function ensureFirstClassDeploymentsForResume(
     apiActive.length === 1 && apiActive[0].name === state.activeIdentities.api &&
     workerActive.length === 1 && workerActive[0].name === state.activeIdentities.worker) {
     const current = {
-      api: deploymentEvidence(runner, request, "api", state.activeIdentities.api),
+      api: deploymentEvidence(
+        runner,
+        request,
+        "api",
+        state.activeIdentities.api,
+        { allowIngressDisabledParentFailure: true },
+      ),
       worker: deploymentEvidence(runner, request, "worker", state.activeIdentities.worker),
     };
     verifyFirstClassWorkerLive(
