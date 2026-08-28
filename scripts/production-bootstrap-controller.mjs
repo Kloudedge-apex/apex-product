@@ -1106,6 +1106,78 @@ function validateRebindablePreparationJournal(journal, request) {
   };
 }
 
+function validateRebindablePreparedState(state, request, supersededRequest) {
+  if (!supersededRequest) {
+    fail("superseded prepared state requires the exact prior bootstrap request");
+  }
+  const previous = validateRequest(readBoundedJson(
+    supersededRequest,
+    "superseded bootstrap request",
+  ));
+  const stableKeys = [
+    "schemaVersion", "environment", "kind", "attemptId", "authority", "storage",
+    "databaseIdentityHash", "redisIdentityHash", "consoleCandidate", "operator",
+    "approver", "changeTicket",
+  ];
+  for (const key of stableKeys) {
+    if (canonicalJson(previous[key]) !== canonicalJson(request[key])) {
+      fail(`superseded prepared state changed stable request field ${key}`);
+    }
+  }
+  if (previous.backendCandidate.repository !== request.backendCandidate.repository ||
+    previous.backendCandidate.branch !== request.backendCandidate.branch ||
+    previous.backendCandidate.commit === request.backendCandidate.commit) {
+    fail("superseded prepared state backend transition is invalid");
+  }
+  if (canonicalJson(previous.targetArtifacts.console) !==
+    canonicalJson(request.targetArtifacts.console)) {
+    fail("superseded prepared state changed the console artifact");
+  }
+  const verified = validateState(state, previous);
+  if (verified.ledger.phase !== "B1_CONTROL_ACQUIRED" ||
+    state.migrationProgress.length !== 0 || Object.keys(state.activeIdentities).length !== 0) {
+    fail("only an unadvanced B1 prepared state can be rebound");
+  }
+  const contextBytes = Buffer.from(state.admissionContextBase64, "base64");
+  if (sha256(contextBytes) !== state.admissionContextSha256 ||
+    verified.ledger.identity.admissionContextHash !== state.admissionContextSha256) {
+    fail("superseded prepared state admission context is corrupt");
+  }
+  const context = strictJsonParse(contextBytes, "superseded admission context");
+  if (context.bootstrapAttemptId !== previous.attemptId ||
+    context.backendCandidateCommit !== previous.backendCandidate.commit ||
+    context.consoleCandidateCommit !== previous.consoleCandidate.commit ||
+    canonicalJson(context.targetArtifacts) !== canonicalJson(previous.targetArtifacts) ||
+    canonicalJson(context.sourceRollbackBaseline) !== canonicalJson(state.sourceRollbackBaseline) ||
+    canonicalJson(context.clerkReconciliationPlan) !==
+      canonicalJson(state.clerkReconciliationPlanBinding)) {
+    fail("superseded prepared state context binding is invalid");
+  }
+  const writerFence = context.quiescedState?.writerFence;
+  exactKeys(writerFence, [
+    "activeComplianceWriters", "activeWriters", "epoch", "generation", "observedAt",
+    "schemaVersion", "state", "stateHash", "target", "writerZero",
+  ], "superseded admission writer fence");
+  if (canonicalJson(writerFence.epoch) !== canonicalJson(writerFence.state)) {
+    fail("superseded admission writer-fence epoch is not the duplicated CLOSED state");
+  }
+  return {
+    request: previous,
+    previousBackendCommit: previous.backendCandidate.commit,
+    source: {
+      sourceRollbackBaseline: state.sourceRollbackBaseline,
+      privateRestoreBundle: state.privateRestoreBundle,
+    },
+    planBytes: Buffer.from(state.clerkReconciliationPlanBase64, "base64"),
+    signatureBytes: Buffer.from(state.clerkReconciliationPlanSignatureBase64, "base64"),
+    dryRunBytes: Buffer.from(state.clerkReconciliationDryRunBase64, "base64"),
+    dryRunSignatureBytes: Buffer.from(
+      state.clerkReconciliationDryRunSignatureBase64,
+      "base64",
+    ),
+  };
+}
+
 function verifySupersededPreparationSignatures(runner, request, options, superseded) {
   const paths = {
     plan: join(options.stateDir, "superseded-clerk-plan.json"),
@@ -2363,7 +2435,17 @@ export function buildAdmissionContext(
       consumersDisabled: true,
     },
     queueObservations: [firstObservation, secondObservation],
-    writerFence: secondSnapshot.writerFence,
+    writerFence: {
+      schemaVersion: secondSnapshot.writerFence.schemaVersion,
+      target: secondSnapshot.writerFence.target,
+      observedAt: secondSnapshot.writerFence.observedAt,
+      generation: secondSnapshot.writerFence.generation,
+      state: secondSnapshot.writerFence.state,
+      stateHash: secondSnapshot.writerFence.stateHash,
+      activeWriters: secondSnapshot.writerFence.activeWriters,
+      activeComplianceWriters: secondSnapshot.writerFence.activeComplianceWriters,
+      writerZero: secondSnapshot.writerFence.writerZero,
+    },
     orphanRecovery: orphanRecoveryEvidence,
     inventory: secondSnapshot.database,
     liveSendAllowlistEmpty: true,
@@ -2664,12 +2746,55 @@ function prepare(runner, request, options) {
       fail("resumed preparation supplied different Clerk reconciliation authority");
     }
   } else if (existing.kind === STATE_KIND) {
-    const resumed = validateState(existing, request);
-    if (resumed.ledger.phase !== "B1_CONTROL_ACQUIRED") {
-      fail("prepare cannot replace an already advanced or consumed bootstrap state");
+    if (existing.requestSha256 === canonicalHash(request)) {
+      const resumed = validateState(existing, request);
+      if (resumed.ledger.phase !== "B1_CONTROL_ACQUIRED") {
+        fail("prepare cannot replace an already advanced or consumed bootstrap state");
+      }
+      materializeContext(existing, options.output);
+      return { phase: "B1_CONTROL_ACQUIRED", alreadyPrepared: true, controlsHeld: true };
     }
-    materializeContext(existing, options.output);
-    return { phase: "B1_CONTROL_ACQUIRED", alreadyPrepared: true, controlsHeld: true };
+    const superseded = validateRebindablePreparedState(
+      existing,
+      request,
+      options.supersededRequest,
+    );
+    verifySupersededPreparationSignatures(runner, request, options, superseded);
+    const reboundSource = refreshCapturedSourceForRebind(
+      runner,
+      request,
+      options,
+      superseded.source,
+      "disabled",
+      true,
+      superseded.previousBackendCommit,
+    );
+    const held = assertRuntimeHeldEvidence(
+      runRuntimeControl(
+        runner,
+        superseded.request,
+        options.stateDir,
+        "read",
+        existing.writerFenceGeneration,
+      ),
+      superseded.request,
+      existing.writerFenceGeneration,
+    );
+    if (["agentRuns", "graphRuns", "outreachSend"]
+      .some((key) => held.queues[key].workerCount !== 0)) {
+      fail("superseded prepared state still has connected queue workers");
+    }
+    rebindReleaseLockForPreparation(
+      runner,
+      request,
+      options.stateDir,
+      superseded.previousBackendCommit,
+    );
+    journal = {
+      ...preparationJournal(request, clerkReconciliation),
+      source: reboundSource,
+    };
+    uploadState(runner, request, journal, options.statePath);
   } else {
     fail("leased bootstrap blob contains an unknown or stale document");
   }
@@ -5682,7 +5807,7 @@ function parseOptions(argv) {
   }
   const allowed = new Set([
     "action", "request", "state-dir", "output", "receipt", "signature",
-    "allowed-signers", "clerk-plan", "clerk-plan-signature",
+    "allowed-signers", "superseded-request", "clerk-plan", "clerk-plan-signature",
     "clerk-plan-dry-run", "clerk-plan-dry-run-signature",
     "outstanding-delivery-review", "provider-delivery-drain",
     "database-ddl-authority-evidence", "failed-list-smoke-evidence",
@@ -5709,6 +5834,9 @@ function parseOptions(argv) {
     if (values.action === "prepare" && !values[key]) fail(`prepare requires --${key}`);
     if (values.action !== "prepare" && values[key]) fail(`--${key} is not valid for ${values.action}`);
   }
+  if (values["superseded-request"] && values.action !== "prepare") {
+    fail("--superseded-request is valid only for prepare");
+  }
   for (const key of [
     "outstanding-delivery-review", "provider-delivery-drain",
     "database-ddl-authority-evidence", "failed-list-smoke-evidence",
@@ -5728,6 +5856,9 @@ function parseOptions(argv) {
     receipt: values.receipt,
     signature: values.signature,
     allowedSigners: values["allowed-signers"],
+    supersededRequest: values["superseded-request"] === undefined
+      ? undefined
+      : validateExternalPath(values["superseded-request"], "superseded bootstrap request"),
     clerkPlan: values["clerk-plan"],
     clerkPlanSignature: values["clerk-plan-signature"],
     clerkPlanDryRun: values["clerk-plan-dry-run"],

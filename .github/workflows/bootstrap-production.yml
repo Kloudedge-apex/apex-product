@@ -178,6 +178,7 @@ jobs:
           DATABASE_DDL_EXCLUSIVE_AUTHORITY_CONFIRMED: ${{ contains(fromJSON('["prepare","invoke-clerk","apply-schema"]'), inputs.action) && steps.production_environment.outputs.exclusive_ddl_authority || '' }}
           WORKFORCE_PRODUCTION_BOOTSTRAP_AUTHORITY_CONFIRMED: "true"
           REQUEST_B64: ${{ secrets.PRODUCTION_BOOTSTRAP_REQUEST_B64 }}
+          SUPERSEDED_REQUEST_B64: ${{ inputs.action == 'prepare' && secrets.PRODUCTION_BOOTSTRAP_SUPERSEDED_REQUEST_B64 || '' }}
           RECEIPT_B64: ${{ contains(fromJSON('["invoke-clerk","deploy-compatible","activate-first-class","resume","complete"]'), inputs.action) && secrets.PRODUCTION_BOOTSTRAP_RECEIPT_B64 || '' }}
           RECEIPT_SIGNATURE_B64: ${{ contains(fromJSON('["invoke-clerk","deploy-compatible","activate-first-class","resume","complete"]'), inputs.action) && secrets.PRODUCTION_BOOTSTRAP_RECEIPT_SIGNATURE_B64 || '' }}
           ALLOWED_SIGNERS_B64: ${{ (inputs.action == 'prepare' || contains(fromJSON('["invoke-clerk","deploy-compatible","activate-first-class","resume","complete"]'), inputs.action)) && secrets.PRODUCTION_MIGRATION_ALLOWED_SIGNERS_B64 || '' }}
@@ -241,6 +242,10 @@ jobs:
           fi
 
           args=(--action "${ACTION}" --request "${request}" --state-dir "${evidence_dir}" --output "${output}" --yes)
+          if [[ "${ACTION}" == "prepare" && -n "${SUPERSEDED_REQUEST_B64}" ]]; then
+            decode_required "${SUPERSEDED_REQUEST_B64}" "${evidence_dir}/superseded-request.json" "superseded bootstrap request"
+            args+=(--superseded-request "${evidence_dir}/superseded-request.json")
+          fi
           case "${ACTION}" in
             prepare)
               decode_required "${ALLOWED_SIGNERS_B64}" "${evidence_dir}/allowed-signers" "allowed signers"
@@ -266,7 +271,7 @@ jobs:
             decode_required "${PGPASS_B64}" "${evidence_dir}/pgpass" "PostgreSQL password file"
             export PGPASSFILE="${evidence_dir}/pgpass"
           fi
-          unset RECEIPT_B64 RECEIPT_SIGNATURE_B64 ALLOWED_SIGNERS_B64
+          unset RECEIPT_B64 RECEIPT_SIGNATURE_B64 ALLOWED_SIGNERS_B64 SUPERSEDED_REQUEST_B64
           unset CLERK_PLAN_B64 CLERK_PLAN_SIGNATURE_B64 CLERK_DRY_RUN_B64 CLERK_DRY_RUN_SIGNATURE_B64
           unset OUTSTANDING_DELIVERY_REVIEW_B64 PROVIDER_DELIVERY_DRAIN_B64 PGPASS_B64
           unset DATABASE_DDL_AUTHORITY_B64 FAILED_LIST_SMOKE_EVIDENCE_B64 DASHBOARD_POLICY_SMOKE_EVIDENCE_B64
