@@ -12,7 +12,8 @@ import {
   phaseSha256Bytes,
 } from "../production-bootstrap-phase-receipt-contracts.mjs";
 
-const [outputDirectory, backendCommit, consoleCommit, nowText] = process.argv.slice(2);
+const [outputDirectory, backendCommit, consoleCommit, nowText, recoveryMode] =
+  process.argv.slice(2);
 const now = Number(nowText);
 if (!outputDirectory || !/^[0-9a-f]{40}$/.test(backendCommit ?? "") ||
   !/^[0-9a-f]{40}$/.test(consoleCommit ?? "") || !Number.isSafeInteger(now)) {
@@ -356,6 +357,35 @@ function evidenceFor(kind, generation, issuedOffset) {
     };
   }
 
+  const finalDeployments = structuredClone(armed.deployments);
+  let activationRecovery = null;
+  if (recoveryMode === "worker-entrypoint-recovery") {
+    const predecessor = structuredClone(armed.deployments.worker);
+    const successor = structuredClone(predecessor);
+    successor.identity.revision = `${predecessor.identity.revision}-r1`;
+    successor.identity.configHash = hash("9");
+    successor.identity.templateHash = hash("a");
+    finalDeployments.worker = successor;
+    const recovery = {
+      schemaVersion: 1,
+      kind: "first-class-worker-entrypoint-recovery",
+      reasonCode: "quiescence-entrypoint-inheritance",
+      predecessor,
+      successor,
+      sourceEntrypointHash: hash("b"),
+      pausedQueueEvidenceHash: hash("c"),
+      queuesRemainedPaused: true,
+      liveSendAllowlistEmpty: true,
+      recoveredAt: iso(-30),
+    };
+    activationRecovery = {
+      ...recovery,
+      evidenceHash: phaseSha256Bytes(Buffer.from(canonicalPhaseJson(recovery), "utf8")),
+    };
+  } else if (recoveryMode !== undefined) {
+    throw new Error(`unsupported fixture recovery mode: ${recoveryMode}`);
+  }
+
   const actions = [
     "release-writer-fence",
     "start-first-class-consumers",
@@ -375,6 +405,8 @@ function evidenceFor(kind, generation, issuedOffset) {
   const retired = () => queueState(true, 0);
   return {
     ...structuredClone(armed),
+    deployments: finalDeployments,
+    activationRecovery,
     resume: {
       terminalOpenIntent: {
         bootstrapAttemptId: attemptId,

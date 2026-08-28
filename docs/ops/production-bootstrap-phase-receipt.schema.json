@@ -404,6 +404,33 @@
         "evidenceHash": { "$ref": "#/$defs/sha256" }
       }
     },
+    "activationRecovery": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schemaVersion", "kind", "reasonCode", "predecessor", "successor",
+            "sourceEntrypointHash", "pausedQueueEvidenceHash", "queuesRemainedPaused",
+            "liveSendAllowlistEmpty", "recoveredAt", "evidenceHash"
+          ],
+          "properties": {
+            "schemaVersion": { "const": 1 },
+            "kind": { "const": "first-class-worker-entrypoint-recovery" },
+            "reasonCode": { "const": "quiescence-entrypoint-inheritance" },
+            "predecessor": { "$ref": "#/$defs/deployment" },
+            "successor": { "$ref": "#/$defs/deployment" },
+            "sourceEntrypointHash": { "$ref": "#/$defs/sha256" },
+            "pausedQueueEvidenceHash": { "$ref": "#/$defs/sha256" },
+            "queuesRemainedPaused": { "const": true },
+            "liveSendAllowlistEmpty": { "const": true },
+            "recoveredAt": { "$ref": "#/$defs/utcSecond" },
+            "evidenceHash": { "$ref": "#/$defs/sha256" }
+          }
+        }
+      ]
+    },
     "migrationResult": {
       "type": "object",
       "additionalProperties": false,
@@ -658,11 +685,12 @@
     "completeEvidence": {
       "type": "object", "additionalProperties": false,
       "required": [
-        "deployments", "writeGates", "rollbackBaseline", "resume", "health",
-        "finalInventory", "bootstrapEvidenceHash"
+        "deployments", "activationRecovery", "writeGates", "rollbackBaseline", "resume",
+        "health", "finalInventory", "bootstrapEvidenceHash"
       ],
       "properties": {
         "deployments": { "$ref": "#/$defs/deployments" },
+        "activationRecovery": { "$ref": "#/$defs/activationRecovery" },
         "writeGates": { "$ref": "#/$defs/writeGates" },
         "rollbackBaseline": { "$ref": "#/$defs/rollbackBaseline" },
         "resume": {
@@ -747,18 +775,18 @@
               "type": "object", "additionalProperties": false,
               "required": [
                 "policy", "containmentReady", "ambiguousPartialResumeDetected",
-                "allQueuesRePauseRequired", "apiAndWorkerDeactivateRequired",
+                "allQueuesRePauseRequired", "apiAndWorkerZeroScaleRequired",
                 "stableZeroReplicasRequired", "terminalOpenRecloseForbidden",
                 "holdForwardOnlyRequired", "evidenceHash"
               ],
               "properties": {
                 "policy": {
-                  "const": "repause-deactivate-stable-zero-and-hold-terminal-open-forward-only-v1"
+                  "const": "repause-zero-scale-stable-zero-and-hold-terminal-open-forward-only-v1"
                 },
                 "containmentReady": { "const": true },
                 "ambiguousPartialResumeDetected": { "const": false },
                 "allQueuesRePauseRequired": { "const": true },
-                "apiAndWorkerDeactivateRequired": { "const": true },
+                "apiAndWorkerZeroScaleRequired": { "const": true },
                 "stableZeroReplicasRequired": { "const": true },
                 "terminalOpenRecloseForbidden": { "const": true },
                 "holdForwardOnlyRequired": { "const": true },

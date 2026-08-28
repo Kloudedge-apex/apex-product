@@ -629,6 +629,7 @@ function phaseEvidence(state, targetPhase, fencingGeneration, minute) {
   const retiredQueue = (waiting) => ({ ...pausedQueue(waiting), workerCount: 0 });
   return {
     deployments: structuredClone(previous.evidence.deployments),
+    activationRecovery: null,
     writeGates: structuredClone(previous.evidence.writeGates),
     rollbackBaseline: structuredClone(previous.evidence.rollbackBaseline),
     resume: {
