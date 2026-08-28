@@ -449,10 +449,11 @@ export function canonicalJson(value) {
     return JSON.stringify(value);
   }
   if (typeof value === "number") {
-    if (!Number.isSafeInteger(value)) {
-      fail("canonical JSON only permits safe integers");
+    if (!Number.isFinite(value) || Object.is(value, -0) ||
+      (Number.isInteger(value) && !Number.isSafeInteger(value))) {
+      fail("canonical JSON only permits finite numbers and safe integers");
     }
-    return String(value);
+    return JSON.stringify(value);
   }
   if (Array.isArray(value)) {
     return `[${value.map((entry) => canonicalJson(entry)).join(",")}]`;
@@ -606,12 +607,15 @@ export function strictJsonParse(bytes, label = "JSON") {
         return value;
       }
     }
-    const numberMatch = text.slice(index).match(/^-?(?:0|[1-9][0-9]*)/);
+    const numberMatch = text.slice(index).match(
+      /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/,
+    );
     if (numberMatch) {
       index += numberMatch[0].length;
       const value = Number(numberMatch[0]);
-      if (!Number.isSafeInteger(value) || !Number.isFinite(value) || Object.is(value, -0)) {
-        fail(`${label} only permits safe integer numbers`);
+      if (!Number.isFinite(value) || Object.is(value, -0) ||
+        (Number.isInteger(value) && !Number.isSafeInteger(value))) {
+        fail(`${label} only permits finite numbers and safe integers`);
       }
       return value;
     }
