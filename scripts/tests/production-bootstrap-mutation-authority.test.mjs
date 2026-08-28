@@ -33,7 +33,7 @@ set -euo pipefail
 printf 'az' >>"\${AUTHORITY_LOG}"
 printf '\\t%s' "$@" >>"\${AUTHORITY_LOG}"
 printf '\\n' >>"\${AUTHORITY_LOG}"
-printf '%s\\n' "\${EXPECTED_LEASE}"
+printf '{"leaseId":"%s"}\\n' "\${EXPECTED_LEASE}"
 `, { mode: 0o700 });
     writeFileSync(gh, `#!/usr/bin/env bash
 set -euo pipefail
@@ -70,8 +70,8 @@ printf '{"ref":"refs/heads/workforce-os-release-lock/production-gtm-platform","o
       "--blob-name", "workforce-os/initial-production-bootstrap/state-v1.json",
       "--auth-mode", "login",
       "--lease-id", LEASE,
-      "--output", "tsv",
-      "--query", "leaseId",
+      "--output", "json",
+      "--only-show-errors",
     ]);
     assert.deepEqual(github, [
       "gh", "api",
