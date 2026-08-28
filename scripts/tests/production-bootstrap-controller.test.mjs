@@ -39,6 +39,10 @@ import {
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const CONTROLLER = resolve(TEST_DIR, "../production-bootstrap-controller.mjs");
+const PHASE_RECEIPT_CONTRACT = resolve(
+  TEST_DIR,
+  "../production-bootstrap-phase-receipt-contracts.mjs",
+);
 const RUNTIME_CONTROL = resolve(TEST_DIR, "../production-bootstrap-runtime-control.ts");
 
 const SHA_A = "a".repeat(40);
@@ -1077,7 +1081,7 @@ test("API ingress disable uses a least-privilege PATCH and never requests secret
   assert.doesNotMatch(disable, /listSecrets|list-secrets|"ingress", "disable"/);
 });
 
-test("Container App updates use parent-resource PATCH and narrowly replace only unhealthy candidate revisions", () => {
+test("Container App updates use parent-resource PATCH and a deterministic unhealthy-revision recovery suffix", () => {
   const source = readFileSync(CONTROLLER, "utf8");
   const quiesceStart = source.indexOf("function quiesceAppWithParentWrite");
   const quiesceEnd = source.indexOf("function disableApiIngress", quiesceStart);
@@ -1086,9 +1090,11 @@ test("Container App updates use parent-resource PATCH and narrowly replace only 
   const mutationPaths = `${source.slice(quiesceStart, quiesceEnd)}\n${source.slice(updateStart, updateEnd)}`;
   assert.match(mutationPaths, /"rest"/);
   assert.match(mutationPaths, /"--method", "patch"/);
-  assert.match(mutationPaths, /"--method", "delete"/);
   assert.match(mutationPaths, /unhealthy bootstrap revision is not safely replaceable/);
   assert.match(mutationPaths, /before\.properties\?\.latestReadyRevisionName === revision/);
+  assert.match(mutationPaths, /const recoveryRevision = `\$\{revision\}-r1`/);
+  assert.match(mutationPaths, /recovery revision name exceeds the Azure limit/);
+  assert.doesNotMatch(mutationPaths, /"--method", "delete"/);
   assert.doesNotMatch(mutationPaths, /listSecrets|list-secrets|"containerapp", "update"/);
   assert.doesNotMatch(source, /"containerapp", "revision", "deactivate"/);
 });
@@ -1116,6 +1122,12 @@ test("protected recovery snapshots are descendant-only and file-scope bounded", 
   assert.match(assertion, /changed\.some\(\(path\) => !allowed\.has\(path\)\)/);
   assert.match(assertion, /a recovery controller successor is permitted only after schema application/);
   assert.match(assertion, /scripts\/production-bootstrap-controller\.mjs/);
+});
+
+test("B5 receipt contract permits only the exact first recovery revision suffix", () => {
+  const source = readFileSync(PHASE_RECEIPT_CONTRACT, "utf8");
+  assert.match(source, /actual === target \|\| actual === `\$\{target\}-r1`/);
+  assert.doesNotMatch(source, /-r2/);
 });
 
 test("Container App PATCH templates omit readback-only template properties", () => {

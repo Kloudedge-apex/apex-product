@@ -868,8 +868,10 @@ function validateB5(evidence, receipt, previousReceipt) {
   ], label);
   validateDeployments(evidence.deployments, receipt.candidate, `${label}.deployments`);
   const targets = previousReceipt?.evidence?.targetRevisions;
-  if (!targets || evidence.deployments.api.identity.revision !== targets.api ||
-    evidence.deployments.worker.identity.revision !== targets.worker ||
+  const matchesTargetOrRecovery = (actual, target) =>
+    actual === target || actual === `${target}-r1`;
+  if (!targets || !matchesTargetOrRecovery(evidence.deployments.api.identity.revision, targets.api) ||
+    !matchesTargetOrRecovery(evidence.deployments.worker.identity.revision, targets.worker) ||
     evidence.deployments.console.identity.revision !== targets.console) {
     fail(`${label}.deployments do not match the schema-result target revisions`);
   }

@@ -1334,6 +1334,7 @@ function assertExactProtectedSnapshot(runner, request, action) {
     ".github/workflows/bootstrap-production.yml",
     "docs/ops/initial-production-bootstrap-controller.md",
     "scripts/production-bootstrap-controller.mjs",
+    "scripts/production-bootstrap-phase-receipt-contracts.mjs",
     "scripts/verify-production-bootstrap-phase-receipt.sh",
     "scripts/verify-production-bootstrap-workflow.sh",
     "scripts/tests/production-bootstrap-controller.test.mjs",
@@ -4159,24 +4160,13 @@ function updateApp(
         before.properties?.latestReadyRevisionName === revision) {
         fail(`${role} unhealthy bootstrap revision is not safely replaceable`);
       }
-      azureMutation(
-        runner,
-        request,
-        [
-          "rest", "--method", "delete",
-          "--url", `${resourceId}/revisions/${revision}?api-version=2024-03-01`,
-          "--output", "none",
-        ],
-        `${role} unhealthy bootstrap revision replacement`,
-        releaseLockRequired,
-      );
-      for (let observation = 0; observation < 12; observation += 1) {
-        preexisting = revisionList(runner, request, app)
-          .find((entry) => entry?.name === revision);
-        if (!preexisting) break;
-        runner.run("sleep", ["5"], { label: `${role} unhealthy revision deletion interval` });
+      const recoveryRevision = `${revision}-r1`;
+      if (recoveryRevision.length > 54) {
+        fail(`${role} recovery revision name exceeds the Azure limit`);
       }
-      if (preexisting) fail(`${role} unhealthy bootstrap revision deletion was not observed`);
+      revision = recoveryRevision;
+      preexisting = revisionList(runner, request, app)
+        .find((entry) => entry?.name === revision);
     }
   }
   if (!preexisting) {
