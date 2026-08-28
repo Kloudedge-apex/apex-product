@@ -4563,15 +4563,15 @@ function validateFirstClassRecoveryEvidence(state, recovery, liveDeployments) {
       }
     }
   }
-  if (recovery.successors.api.identity.configHash !==
+  if (recovery.successors.api.identity.configHash ===
       recovery.predecessors.api.identity.configHash ||
-    recovery.successors.api.identity.templateHash !==
+    recovery.successors.api.identity.templateHash ===
       recovery.predecessors.api.identity.templateHash ||
     recovery.successors.worker.identity.configHash ===
       recovery.predecessors.worker.identity.configHash ||
     recovery.successors.worker.identity.templateHash ===
       recovery.predecessors.worker.identity.templateHash) {
-    fail("first-class recovery did not preserve API config and replace the worker template");
+    fail("first-class recovery did not create fresh API and worker revision templates");
   }
   const { evidenceHash, ...withoutHash } = recovery;
   if (evidenceHash !== canonicalHash(withoutHash)) {
@@ -4588,7 +4588,7 @@ function nextRecoveryRevision(runner, request, app, predecessorName) {
     if (candidateName.length > 54) fail(`${app} recovery revision name exceeds the Azure limit`);
     const existing = revisions.find((entry) => entry?.name === candidateName);
     if (!existing || (existing.properties?.active === true && active.length === 1)) {
-      return candidateName;
+      return { name: candidateName, sequence: attempt };
     }
   }
   fail(`${app} exhausted the bounded recovery revision sequence`);
@@ -4606,16 +4606,9 @@ function ensureFirstClassDeploymentsForResume(
   if (!armed) fail("signed first-class activation evidence is absent");
   const apiPredecessorName = armed.api.identity?.revision;
   const workerPredecessorName = armed.worker.identity?.revision;
-  const apiPredecessor = revisionList(runner, request, API_APP)
-    .find((entry) => entry?.name === apiPredecessorName);
-  const workerPredecessor = revisionList(runner, request, WORKER_APP)
-    .find((entry) => entry?.name === workerPredecessorName);
-  if (!apiPredecessor || !workerPredecessor) {
-    fail("a signed first-class predecessor revision is absent");
-  }
-  const apiSourceTemplate = apiPredecessor.properties?.template;
+  const apiSourceTemplate = state.privateRestoreBundle.apiRevision?.properties?.template;
   const workerSourceTemplate = state.privateRestoreBundle.workerRevision?.properties?.template;
-  const apiSourceEntrypoint = containerEntrypoint(apiSourceTemplate, "signed API source template");
+  const apiSourceEntrypoint = containerEntrypoint(apiSourceTemplate, "captured API source template");
   const workerSourceEntrypoint = containerEntrypoint(
     workerSourceTemplate,
     "captured source worker template",
@@ -4647,13 +4640,12 @@ function ensureFirstClassDeploymentsForResume(
     };
   }
 
-  const predecessorEntrypoint = containerEntrypoint(
-    workerPredecessor.properties?.template,
-    "signed first-class worker template",
-  );
   if (apiActive.length === 1 && apiActive[0].name === apiPredecessorName &&
     workerActive.length === 1 && workerActive[0].name === workerPredecessorName &&
-    canonicalJson(predecessorEntrypoint) === canonicalJson(workerSourceEntrypoint)) {
+    canonicalJson(containerEntrypoint(
+      workerActive[0].properties?.template,
+      "active signed first-class worker template",
+    )) === canonicalJson(workerSourceEntrypoint)) {
     verifyFirstClassWorkerLive(
       runner,
       request,
@@ -4663,21 +4655,51 @@ function ensureFirstClassDeploymentsForResume(
     );
     return { state, recovery: null };
   }
-  if (canonicalJson(predecessorEntrypoint) !== canonicalJson({
+  if (apiActive.length !== 1 || workerActive.length !== 1 ||
+    apiActive[0].properties?.template?.containers?.[0]?.image !== request.targetArtifacts.api.image ||
+    workerActive[0].properties?.template?.containers?.[0]?.image !== request.targetArtifacts.worker.image ||
+    canonicalJson(containerEntrypoint(
+      workerActive[0].properties?.template,
+      "contained first-class worker template",
+    )) !== canonicalJson({
     command: [...WORKER_QUIESCENCE_COMMAND],
     args: [...WORKER_QUIESCENCE_ARGS],
   })) {
-    fail("first-class worker entrypoint drift is not the reviewed quiescence inheritance defect");
+    fail("active deployment posture is not the reviewed API/worker containment state");
   }
+  const apiRecovery = nextRecoveryRevision(runner, request, API_APP, apiPredecessorName);
+  const workerRecovery = nextRecoveryRevision(
+    runner,
+    request,
+    WORKER_APP,
+    workerPredecessorName,
+  );
   const apiRevision = updateApp(
     runner,
     request,
     "api",
     request.targetArtifacts.api.image,
-    nextRecoveryRevision(runner, request, API_APP, apiPredecessorName),
-    [],
+    apiRecovery.name,
+    [
+      "GMAIL_WATCH_RENEWAL_ENABLED=false",
+      "GRAPH_RUN_WORKER_ENABLED=false",
+      "OUTREACH_WORKER_ENABLED=false",
+      "SCHEDULER_ENABLED=false",
+      `WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID=${request.attemptId}`,
+      `WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION=${receipt.fencingGeneration}`,
+      `WORKFORCE_PRODUCTION_BOOTSTRAP_RECOVERY_SEQUENCE=${apiRecovery.sequence}`,
+      "OUTREACH_LIVE_FOR_ORGS=",
+      "OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE=disabled",
+      "OUTREACH_FAILED_STATUS_WRITES_ENABLED=false",
+      "EVIDENCE_LEDGER_ENABLED=true",
+    ],
     1,
-    [],
+    [
+      ...RETIRED_WORKER_ENVIRONMENT,
+      "OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK",
+      "OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH",
+      "OUTREACH_FAILED_STATUS_WRITES_ACK",
+    ],
     true,
     apiSourceTemplate,
   );
@@ -4686,13 +4708,36 @@ function ensureFirstClassDeploymentsForResume(
     request,
     "worker",
     request.targetArtifacts.worker.image,
-    nextRecoveryRevision(runner, request, WORKER_APP, workerPredecessorName),
-    firstClassWorkerEnvironment(request, receipt.fencingGeneration),
+    workerRecovery.name,
+    [
+      ...firstClassWorkerEnvironment(request, receipt.fencingGeneration),
+      `WORKFORCE_PRODUCTION_BOOTSTRAP_RECOVERY_SEQUENCE=${workerRecovery.sequence}`,
+    ],
     1,
     RETIRED_WORKER_ENVIRONMENT,
     true,
     workerSourceTemplate,
   );
+  const api = assertExactActiveRevision(
+    runner,
+    request,
+    API_APP,
+    apiRevision,
+    request.targetArtifacts.api.image,
+  );
+  verifyCandidateWriterGuard(api, request, receipt.fencingGeneration, "recovered API");
+  for (const gate of [
+    "GMAIL_WATCH_RENEWAL_ENABLED", "GRAPH_RUN_WORKER_ENABLED",
+    "OUTREACH_WORKER_ENABLED", "SCHEDULER_ENABLED",
+  ]) {
+    if (revisionEnv(api, gate) !== "false") fail(`recovered API ${gate} is not false`);
+  }
+  if (revisionEnv(api, "WORKFORCE_PRODUCTION_BOOTSTRAP_RECOVERY_SEQUENCE") !==
+    String(apiRecovery.sequence) ||
+    canonicalJson(containerEntrypoint(api.properties?.template, "recovered API template")) !==
+      canonicalJson(apiSourceEntrypoint)) {
+    fail("recovered API marker or captured entrypoint is invalid");
+  }
   verifyFirstClassWorkerLive(
     runner,
     request,
@@ -4700,6 +4745,17 @@ function ensureFirstClassDeploymentsForResume(
     receipt.fencingGeneration,
     workerSourceTemplate,
   );
+  const recoveredWorker = assertExactActiveRevision(
+    runner,
+    request,
+    WORKER_APP,
+    workerRevision,
+    request.targetArtifacts.worker.image,
+  );
+  if (revisionEnv(recoveredWorker, "WORKFORCE_PRODUCTION_BOOTSTRAP_RECOVERY_SEQUENCE") !==
+    String(workerRecovery.sequence)) {
+    fail("recovered worker sequence marker is invalid");
+  }
   const successors = {
     api: deploymentEvidence(runner, request, "api", apiRevision),
     worker: deploymentEvidence(runner, request, "worker", workerRevision),
@@ -6060,11 +6116,10 @@ function resumeBootstrap(runner, request, state, options) {
       };
     }
     uploadState(runner, request, next, options.statePath);
-    fail(
-      containmentFailures.length === 0
-        ? "resume was not proven; ingress and queues are contained, execution replicas are stably zero, and terminal OPEN remains forward-only"
-        : "resume was not proven and containment is incomplete; terminal OPEN remains forward-only under the retained Azure lease",
-    );
+    const rootCause = sanitizeError(error.message);
+    fail(containmentFailures.length === 0
+      ? `resume was not proven (${rootCause}); ingress and queues are contained, execution replicas are stably zero, and terminal OPEN remains forward-only`
+      : `resume was not proven (${rootCause}) and containment is incomplete (${containmentFailures.join(";")}); terminal OPEN remains forward-only under the retained Azure lease`);
   }
 }
 

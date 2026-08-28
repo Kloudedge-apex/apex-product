@@ -366,6 +366,8 @@ function evidenceFor(kind, generation, issuedOffset) {
     };
     const successors = structuredClone(predecessors);
     successors.api.identity.revision = `${predecessors.api.identity.revision}-r1`;
+    successors.api.identity.configHash = hash("8");
+    successors.api.identity.templateHash = hash("7");
     successors.worker.identity.revision = `${predecessors.worker.identity.revision}-r1`;
     successors.worker.identity.configHash = hash("9");
     successors.worker.identity.templateHash = hash("a");
