@@ -952,13 +952,19 @@ test("B8 binds a fresh terminal-OPEN ACA, queue, database, ingress, and readines
   const ingressStart = source.indexOf("function verifyApiIngressLive");
   const ingressEnd = source.indexOf("function bootstrapStep", ingressStart);
   const ingress = source.slice(ingressStart, ingressEnd);
-  assert.match(ingress, /ingress\.allowInsecure !== false/);
-  assert.match(ingress, /ingress\.transport !== expectedTransport/);
-  assert.match(ingress, /activeRevisionsMode !== "Single"/);
-  assert.match(ingress, /traffic\[0\]\?\.latestRevision !== true/);
+  assert.match(ingress, /ingress\.allowInsecure === false/);
+  assert.match(ingress, /ingress\.transport === expectedTransport/);
+  assert.match(ingress, /activeRevisionsMode === "Single"/);
+  assert.match(ingress, /traffic\[0\]\?\.latestRevision === true/);
+  assert.match(ingress, /provisioningState === "Succeeded"/);
+  assert.match(ingress, /API ingress enable readiness interval/);
   const enableStart = source.indexOf("function enableApiIngress");
   const enable = source.slice(enableStart, ingressStart);
+  assert.match(enable, /"rest"/);
+  assert.match(enable, /"--method", "patch"/);
+  assert.match(enable, /configuration: \{ ingress \}/);
   assert.doesNotMatch(enable, /"ingress", "traffic", "set"/);
+  assert.doesNotMatch(enable, /"containerapp", "ingress", "enable"|revisionSuffix/);
 
   const resumeStart = source.indexOf("function resumeBootstrap");
   const resumeEnd = source.indexOf("function completeBootstrap", resumeStart);
