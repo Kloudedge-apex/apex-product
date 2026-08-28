@@ -954,6 +954,11 @@ test("B8 binds a fresh terminal-OPEN ACA, queue, database, ingress, and readines
   const ingress = source.slice(ingressStart, ingressEnd);
   assert.match(ingress, /ingress\.allowInsecure !== false/);
   assert.match(ingress, /ingress\.transport !== expectedTransport/);
+  assert.match(ingress, /activeRevisionsMode !== "Single"/);
+  assert.match(ingress, /traffic\[0\]\?\.latestRevision !== true/);
+  const enableStart = source.indexOf("function enableApiIngress");
+  const enable = source.slice(enableStart, ingressStart);
+  assert.doesNotMatch(enable, /"ingress", "traffic", "set"/);
 
   const resumeStart = source.indexOf("function resumeBootstrap");
   const resumeEnd = source.indexOf("function completeBootstrap", resumeStart);
@@ -1078,6 +1083,7 @@ test("API ingress disable uses a least-privilege PATCH and never requests secret
   assert.match(disable, /"rest"/);
   assert.match(disable, /"--method", "patch"/);
   assert.match(disable, /configuration: \{ ingress: null \}/);
+  assert.match(disable, /API ingress disable readiness interval/);
   assert.doesNotMatch(disable, /listSecrets|list-secrets|"ingress", "disable"/);
 });
 
