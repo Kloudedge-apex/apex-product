@@ -1010,12 +1010,15 @@ function validateRebindablePreparationJournal(journal, request) {
     fail("superseded preparation journal identity is not rebindable");
   }
   string(journal.requestSha256, /^sha256:[0-9a-f]{64}$/, "superseded preparation request hash");
-  if (journal.stage !== "B0_SOURCE_CAPTURE_INTENT" || journal.source !== null) {
-    fail("superseded preparation journal advanced beyond the rebindable pre-mutation stage");
-  }
   exactKeys(journal.intent, ["operation", "status", "at"], "superseded preparation intent");
-  if (journal.intent.operation !== "capture-source-baseline" || journal.intent.status !== "started") {
-    fail("superseded preparation intent is not the rebindable source-capture boundary");
+  const sourceCaptureBoundary = journal.stage === "B0_SOURCE_CAPTURE_INTENT" &&
+    journal.source === null && journal.intent.operation === "capture-source-baseline" &&
+    journal.intent.status === "started";
+  const ingressDisableBoundary = journal.stage === "B0_API_INGRESS_DISABLE_INTENT" &&
+    journal.source !== null && journal.intent.operation === "disable-api-ingress" &&
+    journal.intent.status === "started";
+  if (!sourceCaptureBoundary && !ingressDisableBoundary) {
+    fail("superseded preparation journal advanced beyond a provably rebindable boundary");
   }
   canonicalTimestamp(journal.intent.at, "superseded preparation intent time");
   canonicalTimestamp(journal.updatedAt, "superseded preparation updatedAt");
@@ -1070,6 +1073,7 @@ function validateRebindablePreparationJournal(journal, request) {
     dryRunBytes,
     dryRunSignatureBytes,
     previousBackendCommit: plan.backendCandidateCommit,
+    requiresSourceReadback: ingressDisableBoundary,
   };
 }
 
@@ -1752,6 +1756,51 @@ function sourceSnapshot(app, revision, role, imageMetadata) {
   };
 }
 
+function assertCapturedSourceUnchangedForRebind(runner, request, source) {
+  if (!source || typeof source !== "object" || Array.isArray(source) ||
+    !source.privateRestoreBundle || typeof source.privateRestoreBundle !== "object" ||
+    Array.isArray(source.privateRestoreBundle) ||
+    !source.sourceRollbackBaseline || typeof source.sourceRollbackBaseline !== "object" ||
+    Array.isArray(source.sourceRollbackBaseline)) {
+    fail("superseded preparation source baseline is invalid");
+  }
+  const bundle = source.privateRestoreBundle;
+  const baseline = source.sourceRollbackBaseline;
+  if (baseline.privateRestoreBundleHash !== canonicalHash(bundle)) {
+    fail("superseded preparation source restore bundle is corrupt");
+  }
+  for (const [role, appName, resourceId, storedApp, storedRevision] of [
+    ["api", API_APP, request.authority.apiContainerAppResourceId, bundle.apiResource, bundle.apiRevision],
+    ["worker", WORKER_APP, request.authority.workerContainerAppResourceId, bundle.workerResource, bundle.workerRevision],
+    ["console", CONSOLE_APP, request.authority.consoleContainerAppResourceId, bundle.consoleResource, bundle.consoleRevision],
+  ]) {
+    const snapshot = baseline[role];
+    if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot) ||
+      String(storedApp?.id).toLowerCase() !== resourceId.toLowerCase() ||
+      storedRevision?.name !== snapshot.revision ||
+      storedRevision?.properties?.template?.containers?.[0]?.image !== snapshot.image) {
+      fail(`superseded preparation ${role} source binding is invalid`);
+    }
+    const liveApp = appState(runner, request, resourceId, `rebindable source ${role}`);
+    const liveRevision = activeRevision(revisionList(runner, request, appName), appName);
+    if (liveRevision.name !== snapshot.revision ||
+      liveRevision.properties?.template?.containers?.[0]?.image !== snapshot.image ||
+      canonicalHash(liveApp.properties?.configuration) !== snapshot.configHash ||
+      canonicalHash(liveRevision.properties?.template) !== snapshot.templateHash) {
+      fail(`superseded preparation ${role} source changed after capture`);
+    }
+  }
+  const ingress = appState(
+    runner,
+    request,
+    request.authority.apiContainerAppResourceId,
+    "rebindable source API ingress",
+  ).properties?.configuration?.ingress;
+  if (ingress?.external !== true || typeof ingress.fqdn !== "string" || ingress.fqdn.length < 1) {
+    fail("superseded preparation API ingress may already have changed");
+  }
+}
+
 function inspectSourceImage(runner, image, label) {
   runner.run("docker", ["pull", "--platform", "linux/amd64", image], { label: `${label} source image pull` });
   const values = runner.json("docker", ["image", "inspect", image], { label: `${label} source image inspection` });
@@ -2003,9 +2052,18 @@ function deactivateAllActiveRevisions(runner, request, app) {
 }
 
 function disableApiIngress(runner, request, releaseLockRequired = true) {
-  azureMutation(runner, request, ["containerapp", "ingress", "disable", "--name", API_APP, "--resource-group", RESOURCE_GROUP, "--output", "none"], "API ingress disable", releaseLockRequired);
+  const before = appState(runner, request, request.authority.apiContainerAppResourceId, "API ingress pre-disable");
+  if (before.properties?.configuration?.ingress === null) return { adopted: true };
+  azureMutation(runner, request, [
+    "rest",
+    "--method", "patch",
+    "--url", `${request.authority.apiContainerAppResourceId}?api-version=2024-03-01`,
+    "--body", canonicalJson({ properties: { configuration: { ingress: null } } }),
+    "--output", "none",
+  ], "API ingress disable", releaseLockRequired);
   const state = appState(runner, request, request.authority.apiContainerAppResourceId, "quiesced API");
   if (state.properties?.configuration?.ingress?.external === true || state.properties?.configuration?.ingress?.fqdn) fail("API ingress disable readback is ambiguous");
+  return { adopted: false };
 }
 
 function assertNoActiveRevisions(runner, request, app, label) {
@@ -2433,6 +2491,9 @@ function prepare(runner, request, options) {
     } else {
       const superseded = validateRebindablePreparationJournal(existing, request);
       verifySupersededPreparationSignatures(runner, request, options, superseded);
+      if (superseded.requiresSourceReadback) {
+        assertCapturedSourceUnchangedForRebind(runner, request, superseded.journal.source);
+      }
       rebindReleaseLockForPreparation(
         runner,
         request,

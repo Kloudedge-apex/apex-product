@@ -968,15 +968,15 @@ test("same-commit release-lock adoption requires the exact leased attempt journa
   assert.match(lock, /stale ref alone is therefore never authority/);
 });
 
-test("preparation rebind is limited to the source-capture pre-mutation boundary", () => {
+test("preparation rebind is limited to pre-mutation boundaries with live source readback", () => {
   const source = readFileSync(CONTROLLER, "utf8");
   const validatorStart = source.indexOf("function validateRebindablePreparationJournal");
   const validatorEnd = source.indexOf("function preparationJournal", validatorStart);
   const validator = source.slice(validatorStart, validatorEnd);
-  assert.match(validator, /journal\.stage !== "B0_SOURCE_CAPTURE_INTENT"/);
-  assert.match(validator, /journal\.source !== null/);
-  assert.match(validator, /journal\.intent\.operation !== "capture-source-baseline"/);
-  assert.match(validator, /journal\.intent\.status !== "started"/);
+  assert.match(validator, /journal\.stage === "B0_SOURCE_CAPTURE_INTENT"/);
+  assert.match(validator, /journal\.stage === "B0_API_INGRESS_DISABLE_INTENT"/);
+  assert.match(validator, /journal\.intent\.operation === "capture-source-baseline"/);
+  assert.match(validator, /journal\.intent\.operation === "disable-api-ingress"/);
   assert.match(validator, /plan\.backendCandidateCommit === request\.backendCandidate\.commit/);
 
   const rebindStart = source.indexOf("function rebindReleaseLockForPreparation");
@@ -992,10 +992,23 @@ test("preparation rebind is limited to the source-capture pre-mutation boundary"
   const prepare = source.slice(prepareStart, prepareEnd);
   const validate = prepare.indexOf("validateRebindablePreparationJournal");
   const signatures = prepare.indexOf("verifySupersededPreparationSignatures", validate);
-  const lock = prepare.indexOf("rebindReleaseLockForPreparation", signatures);
+  const sourceReadback = prepare.indexOf("assertCapturedSourceUnchangedForRebind", signatures);
+  const lock = prepare.indexOf("rebindReleaseLockForPreparation", sourceReadback);
   const journal = prepare.indexOf("preparationJournal(request, clerkReconciliation)", lock);
   const upload = prepare.indexOf("uploadState(runner, request, journal, options.statePath)", journal);
-  assert.ok(validate >= 0 && validate < signatures && signatures < lock && lock < journal && journal < upload);
+  assert.ok(validate >= 0 && validate < signatures && signatures < sourceReadback);
+  assert.ok(sourceReadback < lock && lock < journal && journal < upload);
+});
+
+test("API ingress disable uses a least-privilege PATCH and never requests secret values", () => {
+  const source = readFileSync(CONTROLLER, "utf8");
+  const start = source.indexOf("function disableApiIngress");
+  const end = source.indexOf("function assertNoActiveRevisions", start);
+  const disable = source.slice(start, end);
+  assert.match(disable, /"rest"/);
+  assert.match(disable, /"--method", "patch"/);
+  assert.match(disable, /configuration: \{ ingress: null \}/);
+  assert.doesNotMatch(disable, /listSecrets|list-secrets|"ingress", "disable"/);
 });
 
 test("every post-acquisition ACA mutation revalidates both Azure lease and Git release lock", () => {
