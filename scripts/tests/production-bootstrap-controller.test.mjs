@@ -411,11 +411,15 @@ test("attempt ID deterministically yields the Azure proposed lease UUID", () => 
 });
 
 test("Azure lease output accepts current string and legacy object response shapes", () => {
-  const leaseId = "01234567-89ab-4def-8123-456789abcdef";
+  const leaseId = attemptLeaseId("f8c1a08af7713932ec7a4a41288690e1");
   assert.equal(parseAzureLeaseCommandOutput(Buffer.from(JSON.stringify(leaseId))), leaseId);
   assert.equal(parseAzureLeaseCommandOutput(Buffer.from(JSON.stringify({ leaseId }))), leaseId);
   assert.equal(parseAzureLeaseCommandOutput(Buffer.from(JSON.stringify({ lease_id: leaseId.toUpperCase() }))), leaseId);
   assert.throws(() => parseAzureLeaseCommandOutput(Buffer.from("{}")), /Azure blob lease response is invalid/);
+  assert.throws(
+    () => parseAzureLeaseCommandOutput(Buffer.from(JSON.stringify("f8c1a08a-f771-3932-ec7a-4a41288690eg"))),
+    /Azure blob lease response is invalid/,
+  );
 });
 
 test("the controller exposes the complete bounded action set", () => {
