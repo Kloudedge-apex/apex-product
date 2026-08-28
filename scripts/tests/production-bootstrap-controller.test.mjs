@@ -832,8 +832,8 @@ test("prepare replaces API and worker with zero-scale quiescence revisions befor
   const prepare = source.slice(start, end);
   const disable = prepare.indexOf("disableApiIngress(runner, request)");
   const pause = prepare.indexOf('"pause-only"');
-  const apiStop = prepare.indexOf('"api",\n      `${API_APP}--bootstrap-quiesce-');
-  const workerStop = prepare.indexOf('"worker",\n      `${WORKER_APP}--bootstrap-quiesce-');
+  const apiStop = prepare.indexOf('"api",\n      quiescenceRevisionName(');
+  const workerStop = prepare.indexOf('"worker",\n      quiescenceRevisionName(');
   const stableZero = prepare.indexOf("proveStableZeroExecutionReplicas(runner, request)");
   const orphanRecovery = prepare.indexOf('"recover-orphans"', stableZero);
   const arm = prepare.indexOf('"arm"');
@@ -1220,6 +1220,21 @@ test("preparation rebind accepts only exact partial-quiescence revisions", () =>
     "f8c1a08af7713932ec7a4a41288690e1",
     true,
     "4065c7613d346cd0237eef6083e72a45b11196be",
+  ), true);
+  const commitBoundWorkerName = "apex-gtm-worker--bqi-f8c1a08-5ecb0ee";
+  assert.ok(commitBoundWorkerName.length <= 54);
+  assert.equal(matchesCapturedQuiescenceRevision(
+    {
+      ...idleWorker,
+      name: commitBoundWorkerName,
+    },
+    workerSource,
+    image,
+    "apex-gtm-worker",
+    "worker",
+    "f8c1a08af7713932ec7a4a41288690e1",
+    true,
+    "5ecb0eef7025641db55630e1036b4d267bd95ade",
   ), true);
   assert.equal(matchesCapturedQuiescenceRevision(
     {
