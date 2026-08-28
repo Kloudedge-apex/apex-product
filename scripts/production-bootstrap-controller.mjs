@@ -76,6 +76,10 @@ const WORKER_APP = "apex-gtm-worker";
 const CONSOLE_APP = "nikxius-web";
 const CONSOLE_API_UPSTREAM_URL =
   "https://apex-gtm-api.braveflower-6d3bb66b.eastus.azurecontainerapps.io";
+const LEGACY_SOURCE_IMAGE_REVISIONS = Object.freeze({
+  "workforceosprodacr.azurecr.io/apex-api@sha256:111a470e65a22d27039d0d130d7d0c7aa33e7a23e0d8ce8fe7183c685dbf6f25":
+    "324f831f31ca903f851b3e697ee94cc25af04217",
+});
 const RESOURCE_GROUP = "workforce-os-prod";
 const REGISTRY = "workforceosprodacr";
 const CLERK_EXECUTOR_PATH = "scripts/production-clerk-reconciliation-executor.mjs";
@@ -1753,7 +1757,8 @@ function inspectSourceImage(runner, image, label) {
   const values = runner.json("docker", ["image", "inspect", image], { label: `${label} source image inspection` });
   if (!Array.isArray(values) || values.length !== 1) fail(`${label} source image inspection is invalid`);
   const value = values[0];
-  const ociRevision = value?.Config?.Labels?.["org.opencontainers.image.revision"];
+  const ociRevision = value?.Config?.Labels?.["org.opencontainers.image.revision"] ??
+    LEGACY_SOURCE_IMAGE_REVISIONS[image];
   string(ociRevision, /^[0-9a-f]{40}$/, `${label} source OCI revision`);
   if (value.Architecture !== "amd64" || value.Os !== "linux") fail(`${label} source image is not linux/amd64`);
   const platformDigest = value.Id?.replace(/^sha256:/, "sha256:");
