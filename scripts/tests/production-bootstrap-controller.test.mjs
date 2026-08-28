@@ -16,6 +16,7 @@ import {
   azureInheritedRoleAssignmentListArgs,
   buildAdmissionContext,
   classifyPreOpenActionReplay,
+  matchesCapturedQuiescenceRevision,
   productionAuthorityDrainCheckpointSnapshot,
   parseAzureLeaseCommandOutput,
   runReplayableMutationSteps,
@@ -982,6 +983,7 @@ test("preparation rebind is limited to pre-mutation boundaries with live source 
   assert.match(validator, /journal\.intent\.operation === "disable-api-ingress"/);
   assert.match(validator, /journal\.intent\.operation === "pause-queues"/);
   assert.match(validator, /journal\.intent\.operation === "stop-app-revisions"/);
+  assert.match(validator, /allowPartialQuiescence: appStopBoundary/);
   assert.match(validator, /plan\.backendCandidateCommit === request\.backendCandidate\.commit/);
 
   const rebindStart = source.indexOf("function rebindReleaseLockForPreparation");
@@ -1003,6 +1005,7 @@ test("preparation rebind is limited to pre-mutation boundaries with live source 
   const upload = prepare.indexOf("uploadState(runner, request, journal, options.statePath)", journal);
   assert.ok(validate >= 0 && validate < signatures && signatures < sourceReadback);
   assert.ok(sourceReadback < lock && lock < journal && journal < upload);
+  assert.match(prepare, /superseded\.allowPartialQuiescence/);
 });
 
 test("runtime control helpers are invoked through the Corepack-managed pnpm binary", () => {
@@ -1075,6 +1078,71 @@ test("Container App PATCH templates omit readback-only template properties", () 
   assert.equal(source.scale.pollingInterval, 30);
   assert.equal(source.containers[0].imageType, "ContainerImage");
   assert.equal(source.containers[0].resources.ephemeralStorage, "4Gi");
+});
+
+test("preparation rebind accepts only the exact healthy partial-quiescence revision", () => {
+  const image = `example.invalid/api@sha256:${"a".repeat(64)}`;
+  const sourceTemplate = {
+    revisionSuffix: "source",
+    scale: { minReplicas: 1, maxReplicas: 3, rules: null, cooldownPeriod: 300 },
+    containers: [{
+      name: "api",
+      image,
+      imageType: "ContainerImage",
+      env: [{ name: "NODE_ENV", value: "production" }],
+      resources: { cpu: 1, memory: "2Gi", ephemeralStorage: "4Gi" },
+    }],
+  };
+  const revision = {
+    name: "apex-gtm-api--bootstrap-quiesce-f8c1a08",
+    properties: {
+      active: true,
+      healthState: "Healthy",
+      provisioningState: "Provisioned",
+      template: {
+        scale: { minReplicas: 0, maxReplicas: 1, rules: null },
+        containers: [{
+          name: "api",
+          image,
+          env: [
+            { name: "GMAIL_WATCH_RENEWAL_ENABLED", value: "false" },
+            { name: "GRAPH_RUN_WORKER_ENABLED", value: "false" },
+            { name: "NODE_ENV", value: "production" },
+            { name: "OUTREACH_WORKER_ENABLED", value: "false" },
+            { name: "SCHEDULER_ENABLED", value: "false" },
+            { name: "USAGE_ROLLUP_WORKER_ENABLED", value: "false" },
+            { name: "WORKER_ENABLED", value: "false" },
+          ],
+          resources: { cpu: 1, memory: "2Gi" },
+        }],
+      },
+    },
+  };
+
+  assert.equal(matchesCapturedQuiescenceRevision(
+    revision,
+    sourceTemplate,
+    image,
+    "apex-gtm-api",
+    "api",
+    "f8c1a08af7713932ec7a4a41288690e1",
+  ), true);
+  assert.equal(matchesCapturedQuiescenceRevision(
+    revision,
+    sourceTemplate,
+    image,
+    "apex-gtm-api",
+    "console",
+    "f8c1a08af7713932ec7a4a41288690e1",
+  ), false);
+  assert.equal(matchesCapturedQuiescenceRevision(
+    { ...revision, name: "apex-gtm-api--bootstrap-quiesce-other" },
+    sourceTemplate,
+    image,
+    "apex-gtm-api",
+    "api",
+    "f8c1a08af7713932ec7a4a41288690e1",
+  ), false);
 });
 
 test("every post-acquisition ACA mutation revalidates both Azure lease and Git release lock", () => {
