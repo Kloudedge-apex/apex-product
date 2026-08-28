@@ -793,7 +793,7 @@ export function parseAzureLeaseCommandOutput(bytes, label = "Azure blob lease re
     : value && typeof value === "object" && !Array.isArray(value)
       ? value.leaseId ?? value.lease_id
       : undefined;
-  string(leaseId, /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/, label);
+  string(leaseId, /^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$/, label);
   return leaseId.toLowerCase();
 }
 
