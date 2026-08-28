@@ -1043,7 +1043,7 @@ test("Container App updates use parent-resource PATCH without secret reads or re
   assert.doesNotMatch(source, /"containerapp", "revision", "deactivate"/);
 });
 
-test("Container App PATCH templates omit readback-only scale properties", () => {
+test("Container App PATCH templates omit readback-only template properties", () => {
   const source = {
     revisionSuffix: "old-revision",
     scale: {
@@ -1053,17 +1053,28 @@ test("Container App PATCH templates omit readback-only scale properties", () => 
       pollingInterval: 30,
       rules: [],
     },
-    containers: [{ name: "api", image: "example.invalid/api@sha256:deadbeef" }],
+    containers: [{
+      name: "api",
+      image: "example.invalid/api@sha256:deadbeef",
+      imageType: "ContainerImage",
+      resources: { cpu: 1, memory: "2Gi", ephemeralStorage: "4Gi" },
+    }],
   };
   const writable = writableRevisionTemplate(source);
 
   assert.deepEqual(writable, {
     scale: { minReplicas: 1, maxReplicas: 1, rules: [] },
-    containers: [{ name: "api", image: "example.invalid/api@sha256:deadbeef" }],
+    containers: [{
+      name: "api",
+      image: "example.invalid/api@sha256:deadbeef",
+      resources: { cpu: 1, memory: "2Gi" },
+    }],
   });
   assert.equal(source.revisionSuffix, "old-revision");
   assert.equal(source.scale.cooldownPeriod, 300);
   assert.equal(source.scale.pollingInterval, 30);
+  assert.equal(source.containers[0].imageType, "ContainerImage");
+  assert.equal(source.containers[0].resources.ephemeralStorage, "4Gi");
 });
 
 test("every post-acquisition ACA mutation revalidates both Azure lease and Git release lock", () => {

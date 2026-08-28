@@ -3733,6 +3733,16 @@ export function writableRevisionTemplate(sourceTemplate) {
     delete template.scale.cooldownPeriod;
     delete template.scale.pollingInterval;
   }
+  for (const container of template.containers ?? []) {
+    // Azure includes these server-derived values on the parent Container App
+    // template, but omits them from revision readbacks. They are not part of
+    // the caller-controlled revision contract and must not create false drift.
+    delete container.imageType;
+    if (container.resources && typeof container.resources === "object" &&
+      !Array.isArray(container.resources)) {
+      delete container.resources.ephemeralStorage;
+    }
+  }
   return template;
 }
 
