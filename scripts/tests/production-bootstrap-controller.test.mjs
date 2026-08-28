@@ -1080,7 +1080,7 @@ test("Container App PATCH templates omit readback-only template properties", () 
   assert.equal(source.containers[0].resources.ephemeralStorage, "4Gi");
 });
 
-test("preparation rebind accepts only the exact healthy partial-quiescence revision", () => {
+test("preparation rebind accepts only exact partial-quiescence revisions", () => {
   const image = `example.invalid/api@sha256:${"a".repeat(64)}`;
   const sourceTemplate = {
     revisionSuffix: "source",
@@ -1143,6 +1143,94 @@ test("preparation rebind accepts only the exact healthy partial-quiescence revis
     "api",
     "f8c1a08af7713932ec7a4a41288690e1",
   ), false);
+
+  const unhealthyRevision = {
+    ...revision,
+    properties: { ...revision.properties, healthState: null },
+  };
+  assert.equal(matchesCapturedQuiescenceRevision(
+    unhealthyRevision,
+    sourceTemplate,
+    image,
+    "apex-gtm-api",
+    "api",
+    "f8c1a08af7713932ec7a4a41288690e1",
+  ), false);
+  assert.equal(matchesCapturedQuiescenceRevision(
+    unhealthyRevision,
+    sourceTemplate,
+    image,
+    "apex-gtm-api",
+    "api",
+    "f8c1a08af7713932ec7a4a41288690e1",
+    false,
+  ), true);
+
+  const workerSource = {
+    ...sourceTemplate,
+    containers: [{ ...sourceTemplate.containers[0], name: "worker" }],
+  };
+  const idleWorker = {
+    name: "apex-gtm-worker--bootstrap-quiesce-idle-f8c1a08",
+    properties: {
+      active: true,
+      healthState: "Healthy",
+      provisioningState: "Provisioned",
+      template: {
+        scale: { minReplicas: 0, maxReplicas: 1, rules: null },
+        containers: [{
+          name: "worker",
+          image,
+          command: ["node"],
+          args: [
+            "-e",
+            "require('node:http').createServer((_request, response) => { response.writeHead(200); response.end('ok'); }).listen(4000, '0.0.0.0')",
+          ],
+          env: revision.properties.template.containers[0].env,
+          resources: { cpu: 1, memory: "2Gi" },
+        }],
+      },
+    },
+  };
+  assert.equal(matchesCapturedQuiescenceRevision(
+    idleWorker,
+    workerSource,
+    image,
+    "apex-gtm-worker",
+    "worker",
+    "f8c1a08af7713932ec7a4a41288690e1",
+  ), true);
+  assert.equal(matchesCapturedQuiescenceRevision(
+    {
+      ...idleWorker,
+      properties: {
+        ...idleWorker.properties,
+        template: {
+          ...idleWorker.properties.template,
+          containers: [{
+            ...idleWorker.properties.template.containers[0],
+            args: ["-e", "process.exit(0)"],
+          }],
+        },
+      },
+    },
+    workerSource,
+    image,
+    "apex-gtm-worker",
+    "worker",
+    "f8c1a08af7713932ec7a4a41288690e1",
+  ), false);
+});
+
+test("superseded preparation admits only the exact two-revision interrupted replacement", () => {
+  const source = readFileSync(CONTROLLER, "utf8");
+  const start = source.indexOf("function refreshCapturedSourceForRebind");
+  const end = source.indexOf("function inspectSourceImage", start);
+  const rebind = source.slice(start, end);
+  assert.match(rebind, /activeRevisions\.length === 2/);
+  assert.match(rebind, /activeRevisions\.filter\(sourceMatches\)\.length === 1/);
+  assert.match(rebind, /quiescenceMatches\(revision, false\)/);
+  assert.match(rebind, /!soleExactRevision && !exactInterruptedReplacement/);
 });
 
 test("every post-acquisition ACA mutation revalidates both Azure lease and Git release lock", () => {
