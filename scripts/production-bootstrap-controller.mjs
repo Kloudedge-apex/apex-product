@@ -4151,7 +4151,13 @@ function expectedRevisionTemplate(sourceTemplate, image, envValues, removeEnvVal
     const name = setting.slice(0, separator);
     const value = setting.slice(separator + 1);
     if (!/^[A-Z][A-Z0-9_]*$/.test(name)) fail(`${role} candidate environment name is invalid`);
-    environment.set(name, { name, value });
+    if (value.startsWith("secretref:")) {
+      const secretRef = value.slice("secretref:".length);
+      string(secretRef, /^[a-z0-9][a-z0-9-]{0,62}$/, `${role} candidate secret reference`);
+      environment.set(name, { name, secretRef });
+    } else {
+      environment.set(name, { name, value });
+    }
   }
   for (const name of removeEnvValues) environment.delete(name);
   container.env = [...environment.values()].sort((left, right) => left.name.localeCompare(right.name));
@@ -4518,8 +4524,8 @@ function deploymentEvidence(runner, request, role, revisionName) {
 function validateFirstClassRecoveryEvidence(state, recovery, liveDeployments) {
   exactKeys(recovery, [
     "schemaVersion", "kind", "reasonCodes", "predecessors", "successors",
-    "sourceEntrypointHashes", "pausedQueueEvidenceHash", "queuesRemainedPaused",
-    "liveSendAllowlistEmpty", "recoveredAt", "evidenceHash",
+    "sourceEntrypointHashes", "workerSecretBinding", "pausedQueueEvidenceHash",
+    "queuesRemainedPaused", "liveSendAllowlistEmpty", "recoveredAt", "evidenceHash",
   ], "first-class deployment recovery evidence");
   if (recovery.schemaVersion !== 1 ||
     recovery.kind !== "first-class-api-worker-template-recovery" ||
@@ -4534,6 +4540,12 @@ function validateFirstClassRecoveryEvidence(state, recovery, liveDeployments) {
   if (recovery.reasonCodes.api !== "containment-revision-supersession" ||
     recovery.reasonCodes.worker !== "quiescence-entrypoint-inheritance") {
     fail("first-class deployment recovery reasons are invalid");
+  }
+  exactKeys(recovery.workerSecretBinding, ["name", "secretRef"],
+    "first-class recovery worker secret binding");
+  if (recovery.workerSecretBinding.name !== "CLERK_WEBHOOK_SECRET" ||
+    recovery.workerSecretBinding.secretRef !== "clerk-webhook-secret") {
+    fail("first-class recovery worker secret binding is invalid");
   }
   for (const [value, label] of [
     [recovery.sourceEntrypointHashes.api, "API recovery source entrypoint hash"],
@@ -4556,7 +4568,7 @@ function validateFirstClassRecoveryEvidence(state, recovery, liveDeployments) {
     }
     for (const key of [
       "image", "manifestDigest", "platformDigest", "ociRevision", "platform",
-      "secretReferencesHash",
+      ...(role === "api" ? ["secretReferencesHash"] : []),
     ]) {
       if (successor.identity[key] !== predecessor.identity[key]) {
         fail(`first-class ${role} recovery changed immutable ${key}`);
@@ -4570,7 +4582,9 @@ function validateFirstClassRecoveryEvidence(state, recovery, liveDeployments) {
     recovery.successors.worker.identity.configHash ===
       recovery.predecessors.worker.identity.configHash ||
     recovery.successors.worker.identity.templateHash ===
-      recovery.predecessors.worker.identity.templateHash) {
+      recovery.predecessors.worker.identity.templateHash ||
+    recovery.successors.worker.identity.secretReferencesHash ===
+      recovery.predecessors.worker.identity.secretReferencesHash) {
     fail("first-class recovery did not create fresh API and worker revision templates");
   }
   const { evidenceHash, ...withoutHash } = recovery;
@@ -4712,6 +4726,7 @@ function ensureFirstClassDeploymentsForResume(
     [
       ...firstClassWorkerEnvironment(request, receipt.fencingGeneration),
       `WORKFORCE_PRODUCTION_BOOTSTRAP_RECOVERY_SEQUENCE=${workerRecovery.sequence}`,
+      "CLERK_WEBHOOK_SECRET=secretref:clerk-webhook-secret",
     ],
     1,
     RETIRED_WORKER_ENVIRONMENT,
@@ -4756,6 +4771,13 @@ function ensureFirstClassDeploymentsForResume(
     String(workerRecovery.sequence)) {
     fail("recovered worker sequence marker is invalid");
   }
+  const workerWebhookBindings = (recoveredWorker.properties?.template?.containers?.[0]?.env ?? [])
+    .filter((entry) => entry?.name === "CLERK_WEBHOOK_SECRET");
+  if (workerWebhookBindings.length !== 1 ||
+    workerWebhookBindings[0].secretRef !== "clerk-webhook-secret" ||
+    workerWebhookBindings[0].value !== undefined) {
+    fail("recovered worker Clerk webhook secret binding is invalid");
+  }
   const successors = {
     api: deploymentEvidence(runner, request, "api", apiRevision),
     worker: deploymentEvidence(runner, request, "worker", workerRevision),
@@ -4772,6 +4794,10 @@ function ensureFirstClassDeploymentsForResume(
     sourceEntrypointHashes: {
       api: canonicalHash(apiSourceEntrypoint),
       worker: canonicalHash(workerSourceEntrypoint),
+    },
+    workerSecretBinding: {
+      name: "CLERK_WEBHOOK_SECRET",
+      secretRef: "clerk-webhook-secret",
     },
     pausedQueueEvidenceHash,
     queuesRemainedPaused: true,

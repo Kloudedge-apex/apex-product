@@ -239,6 +239,7 @@ jq -e '
   and (.["$defs"].completeEvidence.required | index("activationRecovery") != null)
   and .["$defs"].activationRecovery.oneOf[1].additionalProperties == false
   and .["$defs"].activationRecovery.oneOf[1].properties.kind.const == "first-class-api-worker-template-recovery"
+  and .["$defs"].activationRecovery.oneOf[1].properties.workerSecretBinding.properties.name.const == "CLERK_WEBHOOK_SECRET"
   and .["$defs"].activationRecovery.oneOf[1].properties.queuesRemainedPaused.const == true
   and (.["$defs"].completeEvidence.properties.health.required |
     index("releaseConfigEvidenceHash") != null)

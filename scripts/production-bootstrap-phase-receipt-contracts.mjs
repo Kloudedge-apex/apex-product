@@ -951,8 +951,8 @@ function validateActivationRecovery(recovery, receipt, armed, deployments, label
   }
   assertExactKeys(recovery, [
     "schemaVersion", "kind", "reasonCodes", "predecessors", "successors",
-    "sourceEntrypointHashes", "pausedQueueEvidenceHash", "queuesRemainedPaused",
-    "liveSendAllowlistEmpty", "recoveredAt", "evidenceHash",
+    "sourceEntrypointHashes", "workerSecretBinding", "pausedQueueEvidenceHash",
+    "queuesRemainedPaused", "liveSendAllowlistEmpty", "recoveredAt", "evidenceHash",
   ], `${label}.activationRecovery`);
   if (recovery.schemaVersion !== 1 ||
     recovery.kind !== "first-class-api-worker-template-recovery" ||
@@ -970,6 +970,12 @@ function validateActivationRecovery(recovery, receipt, armed, deployments, label
   if (recovery.reasonCodes.api !== "containment-revision-supersession" ||
     recovery.reasonCodes.worker !== "quiescence-entrypoint-inheritance") {
     fail(`${label}.activationRecovery reason codes are invalid`);
+  }
+  assertExactKeys(recovery.workerSecretBinding, ["name", "secretRef"],
+    `${label}.activationRecovery.workerSecretBinding`);
+  if (recovery.workerSecretBinding.name !== "CLERK_WEBHOOK_SECRET" ||
+    recovery.workerSecretBinding.secretRef !== "clerk-webhook-secret") {
+    fail(`${label}.activationRecovery worker secret binding is invalid`);
   }
   assertHash(recovery.sourceEntrypointHashes.api,
     `${label}.activationRecovery.sourceEntrypointHashes.api`);
@@ -1002,7 +1008,7 @@ function validateActivationRecovery(recovery, receipt, armed, deployments, label
     }
     for (const key of [
       "image", "manifestDigest", "platformDigest", "ociRevision", "platform",
-      "secretReferencesHash",
+      ...(role === "api" ? ["secretReferencesHash"] : []),
     ]) {
       if (successor.identity[key] !== predecessor.identity[key]) {
         fail(`${label}.activationRecovery changed immutable ${role} ${key}`);
@@ -1016,7 +1022,9 @@ function validateActivationRecovery(recovery, receipt, armed, deployments, label
     recovery.successors.worker.identity.configHash ===
       recovery.predecessors.worker.identity.configHash ||
     recovery.successors.worker.identity.templateHash ===
-      recovery.predecessors.worker.identity.templateHash) {
+      recovery.predecessors.worker.identity.templateHash ||
+    recovery.successors.worker.identity.secretReferencesHash ===
+      recovery.predecessors.worker.identity.secretReferencesHash) {
     fail(`${label}.activationRecovery did not create fresh API and worker templates`);
   }
   const { evidenceHash, ...withoutHash } = recovery;

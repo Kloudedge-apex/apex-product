@@ -371,6 +371,7 @@ function evidenceFor(kind, generation, issuedOffset) {
     successors.worker.identity.revision = `${predecessors.worker.identity.revision}-r1`;
     successors.worker.identity.configHash = hash("9");
     successors.worker.identity.templateHash = hash("a");
+    successors.worker.identity.secretReferencesHash = hash("6");
     finalDeployments.api = successors.api;
     finalDeployments.worker = successors.worker;
     const recovery = {
@@ -383,6 +384,10 @@ function evidenceFor(kind, generation, issuedOffset) {
       predecessors,
       successors,
       sourceEntrypointHashes: { api: hash("b"), worker: hash("d") },
+      workerSecretBinding: {
+        name: "CLERK_WEBHOOK_SECRET",
+        secretRef: "clerk-webhook-secret",
+      },
       pausedQueueEvidenceHash: hash("c"),
       queuesRemainedPaused: true,
       liveSendAllowlistEmpty: true,
