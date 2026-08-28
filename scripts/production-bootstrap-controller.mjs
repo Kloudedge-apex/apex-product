@@ -1017,7 +1017,10 @@ function validateRebindablePreparationJournal(journal, request) {
   const ingressDisableBoundary = journal.stage === "B0_API_INGRESS_DISABLE_INTENT" &&
     journal.source !== null && journal.intent.operation === "disable-api-ingress" &&
     journal.intent.status === "started";
-  if (!sourceCaptureBoundary && !ingressDisableBoundary) {
+  const queuePauseBoundary = journal.stage === "B0_QUEUE_PAUSE_INTENT" &&
+    journal.source !== null && journal.intent.operation === "pause-queues" &&
+    journal.intent.status === "started";
+  if (!sourceCaptureBoundary && !ingressDisableBoundary && !queuePauseBoundary) {
     fail("superseded preparation journal advanced beyond a provably rebindable boundary");
   }
   canonicalTimestamp(journal.intent.at, "superseded preparation intent time");
@@ -1073,7 +1076,11 @@ function validateRebindablePreparationJournal(journal, request) {
     dryRunBytes,
     dryRunSignatureBytes,
     previousBackendCommit: plan.backendCandidateCommit,
-    requiresSourceReadback: ingressDisableBoundary,
+    sourceReadbackPosture: ingressDisableBoundary
+      ? "enabled"
+      : queuePauseBoundary
+        ? "disabled"
+        : null,
   };
 }
 
@@ -1756,7 +1763,7 @@ function sourceSnapshot(app, revision, role, imageMetadata) {
   };
 }
 
-function assertCapturedSourceUnchangedForRebind(runner, request, source) {
+function refreshCapturedSourceForRebind(runner, request, options, source, apiIngressPosture) {
   if (!source || typeof source !== "object" || Array.isArray(source) ||
     !source.privateRestoreBundle || typeof source.privateRestoreBundle !== "object" ||
     Array.isArray(source.privateRestoreBundle) ||
@@ -1766,6 +1773,9 @@ function assertCapturedSourceUnchangedForRebind(runner, request, source) {
   }
   const bundle = source.privateRestoreBundle;
   const baseline = source.sourceRollbackBaseline;
+  if (!new Set(["enabled", "disabled"]).has(apiIngressPosture)) {
+    fail("superseded preparation API ingress posture is invalid");
+  }
   if (baseline.privateRestoreBundleHash !== canonicalHash(bundle)) {
     fail("superseded preparation source restore bundle is corrupt");
   }
@@ -1783,9 +1793,18 @@ function assertCapturedSourceUnchangedForRebind(runner, request, source) {
     }
     const liveApp = appState(runner, request, resourceId, `rebindable source ${role}`);
     const liveRevision = activeRevision(revisionList(runner, request, appName), appName);
+    const liveConfiguration = structuredClone(liveApp.properties?.configuration);
+    if (role === "api" && apiIngressPosture === "disabled") {
+      if (liveConfiguration?.ingress !== null) {
+        fail("superseded preparation API ingress is not disabled");
+      }
+      liveConfiguration.ingress = structuredClone(
+        bundle.apiResource?.properties?.configuration?.ingress,
+      );
+    }
     if (liveRevision.name !== snapshot.revision ||
       liveRevision.properties?.template?.containers?.[0]?.image !== snapshot.image ||
-      canonicalHash(liveApp.properties?.configuration) !== snapshot.configHash ||
+      canonicalHash(liveConfiguration) !== snapshot.configHash ||
       canonicalHash(liveRevision.properties?.template) !== snapshot.templateHash) {
       fail(`superseded preparation ${role} source changed after capture`);
     }
@@ -1796,9 +1815,23 @@ function assertCapturedSourceUnchangedForRebind(runner, request, source) {
     request.authority.apiContainerAppResourceId,
     "rebindable source API ingress",
   ).properties?.configuration?.ingress;
-  if (ingress?.external !== true || typeof ingress.fqdn !== "string" || ingress.fqdn.length < 1) {
-    fail("superseded preparation API ingress may already have changed");
+  if ((apiIngressPosture === "enabled" &&
+      (ingress?.external !== true || typeof ingress.fqdn !== "string" || ingress.fqdn.length < 1)) ||
+    (apiIngressPosture === "disabled" && ingress !== null)) {
+    fail("superseded preparation API ingress does not match its journal boundary");
   }
+  return {
+    ...source,
+    sourceRollbackBaseline: {
+      ...baseline,
+      deliverySafetyEvidence: verifyDeliverySafetyEvidence(request, options),
+      databaseDdlAuthorityEvidence: verifyDatabaseDdlAuthorityEvidence(
+        request,
+        options.databaseDdlAuthorityEvidence,
+      ),
+      operationalSmokeEvidence: verifyOperationalSmokeEvidence(request, options),
+    },
+  };
 }
 
 function inspectSourceImage(runner, image, label) {
@@ -1935,7 +1968,7 @@ function runRuntimeControl(
     verifyAzureLease(runner, request);
     verifyReleaseLock(runner, request);
   }
-  runner.run("pnpm", args, {
+  runner.run("corepack", ["pnpm", ...args], {
     label: `production runtime ${action}`,
     env: { ...process.env, WORKFORCE_PRODUCTION_BOOTSTRAP_AUTHORITY_CONFIRMED: "true" },
   });
@@ -1987,7 +2020,7 @@ function runQuiescence(
     verifyAzureLease(runner, request);
     verifyReleaseLock(runner, request);
   }
-  runner.run("pnpm", [
+  runner.run("corepack", ["pnpm",
     "--filter", "@apex/api", "ops:production-bootstrap-quiescence", "--",
     "--action", action,
     "--attempt-id", request.attemptId,
@@ -2491,16 +2524,25 @@ function prepare(runner, request, options) {
     } else {
       const superseded = validateRebindablePreparationJournal(existing, request);
       verifySupersededPreparationSignatures(runner, request, options, superseded);
-      if (superseded.requiresSourceReadback) {
-        assertCapturedSourceUnchangedForRebind(runner, request, superseded.journal.source);
-      }
+      const reboundSource = superseded.sourceReadbackPosture === null
+        ? null
+        : refreshCapturedSourceForRebind(
+          runner,
+          request,
+          options,
+          superseded.journal.source,
+          superseded.sourceReadbackPosture,
+        );
       rebindReleaseLockForPreparation(
         runner,
         request,
         options.stateDir,
         superseded.previousBackendCommit,
       );
-      journal = preparationJournal(request, clerkReconciliation);
+      journal = {
+        ...preparationJournal(request, clerkReconciliation),
+        source: reboundSource,
+      };
       uploadState(runner, request, journal, options.statePath);
     }
     if (journal.clerkReconciliationPlanBase64 !== clerkReconciliation.planBytes.toString("base64") ||
