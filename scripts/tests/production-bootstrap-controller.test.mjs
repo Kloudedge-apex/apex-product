@@ -979,11 +979,14 @@ test("preparation rebind is limited to pre-mutation boundaries with live source 
   assert.match(validator, /journal\.stage === "B0_API_INGRESS_DISABLE_INTENT"/);
   assert.match(validator, /journal\.stage === "B0_QUEUE_PAUSE_INTENT"/);
   assert.match(validator, /journal\.stage === "B0_APP_STOP_INTENT"/);
+  assert.match(validator, /journal\.stage === "B0_WRITER_FENCE_ARMED"/);
   assert.match(validator, /journal\.intent\.operation === "capture-source-baseline"/);
   assert.match(validator, /journal\.intent\.operation === "disable-api-ingress"/);
   assert.match(validator, /journal\.intent\.operation === "pause-queues"/);
   assert.match(validator, /journal\.intent\.operation === "stop-app-revisions"/);
+  assert.match(validator, /journal\.intent\.operation === "arm-writer-fence"/);
   assert.match(validator, /allowPartialQuiescence: appStopBoundary/);
+  assert.match(validator, /requireHeldRuntime: writerFenceArmedBoundary/);
   assert.match(validator, /plan\.backendCandidateCommit === request\.backendCandidate\.commit/);
 
   const rebindStart = source.indexOf("function rebindReleaseLockForPreparation");
@@ -1000,11 +1003,13 @@ test("preparation rebind is limited to pre-mutation boundaries with live source 
   const validate = prepare.indexOf("validateRebindablePreparationJournal");
   const signatures = prepare.indexOf("verifySupersededPreparationSignatures", validate);
   const sourceReadback = prepare.indexOf("refreshCapturedSourceForRebind", signatures);
-  const lock = prepare.indexOf("rebindReleaseLockForPreparation", sourceReadback);
+  const runtimeReadback = prepare.indexOf('"read",', sourceReadback);
+  const lock = prepare.indexOf("rebindReleaseLockForPreparation", runtimeReadback);
   const journal = prepare.indexOf("preparationJournal(request, clerkReconciliation)", lock);
   const upload = prepare.indexOf("uploadState(runner, request, journal, options.statePath)", journal);
   assert.ok(validate >= 0 && validate < signatures && signatures < sourceReadback);
-  assert.ok(sourceReadback < lock && lock < journal && journal < upload);
+  assert.ok(sourceReadback < runtimeReadback && runtimeReadback < lock);
+  assert.ok(lock < journal && journal < upload);
   assert.match(prepare, /superseded\.allowPartialQuiescence/);
 });
 
@@ -1018,6 +1023,9 @@ test("runtime control helpers are invoked through the Corepack-managed pnpm bina
   const quiescence = source.slice(quiescenceStart, quiescenceEnd);
   assert.match(runtime, /runner\.run\("corepack", \["pnpm", \.\.\.args\]/);
   assert.match(quiescence, /runner\.run\("corepack", \["pnpm",/);
+  assert.match(quiescence, /"--filter", "@apex\/api", "exec", "tsx"/);
+  assert.match(quiescence, /production-bootstrap-quiescence\.cli\.ts/);
+  assert.doesNotMatch(quiescence, /ops:production-bootstrap-quiescence/);
   assert.doesNotMatch(runtime, /runner\.run\("pnpm"/);
   assert.doesNotMatch(quiescence, /runner\.run\("pnpm"/);
 });
@@ -1203,6 +1211,19 @@ test("preparation rebind accepts only exact partial-quiescence revisions", () =>
   assert.equal(matchesCapturedQuiescenceRevision(
     {
       ...idleWorker,
+      name: "apex-gtm-worker--bootstrap-quiesce-idle-f8c1a08-4065c76",
+    },
+    workerSource,
+    image,
+    "apex-gtm-worker",
+    "worker",
+    "f8c1a08af7713932ec7a4a41288690e1",
+    true,
+    "4065c7613d346cd0237eef6083e72a45b11196be",
+  ), true);
+  assert.equal(matchesCapturedQuiescenceRevision(
+    {
+      ...idleWorker,
       properties: {
         ...idleWorker.properties,
         template: {
@@ -1227,6 +1248,7 @@ test("superseded preparation admits only the exact two-revision interrupted repl
   const start = source.indexOf("function refreshCapturedSourceForRebind");
   const end = source.indexOf("function inspectSourceImage", start);
   const rebind = source.slice(start, end);
+  assert.match(rebind, /role === "worker" && activeRevisions\.length === 2/);
   assert.match(rebind, /activeRevisions\.length === 2/);
   assert.match(rebind, /activeRevisions\.filter\(sourceMatches\)\.length === 1/);
   assert.match(rebind, /quiescenceMatches\(revision, false\)/);

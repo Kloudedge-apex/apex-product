@@ -1036,8 +1036,11 @@ function validateRebindablePreparationJournal(journal, request) {
   const appStopBoundary = journal.stage === "B0_APP_STOP_INTENT" &&
     journal.source !== null && journal.intent.operation === "stop-app-revisions" &&
     journal.intent.status === "started";
+  const writerFenceArmedBoundary = journal.stage === "B0_WRITER_FENCE_ARMED" &&
+    journal.source !== null && journal.intent.operation === "arm-writer-fence" &&
+    journal.intent.status === "completed";
   if (!sourceCaptureBoundary && !ingressDisableBoundary && !queuePauseBoundary &&
-    !appStopBoundary) {
+    !appStopBoundary && !writerFenceArmedBoundary) {
     fail("superseded preparation journal advanced beyond a provably rebindable boundary");
   }
   canonicalTimestamp(journal.intent.at, "superseded preparation intent time");
@@ -1095,10 +1098,11 @@ function validateRebindablePreparationJournal(journal, request) {
     previousBackendCommit: plan.backendCandidateCommit,
     sourceReadbackPosture: ingressDisableBoundary
       ? "enabled"
-      : queuePauseBoundary || appStopBoundary
+      : queuePauseBoundary || appStopBoundary || writerFenceArmedBoundary
         ? "disabled"
         : null,
-    allowPartialQuiescence: appStopBoundary,
+    allowPartialQuiescence: appStopBoundary || writerFenceArmedBoundary,
+    requireHeldRuntime: writerFenceArmedBoundary,
   };
 }
 
@@ -1788,6 +1792,7 @@ function refreshCapturedSourceForRebind(
   source,
   apiIngressPosture,
   allowPartialQuiescence,
+  previousBackendCommit,
 ) {
   if (!source || typeof source !== "object" || Array.isArray(source) ||
     !source.privateRestoreBundle || typeof source.privateRestoreBundle !== "object" ||
@@ -1840,6 +1845,7 @@ function refreshCapturedSourceForRebind(
         role,
         request.attemptId,
         requireHealthy,
+        previousBackendCommit,
       );
     const soleExactRevision = activeRevisions.length === 1 &&
       (sourceMatches(activeRevisions[0]) || quiescenceMatches(activeRevisions[0], true));
@@ -2063,7 +2069,8 @@ function runQuiescence(
     verifyReleaseLock(runner, request);
   }
   runner.run("corepack", ["pnpm",
-    "--filter", "@apex/api", "ops:production-bootstrap-quiescence", "--",
+    "--filter", "@apex/api", "exec", "tsx",
+    requireSnapshotFile("apps/api/src/ops/production-bootstrap-quiescence.cli.ts"),
     "--action", action,
     "--attempt-id", request.attemptId,
     "--schema-phase", schemaPhase,
@@ -2611,7 +2618,32 @@ function prepare(runner, request, options) {
           superseded.journal.source,
           superseded.sourceReadbackPosture,
           superseded.allowPartialQuiescence,
+          superseded.previousBackendCommit,
         );
+      if (superseded.requireHeldRuntime) {
+        const previousRequest = {
+          ...request,
+          backendCandidate: {
+            ...request.backendCandidate,
+            commit: superseded.previousBackendCommit,
+          },
+        };
+        const held = assertRuntimeHeldEvidence(
+          runRuntimeControl(
+            runner,
+            previousRequest,
+            options.stateDir,
+            "read",
+            3,
+          ),
+          previousRequest,
+          3,
+        );
+        if (["agentRuns", "graphRuns", "outreachSend"]
+          .some((key) => held.queues[key].workerCount !== 0)) {
+          fail("superseded preparation runtime still has connected queue workers");
+        }
+      }
       rebindReleaseLockForPreparation(
         runner,
         request,
@@ -2663,17 +2695,19 @@ function prepare(runner, request, options) {
     runRuntimeControl(runner, request, options.stateDir, "pause-only", 3);
     journal = journalMutation(runner, request, options, journal, "pause-queues", "completed", "B0_QUEUES_PAUSED");
     journal = journalMutation(runner, request, options, journal, "stop-app-revisions", "started", "B0_APP_STOP_INTENT");
+    const quiescenceRevisionIdentity =
+      `${request.attemptId.slice(0, 7)}-${request.backendCandidate.commit.slice(0, 7)}`;
     quiesceAppWithParentWrite(
       runner,
       request,
       "api",
-      `${API_APP}--bootstrap-quiesce-${request.attemptId.slice(0, 7)}`,
+      `${API_APP}--bootstrap-quiesce-${quiescenceRevisionIdentity}`,
     );
     quiesceAppWithParentWrite(
       runner,
       request,
       "worker",
-      `${WORKER_APP}--bootstrap-quiesce-idle-${request.attemptId.slice(0, 7)}`,
+      `${WORKER_APP}--bootstrap-quiesce-idle-${quiescenceRevisionIdentity}`,
     );
     const legacyReplicaEvidence = proveStableZeroExecutionReplicas(runner, request);
     journal = journalMutation(runner, request, options, journal, "stop-app-revisions", "completed", "B0_APPS_STOPPED");
@@ -3778,12 +3812,20 @@ export function matchesCapturedQuiescenceRevision(
   role,
   attemptId,
   requireHealthy = true,
+  backendCommit,
 ) {
   const legacyName = `${appName}--bootstrap-quiesce-${attemptId.slice(0, 7)}`;
   const idleWorkerName = `${appName}--bootstrap-quiesce-idle-${attemptId.slice(0, 7)}`;
-  if (role === "console" ||
-    (liveRevision?.name !== legacyName &&
-      !(role === "worker" && liveRevision?.name === idleWorkerName)) ||
+  const revisionNames = new Set([legacyName]);
+  if (role === "worker") revisionNames.add(idleWorkerName);
+  if (backendCommit !== undefined) {
+    string(backendCommit, /^[0-9a-f]{40}$/, "quiescence backend commit");
+    revisionNames.add(`${legacyName}-${backendCommit.slice(0, 7)}`);
+    if (role === "worker") {
+      revisionNames.add(`${idleWorkerName}-${backendCommit.slice(0, 7)}`);
+    }
+  }
+  if (role === "console" || !revisionNames.has(liveRevision?.name) ||
     liveRevision.properties?.active !== true) return false;
   const actual = writableRevisionTemplate(liveRevision.properties?.template ?? {});
   const container = actual.containers?.[0];
@@ -3791,7 +3833,7 @@ export function matchesCapturedQuiescenceRevision(
   if (Array.isArray(container.env)) {
     container.env.sort((left, right) => String(left?.name).localeCompare(String(right?.name)));
   }
-  const expected = liveRevision.name === idleWorkerName
+  const expected = liveRevision.name.startsWith(`${appName}--bootstrap-quiesce-idle-`)
     ? expectedQuiescenceTemplate(sourceTemplate, sourceImage, role)
     : expectedRevisionTemplate(
       sourceTemplate,
