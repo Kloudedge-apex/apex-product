@@ -385,13 +385,13 @@ jq -n \
       quiescedState: {
         api: {
           stopped: true,
-          activeRevisionCount: 0,
+          activeRevisionCount: 1,
           replicaCount: 0,
           ingressDisabled: true
         },
         worker: {
           stopped: true,
-          activeRevisionCount: 0,
+          activeRevisionCount: 1,
           replicaCount: 0,
           consumersDisabled: true
         },
@@ -845,11 +845,11 @@ UNSAFE_BOUND_FILTERS=(
   '.sourceRollbackBaseline.worker.image = "workforceosprodacr.azurecr.io/apex-api@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"'
   '.sourceRollbackBaseline.console.platform = "linux/arm64"'
   '.quiescedState.api.stopped = false'
-  '.quiescedState.api.activeRevisionCount = 1'
+  '.quiescedState.api.activeRevisionCount = 0'
   '.quiescedState.api.replicaCount = 1'
   '.quiescedState.api.ingressDisabled = false'
   '.quiescedState.worker.stopped = false'
-  '.quiescedState.worker.activeRevisionCount = 1'
+  '.quiescedState.worker.activeRevisionCount = 0'
   '.quiescedState.worker.replicaCount = 1'
   '.quiescedState.worker.consumersDisabled = false'
   '.quiescedState.queueObservations[0].queues.agentRuns.paused = false'

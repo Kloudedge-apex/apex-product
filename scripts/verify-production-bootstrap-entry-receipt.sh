@@ -450,12 +450,12 @@ if ! jq -e \
       ])
       and (.api | exact_keys(["activeRevisionCount", "ingressDisabled", "replicaCount", "stopped"]))
       and .api.stopped == true
-      and .api.activeRevisionCount == 0
+      and .api.activeRevisionCount == 1
       and .api.replicaCount == 0
       and .api.ingressDisabled == true
       and (.worker | exact_keys(["activeRevisionCount", "consumersDisabled", "replicaCount", "stopped"]))
       and .worker.stopped == true
-      and .worker.activeRevisionCount == 0
+      and .worker.activeRevisionCount == 1
       and .worker.replicaCount == 0
       and .worker.consumersDisabled == true
       and (.queueObservations | type == "array" and length == 2)

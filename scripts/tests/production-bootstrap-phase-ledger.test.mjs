@@ -314,8 +314,8 @@ function entryReceiptFor(fencingGeneration, minute, overrides = {}) {
     },
     sourceRollbackBaseline,
     quiescedState: {
-      api: { stopped: true, activeRevisionCount: 0, replicaCount: 0, ingressDisabled: true },
-      worker: { stopped: true, activeRevisionCount: 0, replicaCount: 0, consumersDisabled: true },
+      api: { stopped: true, activeRevisionCount: 1, replicaCount: 0, ingressDisabled: true },
+      worker: { stopped: true, activeRevisionCount: 1, replicaCount: 0, consumersDisabled: true },
       queueObservations: [
         {
           observedAt: atMinute(minute - 1.5),
@@ -665,11 +665,11 @@ function phaseEvidence(state, targetPhase, fencingGeneration, minute) {
         restoredAt: steps[4].completedAt, evidenceHash: hash("b"),
       },
       ambiguityControl: {
-        policy: "repause-deactivate-stable-zero-and-hold-terminal-open-forward-only-v1",
+        policy: "repause-zero-scale-stable-zero-and-hold-terminal-open-forward-only-v1",
         containmentReady: true,
         ambiguousPartialResumeDetected: false,
         allQueuesRePauseRequired: true,
-        apiAndWorkerDeactivateRequired: true,
+        apiAndWorkerZeroScaleRequired: true,
         stableZeroReplicasRequired: true,
         terminalOpenRecloseForbidden: true,
         holdForwardOnlyRequired: true,

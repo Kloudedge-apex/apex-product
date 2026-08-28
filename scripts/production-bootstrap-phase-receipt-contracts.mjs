@@ -1082,16 +1082,16 @@ function validateB8(evidence, receipt, previousReceipt) {
   assertHash(resume.apiMutations.evidenceHash, `${label}.resume.apiMutations.evidenceHash`);
   assertExactKeys(resume.ambiguityControl, [
     "policy", "containmentReady", "ambiguousPartialResumeDetected",
-    "allQueuesRePauseRequired", "apiAndWorkerDeactivateRequired",
+    "allQueuesRePauseRequired", "apiAndWorkerZeroScaleRequired",
     "stableZeroReplicasRequired", "terminalOpenRecloseForbidden",
     "holdForwardOnlyRequired", "evidenceHash",
   ], `${label}.resume.ambiguityControl`);
   if (resume.ambiguityControl.policy !==
-      "repause-deactivate-stable-zero-and-hold-terminal-open-forward-only-v1" ||
+      "repause-zero-scale-stable-zero-and-hold-terminal-open-forward-only-v1" ||
     resume.ambiguityControl.containmentReady !== true ||
     resume.ambiguityControl.ambiguousPartialResumeDetected !== false ||
     resume.ambiguityControl.allQueuesRePauseRequired !== true ||
-    resume.ambiguityControl.apiAndWorkerDeactivateRequired !== true ||
+    resume.ambiguityControl.apiAndWorkerZeroScaleRequired !== true ||
     resume.ambiguityControl.stableZeroReplicasRequired !== true ||
     resume.ambiguityControl.terminalOpenRecloseForbidden !== true ||
     resume.ambiguityControl.holdForwardOnlyRequired !== true) {

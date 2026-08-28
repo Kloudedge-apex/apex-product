@@ -1106,12 +1106,12 @@ function validateQueueObservation(observation, label) {
 function validateQuiescedState(quiescedState, sourceBaseline, context) {
   assertExactKeys(quiescedState, QUIESCED_STATE_KEYS, "entry receipt quiescedState");
   assertExactKeys(quiescedState.api, QUIESCED_API_KEYS, "entry receipt quiescedState.api");
-  if (quiescedState.api.stopped !== true || quiescedState.api.activeRevisionCount !== 0 ||
+  if (quiescedState.api.stopped !== true || quiescedState.api.activeRevisionCount !== 1 ||
     quiescedState.api.replicaCount !== 0 || quiescedState.api.ingressDisabled !== true) {
     fail("entry receipt API is not proven stopped and ingress-disabled");
   }
   assertExactKeys(quiescedState.worker, QUIESCED_WORKER_KEYS, "entry receipt quiescedState.worker");
-  if (quiescedState.worker.stopped !== true || quiescedState.worker.activeRevisionCount !== 0 ||
+  if (quiescedState.worker.stopped !== true || quiescedState.worker.activeRevisionCount !== 1 ||
     quiescedState.worker.replicaCount !== 0 || quiescedState.worker.consumersDisabled !== true) {
     fail("entry receipt worker is not proven stopped and consumer-disabled");
   }
