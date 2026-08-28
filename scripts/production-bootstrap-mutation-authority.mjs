@@ -55,6 +55,35 @@ function run(command, args, environment, label) {
   return result.stdout;
 }
 
+function renewAzureLease(args, environment, expectedLeaseId) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const result = spawnSync("az", args, {
+      encoding: null,
+      maxBuffer: 64 * 1024,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: environment,
+    });
+    if (!result.error && result.status === 0 && Buffer.isBuffer(result.stdout)) {
+      const raw = result.stdout.toString("utf8").trim();
+      let value = raw;
+      try {
+        value = JSON.parse(raw);
+      } catch {
+        // Azure CLI versions may emit the UUID directly even for JSON output.
+      }
+      const leaseId = typeof value === "string"
+        ? value
+        : value && typeof value === "object"
+          ? value.leaseId ?? value.lease_id
+          : null;
+      if (typeof leaseId === "string" && leaseId.toLowerCase() === expectedLeaseId) {
+        return;
+      }
+    }
+  }
+  fail("Azure bootstrap lease validation failed");
+}
+
 /**
  * Revalidate both durable mutation authorities from inside the child process,
  * immediately before its bounded Redis/PostgreSQL mutation. Command output is
@@ -79,7 +108,7 @@ export function verifyProductionBootstrapMutationAuthority(options) {
   }
   const environment = options.environment ?? process.env;
   const expectedLeaseId = leaseId(attemptId);
-  const azureOutput = run("az", [
+  renewAzureLease([
     "storage", "blob", "lease", "renew",
     "--subscription", subscriptionId,
     "--account-name", storageAccount,
@@ -87,12 +116,9 @@ export function verifyProductionBootstrapMutationAuthority(options) {
     "--blob-name", storageBlob,
     "--auth-mode", "login",
     "--lease-id", expectedLeaseId,
-    "--output", "tsv",
-    "--query", "leaseId",
-  ], environment, "Azure bootstrap lease");
-  if (azureOutput.toString("utf8").trim() !== expectedLeaseId) {
-    fail("Azure bootstrap lease validation failed");
-  }
+    "--output", "json",
+    "--only-show-errors",
+  ], environment, expectedLeaseId);
 
   const release = boundedJson(run("gh", [
     "api",
