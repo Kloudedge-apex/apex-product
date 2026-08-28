@@ -1136,6 +1136,9 @@ test("first-class recovery restores captured entrypoints before consumers resume
   assert.match(resume, /pausedRuntime\.evidenceHash/);
   assert.match(recovery, /CLERK_WEBHOOK_SECRET=secretref:clerk-webhook-secret/);
   assert.match(recovery, /workerSecretBinding/);
+  assert.match(recovery, /boundedRecoverySequence/);
+  assert.match(recovery, /partialRecoveryObserved/);
+  assert.match(recovery, /workerQuiescent\.some\(Boolean\)/);
   assert.match(containment, /sourceRevisionName/);
   assert.match(containment, /bounded quiescence recovery sequence/);
 });

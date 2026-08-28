@@ -4594,14 +4594,56 @@ function validateFirstClassRecoveryEvidence(state, recovery, liveDeployments) {
   return recovery;
 }
 
-function nextRecoveryRevision(runner, request, app, predecessorName) {
+function boundedRecoverySequence(revision, predecessorName, image, sourceEntrypoint) {
+  if (revision?.properties?.active !== true ||
+    revision.properties?.template?.containers?.[0]?.image !== image ||
+    canonicalJson(containerEntrypoint(
+      revision.properties?.template,
+      `${predecessorName} recovery successor template`,
+    )) !== canonicalJson(sourceEntrypoint)) {
+    return null;
+  }
+  for (let sequence = 1; sequence <= 9; sequence += 1) {
+    if (revision.name === `${predecessorName}-r${sequence}`) return sequence;
+  }
+  return null;
+}
+
+function isForwardOnlyHoldRevision(revision, app, generation, image) {
+  if (revision?.properties?.active !== true ||
+    revision.properties?.template?.containers?.[0]?.image !== image ||
+    canonicalJson(containerEntrypoint(
+      revision.properties?.template,
+      `${app} forward-only hold template`,
+    )) !== canonicalJson({
+      command: [...WORKER_QUIESCENCE_COMMAND],
+      args: [...WORKER_QUIESCENCE_ARGS],
+    })) {
+    return false;
+  }
+  const base = `${app}--bootstrap-hold-${generation}`;
+  if (revision.name === base) return true;
+  for (let sequence = 1; sequence <= 9; sequence += 1) {
+    if (revision.name === `${base}-r${sequence}`) return true;
+  }
+  return false;
+}
+
+function nextRecoveryRevision(
+  runner,
+  request,
+  app,
+  predecessorName,
+  allowSoleActiveAdoption = true,
+) {
   const revisions = revisionList(runner, request, app);
   const active = revisions.filter((entry) => entry?.properties?.active === true);
   for (let attempt = 1; attempt <= 9; attempt += 1) {
     const candidateName = `${predecessorName}-r${attempt}`;
     if (candidateName.length > 54) fail(`${app} recovery revision name exceeds the Azure limit`);
     const existing = revisions.find((entry) => entry?.name === candidateName);
-    if (!existing || (existing.properties?.active === true && active.length === 1)) {
+    if (!existing || (allowSoleActiveAdoption &&
+      existing.properties?.active === true && active.length === 1)) {
       return { name: candidateName, sequence: attempt };
     }
   }
@@ -4627,6 +4669,10 @@ function ensureFirstClassDeploymentsForResume(
     workerSourceTemplate,
     "captured source worker template",
   );
+  const terminalOpenGeneration = state.phaseEvidence.terminalOpenIntent?.generation;
+  if (!Number.isSafeInteger(terminalOpenGeneration) || terminalOpenGeneration < 1) {
+    fail("terminal OPEN generation is absent during first-class deployment recovery");
+  }
   const apiActive = revisionList(runner, request, API_APP)
     .filter((entry) => entry?.properties?.active === true);
   const workerActive = revisionList(runner, request, WORKER_APP)
@@ -4669,24 +4715,75 @@ function ensureFirstClassDeploymentsForResume(
     );
     return { state, recovery: null };
   }
-  if (apiActive.length !== 1 || workerActive.length !== 1 ||
-    apiActive[0].properties?.template?.containers?.[0]?.image !== request.targetArtifacts.api.image ||
-    workerActive[0].properties?.template?.containers?.[0]?.image !== request.targetArtifacts.worker.image ||
-    canonicalJson(containerEntrypoint(
-      workerActive[0].properties?.template,
-      "contained first-class worker template",
-    )) !== canonicalJson({
-    command: [...WORKER_QUIESCENCE_COMMAND],
-    args: [...WORKER_QUIESCENCE_ARGS],
-  })) {
+  const apiRecoverySequences = apiActive.map((revision) => boundedRecoverySequence(
+    revision,
+    apiPredecessorName,
+    request.targetArtifacts.api.image,
+    apiSourceEntrypoint,
+  ));
+  const workerRecoverySequences = workerActive.map((revision) => boundedRecoverySequence(
+    revision,
+    workerPredecessorName,
+    request.targetArtifacts.worker.image,
+    workerSourceEntrypoint,
+  ));
+  const apiContained = apiActive.length === 1 && (
+    isForwardOnlyHoldRevision(
+      apiActive[0],
+      API_APP,
+      terminalOpenGeneration,
+      request.targetArtifacts.api.image,
+    ) ||
+    (apiActive[0].name === apiPredecessorName &&
+      apiActive[0].properties?.template?.containers?.[0]?.image ===
+        request.targetArtifacts.api.image)
+  );
+  const workerQuiescent = workerActive.map((revision) =>
+    isForwardOnlyHoldRevision(
+      revision,
+      WORKER_APP,
+      terminalOpenGeneration,
+      request.targetArtifacts.worker.image,
+    ) ||
+    (revision.name === workerPredecessorName &&
+      revision.properties?.template?.containers?.[0]?.image ===
+        request.targetArtifacts.worker.image &&
+      canonicalJson(containerEntrypoint(
+        revision.properties?.template,
+        "contained signed first-class worker template",
+      )) === canonicalJson({
+        command: [...WORKER_QUIESCENCE_COMMAND],
+        args: [...WORKER_QUIESCENCE_ARGS],
+      })),
+  );
+  const apiRecoverable = apiActive.length === 1 &&
+    (apiContained || apiRecoverySequences[0] !== null);
+  const workerRecoverable = workerActive.length >= 1 && workerActive.length <= 10 &&
+    workerQuiescent.some(Boolean) &&
+    workerActive.every((_, index) =>
+      workerQuiescent[index] || workerRecoverySequences[index] !== null);
+  if (!apiRecoverable || !workerRecoverable) {
     fail("active deployment posture is not the reviewed API/worker containment state");
   }
-  const apiRecovery = nextRecoveryRevision(runner, request, API_APP, apiPredecessorName);
+  // A previous attempt may have durably created only one successor before the
+  // other role failed readiness. Never reuse either side of that asymmetric
+  // state: advance both bounded suffixes so one parent write repairs each app
+  // and the resulting evidence binds one fresh, coherent successor pair.
+  const partialRecoveryObserved = apiRecoverySequences.some((value) => value !== null) ||
+    workerRecoverySequences.some((value) => value !== null);
+  const apiRecovery = nextRecoveryRevision(
+    runner,
+    request,
+    API_APP,
+    apiPredecessorName,
+    !partialRecoveryObserved,
+  );
   const workerRecovery = nextRecoveryRevision(
     runner,
     request,
     WORKER_APP,
     workerPredecessorName,
+    !partialRecoveryObserved,
   );
   const apiRevision = updateApp(
     runner,
