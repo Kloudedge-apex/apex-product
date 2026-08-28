@@ -74,6 +74,14 @@ const RELEASE_LOCK_REF = "refs/heads/workforce-os-release-lock/production-gtm-pl
 const API_APP = "apex-gtm-api";
 const WORKER_APP = "apex-gtm-worker";
 const CONSOLE_APP = "nikxius-web";
+const QUIESCENCE_DISABLED_WORKERS = Object.freeze([
+  "GMAIL_WATCH_RENEWAL_ENABLED=false",
+  "GRAPH_RUN_WORKER_ENABLED=false",
+  "OUTREACH_WORKER_ENABLED=false",
+  "SCHEDULER_ENABLED=false",
+  "USAGE_ROLLUP_WORKER_ENABLED=false",
+  "WORKER_ENABLED=false",
+]);
 const CONSOLE_API_UPSTREAM_URL =
   "https://apex-gtm-api.braveflower-6d3bb66b.eastus.azurecontainerapps.io";
 const LEGACY_SOURCE_IMAGE_REVISIONS = Object.freeze({
@@ -1085,6 +1093,7 @@ function validateRebindablePreparationJournal(journal, request) {
       : queuePauseBoundary || appStopBoundary
         ? "disabled"
         : null,
+    allowPartialQuiescence: appStopBoundary,
   };
 }
 
@@ -1767,7 +1776,14 @@ function sourceSnapshot(app, revision, role, imageMetadata) {
   };
 }
 
-function refreshCapturedSourceForRebind(runner, request, options, source, apiIngressPosture) {
+function refreshCapturedSourceForRebind(
+  runner,
+  request,
+  options,
+  source,
+  apiIngressPosture,
+  allowPartialQuiescence,
+) {
   if (!source || typeof source !== "object" || Array.isArray(source) ||
     !source.privateRestoreBundle || typeof source.privateRestoreBundle !== "object" ||
     Array.isArray(source.privateRestoreBundle) ||
@@ -1806,10 +1822,20 @@ function refreshCapturedSourceForRebind(runner, request, options, source, apiIng
         bundle.apiResource?.properties?.configuration?.ingress,
       );
     }
-    if (liveRevision.name !== snapshot.revision ||
-      liveRevision.properties?.template?.containers?.[0]?.image !== snapshot.image ||
-      canonicalHash(liveConfiguration) !== snapshot.configHash ||
-      canonicalHash(liveRevision.properties?.template) !== snapshot.templateHash) {
+    const sourceMatches = liveRevision.name === snapshot.revision &&
+      liveRevision.properties?.template?.containers?.[0]?.image === snapshot.image &&
+      canonicalHash(liveRevision.properties?.template) === snapshot.templateHash;
+    const partialQuiescenceMatches = allowPartialQuiescence &&
+      matchesCapturedQuiescenceRevision(
+        liveRevision,
+        storedApp.properties?.template,
+        snapshot.image,
+        appName,
+        role,
+        request.attemptId,
+      );
+    if (canonicalHash(liveConfiguration) !== snapshot.configHash ||
+      (!sourceMatches && !partialQuiescenceMatches)) {
       fail(`superseded preparation ${role} source changed after capture`);
     }
   }
@@ -2086,18 +2112,10 @@ function quiesceAppWithParentWrite(runner, request, role, revision) {
     /^[a-z0-9.-]+\/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$/,
     `${role} quiescence source image`,
   );
-  const disabledWorkers = [
-    "GMAIL_WATCH_RENEWAL_ENABLED=false",
-    "GRAPH_RUN_WORKER_ENABLED=false",
-    "OUTREACH_WORKER_ENABLED=false",
-    "SCHEDULER_ENABLED=false",
-    "USAGE_ROLLUP_WORKER_ENABLED=false",
-    "WORKER_ENABLED=false",
-  ];
   const expectedTemplate = expectedRevisionTemplate(
     before.properties.template,
     image,
-    disabledWorkers,
+    QUIESCENCE_DISABLED_WORKERS,
     [],
     0,
     role,
@@ -2587,6 +2605,7 @@ function prepare(runner, request, options) {
           options,
           superseded.journal.source,
           superseded.sourceReadbackPosture,
+          superseded.allowPartialQuiescence,
         );
       rebindReleaseLockForPreparation(
         runner,
@@ -3744,6 +3763,38 @@ export function writableRevisionTemplate(sourceTemplate) {
     }
   }
   return template;
+}
+
+export function matchesCapturedQuiescenceRevision(
+  liveRevision,
+  sourceTemplate,
+  sourceImage,
+  appName,
+  role,
+  attemptId,
+) {
+  if (role === "console" || liveRevision?.name !==
+    `${appName}--bootstrap-quiesce-${attemptId.slice(0, 7)}` ||
+    liveRevision.properties?.active !== true) return false;
+  const actual = writableRevisionTemplate(liveRevision.properties?.template ?? {});
+  const container = actual.containers?.[0];
+  if (!container || actual.containers.length !== 1 || container.image !== sourceImage) return false;
+  if (Array.isArray(container.env)) {
+    container.env.sort((left, right) => String(left?.name).localeCompare(String(right?.name)));
+  }
+  const expected = expectedRevisionTemplate(
+    sourceTemplate,
+    sourceImage,
+    QUIESCENCE_DISABLED_WORKERS,
+    [],
+    0,
+    role,
+  );
+  const health = liveRevision.properties?.healthState ?? liveRevision.properties?.runningState;
+  const provisioned = liveRevision.properties?.provisioningState === undefined ||
+    liveRevision.properties.provisioningState === "Provisioned";
+  return canonicalJson(actual) === canonicalJson(expected) && provisioned &&
+    new Set(["Healthy", "Running", "Provisioned"]).has(health);
 }
 
 function expectedRevisionTemplate(sourceTemplate, image, envValues, removeEnvValues, minReplicas, role) {
