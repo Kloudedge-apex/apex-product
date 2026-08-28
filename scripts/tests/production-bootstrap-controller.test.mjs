@@ -583,7 +583,7 @@ test("B5 first-class worker mutation and persisted phase replay are executable",
   assert.equal(live.has("worker-first-class"), true);
 });
 
-test("admission context preserves the writer-fence readback bytes and generation", () => {
+test("admission context removes the duplicate writer-fence epoch and preserves the closed state", () => {
   const request = validRequest();
   const writerFence = {
     schemaVersion: 1,
@@ -591,6 +591,15 @@ test("admission context preserves the writer-fence readback bytes and generation
     observedAt: "2026-08-14T10:00:10Z",
     generation: 3,
     state: {
+      schemaVersion: 1,
+      target: "workforce-os-production",
+      mode: "closed",
+      bootstrapAttemptId: request.attemptId,
+      generation: 3,
+      issuedAt: "2026-08-14T10:00:00Z",
+      expiresAt: "2026-08-15T10:00:00Z",
+    },
+    epoch: {
       schemaVersion: 1,
       target: "workforce-os-production",
       mode: "closed",
@@ -673,7 +682,18 @@ test("admission context preserves the writer-fence readback bytes and generation
       },
     },
   );
-  assert.deepEqual(context.quiescedState.writerFence, second.writerFence);
+  assert.deepEqual(context.quiescedState.writerFence, {
+    schemaVersion: second.writerFence.schemaVersion,
+    target: second.writerFence.target,
+    observedAt: second.writerFence.observedAt,
+    generation: second.writerFence.generation,
+    state: second.writerFence.state,
+    stateHash: second.writerFence.stateHash,
+    activeWriters: second.writerFence.activeWriters,
+    activeComplianceWriters: second.writerFence.activeComplianceWriters,
+    writerZero: second.writerFence.writerZero,
+  });
+  assert.equal(Object.hasOwn(context.quiescedState.writerFence, "epoch"), false);
   assert.equal(context.lease.generation, 3);
   assert.equal(context.quiescedState.orphanRecovery.post.uncertainApplicationWriters, 0);
   assert.equal(context.quiescedState.queueObservations[1].stableSince, first.capturedAt);
@@ -1011,6 +1031,22 @@ test("preparation rebind is limited to pre-mutation boundaries with live source 
   assert.ok(sourceReadback < runtimeReadback && runtimeReadback < lock);
   assert.ok(lock < journal && journal < upload);
   assert.match(prepare, /superseded\.allowPartialQuiescence/);
+  assert.match(prepare, /validateRebindablePreparedState/);
+  assert.match(prepare, /options\.supersededRequest/);
+  assert.match(prepare, /superseded prepared state still has connected queue workers/);
+});
+
+test("prepared-state rebind is limited to the duplicated CLOSED epoch defect before migration", () => {
+  const source = readFileSync(CONTROLLER, "utf8");
+  const start = source.indexOf("function validateRebindablePreparedState");
+  const end = source.indexOf("function verifySupersededPreparationSignatures", start);
+  const validator = source.slice(start, end);
+  assert.match(validator, /B1_CONTROL_ACQUIRED/);
+  assert.match(validator, /state\.migrationProgress\.length !== 0/);
+  assert.match(validator, /Object\.keys\(state\.activeIdentities\)\.length !== 0/);
+  assert.match(validator, /"activeComplianceWriters", "activeWriters", "epoch"/);
+  assert.match(validator, /canonicalJson\(writerFence\.epoch\) !== canonicalJson\(writerFence\.state\)/);
+  assert.match(validator, /superseded prepared state changed the console artifact/);
 });
 
 test("runtime control helpers are invoked through the Corepack-managed pnpm binary", () => {
