@@ -996,6 +996,102 @@ function validatePreparationJournal(journal, request) {
   return journal;
 }
 
+function validateRebindablePreparationJournal(journal, request) {
+  exactKeys(journal, PREPARATION_JOURNAL_KEYS, "superseded preparation journal");
+  if (journal.schemaVersion !== 1 || journal.environment !== ENVIRONMENT ||
+    journal.kind !== PREPARATION_JOURNAL_KIND || journal.attemptId !== request.attemptId ||
+    journal.azureLeaseTokenHash !== leaseTokenHash(request) ||
+    journal.leaseIdHash !== leaseIdHash(request) ||
+    journal.requestSha256 === canonicalHash(request)) {
+    fail("superseded preparation journal identity is not rebindable");
+  }
+  string(journal.requestSha256, /^sha256:[0-9a-f]{64}$/, "superseded preparation request hash");
+  if (journal.stage !== "B0_SOURCE_CAPTURE_INTENT" || journal.source !== null) {
+    fail("superseded preparation journal advanced beyond the rebindable pre-mutation stage");
+  }
+  exactKeys(journal.intent, ["operation", "status", "at"], "superseded preparation intent");
+  if (journal.intent.operation !== "capture-source-baseline" || journal.intent.status !== "started") {
+    fail("superseded preparation intent is not the rebindable source-capture boundary");
+  }
+  canonicalTimestamp(journal.intent.at, "superseded preparation intent time");
+  canonicalTimestamp(journal.updatedAt, "superseded preparation updatedAt");
+  for (const key of [
+    "clerkReconciliationPlanBase64", "clerkReconciliationPlanSignatureBase64",
+    "clerkReconciliationDryRunBase64", "clerkReconciliationDryRunSignatureBase64",
+  ]) string(journal[key], /^[A-Za-z0-9+/]+={0,2}$/, `superseded preparation journal ${key}`);
+  if (!journal.clerkReconciliationPlanBinding ||
+    typeof journal.clerkReconciliationPlanBinding !== "object" ||
+    Array.isArray(journal.clerkReconciliationPlanBinding)) {
+    fail("superseded preparation Clerk binding is invalid");
+  }
+  const planBytes = Buffer.from(journal.clerkReconciliationPlanBase64, "base64");
+  const signatureBytes = Buffer.from(journal.clerkReconciliationPlanSignatureBase64, "base64");
+  const dryRunBytes = Buffer.from(journal.clerkReconciliationDryRunBase64, "base64");
+  const dryRunSignatureBytes = Buffer.from(
+    journal.clerkReconciliationDryRunSignatureBase64,
+    "base64",
+  );
+  if (planBytes.length < 2 || planBytes.length > MAX_JSON_BYTES ||
+    signatureBytes.length < 2 || signatureBytes.length > 64 * 1024 ||
+    dryRunBytes.length < 2 || dryRunBytes.length > MAX_JSON_BYTES ||
+    dryRunSignatureBytes.length < 2 || dryRunSignatureBytes.length > 64 * 1024) {
+    fail("superseded preparation Clerk authority is outside its size bound");
+  }
+  const plan = strictJsonParse(planBytes, "superseded private Clerk reconciliation plan");
+  const dryRun = strictJsonParse(dryRunBytes, "superseded Clerk reconciliation dry-run");
+  exactKeys(plan, [
+    "schemaVersion", "environment", "kind", "attemptId", "backendCandidateCommit",
+    "databaseIdentityHash", "approver", "executor", "cutover", "operations",
+  ], "superseded private Clerk reconciliation plan");
+  if (plan.schemaVersion !== 1 || plan.environment !== ENVIRONMENT ||
+    plan.kind !== "private-clerk-reconciliation-plan" ||
+    plan.attemptId !== request.attemptId ||
+    plan.databaseIdentityHash !== request.databaseIdentityHash ||
+    plan.approver !== request.approver) {
+    fail("superseded private Clerk reconciliation plan identity drift detected");
+  }
+  string(plan.backendCandidateCommit, /^[0-9a-f]{40}$/, "superseded backend candidate commit");
+  if (plan.backendCandidateCommit === request.backendCandidate.commit ||
+    journal.clerkReconciliationPlanBinding.rawPlanSha256 !== sha256(planBytes) ||
+    journal.clerkReconciliationPlanBinding.approver !== request.approver ||
+    dryRun.attemptId !== request.attemptId ||
+    dryRun.databaseIdentityHash !== request.databaseIdentityHash ||
+    dryRun.rawPlanSha256 !== sha256(planBytes)) {
+    fail("superseded preparation Clerk authority is not bound to the prior candidate");
+  }
+  return {
+    journal,
+    planBytes,
+    signatureBytes,
+    dryRunBytes,
+    dryRunSignatureBytes,
+    previousBackendCommit: plan.backendCandidateCommit,
+  };
+}
+
+function verifySupersededPreparationSignatures(runner, request, options, superseded) {
+  const paths = {
+    plan: join(options.stateDir, "superseded-clerk-plan.json"),
+    planSignature: join(options.stateDir, "superseded-clerk-plan.sig"),
+    dryRun: join(options.stateDir, "superseded-clerk-dry-run.json"),
+    dryRunSignature: join(options.stateDir, "superseded-clerk-dry-run.sig"),
+  };
+  for (const [path, bytes] of [
+    [paths.plan, superseded.planBytes],
+    [paths.planSignature, superseded.signatureBytes],
+    [paths.dryRun, superseded.dryRunBytes],
+    [paths.dryRunSignature, superseded.dryRunSignatureBytes],
+  ]) writeFileSync(path, bytes, { mode: 0o600, flag: "wx" });
+  runner.run("ssh-keygen", [
+    "-Y", "verify", "-f", options.allowedSigners, "-I", request.approver,
+    "-n", "workforce-os-clerk-reconciliation-plan", "-s", paths.planSignature,
+  ], { input: superseded.planBytes, label: "superseded Clerk plan signature verification" });
+  runner.run("ssh-keygen", [
+    "-Y", "verify", "-f", options.allowedSigners, "-I", request.approver,
+    "-n", "workforce-os-clerk-reconciliation-dry-run", "-s", paths.dryRunSignature,
+  ], { input: superseded.dryRunBytes, label: "superseded Clerk dry-run signature verification" });
+}
+
 function preparationJournal(request, clerkReconciliation) {
   return {
     schemaVersion: 1,
@@ -2179,6 +2275,50 @@ function acquireReleaseLock(runner, request, stateDir) {
   return { adopted: false };
 }
 
+function rebindReleaseLockForPreparation(runner, request, stateDir, previousBackendCommit) {
+  verifyAzureLease(runner, request);
+  const existing = readReleaseLock(runner);
+  if (existing?.ref === RELEASE_LOCK_REF &&
+    existing.object?.sha === request.backendCandidate.commit &&
+    existing.object?.type === "commit") {
+    return { adopted: true };
+  }
+  if (existing?.ref !== RELEASE_LOCK_REF || existing.object?.sha !== previousBackendCommit ||
+    existing.object?.type !== "commit") {
+    fail("superseded production release lock does not match the rebindable journal");
+  }
+  const lockDir = join(stateDir, "release-lock-rebind.git");
+  mkdirSync(lockDir, { mode: 0o700 });
+  runner.run("git", ["init", "--bare", "--template=", lockDir], {
+    label: "release lock rebind repository initialization",
+  });
+  const credentialArgs = ["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"];
+  runner.run(requireSnapshotFile("scripts/run-release-git.sh", true), [
+    ...credentialArgs, "--git-dir", lockDir, "fetch", "--no-tags", "--depth=1",
+    RELEASE_REPOSITORY_URL, request.backendCandidate.commit,
+  ], { label: "release lock rebind source fetch" });
+  const fetched = runner.run(requireSnapshotFile("scripts/run-release-git.sh", true), [
+    "--git-dir", lockDir, "rev-parse", "FETCH_HEAD",
+  ], { label: "release lock rebind source identity" }).stdout.toString("utf8").trim();
+  if (fetched !== request.backendCandidate.commit) fail("release lock rebind fetched a different source commit");
+  try {
+    runner.run(requireSnapshotFile("scripts/run-release-git.sh", true), [
+      ...credentialArgs,
+      "--git-dir", lockDir,
+      "push", `--force-with-lease=${RELEASE_LOCK_REF}:${previousBackendCommit}`,
+      RELEASE_REPOSITORY_URL,
+      `${request.backendCandidate.commit}:${RELEASE_LOCK_REF}`,
+    ], { label: "production release lock pre-mutation rebind" });
+  } catch (error) {
+    const after = readReleaseLock(runner);
+    if (after?.ref !== RELEASE_LOCK_REF || after.object?.sha !== request.backendCandidate.commit ||
+      after.object?.type !== "commit") throw error;
+    return { adopted: true, acknowledgementUncertain: true };
+  }
+  verifyReleaseLock(runner, request);
+  return { adopted: false };
+}
+
 function readReleaseLock(runner) {
   const result = runner.run("gh", [
     "api", `repos/${RELEASE_REPOSITORY}/git/ref/${RELEASE_LOCK_REF.replace("refs/", "")}`,
@@ -2283,7 +2423,20 @@ function prepare(runner, request, options) {
     // an acknowledged-uncertain lease acquisition resumable without a break.
     uploadState(runner, request, journal, options.statePath);
   } else if (existing.kind === PREPARATION_JOURNAL_KIND) {
-    journal = validatePreparationJournal(existing, request);
+    if (existing.requestSha256 === canonicalHash(request)) {
+      journal = validatePreparationJournal(existing, request);
+    } else {
+      const superseded = validateRebindablePreparationJournal(existing, request);
+      verifySupersededPreparationSignatures(runner, request, options, superseded);
+      rebindReleaseLockForPreparation(
+        runner,
+        request,
+        options.stateDir,
+        superseded.previousBackendCommit,
+      );
+      journal = preparationJournal(request, clerkReconciliation);
+      uploadState(runner, request, journal, options.statePath);
+    }
     if (journal.clerkReconciliationPlanBase64 !== clerkReconciliation.planBytes.toString("base64") ||
       journal.clerkReconciliationPlanSignatureBase64 !== clerkReconciliation.signatureBytes.toString("base64") ||
       journal.clerkReconciliationDryRunBase64 !== clerkReconciliation.dryRunBytes.toString("base64") ||
