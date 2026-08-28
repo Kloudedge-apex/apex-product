@@ -423,11 +423,11 @@ function evidenceFor(kind, generation, issuedOffset) {
         evidenceHash: hash("b"),
       },
       ambiguityControl: {
-        policy: "repause-deactivate-stable-zero-and-hold-terminal-open-forward-only-v1",
+        policy: "repause-zero-scale-stable-zero-and-hold-terminal-open-forward-only-v1",
         containmentReady: true,
         ambiguousPartialResumeDetected: false,
         allQueuesRePauseRequired: true,
-        apiAndWorkerDeactivateRequired: true,
+        apiAndWorkerZeroScaleRequired: true,
         stableZeroReplicasRequired: true,
         terminalOpenRecloseForbidden: true,
         holdForwardOnlyRequired: true,

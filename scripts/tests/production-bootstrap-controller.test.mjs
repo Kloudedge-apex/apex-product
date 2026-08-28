@@ -823,15 +823,15 @@ test("unsupported abort is absent from the bounded controller surface", () => {
   assert.doesNotMatch(source, /abort-before-schema/);
 });
 
-test("prepare quiesces every active API and worker revision before arming", () => {
+test("prepare replaces API and worker with zero-scale quiescence revisions before arming", () => {
   const source = readFileSync(CONTROLLER, "utf8");
   const start = source.indexOf("function prepare(");
   const end = source.indexOf("function materializeContext", start);
   const prepare = source.slice(start, end);
   const disable = prepare.indexOf("disableApiIngress(runner, request)");
   const pause = prepare.indexOf('"pause-only"');
-  const apiStop = prepare.indexOf("deactivateAllActiveRevisions(runner, request, API_APP)");
-  const workerStop = prepare.indexOf("deactivateAllActiveRevisions(runner, request, WORKER_APP)");
+  const apiStop = prepare.indexOf('"api",\n      `${API_APP}--bootstrap-quiesce-');
+  const workerStop = prepare.indexOf('"worker",\n      `${WORKER_APP}--bootstrap-quiesce-');
   const stableZero = prepare.indexOf("proveStableZeroExecutionReplicas(runner, request)");
   const orphanRecovery = prepare.indexOf('"recover-orphans"', stableZero);
   const arm = prepare.indexOf('"arm"');
@@ -839,7 +839,7 @@ test("prepare quiesces every active API and worker revision before arming", () =
   assert.ok(pause < apiStop && apiStop < workerStop);
   assert.ok(workerStop < stableZero && stableZero < orphanRecovery && orphanRecovery < arm);
   assert.match(prepare, /legacyReplicaEvidence\.evidenceHash/);
-  assert.doesNotMatch(prepare, /createStoppedWorkerRevision/);
+  assert.doesNotMatch(prepare, /containerapp", "revision", "deactivate/);
 });
 
 test("source live-send policy accepts exact empty but gates nonempty authority", () => {
@@ -874,7 +874,7 @@ test("terminal OPEN crash boundaries are durably ordered and forward-only", () =
   assert.ok(persistRenewal < intent && intent < persistIntent && persistIntent < open);
   assert.ok(open < api && api < completeContext);
   assert.match(resume, /TERMINAL_OPEN_FORWARD_ONLY_HOLD/);
-  assert.match(resume, /deactivateAllActiveRevisions\(runner, request, API_APP\)/);
+  assert.match(resume, /quiesceAppWithParentWrite\(/);
   assert.match(resume, /proveStableZeroExecutionReplicas\(runner, request\)/);
   assert.doesNotMatch(resume, /["']reclose["']/);
 });
@@ -976,9 +976,11 @@ test("preparation rebind is limited to pre-mutation boundaries with live source 
   assert.match(validator, /journal\.stage === "B0_SOURCE_CAPTURE_INTENT"/);
   assert.match(validator, /journal\.stage === "B0_API_INGRESS_DISABLE_INTENT"/);
   assert.match(validator, /journal\.stage === "B0_QUEUE_PAUSE_INTENT"/);
+  assert.match(validator, /journal\.stage === "B0_APP_STOP_INTENT"/);
   assert.match(validator, /journal\.intent\.operation === "capture-source-baseline"/);
   assert.match(validator, /journal\.intent\.operation === "disable-api-ingress"/);
   assert.match(validator, /journal\.intent\.operation === "pause-queues"/);
+  assert.match(validator, /journal\.intent\.operation === "stop-app-revisions"/);
   assert.match(validator, /plan\.backendCandidateCommit === request\.backendCandidate\.commit/);
 
   const rebindStart = source.indexOf("function rebindReleaseLockForPreparation");
@@ -1019,7 +1021,7 @@ test("runtime control helpers are invoked through the Corepack-managed pnpm bina
 test("API ingress disable uses a least-privilege PATCH and never requests secret values", () => {
   const source = readFileSync(CONTROLLER, "utf8");
   const start = source.indexOf("function disableApiIngress");
-  const end = source.indexOf("function assertNoActiveRevisions", start);
+  const end = source.indexOf("function replicaObservation", start);
   const disable = source.slice(start, end);
   assert.match(disable, /"rest"/);
   assert.match(disable, /"--method", "patch"/);
@@ -1027,10 +1029,23 @@ test("API ingress disable uses a least-privilege PATCH and never requests secret
   assert.doesNotMatch(disable, /listSecrets|list-secrets|"ingress", "disable"/);
 });
 
+test("Container App updates use parent-resource PATCH without secret reads or revision deactivation", () => {
+  const source = readFileSync(CONTROLLER, "utf8");
+  const quiesceStart = source.indexOf("function quiesceAppWithParentWrite");
+  const quiesceEnd = source.indexOf("function disableApiIngress", quiesceStart);
+  const updateStart = source.indexOf("function updateApp");
+  const updateEnd = source.indexOf("function revisionEnv", updateStart);
+  const mutationPaths = `${source.slice(quiesceStart, quiesceEnd)}\n${source.slice(updateStart, updateEnd)}`;
+  assert.match(mutationPaths, /"rest"/);
+  assert.match(mutationPaths, /"--method", "patch"/);
+  assert.doesNotMatch(mutationPaths, /listSecrets|list-secrets|"containerapp", "update"/);
+  assert.doesNotMatch(source, /"containerapp", "revision", "deactivate"/);
+});
+
 test("every post-acquisition ACA mutation revalidates both Azure lease and Git release lock", () => {
   const source = readFileSync(CONTROLLER, "utf8");
   const start = source.indexOf("function azureMutation");
-  const end = source.indexOf("function deactivateRevision", start);
+  const end = source.indexOf("function activateRevision", start);
   const mutation = source.slice(start, end);
   assert.match(mutation, /releaseLockRequired = true/);
   assert.match(mutation, /verifyAzureLease\(runner, request\)/);

@@ -1020,7 +1020,11 @@ function validateRebindablePreparationJournal(journal, request) {
   const queuePauseBoundary = journal.stage === "B0_QUEUE_PAUSE_INTENT" &&
     journal.source !== null && journal.intent.operation === "pause-queues" &&
     journal.intent.status === "started";
-  if (!sourceCaptureBoundary && !ingressDisableBoundary && !queuePauseBoundary) {
+  const appStopBoundary = journal.stage === "B0_APP_STOP_INTENT" &&
+    journal.source !== null && journal.intent.operation === "stop-app-revisions" &&
+    journal.intent.status === "started";
+  if (!sourceCaptureBoundary && !ingressDisableBoundary && !queuePauseBoundary &&
+    !appStopBoundary) {
     fail("superseded preparation journal advanced beyond a provably rebindable boundary");
   }
   canonicalTimestamp(journal.intent.at, "superseded preparation intent time");
@@ -1078,7 +1082,7 @@ function validateRebindablePreparationJournal(journal, request) {
     previousBackendCommit: plan.backendCandidateCommit,
     sourceReadbackPosture: ingressDisableBoundary
       ? "enabled"
-      : queuePauseBoundary
+      : queuePauseBoundary || appStopBoundary
         ? "disabled"
         : null,
   };
@@ -2049,16 +2053,6 @@ function azureMutation(runner, request, args, label, releaseLockRequired = true)
   return runner.run("az", azArgs(request, args), { label });
 }
 
-function deactivateRevision(runner, request, app, revision, releaseLockRequired = true) {
-  const existing = revisionList(runner, request, app).find((entry) => entry?.name === revision);
-  if (!existing) fail(`${app} revision ${revision} is absent`);
-  if (existing.properties?.active !== true) return { adopted: true };
-  azureMutation(runner, request, ["containerapp", "revision", "deactivate", "--name", app, "--resource-group", RESOURCE_GROUP, "--revision", revision, "--output", "none"], `${app} revision deactivation`, releaseLockRequired);
-  const readback = revisionList(runner, request, app).find((entry) => entry?.name === revision);
-  if (!readback || readback.properties?.active === true) fail(`${app} revision deactivation readback is ambiguous`);
-  return { adopted: false };
-}
-
 function activateRevision(runner, request, app, revision) {
   const existing = revisionList(runner, request, app).find((entry) => entry?.name === revision);
   if (!existing) fail(`${app} revision ${revision} is absent`);
@@ -2077,11 +2071,71 @@ function activateRevision(runner, request, app, revision) {
   return { adopted: false };
 }
 
-function deactivateAllActiveRevisions(runner, request, app) {
-  for (const revision of revisionList(runner, request, app)) {
-    if (revision?.properties?.active === true) deactivateRevision(runner, request, app, revision.name);
+function quiesceAppWithParentWrite(runner, request, role, revision) {
+  const app = role === "api" ? API_APP : WORKER_APP;
+  const resourceId = role === "api"
+    ? request.authority.apiContainerAppResourceId
+    : request.authority.workerContainerAppResourceId;
+  const before = appState(runner, request, resourceId, `${role} pre-quiescence application`);
+  if (before.properties?.configuration?.activeRevisionsMode !== "Single") {
+    fail(`${role} quiescence requires single revision mode`);
   }
-  assertNoActiveRevisions(runner, request, app, app);
+  const image = before.properties?.template?.containers?.[0]?.image;
+  string(
+    image,
+    /^[a-z0-9.-]+\/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$/,
+    `${role} quiescence source image`,
+  );
+  const disabledWorkers = [
+    "GMAIL_WATCH_RENEWAL_ENABLED=false",
+    "GRAPH_RUN_WORKER_ENABLED=false",
+    "OUTREACH_WORKER_ENABLED=false",
+    "SCHEDULER_ENABLED=false",
+    "USAGE_ROLLUP_WORKER_ENABLED=false",
+    "WORKER_ENABLED=false",
+  ];
+  const expectedTemplate = expectedRevisionTemplate(
+    before.properties.template,
+    image,
+    disabledWorkers,
+    [],
+    0,
+    role,
+  );
+  const preexisting = revisionList(runner, request, app)
+    .find((entry) => entry?.name === revision);
+  if (!preexisting) {
+    azureMutation(runner, request, [
+      "rest",
+      "--method", "patch",
+      "--url", `${resourceId}?api-version=2024-03-01`,
+      "--body", canonicalJson({
+        properties: {
+          template: {
+            ...expectedTemplate,
+            revisionSuffix: plannedSuffix(revision, app),
+          },
+        },
+      }),
+      "--output", "none",
+    ], `${role} zero-scale quiescence revision`);
+  }
+  for (let observation = 0; observation < 36; observation += 1) {
+    const revisions = revisionList(runner, request, app);
+    const candidate = revisions.find((entry) => entry?.name === revision);
+    const active = revisions.filter((entry) => entry?.properties?.active === true);
+    const health = candidate?.properties?.healthState ?? candidate?.properties?.runningState;
+    const provisioned = candidate?.properties?.provisioningState === undefined ||
+      candidate.properties.provisioningState === "Provisioned";
+    if (candidate?.properties?.active === true && active.length === 1 && provisioned &&
+      new Set(["Healthy", "Running", "Provisioned"]).has(health)) {
+      assertRevisionMatchesUpdate(candidate, expectedTemplate, image, `${role} quiescence`);
+      assertExactActiveRevision(runner, request, app, revision, image);
+      return revision;
+    }
+    runner.run("sleep", ["5"], { label: `${role} quiescence revision readiness interval` });
+  }
+  fail(`${role} zero-scale quiescence revision did not become solely active and healthy`);
 }
 
 function disableApiIngress(runner, request, releaseLockRequired = true) {
@@ -2097,11 +2151,6 @@ function disableApiIngress(runner, request, releaseLockRequired = true) {
   const state = appState(runner, request, request.authority.apiContainerAppResourceId, "quiesced API");
   if (state.properties?.configuration?.ingress?.external === true || state.properties?.configuration?.ingress?.fqdn) fail("API ingress disable readback is ambiguous");
   return { adopted: false };
-}
-
-function assertNoActiveRevisions(runner, request, app, label) {
-  const active = revisionList(runner, request, app).filter((entry) => entry?.properties?.active === true);
-  if (active.length !== 0) fail(`${label} still has an active revision`);
 }
 
 function replicaObservation(runner, request, app) {
@@ -2131,14 +2180,20 @@ function proveStableZeroExecutionReplicas(runner, request) {
     api: replicaObservation(runner, request, API_APP),
     worker: replicaObservation(runner, request, WORKER_APP),
   });
-  const first = observe();
-  if (first.api.replicaCount !== 0 || first.worker.replicaCount !== 0) {
-    fail("legacy API or worker replicas remain after revision deactivation");
+  let first = null;
+  for (let observation = 0; observation < 60; observation += 1) {
+    const candidate = observe();
+    if (candidate.api.replicaCount === 0 && candidate.worker.replicaCount === 0) {
+      first = candidate;
+      break;
+    }
+    runner.run("sleep", ["5"], { label: "zero-replica quiescence interval" });
   }
+  if (first === null) fail("API or worker replicas did not scale to zero after quiescence");
   runner.run("sleep", ["5"], { label: "stable zero-replica observation interval" });
   const second = observe();
   if (second.api.replicaCount !== 0 || second.worker.replicaCount !== 0) {
-    fail("legacy API or worker replicas reappeared after deactivation");
+    fail("API or worker replicas reappeared after zero-scale quiescence");
   }
   const value = { first, second };
   return { ...value, evidenceHash: canonicalHash(value) };
@@ -2267,13 +2322,13 @@ export function buildAdmissionContext(
   const quiescenceWithoutHash = {
     api: {
       stopped: true,
-      activeRevisionCount: 0,
+      activeRevisionCount: 1,
       replicaCount: legacyReplicaEvidence.second.api.replicaCount,
       ingressDisabled: true,
     },
     worker: {
       stopped: true,
-      activeRevisionCount: 0,
+      activeRevisionCount: 1,
       replicaCount: legacyReplicaEvidence.second.worker.replicaCount,
       consumersDisabled: true,
     },
@@ -2584,8 +2639,18 @@ function prepare(runner, request, options) {
     runRuntimeControl(runner, request, options.stateDir, "pause-only", 3);
     journal = journalMutation(runner, request, options, journal, "pause-queues", "completed", "B0_QUEUES_PAUSED");
     journal = journalMutation(runner, request, options, journal, "stop-app-revisions", "started", "B0_APP_STOP_INTENT");
-    deactivateAllActiveRevisions(runner, request, API_APP);
-    deactivateAllActiveRevisions(runner, request, WORKER_APP);
+    quiesceAppWithParentWrite(
+      runner,
+      request,
+      "api",
+      `${API_APP}--bootstrap-quiesce-${request.attemptId.slice(0, 7)}`,
+    );
+    quiesceAppWithParentWrite(
+      runner,
+      request,
+      "worker",
+      `${WORKER_APP}--bootstrap-quiesce-${request.attemptId.slice(0, 7)}`,
+    );
     const legacyReplicaEvidence = proveStableZeroExecutionReplicas(runner, request);
     journal = journalMutation(runner, request, options, journal, "stop-app-revisions", "completed", "B0_APPS_STOPPED");
     journal = journalMutation(runner, request, options, journal, "recover-orphan-writer-tokens", "started", "B0_ORPHAN_RECOVERY_INTENT");
@@ -3735,6 +3800,9 @@ function updateApp(
       ? request.authority.workerContainerAppResourceId
       : request.authority.consoleContainerAppResourceId;
   const before = appState(runner, request, resourceId, `${role} pre-update application`);
+  if (before.properties?.configuration?.activeRevisionsMode !== "Single") {
+    fail(`${role} bootstrap update requires single revision mode`);
+  }
   const expectedTemplate = expectedRevisionTemplate(
     before.properties?.template,
     image,
@@ -3745,38 +3813,45 @@ function updateApp(
   );
   const preexisting = revisionList(runner, request, app)
     .find((entry) => entry?.name === revision);
-  const args = [
-    "containerapp", "update",
-    "--name", app,
-    "--resource-group", RESOURCE_GROUP,
-    "--image", image,
-    "--revision-suffix", plannedSuffix(revision, app),
-  ];
-  if (role !== "console") {
-    args.push("--min-replicas", String(minReplicas), "--max-replicas", "1");
-  }
-  if (envValues.length > 0) args.push("--set-env-vars", ...envValues);
-  if (removeEnvValues.length > 0) args.push("--remove-env-vars", ...removeEnvValues);
-  args.push("--output", "none");
-  if (preexisting) {
-    assertRevisionMatchesUpdate(preexisting, expectedTemplate, image, role);
-  } else {
+  if (!preexisting) {
     azureMutation(
       runner,
       request,
-      args,
+      [
+        "rest",
+        "--method", "patch",
+        "--url", `${resourceId}?api-version=2024-03-01`,
+        "--body", canonicalJson({
+          properties: {
+            template: {
+              ...expectedTemplate,
+              revisionSuffix: plannedSuffix(revision, app),
+            },
+          },
+        }),
+        "--output", "none",
+      ],
       `${role} bootstrap revision update`,
       releaseLockRequired,
     );
   }
-  const revisions = revisionList(runner, request, app);
-  const expected = revisions.find((entry) => entry.name === revision);
-  assertRevisionMatchesUpdate(expected, expectedTemplate, image, role);
-  for (const candidate of revisions) {
-    if (candidate.name !== revision && candidate.properties?.active === true) {
-      deactivateRevision(runner, request, app, candidate.name, releaseLockRequired);
+  let expected = null;
+  for (let observation = 0; observation < 36; observation += 1) {
+    const revisions = revisionList(runner, request, app);
+    const candidate = revisions.find((entry) => entry.name === revision);
+    const active = revisions.filter((entry) => entry?.properties?.active === true);
+    const health = candidate?.properties?.healthState ?? candidate?.properties?.runningState;
+    const provisioned = candidate?.properties?.provisioningState === undefined ||
+      candidate.properties.provisioningState === "Provisioned";
+    if (candidate?.properties?.active === true && active.length === 1 && provisioned &&
+      new Set(["Healthy", "Running", "Provisioned"]).has(health)) {
+      expected = candidate;
+      break;
     }
+    runner.run("sleep", ["5"], { label: `${role} bootstrap revision readiness interval` });
   }
+  if (expected === null) fail(`${role} bootstrap revision did not become solely active and healthy`);
+  assertRevisionMatchesUpdate(expected, expectedTemplate, image, role);
   assertExactActiveRevision(runner, request, app, revision, image);
   const after = appState(runner, request, resourceId, `${role} post-update application`);
   if ((after.properties?.provisioningState !== undefined && after.properties.provisioningState !== "Succeeded") ||
@@ -5061,11 +5136,11 @@ function resumeBootstrap(runner, request, state, options) {
     };
     const apiMutations = { ...apiWithoutHash, evidenceHash: canonicalHash(apiWithoutHash) };
     const ambiguityWithoutHash = {
-      policy: "repause-deactivate-stable-zero-and-hold-terminal-open-forward-only-v1",
+      policy: "repause-zero-scale-stable-zero-and-hold-terminal-open-forward-only-v1",
       containmentReady: true,
       ambiguousPartialResumeDetected: false,
       allQueuesRePauseRequired: true,
-      apiAndWorkerDeactivateRequired: true,
+      apiAndWorkerZeroScaleRequired: true,
       stableZeroReplicasRequired: true,
       terminalOpenRecloseForbidden: true,
       holdForwardOnlyRequired: true,
@@ -5172,8 +5247,18 @@ function resumeBootstrap(runner, request, state, options) {
       containmentFailures.push(`runtime:${sanitizeError(containmentError.message)}`);
     }
     try {
-      deactivateAllActiveRevisions(runner, request, API_APP);
-      deactivateAllActiveRevisions(runner, request, WORKER_APP);
+      quiesceAppWithParentWrite(
+        runner,
+        request,
+        "api",
+        `${API_APP}--bootstrap-hold-${terminalOpenIntent.generation}`,
+      );
+      quiesceAppWithParentWrite(
+        runner,
+        request,
+        "worker",
+        `${WORKER_APP}--bootstrap-hold-${terminalOpenIntent.generation}`,
+      );
     } catch (containmentError) {
       containmentFailures.push(`revisions:${sanitizeError(containmentError.message)}`);
     }
