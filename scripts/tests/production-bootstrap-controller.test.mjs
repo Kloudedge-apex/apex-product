@@ -1180,6 +1180,8 @@ test("stored recovery rerolls exact successors when the ingress-disabled API par
   assert.match(recovery, /activeRevisionsMode === "Single"/);
   assert.match(recovery, /latestReadyRevisionName === state\.activeIdentities\.api/);
   assert.match(recovery, /if \(!apiParentRepairRequired\) \{\s*return \{ state, recovery: validatedRecovery \};/);
+  assert.match(recovery, /validatedStoredRecoveryParentRepair = true/);
+  assert.match(recovery, /workerQuiescent\.some\(Boolean\) \|\| validatedStoredRecoveryParentRepair/);
   assert.match(recovery, /const partialRecoveryObserved =/);
   assert.match(recovery, /!partialRecoveryObserved/);
 });
