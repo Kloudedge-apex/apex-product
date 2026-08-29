@@ -2633,7 +2633,7 @@ write_containerapp_fixture() {
           maxInactiveRevisions: 10,
           ingress: (if $enabled == "true"
             then {external: false, allowInsecure: false}
-            else {external: true, allowInsecure: false, targetPort: 4000, fqdn: "api.workforceos.xyz"}
+            else {external: true, allowInsecure: false, targetPort: 4000, fqdn: "apex-gtm-api.braveflower-6d3bb66b.eastus.azurecontainerapps.io"}
           end)
         },
         latestRevisionName: $revision,
@@ -2751,6 +2751,36 @@ EOF
     API_REVISION_FILE="${harness}/api-revision.json" WORKER_REVISION_FILE="${harness}/worker-revision.json" \
     "${harness}/scripts/verify-containerapp-release-config.sh" \
     "${api_image}" "${worker_image}" >/dev/null
+  pass
+
+  jq '(.properties.template.containers[0].env[] |
+    select(.name == "API_PUBLIC_URL").value) = "https://wrong.example.com"' \
+    "${harness}/api.json" >"${harness}/api-wrong-public-origin.json"
+  jq '(.properties.template.containers[0].env[] |
+    select(.name == "API_PUBLIC_URL").value) = "https://wrong.example.com"' \
+    "${harness}/worker.json" >"${harness}/worker-wrong-public-origin.json"
+  if env PATH="${harness}/bin:${PATH}" \
+    API_JSON_FILE="${harness}/api-wrong-public-origin.json" \
+    WORKER_JSON_FILE="${harness}/worker-wrong-public-origin.json" \
+    API_REVISION_FILE="${harness}/api-revision.json" \
+    WORKER_REVISION_FILE="${harness}/worker-revision.json" \
+    "${harness}/scripts/verify-containerapp-release-config.sh" \
+    "${api_image}" "${worker_image}" >/dev/null 2>&1; then
+    fail "Container App verifier accepted a coordinated public API origin drift"
+  fi
+  pass
+
+  jq '.properties.configuration.ingress.fqdn = "api.workforceos.xyz"' \
+    "${harness}/api.json" >"${harness}/api-non-azure-ingress-fqdn.json"
+  if env PATH="${harness}/bin:${PATH}" \
+    API_JSON_FILE="${harness}/api-non-azure-ingress-fqdn.json" \
+    WORKER_JSON_FILE="${harness}/worker.json" \
+    API_REVISION_FILE="${harness}/api-revision.json" \
+    WORKER_REVISION_FILE="${harness}/worker-revision.json" \
+    "${harness}/scripts/verify-containerapp-release-config.sh" \
+    "${api_image}" "${worker_image}" >/dev/null 2>&1; then
+    fail "Container App verifier accepted a non-Azure isolated API ingress FQDN"
+  fi
   pass
 
   jq '(.properties.template.containers[0].env[] |
