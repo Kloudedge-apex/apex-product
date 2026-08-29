@@ -1109,7 +1109,11 @@ test("Container App updates use bounded parent mutation paths and deterministic 
   assert.match(mutationPaths, /"containerapp", "revision", "copy"/);
   assert.match(mutationPaths, /"--from-revision", copyFromRevision/);
   assert.match(mutationPaths, /failed-parent revision-copy repair posture is invalid/);
-  assert.match(mutationPaths, /before\.properties\?\.deploymentErrors !== expectedDeploymentError/);
+  assert.match(mutationPaths, /"2025-02-02-preview"/);
+  assert.match(mutationPaths, /repairParent\.properties\?\.deploymentErrors !== expectedDeploymentError/);
+  assert.match(mutationPaths, /conflictingRevision\?\.properties\?\.active !== false/);
+  assert.match(mutationPaths, /revisionList\(runner, request, app, true\)/);
+  assert.match(source, /if \(includeInactive\) args\.push\("--all"\)/);
   assert.doesNotMatch(mutationPaths, /"--method", "delete"/);
   assert.doesNotMatch(mutationPaths, /listSecrets|list-secrets|"containerapp", "update"|--show-secrets/);
   assert.doesNotMatch(source, /"containerapp", "revision", "deactivate"/);

@@ -1850,10 +1850,36 @@ function appState(runner, request, resourceId, label) {
   return state;
 }
 
-function revisionList(runner, request, appName) {
-  const list = runner.json("az", azArgs(request, ["containerapp", "revision", "list", "--name", appName, "--resource-group", RESOURCE_GROUP, "--output", "json"]), { label: `${appName} revision list` });
+function revisionList(runner, request, appName, includeInactive = false) {
+  const args = [
+    "containerapp", "revision", "list",
+    "--name", appName,
+    "--resource-group", RESOURCE_GROUP,
+  ];
+  if (includeInactive) args.push("--all");
+  args.push("--output", "json");
+  const list = runner.json("az", azArgs(request, args), {
+    label: `${appName} revision list${includeInactive ? " including inactive" : ""}`,
+  });
   if (!Array.isArray(list)) fail(`${appName} revision list is invalid`);
   return list;
+}
+
+function resourceProviderAppState(runner, request, resourceId, apiVersion, label) {
+  const state = runner.json("az", azArgs(request, [
+    "rest",
+    "--method", "get",
+    "--url", `${resourceId}?api-version=${apiVersion}`,
+    "--output", "json",
+  ]), { label });
+  if (String(state.id).toLowerCase() !== resourceId.toLowerCase()) {
+    fail(`${label} resource identity drift detected`);
+  }
+  if (!Array.isArray(state.properties?.template?.containers) ||
+    state.properties.template.containers.length !== 1) {
+    fail(`${label} must have exactly one container`);
+  }
+  return state;
 }
 
 function activeRevision(revisions, appName) {
@@ -2215,7 +2241,8 @@ function azureMutation(runner, request, args, label, releaseLockRequired = true)
 
 function activateRevision(runner, request, role, revision, releaseLockRequired = true) {
   const app = role === "api" ? API_APP : role === "worker" ? WORKER_APP : CONSOLE_APP;
-  const existing = revisionList(runner, request, app).find((entry) => entry?.name === revision);
+  const existing = revisionList(runner, request, app, true)
+    .find((entry) => entry?.name === revision);
   if (!existing) fail(`${app} revision ${revision} is absent`);
   const expectedImage = request.targetArtifacts[role].image;
   if (existing.properties?.template?.containers?.[0]?.image !== expectedImage) {
@@ -2292,7 +2319,7 @@ function quiesceAppWithParentWrite(
     role,
     sourceRevisionName === undefined,
   );
-  const revisionsBefore = revisionList(runner, request, app);
+  const revisionsBefore = revisionList(runner, request, app, true);
   const baseRevision = revision;
   let preexisting;
   for (let attempt = 0; attempt <= 9; attempt += 1) {
@@ -4253,7 +4280,7 @@ function updateApp(
     minReplicas,
     role,
   );
-  let preexisting = revisionList(runner, request, app)
+  let preexisting = revisionList(runner, request, app, true)
     .find((entry) => entry?.name === revision);
   if (preexisting) {
     const health = preexisting.properties?.healthState ?? preexisting.properties?.runningState;
@@ -4276,7 +4303,7 @@ function updateApp(
         fail(`${role} recovery revision name exceeds the Azure limit`);
       }
       revision = recoveryRevision;
-      preexisting = revisionList(runner, request, app)
+      preexisting = revisionList(runner, request, app, true)
         .find((entry) => entry?.name === revision);
     }
   }
@@ -4304,12 +4331,28 @@ function updateApp(
         `Field 'template.revisionsuffix' is invalid with details: 'Invalid value: ` +
         `\"${conflictingRevisionSuffix}\": revision with suffix ` +
         `${conflictingRevisionSuffix} already exists.';.`;
+      const repairParent = resourceProviderAppState(
+        runner,
+        request,
+        resourceId,
+        "2025-02-02-preview",
+        `${role} failed-parent resource-provider readback`,
+      );
+      const conflictingRevisionName = `${app}--${conflictingRevisionSuffix}`;
+      const conflictingRevision = revisionList(runner, request, app, true)
+        .find((entry) => entry?.name === conflictingRevisionName);
+      const conflictHealth = conflictingRevision?.properties?.healthState ??
+        conflictingRevision?.properties?.runningState;
       if (role !== "api" ||
-        before.properties?.provisioningState !== "Failed" ||
-        before.properties?.configuration?.ingress !== null ||
-        before.properties?.configuration?.activeRevisionsMode !== "Single" ||
-        before.properties?.latestReadyRevisionName !== copyFromRevision ||
-        before.properties?.deploymentErrors !== expectedDeploymentError) {
+        repairParent.properties?.provisioningState !== "Failed" ||
+        repairParent.properties?.configuration?.ingress !== null ||
+        repairParent.properties?.configuration?.activeRevisionsMode !== "Single" ||
+        repairParent.properties?.latestReadyRevisionName !== copyFromRevision ||
+        repairParent.properties?.deploymentErrors !== expectedDeploymentError ||
+        conflictingRevision?.properties?.active !== false ||
+        conflictingRevision.properties?.provisioningState !== "Provisioned" ||
+        !new Set(["Healthy", "Running", "Provisioned"]).has(conflictHealth) ||
+        conflictingRevision.properties?.template?.containers?.[0]?.image !== image) {
         fail("failed-parent revision-copy repair posture is invalid");
       }
       assertExactActiveRevision(runner, request, app, copyFromRevision, image);
@@ -4391,7 +4434,7 @@ function revisionEnv(revision, name) {
 }
 
 function assertExactActiveRevision(runner, request, app, revisionName, image) {
-  const revisions = revisionList(runner, request, app);
+  const revisions = revisionList(runner, request, app, true);
   const active = revisions.filter((entry) => entry?.properties?.active === true);
   if (active.length !== 1 || active[0].name !== revisionName) {
     fail(`${app} does not have exactly the admitted active revision`);
@@ -4696,7 +4739,7 @@ function nextRecoveryRevision(
   predecessorName,
   allowSoleActiveAdoption = true,
 ) {
-  const revisions = revisionList(runner, request, app);
+  const revisions = revisionList(runner, request, app, true);
   const active = revisions.filter((entry) => entry?.properties?.active === true);
   for (let attempt = 1; attempt <= 9; attempt += 1) {
     const candidateName = `${predecessorName}-r${attempt}`;
