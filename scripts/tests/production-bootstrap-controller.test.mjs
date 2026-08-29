@@ -1169,6 +1169,21 @@ test("stored recovery admits only the exact ingress-disabled API parent failure"
   assert.match(deployment, /provisioningState !== "Succeeded" && !containedApiParentFailure/);
 });
 
+test("stored recovery rerolls exact successors when the ingress-disabled API parent remains failed", () => {
+  const source = readFileSync(CONTROLLER, "utf8");
+  const start = source.indexOf("function ensureFirstClassDeploymentsForResume");
+  const end = source.indexOf("function disabledWriteGates", start);
+  const recovery = source.slice(start, end);
+  assert.match(recovery, /const apiParentRepairRequired =/);
+  assert.match(recovery, /apiParent\.properties\?\.provisioningState === "Failed"/);
+  assert.match(recovery, /apiParent\.properties\?\.configuration\?\.ingress === null/);
+  assert.match(recovery, /activeRevisionsMode === "Single"/);
+  assert.match(recovery, /latestReadyRevisionName === state\.activeIdentities\.api/);
+  assert.match(recovery, /if \(!apiParentRepairRequired\) \{\s*return \{ state, recovery: validatedRecovery \};/);
+  assert.match(recovery, /const partialRecoveryObserved =/);
+  assert.match(recovery, /!partialRecoveryObserved/);
+});
+
 test("protected recovery snapshots are descendant-only and file-scope bounded", () => {
   const source = readFileSync(CONTROLLER, "utf8");
   const start = source.indexOf("function assertExactProtectedSnapshot");
