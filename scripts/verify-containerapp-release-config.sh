@@ -10,6 +10,7 @@ set -euo pipefail
 
 EXPECTED_API_IMAGE="${1:-}"
 EXPECTED_WORKER_IMAGE="${2:-}"
+EXPECTED_PUBLIC_API_ORIGIN="https://api.workforceos.xyz"
 RESOURCE_GROUP="workforce-os-prod"
 API_APP="apex-gtm-api"
 WORKER_APP="apex-gtm-worker"
@@ -431,6 +432,10 @@ fi
 API_PUBLIC_URL="$(env_value "${API_JSON}" API_PUBLIC_URL)"
 WORKER_PUBLIC_URL="$(env_value "${WORKER_JSON}" API_PUBLIC_URL)"
 require_value "${WORKER_PUBLIC_URL}" "${API_PUBLIC_URL}" "API_PUBLIC_URL parity"
+require_value \
+  "${API_PUBLIC_URL}" \
+  "${EXPECTED_PUBLIC_API_ORIGIN}" \
+  "API_PUBLIC_URL public contract"
 if [[ ! "${API_PUBLIC_URL}" =~ ^https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?(/api)?/?$ ]]; then
   echo "ERROR: API_PUBLIC_URL is not a canonical public HTTPS API origin" >&2
   exit 1
@@ -484,10 +489,11 @@ require_value \
   "$(json_value "${API_JSON}" '.properties.configuration.ingress.targetPort')" \
   "4000" \
   "API ingress target port"
-require_value \
-  "$(json_value "${API_JSON}" '.properties.configuration.ingress.fqdn')" \
-  "${PUBLIC_HOST}" \
-  "API_PUBLIC_URL and ingress FQDN parity"
+API_INGRESS_FQDN="$(json_value "${API_JSON}" '.properties.configuration.ingress.fqdn')"
+if [[ ! "${API_INGRESS_FQDN}" =~ ^apex-gtm-api\.[a-z0-9-]+\.[a-z0-9-]+\.azurecontainerapps\.io$ ]]; then
+  echo "ERROR: API ingress FQDN is not the isolated Azure Container Apps endpoint" >&2
+  exit 1
+fi
 require_value \
   "$(json_value "${WORKER_JSON}" '(.properties.configuration.ingress.external // false)')" \
   "false" \
