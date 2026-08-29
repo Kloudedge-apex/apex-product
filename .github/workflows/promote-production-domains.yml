@@ -3,8 +3,15 @@ name: Promote Workforce OS production domains
 on:
   workflow_dispatch:
     inputs:
+      phase:
+        description: "Prepare hostnames first; bind only after certificates succeed"
+        required: true
+        type: choice
+        options:
+          - prepare
+          - bind
       confirmation:
-        description: "Type PROMOTE WORKFORCE OS PUBLIC DOMAINS"
+        description: "Type the exact confirmation phrase for the selected phase"
         required: true
         type: string
 
@@ -28,6 +35,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CONFIRMATION: ${{ inputs.confirmation }}
+          PHASE: ${{ inputs.phase }}
           REF_PROTECTED: ${{ github.ref_protected }}
           WORKFLOW_SHA: ${{ github.sha }}
         run: |
@@ -35,11 +43,18 @@ jobs:
           if [[ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ||
             "${GITHUB_REF}" != "refs/heads/master" ||
             "${REF_PROTECTED}" != "true" ||
-            "${CONFIRMATION}" != "PROMOTE WORKFORCE OS PUBLIC DOMAINS" ||
             ! "${WORKFLOW_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
             echo "ERROR: domain promotion requires protected master and exact confirmation" >&2
             exit 1
           fi
+          case "${PHASE}:${CONFIRMATION}" in
+            "prepare:PREPARE WORKFORCE OS PUBLIC DOMAINS"|\
+            "bind:PROMOTE WORKFORCE OS PUBLIC DOMAINS") ;;
+            *)
+              echo "ERROR: selected phase and confirmation do not match" >&2
+              exit 1
+              ;;
+          esac
           branch_json="$(gh api "repos/${GITHUB_REPOSITORY}/branches/master")"
           jq -e --arg sha "${WORKFLOW_SHA}" \
             '.protected == true and .commit.sha == $sha' >/dev/null <<<"${branch_json}"
@@ -61,12 +76,16 @@ jobs:
           subscription-id: 3171575e-f164-425c-9ee0-2fb10cf93884
 
       - name: Verify exact production package without mutation
-        run: scripts/promote-production-custom-domains.sh
+        env:
+          PHASE: ${{ inputs.phase }}
+        run: scripts/promote-production-custom-domains.sh --phase "${PHASE}"
 
-      - name: Bind reviewed production domains
+      - name: Apply reviewed production domain phase
         env:
           CONFIRMATION: ${{ inputs.confirmation }}
+          PHASE: ${{ inputs.phase }}
         run: |
           scripts/promote-production-custom-domains.sh \
+            --phase "${PHASE}" \
             --apply \
             --confirmation "${CONFIRMATION}"

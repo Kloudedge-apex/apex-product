@@ -18,23 +18,26 @@ readonly CONSOLE_IMAGE="workforceosprodacr.azurecr.io/workforceos-fe@sha256:892c
 readonly API_REVISION="apex-gtm-api--bootstrap-api-0767c74-r1-r4"
 readonly WORKER_REVISION="apex-gtm-worker--bootstrap-first-class-629881c-r4"
 readonly CONSOLE_REVISION="nikxius-web--bootstrap-console-1b930e4"
-readonly CONFIRMATION_PHRASE="PROMOTE WORKFORCE OS PUBLIC DOMAINS"
+readonly PREPARE_CONFIRMATION_PHRASE="PREPARE WORKFORCE OS PUBLIC DOMAINS"
+readonly BIND_CONFIRMATION_PHRASE="PROMOTE WORKFORCE OS PUBLIC DOMAINS"
 
 APPLY=false
 CONFIRMATION=""
+PHASE="bind"
 
 usage() {
   cat <<'USAGE'
 Usage: scripts/promote-production-custom-domains.sh [options]
 
-Safely verifies the exact completed production bootstrap and binds the reviewed
-custom domains to its Azure Container Apps. This script never changes DNS or
-removes a hostname from the legacy environment.
+Safely verifies the exact completed production bootstrap and prepares or binds
+the reviewed custom domains on its Azure Container Apps. This script never
+changes DNS or removes a hostname from the legacy environment.
 
 Options:
-  --apply                 Perform the two hostname bindings.
-  --confirmation TEXT     Required with --apply. Exact phrase:
-                          PROMOTE WORKFORCE OS PUBLIC DOMAINS
+  --phase prepare|bind    Prepare unbound hostnames or bind ready certificates.
+                          Defaults to bind.
+  --apply                 Perform the selected phase.
+  --confirmation TEXT     Required with --apply. Exact phrase is phase-specific.
   -h, --help              Show this help.
 USAGE
 }
@@ -50,6 +53,11 @@ while (($# > 0)); do
       APPLY=true
       shift
       ;;
+    --phase)
+      (($# >= 2)) || fail "--phase requires a value"
+      PHASE="$2"
+      shift 2
+      ;;
     --confirmation)
       (($# >= 2)) || fail "--confirmation requires a value"
       CONFIRMATION="$2"
@@ -64,6 +72,9 @@ while (($# > 0)); do
       ;;
   esac
 done
+
+[[ "${PHASE}" == "prepare" || "${PHASE}" == "bind" ]] ||
+  fail "--phase must be prepare or bind"
 
 for command_name in az curl jq; do
   command -v "${command_name}" >/dev/null 2>&1 || fail "${command_name} is required"
@@ -127,6 +138,85 @@ for app_record in "${api_json}:${API_HOSTNAME}" "${console_json}:${CONSOLE_HOSTN
   ' >/dev/null <<<"${app_payload}" || fail "an unreviewed custom domain is already present"
 done
 
+curl --fail --silent --show-error --retry 4 --retry-delay 2 \
+  "https://${API_FQDN}/api/health/live" >/dev/null
+curl --fail --silent --show-error --retry 4 --retry-delay 2 \
+  "https://${API_FQDN}/api/health/ready" >/dev/null
+curl --fail --silent --show-error --retry 4 --retry-delay 2 \
+  "https://${CONSOLE_FQDN}/api/healthz" >/dev/null
+
+if [[ "${PHASE}" == "prepare" ]]; then
+  jq -n \
+    --arg mode "$([[ "${APPLY}" == true ]] && echo apply || echo dry-run)" \
+    --arg phase "${PHASE}" \
+    --arg apiApp "${API_APP}" --arg apiHostname "${API_HOSTNAME}" \
+    --arg consoleApp "${CONSOLE_APP}" --arg consoleHostname "${CONSOLE_HOSTNAME}" \
+    '{mode:$mode,phase:$phase,verified:true,hostnames:[{app:$apiApp,hostname:$apiHostname},{app:$consoleApp,hostname:$consoleHostname}],certificateBindingsChanged:false,dnsChanged:false,legacyBindingsChanged:false}'
+
+  if [[ "${APPLY}" != true ]]; then
+    exit 0
+  fi
+  [[ "${CONFIRMATION}" == "${PREPARE_CONFIRMATION_PHRASE}" ]] ||
+    fail "prepare apply requires the exact confirmation phrase"
+
+  api_hostname_preexisting="$(jq -r --arg hostname "${API_HOSTNAME}" '
+    any((.properties.configuration.ingress.customDomains // [])[]; .name == $hostname)
+  ' <<<"${api_json}")"
+  console_hostname_preexisting="$(jq -r --arg hostname "${CONSOLE_HOSTNAME}" '
+    any((.properties.configuration.ingress.customDomains // [])[]; .name == $hostname)
+  ' <<<"${console_json}")"
+  api_added_by_run=false
+  console_added_by_run=false
+
+  rollback_partial_preparation() {
+    local exit_code=$?
+    trap - ERR
+    set +e
+    if [[ "${console_added_by_run}" == true ]]; then
+      az containerapp hostname delete --subscription "${SUBSCRIPTION_ID}" \
+        --resource-group "${RESOURCE_GROUP}" --name "${CONSOLE_APP}" \
+        --hostname "${CONSOLE_HOSTNAME}" --yes --only-show-errors -o none
+    fi
+    if [[ "${api_added_by_run}" == true ]]; then
+      az containerapp hostname delete --subscription "${SUBSCRIPTION_ID}" \
+        --resource-group "${RESOURCE_GROUP}" --name "${API_APP}" \
+        --hostname "${API_HOSTNAME}" --yes --only-show-errors -o none
+    fi
+    echo "ERROR: preparation failed; any hostname added by this run was rolled back" >&2
+    exit "${exit_code}"
+  }
+  trap rollback_partial_preparation ERR
+
+  if [[ "${api_hostname_preexisting}" != true ]]; then
+    az containerapp hostname add --subscription "${SUBSCRIPTION_ID}" \
+      --resource-group "${RESOURCE_GROUP}" --name "${API_APP}" \
+      --hostname "${API_HOSTNAME}" --only-show-errors -o none
+    api_added_by_run=true
+  fi
+  if [[ "${console_hostname_preexisting}" != true ]]; then
+    az containerapp hostname add --subscription "${SUBSCRIPTION_ID}" \
+      --resource-group "${RESOURCE_GROUP}" --name "${CONSOLE_APP}" \
+      --hostname "${CONSOLE_HOSTNAME}" --only-show-errors -o none
+    console_added_by_run=true
+  fi
+
+  api_prepared="$(az containerapp show --subscription "${SUBSCRIPTION_ID}" \
+    --resource-group "${RESOURCE_GROUP}" --name "${API_APP}" --only-show-errors -o json)"
+  console_prepared="$(az containerapp show --subscription "${SUBSCRIPTION_ID}" \
+    --resource-group "${RESOURCE_GROUP}" --name "${CONSOLE_APP}" --only-show-errors -o json)"
+  jq -e --arg hostname "${API_HOSTNAME}" '
+    any(.properties.configuration.ingress.customDomains[]; .name == $hostname)
+  ' >/dev/null <<<"${api_prepared}" || fail "the API hostname was not prepared"
+  jq -e --arg hostname "${CONSOLE_HOSTNAME}" '
+    any(.properties.configuration.ingress.customDomains[]; .name == $hostname)
+  ' >/dev/null <<<"${console_prepared}" || fail "the console hostname was not prepared"
+
+  trap - ERR
+  jq -n --arg api "${API_HOSTNAME}" --arg console "${CONSOLE_HOSTNAME}" \
+    '{prepared:true,hostnames:[$api,$console],certificateBindingsChanged:false,dnsChanged:false}'
+  exit 0
+fi
+
 certificates_json="$(az containerapp env certificate list \
   --subscription "${SUBSCRIPTION_ID}" \
   --resource-group "${RESOURCE_GROUP}" \
@@ -151,25 +241,19 @@ api_certificate_id="$(certificate_id "${API_CERTIFICATE_NAME}" "${API_HOSTNAME}"
 console_certificate_id="$(certificate_id "${CONSOLE_CERTIFICATE_NAME}" "${CONSOLE_HOSTNAME}")" ||
   fail "the reviewed console managed certificate is not ready"
 
-curl --fail --silent --show-error --retry 4 --retry-delay 2 \
-  "https://${API_FQDN}/api/health/live" >/dev/null
-curl --fail --silent --show-error --retry 4 --retry-delay 2 \
-  "https://${API_FQDN}/api/health/ready" >/dev/null
-curl --fail --silent --show-error --retry 4 --retry-delay 2 \
-  "https://${CONSOLE_FQDN}/api/healthz" >/dev/null
-
 jq -n \
   --arg mode "$([[ "${APPLY}" == true ]] && echo apply || echo dry-run)" \
+  --arg phase "${PHASE}" \
   --arg apiApp "${API_APP}" --arg apiHostname "${API_HOSTNAME}" \
   --arg consoleApp "${CONSOLE_APP}" --arg consoleHostname "${CONSOLE_HOSTNAME}" \
   --arg backendImage "${BACKEND_IMAGE}" --arg consoleImage "${CONSOLE_IMAGE}" \
-  '{mode:$mode,verified:true,bindings:[{app:$apiApp,hostname:$apiHostname},{app:$consoleApp,hostname:$consoleHostname}],images:{backend:$backendImage,console:$consoleImage},dnsChanged:false,legacyBindingsChanged:false}'
+  '{mode:$mode,phase:$phase,verified:true,bindings:[{app:$apiApp,hostname:$apiHostname},{app:$consoleApp,hostname:$consoleHostname}],images:{backend:$backendImage,console:$consoleImage},dnsChanged:false,legacyBindingsChanged:false}'
 
 if [[ "${APPLY}" != true ]]; then
   exit 0
 fi
-[[ "${CONFIRMATION}" == "${CONFIRMATION_PHRASE}" ]] ||
-  fail "--apply requires the exact confirmation phrase"
+[[ "${CONFIRMATION}" == "${BIND_CONFIRMATION_PHRASE}" ]] ||
+  fail "bind apply requires the exact confirmation phrase"
 
 api_preexisting="$(jq -r --arg hostname "${API_HOSTNAME}" '
   any((.properties.configuration.ingress.customDomains // [])[];
