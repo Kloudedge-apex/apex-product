@@ -4702,6 +4702,17 @@ function ensureFirstClassDeploymentsForResume(
     state.activeIdentities.worker === storedRecovery.successors?.worker?.identity?.revision &&
     apiActive.length === 1 && apiActive[0].name === state.activeIdentities.api &&
     workerActive.length === 1 && workerActive[0].name === state.activeIdentities.worker) {
+    const apiParent = appState(
+      runner,
+      request,
+      request.authority.apiContainerAppResourceId,
+      "stored recovery API parent",
+    );
+    const apiParentRepairRequired =
+      apiParent.properties?.provisioningState === "Failed" &&
+      apiParent.properties?.configuration?.ingress === null &&
+      apiParent.properties?.configuration?.activeRevisionsMode === "Single" &&
+      apiParent.properties?.latestReadyRevisionName === state.activeIdentities.api;
     const current = {
       api: deploymentEvidence(
         runner,
@@ -4719,10 +4730,14 @@ function ensureFirstClassDeploymentsForResume(
       receipt.fencingGeneration,
       workerSourceTemplate,
     );
-    return {
-      state,
-      recovery: validateFirstClassRecoveryEvidence(state, storedRecovery, current),
-    };
+    const validatedRecovery = validateFirstClassRecoveryEvidence(state, storedRecovery, current);
+    if (!apiParentRepairRequired) {
+      return { state, recovery: validatedRecovery };
+    }
+    // An ingress-only write cannot repair an already-failed Container App
+    // parent. Fall through to the bounded successor path while queues and
+    // ingress remain contained; the fresh exact templates repair both parent
+    // resources before ingress is enabled.
   }
 
   if (apiActive.length === 1 && apiActive[0].name === apiPredecessorName &&
