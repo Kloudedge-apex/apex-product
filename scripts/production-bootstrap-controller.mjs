@@ -4714,16 +4714,26 @@ function boundedRecoverySequence(revision, predecessorName, image, sourceEntrypo
   return null;
 }
 
-function isForwardOnlyHoldRevision(revision, app, generation, image) {
+function isForwardOnlyHoldRevision(
+  revision,
+  app,
+  generation,
+  image,
+  expectedEntrypoint,
+  attemptId,
+) {
   if (revision?.properties?.active !== true ||
     revision.properties?.template?.containers?.[0]?.image !== image ||
+    revision.properties?.template?.scale?.minReplicas !== 0 ||
+    revisionEnv(revision, "WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID") !== attemptId ||
+    [
+      "GMAIL_WATCH_RENEWAL_ENABLED", "GRAPH_RUN_WORKER_ENABLED",
+      "OUTREACH_WORKER_ENABLED", "SCHEDULER_ENABLED",
+    ].some((gate) => revisionEnv(revision, gate) !== "false") ||
     canonicalJson(containerEntrypoint(
       revision.properties?.template,
       `${app} forward-only hold template`,
-    )) !== canonicalJson({
-      command: [...WORKER_QUIESCENCE_COMMAND],
-      args: [...WORKER_QUIESCENCE_ARGS],
-    })) {
+    )) !== canonicalJson(expectedEntrypoint)) {
     return false;
   }
   const base = `${app}--bootstrap-hold-${generation}`;
@@ -4861,6 +4871,8 @@ function ensureFirstClassDeploymentsForResume(
       API_APP,
       terminalOpenGeneration,
       request.targetArtifacts.api.image,
+      apiSourceEntrypoint,
+      request.attemptId,
     ) ||
     (apiActive[0].name === apiPredecessorName &&
       apiActive[0].properties?.template?.containers?.[0]?.image ===
@@ -4872,6 +4884,11 @@ function ensureFirstClassDeploymentsForResume(
       WORKER_APP,
       terminalOpenGeneration,
       request.targetArtifacts.worker.image,
+      {
+        command: [...WORKER_QUIESCENCE_COMMAND],
+        args: [...WORKER_QUIESCENCE_ARGS],
+      },
+      request.attemptId,
     ) ||
     (revision.name === workerPredecessorName &&
       revision.properties?.template?.containers?.[0]?.image ===

@@ -1159,6 +1159,8 @@ test("first-class recovery restores captured entrypoints before consumers resume
   assert.match(recovery, /boundedRecoverySequence/);
   assert.match(recovery, /partialRecoveryObserved/);
   assert.match(recovery, /workerQuiescent\.some\(Boolean\)/);
+  assert.match(recovery, /request\.targetArtifacts\.api\.image,\s*apiSourceEntrypoint,\s*request\.attemptId/);
+  assert.match(recovery, /args: \[\.\.\.WORKER_QUIESCENCE_ARGS\],\s*},\s*request\.attemptId/);
   assert.match(recovery, /allowIngressDisabledParentFailure: true/);
   assert.match(containment, /sourceRevisionName/);
   assert.match(containment, /bounded quiescence recovery sequence/);
