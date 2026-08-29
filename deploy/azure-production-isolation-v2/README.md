@@ -79,12 +79,20 @@ this one-time provisioning step.
 ## Public-domain promotion
 
 The stack owns the two TXT-validated managed certificates, but it does not bind
-hostnames or change DNS. After both certificates report `Succeeded`, dispatch
-`promote-production-domains.yml` from protected `master` with the exact phrase
-`PROMOTE WORKFORCE OS PUBLIC DOMAINS`. That workflow verifies the immutable
-backend, worker, and console images and revisions before binding either domain.
-It rolls back any new partial binding and never mutates the legacy environment
-or DNS.
+hostnames or change DNS. Azure requires an unbound hostname before it will issue
+a managed certificate, so dispatch `promote-production-domains.yml` from
+protected `master` in two phases:
+
+1. `prepare` with `PREPARE WORKFORCE OS PUBLIC DOMAINS` adds only the two
+   unbound hostnames.
+2. Update this deployment stack and wait for both certificates to report
+   `Succeeded`.
+3. `bind` with `PROMOTE WORKFORCE OS PUBLIC DOMAINS` attaches the two exact
+   certificates.
+
+Every phase verifies the immutable backend, worker, and console images and
+revisions first. It rolls back any new partial change and never mutates the
+legacy environment or DNS.
 
 Only after both bindings are verified should the two existing DNS records be
 changed to the isolated app FQDNs. Preserve their previous values first so the
