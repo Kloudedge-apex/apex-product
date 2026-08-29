@@ -8,6 +8,10 @@ param controlBlobName string
 param authorityDrainCheckpointBlobName string
 param logAnalyticsWorkspaceName string
 param containerAppsEnvironmentName string
+param publicConsoleHostname string
+param publicApiHostname string
+param publicConsoleCertificateName string
+param publicApiCertificateName string
 param identityNamePrefix string
 param githubOwner string
 param backendRepository string
@@ -140,6 +144,26 @@ resource containerAppsEnvironment 'Microsoft.App/managedEnvironments@2024-03-01'
   tags: {
     application: 'workforce-os'
     environment: 'production'
+  }
+}
+
+resource publicConsoleCertificate 'Microsoft.App/managedEnvironments/managedCertificates@2024-03-01' = {
+  parent: containerAppsEnvironment
+  name: publicConsoleCertificateName
+  location: location
+  properties: {
+    subjectName: publicConsoleHostname
+    domainControlValidation: 'TXT'
+  }
+}
+
+resource publicApiCertificate 'Microsoft.App/managedEnvironments/managedCertificates@2024-03-01' = {
+  parent: containerAppsEnvironment
+  name: publicApiCertificateName
+  location: location
+  properties: {
+    subjectName: publicApiHostname
+    domainControlValidation: 'TXT'
   }
 }
 
@@ -359,6 +383,19 @@ output controlStorage object = {
 output containerAppsEnvironment object = {
   name: containerAppsEnvironment.name
   resourceId: containerAppsEnvironment.id
+}
+
+output managedCertificates object = {
+  publicConsole: {
+    name: publicConsoleCertificate.name
+    hostname: publicConsoleHostname
+    resourceId: publicConsoleCertificate.id
+  }
+  publicApi: {
+    name: publicApiCertificate.name
+    hostname: publicApiHostname
+    resourceId: publicApiCertificate.id
+  }
 }
 
 output runtimeImagePull object = {

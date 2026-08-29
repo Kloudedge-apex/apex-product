@@ -12,13 +12,17 @@ The subscription-scoped template creates:
   local-user access disabled;
 - private `production-control` blob container;
 - a dedicated Log Analytics workspace and Container Apps environment;
+- TXT-validated managed certificates for `workforceos.xyz` and
+  `api.workforceos.xyz` in that isolated environment;
 - four user-assigned identities with exact GitHub Environment OIDC subjects;
 - one non-federated runtime identity with read-only `AcrPull` on the isolated
   registry;
 - narrow ACR build/pull, exact-path control-blob, and read-only audit roles.
 
 The template intentionally creates no application, database, cache, DNS, or
-custom-domain mutation. Those are later cutover phases.
+Container App hostname binding. Certificate issuance is traffic-neutral; the
+reviewed promotion workflow performs hostname binding only after both
+certificates are ready. DNS remains a separate cutover phase.
 
 ## Deployment stack boundary
 
@@ -71,3 +75,17 @@ deploy/azure-production-isolation-v2/initialize-control-blob.sh \
 The initializer uses Entra login, rejects an existing blob, and sends both
 `--overwrite false` and `--if-none-match '*'`. Release identities must not run
 this one-time provisioning step.
+
+## Public-domain promotion
+
+The stack owns the two TXT-validated managed certificates, but it does not bind
+hostnames or change DNS. After both certificates report `Succeeded`, dispatch
+`promote-production-domains.yml` from protected `master` with the exact phrase
+`PROMOTE WORKFORCE OS PUBLIC DOMAINS`. That workflow verifies the immutable
+backend, worker, and console images and revisions before binding either domain.
+It rolls back any new partial binding and never mutates the legacy environment
+or DNS.
+
+Only after both bindings are verified should the two existing DNS records be
+changed to the isolated app FQDNs. Preserve their previous values first so the
+DNS-only cutover remains immediately reversible.

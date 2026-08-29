@@ -57,6 +57,12 @@ rejected("Storage shared-key credentials are rejected", "resources.bicep", (sour
 rejected("public blob access is rejected", "resources.bicep", (source) =>
   source.replace("allowBlobPublicAccess: false", "allowBlobPublicAccess: true"));
 
+rejected("HTTP certificate validation is rejected", "resources.bicep", (source) =>
+  source.replace("domainControlValidation: 'TXT'", "domainControlValidation: 'HTTP'"));
+
+rejected("a wrong public API hostname is rejected", "authority-contract.json", (source) =>
+  source.replace('"hostname": "api.workforceos.xyz"', '"hostname": "wrong.workforceos.xyz"'));
+
 rejected("a wildcard build role is rejected", "main.bicep", (source) =>
   source.replace(
     "'Microsoft.ContainerRegistry/registries/read'",

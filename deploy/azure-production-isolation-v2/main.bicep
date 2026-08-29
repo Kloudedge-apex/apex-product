@@ -13,6 +13,10 @@ param controlBlobName string = 'workforce-os/initial-production-bootstrap/state-
 param authorityDrainCheckpointBlobName string = 'workforce-os/initial-production-bootstrap/authority-drain-checkpoint-v1'
 param logAnalyticsWorkspaceName string = 'workforce-os-prod-logs'
 param containerAppsEnvironmentName string = 'workforce-os-prod-env'
+param publicConsoleHostname string = 'workforceos.xyz'
+param publicApiHostname string = 'api.workforceos.xyz'
+param publicConsoleCertificateName string = 'workforceos-root-v1'
+param publicApiCertificateName string = 'workforceos-api-v1'
 param identityNamePrefix string = 'workforce-os-v2'
 param githubOwner string = 'Kloudedge-apex'
 param backendRepository string = 'apex-product'
@@ -119,6 +123,7 @@ resource authorityAuditReaderRole 'Microsoft.Authorization/roleDefinitions@2022-
           'Microsoft.Authorization/denyAssignments/read'
           'Microsoft.App/containerApps/read'
           'Microsoft.App/managedEnvironments/read'
+          'Microsoft.App/managedEnvironments/managedCertificates/read'
           'Microsoft.ManagedIdentity/userAssignedIdentities/read'
           'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials/read'
           'Microsoft.ContainerRegistry/registries/read'
@@ -151,6 +156,10 @@ module isolatedResources './resources.bicep' = {
     authorityDrainCheckpointBlobName: authorityDrainCheckpointBlobName
     logAnalyticsWorkspaceName: logAnalyticsWorkspaceName
     containerAppsEnvironmentName: containerAppsEnvironmentName
+    publicConsoleHostname: publicConsoleHostname
+    publicApiHostname: publicApiHostname
+    publicConsoleCertificateName: publicConsoleCertificateName
+    publicApiCertificateName: publicApiCertificateName
     identityNamePrefix: identityNamePrefix
     githubOwner: githubOwner
     backendRepository: backendRepository
@@ -190,6 +199,7 @@ output isolation object = {
   registry: isolatedResources.outputs.registry
   controlStorage: isolatedResources.outputs.controlStorage
   containerAppsEnvironment: isolatedResources.outputs.containerAppsEnvironment
+  managedCertificates: isolatedResources.outputs.managedCertificates
   runtimeImagePull: isolatedResources.outputs.runtimeImagePull
   authority: isolatedResources.outputs.authority
   roleDefinitions: {

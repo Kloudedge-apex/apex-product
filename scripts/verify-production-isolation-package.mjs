@@ -69,7 +69,7 @@ const drainInitializer = read(
 );
 
 const expectedContract = {
-  schemaVersion: 3,
+  schemaVersion: 4,
   status: "reviewed-source",
   subscriptionId: "3171575e-f164-425c-9ee0-2fb10cf93884",
   resourceGroup: "workforce-os-prod",
@@ -82,6 +82,18 @@ const expectedContract = {
     "workforce-os/initial-production-bootstrap/authority-drain-checkpoint-v1",
   logAnalyticsWorkspaceName: "workforce-os-prod-logs",
   containerAppsEnvironmentName: "workforce-os-prod-env",
+  managedCertificates: {
+    publicConsole: {
+      name: "workforceos-root-v1",
+      hostname: "workforceos.xyz",
+      validation: "TXT",
+    },
+    publicApi: {
+      name: "workforceos-api-v1",
+      hostname: "api.workforceos.xyz",
+      validation: "TXT",
+    },
+  },
   identityNamePrefix: "workforce-os-v2",
   github: {
     issuer: "https://token.actions.githubusercontent.com",
@@ -155,6 +167,10 @@ const expectedDefaults = {
   authorityDrainCheckpointBlobName: contract.authorityDrainCheckpointBlobName,
   logAnalyticsWorkspaceName: contract.logAnalyticsWorkspaceName,
   containerAppsEnvironmentName: contract.containerAppsEnvironmentName,
+  publicConsoleHostname: contract.managedCertificates.publicConsole.hostname,
+  publicApiHostname: contract.managedCertificates.publicApi.hostname,
+  publicConsoleCertificateName: contract.managedCertificates.publicConsole.name,
+  publicApiCertificateName: contract.managedCertificates.publicApi.name,
   identityNamePrefix: contract.identityNamePrefix,
   githubOwner: "Kloudedge-apex",
   backendRepository: "apex-product",
@@ -208,6 +224,7 @@ const expectedRoles = new Map([
       "Microsoft.Authorization/denyAssignments/read",
       "Microsoft.App/containerApps/read",
       "Microsoft.App/managedEnvironments/read",
+      "Microsoft.App/managedEnvironments/managedCertificates/read",
       "Microsoft.ManagedIdentity/userAssignedIdentities/read",
       "Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials/read",
       "Microsoft.ContainerRegistry/registries/read",
@@ -262,6 +279,7 @@ exactCount("Microsoft.Storage/storageAccounts", 1);
 exactCount("Microsoft.Storage/storageAccounts/blobServices/containers", 1);
 exactCount("Microsoft.OperationalInsights/workspaces", 1);
 exactCount("Microsoft.App/managedEnvironments", 1);
+exactCount("Microsoft.App/managedEnvironments/managedCertificates", 2);
 exactCount("Microsoft.ManagedIdentity/userAssignedIdentities", 5);
 exactCount(
   "Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials",
@@ -274,6 +292,24 @@ if (resources.some((item) => [
   "Microsoft.DBforPostgreSQL/flexibleServers",
 ].includes(item.type))) {
   fail("initial isolation package may not mutate application or data-plane runtimes");
+}
+
+const managedCertificates = byType(
+  "Microsoft.App/managedEnvironments/managedCertificates",
+);
+for (const [key, expected] of Object.entries(contract.managedCertificates)) {
+  const prefix = key === "publicConsole" ? "publicConsole" : "publicApi";
+  const certificateName =
+    `[format('{0}/{1}', parameters('containerAppsEnvironmentName'), ` +
+    `parameters('${prefix}CertificateName'))]`;
+  const certificate = managedCertificates.find((item) =>
+    item.name === certificateName);
+  if (!certificate ||
+    certificate.properties?.subjectName !== `[parameters('${prefix}Hostname')]` ||
+    certificate.properties?.domainControlValidation !== expected.validation ||
+    certificate.location !== "[parameters('location')]") {
+    fail(`managed certificate is invalid for ${expected.hostname}`);
+  }
 }
 
 const registry = byType("Microsoft.ContainerRegistry/registries")[0];

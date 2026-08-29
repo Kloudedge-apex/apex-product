@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "status": "reviewed-source",
   "subscriptionId": "3171575e-f164-425c-9ee0-2fb10cf93884",
   "resourceGroup": "workforce-os-prod",
@@ -11,6 +11,18 @@
   "authorityDrainCheckpointBlobName": "workforce-os/initial-production-bootstrap/authority-drain-checkpoint-v1",
   "logAnalyticsWorkspaceName": "workforce-os-prod-logs",
   "containerAppsEnvironmentName": "workforce-os-prod-env",
+  "managedCertificates": {
+    "publicConsole": {
+      "name": "workforceos-root-v1",
+      "hostname": "workforceos.xyz",
+      "validation": "TXT"
+    },
+    "publicApi": {
+      "name": "workforceos-api-v1",
+      "hostname": "api.workforceos.xyz",
+      "validation": "TXT"
+    }
+  },
   "identityNamePrefix": "workforce-os-v2",
   "github": {
     "issuer": "https://token.actions.githubusercontent.com",
