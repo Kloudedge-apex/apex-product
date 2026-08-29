@@ -17,13 +17,15 @@ import { EvidenceLedgerService } from "../observability/evidence-ledger.service"
 import { LangSmithService } from "../observability/langsmith.service";
 import { RunLevelEvaluatorService } from "../observability/run-level-evaluator.service";
 import { PrismaCheckpointSaver } from "./prisma-checkpointer";
-import { buildPipelineGraph } from "./pipeline-graph";
+import { buildPipelineGraph, StageFailureError } from "./pipeline-graph";
 import { SignalExtractionService } from "./nodes/research/signal-extraction.service";
 import { WebSearchTool } from "../runtime/tools/web-search.tool";
 import { NODE, PipelineState } from "./state";
 import { GraphRunQueueService } from "./graph-run-queue.service";
 
 const GRAPH_NAME = "pipeline-supervisor";
+
+type GraphInvocationInput = Partial<PipelineState> | Command | null;
 
 @Injectable()
 export class GraphService {
@@ -358,16 +360,27 @@ export class GraphService {
    */
   async processGraphRun(
     runId: string,
-    input: Partial<PipelineState> | Command,
+    input: GraphInvocationInput,
     dispatchGeneration: number,
   ): Promise<void> {
     const config = { configurable: { thread_id: runId } };
+
+    // Null is valid only when the root graph has a durable checkpoint. Recheck
+    // that invariant at the execution boundary instead of trusting an earlier
+    // worker read. If the checkpoint is absent, reconstruct the initial input
+    // from the immutable GraphRun seed rather than invoking LangGraph with an
+    // empty __start__ channel.
+    const invocationInput = await this.resolveInvocationInput(
+      runId,
+      input,
+      dispatchGeneration,
+    );
 
     // Resolve the LangSmith root run id for this GraphRun. Resume reuses the
     // persisted id; start mints a fresh one and persists it.
     const parentRunId = await this.resolveParentRunId(
       runId,
-      input,
+      invocationInput,
       dispatchGeneration,
     );
 
@@ -383,9 +396,10 @@ export class GraphService {
     }).compile({ checkpointer: this.checkpointer });
 
     try {
-      const result = (await compiled.invoke(input as never, config)) as PipelineState & {
-        __interrupt__?: unknown;
-      };
+      const result = (await compiled.invoke(
+        invocationInput as never,
+        config,
+      )) as PipelineState & { __interrupt__?: unknown };
 
       // Did the graph pause at an interrupt? Check checkpointer state.
       const snapshot = await compiled.getState(config);
@@ -482,6 +496,19 @@ export class GraphService {
       this.logger.log(`Graph ${runId} completed`);
       await this.fireRunLevelEvaluator(runId);
     } catch (err) {
+      // Infrastructure and checkpointer failures are retryable. Leave the row
+      // RUNNING so BullMQ can invoke the graph again from its last durable
+      // checkpoint. The worker marks the run FAILED only after all attempts
+      // are exhausted. A StageFailureError is a deterministic pipeline result
+      // and remains terminal immediately.
+      if (!(err instanceof StageFailureError)) {
+        this.logger.warn(
+          `Graph ${runId} dispatch ${dispatchGeneration} failed retryably: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        throw err;
+      }
       const msg = err instanceof Error ? err.message : String(err);
       const transition = await this.prisma.graphRun.updateMany({
         where: {
@@ -506,6 +533,63 @@ export class GraphService {
     }
   }
 
+  private async resolveInvocationInput(
+    runId: string,
+    input: GraphInvocationInput,
+    dispatchGeneration: number,
+  ): Promise<GraphInvocationInput> {
+    if (input !== null) return input;
+
+    const run = await this.prisma.graphRun.findFirst({
+      where: {
+        id: runId,
+        status: GraphRunStatus.RUNNING,
+        dispatchGeneration,
+      },
+      select: {
+        id: true,
+        orgId: true,
+        threadId: true,
+        startIcpProfileIds: true,
+        pendingResumeApproved: true,
+      },
+    });
+    if (!run) {
+      throw new Error(
+        `GraphRun ${runId} is not RUNNING at dispatch generation ${dispatchGeneration}`,
+      );
+    }
+
+    const checkpoint = await this.prisma.graphCheckpoint.findFirst({
+      where: {
+        threadId: run.threadId,
+        checkpointNamespace: "",
+      },
+      select: { checkpointId: true },
+    });
+    if (checkpoint) return null;
+
+    if (typeof run.pendingResumeApproved === "boolean") {
+      throw new Error(
+        `GraphRun ${runId} has a pending reviewer decision but no root checkpoint`,
+      );
+    }
+    if (run.startIcpProfileIds.length === 0) {
+      throw new Error(
+        `GraphRun ${runId} has no root checkpoint or durable start ICP input`,
+      );
+    }
+
+    this.logger.warn(
+      `Graph ${runId} continuation had no root checkpoint; rebuilding input from durable start seed`,
+    );
+    return {
+      orgId: run.orgId,
+      runId: run.id,
+      icpProfileIds: [...run.startIcpProfileIds],
+    };
+  }
+
   /**
    * Resolve the LangSmith root run id for this invocation of a GraphRun.
    *
@@ -522,7 +606,7 @@ export class GraphService {
    */
   private async resolveParentRunId(
     runId: string,
-    input: Partial<PipelineState> | Command,
+    input: GraphInvocationInput,
     dispatchGeneration: number,
   ): Promise<string | null> {
     let row: { id: string; orgId: string; langsmithRootRunId: string | null } | null = null;
@@ -539,7 +623,7 @@ export class GraphService {
       );
     }
 
-    const isResume = input instanceof Command;
+    const isResume = input === null || input instanceof Command;
     if (isResume && row?.langsmithRootRunId) {
       return row.langsmithRootRunId;
     }

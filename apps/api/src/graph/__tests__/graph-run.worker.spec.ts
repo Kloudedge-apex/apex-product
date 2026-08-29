@@ -216,6 +216,10 @@ describe("GraphRunWorker.processGraphRun", () => {
       null,
       0,
     );
+    expect(prisma.graphCheckpoint.findFirst).toHaveBeenCalledWith({
+      where: { threadId: "graph_1", checkpointNamespace: "" },
+      select: { checkpointId: true },
+    });
   });
 
   it("fails closed for a legacy run with neither checkpoint nor durable start seed", async () => {

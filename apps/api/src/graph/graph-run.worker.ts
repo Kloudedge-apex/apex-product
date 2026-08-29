@@ -52,15 +52,10 @@ const PRODUCTION_BOOTSTRAP_ACTIVATION_POLL_MS = 1_000;
 /**
  * LangGraph resume sentinel: invoking a compiled graph with `null` input
  * means "seed nothing — continue from the last persisted checkpoint".
- * GraphService.processGraphRun forwards its input verbatim to
- * `compiled.invoke()` (and only inspects it via `instanceof Command`, which
- * is null-safe), but its signature predates the recovery path and does not
- * admit `null` — hence the cast. Widening that signature lives in
- * graph.service.ts, which is out of scope this week.
+ * GraphService revalidates the matching root checkpoint before forwarding it
+ * and reconstructs a missing first-start seed from the durable GraphRun row.
  */
-const RESUME_FROM_CHECKPOINT = null as unknown as Parameters<
-  GraphService["processGraphRun"]
->[1];
+const RESUME_FROM_CHECKPOINT = null;
 
 /**
  * Worker that drives queued GraphRun jobs through GraphService.processGraphRun.
@@ -423,7 +418,7 @@ export class GraphRunWorker implements OnModuleInit, OnModuleDestroy {
     // Once any checkpoint exists, never replay the first-start seed. Null is
     // LangGraph's checkpoint-continuation contract and preserves partial work.
     const checkpoint = await this.prisma.graphCheckpoint.findFirst({
-      where: { threadId: run.threadId },
+      where: { threadId: run.threadId, checkpointNamespace: "" },
       select: { checkpointId: true },
     });
     if (checkpoint) {

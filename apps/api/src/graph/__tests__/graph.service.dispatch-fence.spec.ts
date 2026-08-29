@@ -2,10 +2,20 @@ import { GraphRunStatus } from "@prisma/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PrismaService } from "../../prisma/prisma.service";
 import { GraphService } from "../graph.service";
+import { StageFailureError } from "../pipeline-graph";
 
 const graphMocks = vi.hoisted(() => ({
   invoke: vi.fn(),
   getState: vi.fn(),
+  StageFailureError: class StageFailureError extends Error {
+    constructor(
+      readonly stage: string,
+      readonly reason: string,
+    ) {
+      super(`${stage}:${reason}`);
+      this.name = "StageFailureError";
+    }
+  },
 }));
 
 vi.mock("../pipeline-graph", () => ({
@@ -15,6 +25,7 @@ vi.mock("../pipeline-graph", () => ({
       getState: graphMocks.getState,
     }),
   })),
+  StageFailureError: graphMocks.StageFailureError,
 }));
 
 function makeHarness(transitionCount: number) {
@@ -25,12 +36,26 @@ function makeHarness(transitionCount: number) {
         orgId: "org_1",
         langsmithRootRunId: null,
       }),
+      findFirst: vi.fn().mockResolvedValue({
+        id: "run_1",
+        orgId: "org_1",
+        threadId: "run_1",
+        startIcpProfileIds: ["icp_1"],
+        pendingResumeApproved: null,
+      }),
       updateMany: vi.fn().mockResolvedValue({ count: transitionCount }),
+    },
+    graphCheckpoint: {
+      findFirst: vi.fn().mockResolvedValue(null),
     },
   } as unknown as PrismaService & {
     graphRun: {
       findUnique: ReturnType<typeof vi.fn>;
+      findFirst: ReturnType<typeof vi.fn>;
       updateMany: ReturnType<typeof vi.fn>;
+    };
+    graphCheckpoint: {
+      findFirst: ReturnType<typeof vi.fn>;
     };
   };
   const evidenceLedger = {
@@ -91,7 +116,7 @@ describe("GraphService dispatch-generation lifecycle fence", () => {
     expect(evaluator.evaluateGraphRun).not.toHaveBeenCalled();
   });
 
-  it("does not persist FAILED or evaluate when a stale invocation throws", async () => {
+  it("leaves a retryable invocation failure RUNNING for BullMQ", async () => {
     graphMocks.invoke.mockRejectedValueOnce(new Error("stale worker failed"));
     const { service, prisma, evaluator } = makeHarness(0);
 
@@ -99,15 +124,84 @@ describe("GraphService dispatch-generation lifecycle fence", () => {
       service.processGraphRun("run_1", completedResult(), 7),
     ).rejects.toThrow("stale worker failed");
 
+    expect(prisma.graphRun.updateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: GraphRunStatus.FAILED }),
+      }),
+    );
+    expect(evaluator.evaluateGraphRun).not.toHaveBeenCalled();
+  });
+
+  it("rebuilds a missing-checkpoint continuation from the durable start seed", async () => {
+    const { service, prisma } = makeHarness(1);
+
+    await service.processGraphRun("run_1", null, 8);
+
+    expect(prisma.graphCheckpoint.findFirst).toHaveBeenCalledWith({
+      where: { threadId: "run_1", checkpointNamespace: "" },
+      select: { checkpointId: true },
+    });
+    expect(graphMocks.invoke).toHaveBeenCalledWith(
+      {
+        orgId: "org_1",
+        runId: "run_1",
+        icpProfileIds: ["icp_1"],
+      },
+      { configurable: { thread_id: "run_1" } },
+    );
+  });
+
+  it("keeps null continuation when the root checkpoint exists", async () => {
+    const { service, prisma } = makeHarness(1);
+    prisma.graphCheckpoint.findFirst.mockResolvedValueOnce({
+      checkpointId: "checkpoint_1",
+    });
+
+    await service.processGraphRun("run_1", null, 8);
+
+    expect(graphMocks.invoke).toHaveBeenCalledWith(null, {
+      configurable: { thread_id: "run_1" },
+    });
+  });
+
+  it("refuses to replace a pending reviewer decision with a start seed", async () => {
+    const { service, prisma } = makeHarness(1);
+    prisma.graphRun.findFirst.mockResolvedValueOnce({
+      id: "run_1",
+      orgId: "org_1",
+      threadId: "run_1",
+      startIcpProfileIds: ["icp_1"],
+      pendingResumeApproved: false,
+    });
+
+    await expect(service.processGraphRun("run_1", null, 8)).rejects.toThrow(
+      "pending reviewer decision but no root checkpoint",
+    );
+    expect(graphMocks.invoke).not.toHaveBeenCalled();
+  });
+
+  it("marks a deterministic stage failure terminal immediately", async () => {
+    graphMocks.invoke.mockRejectedValueOnce(
+      new StageFailureError("sourcing", "no_companies"),
+    );
+    const { service, prisma, evaluator } = makeHarness(1);
+
+    await expect(
+      service.processGraphRun("run_1", completedResult(), 10),
+    ).rejects.toThrow("sourcing:no_companies");
+
     expect(prisma.graphRun.updateMany).toHaveBeenCalledWith({
       where: {
         id: "run_1",
         status: GraphRunStatus.RUNNING,
-        dispatchGeneration: 7,
+        dispatchGeneration: 10,
       },
-      data: expect.objectContaining({ status: GraphRunStatus.FAILED }),
+      data: expect.objectContaining({
+        status: GraphRunStatus.FAILED,
+        error: "sourcing:no_companies",
+      }),
     });
-    expect(evaluator.evaluateGraphRun).not.toHaveBeenCalled();
+    expect(evaluator.evaluateGraphRun).toHaveBeenCalledWith("run_1");
   });
 
   it("emits approval-requested evidence only after the fenced transition wins", async () => {
