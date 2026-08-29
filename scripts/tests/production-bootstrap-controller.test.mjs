@@ -1093,7 +1093,7 @@ test("API ingress disable uses a least-privilege PATCH and never requests secret
   assert.doesNotMatch(disable, /listSecrets|list-secrets|"ingress", "disable"/);
 });
 
-test("Container App updates use parent-resource PATCH and a deterministic unhealthy-revision recovery suffix", () => {
+test("Container App updates use bounded parent mutation paths and deterministic recovery suffixes", () => {
   const source = readFileSync(CONTROLLER, "utf8");
   const quiesceStart = source.indexOf("function quiesceAppWithParentWrite");
   const quiesceEnd = source.indexOf("function disableApiIngress", quiesceStart);
@@ -1106,8 +1106,12 @@ test("Container App updates use parent-resource PATCH and a deterministic unheal
   assert.match(mutationPaths, /before\.properties\?\.latestReadyRevisionName === revision/);
   assert.match(mutationPaths, /const recoveryRevision = `\$\{revision\}-r1`/);
   assert.match(mutationPaths, /recovery revision name exceeds the Azure limit/);
+  assert.match(mutationPaths, /"containerapp", "revision", "copy"/);
+  assert.match(mutationPaths, /"--from-revision", copyFromRevision/);
+  assert.match(mutationPaths, /failed-parent revision-copy repair posture is invalid/);
+  assert.match(mutationPaths, /before\.properties\?\.deploymentErrors !== expectedDeploymentError/);
   assert.doesNotMatch(mutationPaths, /"--method", "delete"/);
-  assert.doesNotMatch(mutationPaths, /listSecrets|list-secrets|"containerapp", "update"/);
+  assert.doesNotMatch(mutationPaths, /listSecrets|list-secrets|"containerapp", "update"|--show-secrets/);
   assert.doesNotMatch(source, /"containerapp", "revision", "deactivate"/);
 });
 
@@ -1182,6 +1186,8 @@ test("stored recovery rerolls exact successors when the ingress-disabled API par
   assert.match(recovery, /if \(!apiParentRepairRequired\) \{\s*return \{ state, recovery: validatedRecovery \};/);
   assert.match(recovery, /validatedStoredRecoveryParentRepair = true/);
   assert.match(recovery, /workerQuiescent\.some\(Boolean\) \|\| validatedStoredRecoveryParentRepair/);
+  assert.match(recovery, /copyFromRevision: state\.activeIdentities\.api/);
+  assert.match(recovery, /conflictingRevisionSuffix: `bootstrap-hold-\$\{terminalOpenGeneration\}`/);
   assert.match(recovery, /const partialRecoveryObserved =/);
   assert.match(recovery, /!partialRecoveryObserved/);
 });

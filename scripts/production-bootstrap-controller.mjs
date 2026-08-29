@@ -4233,6 +4233,7 @@ function updateApp(
   removeEnvValues = [],
   releaseLockRequired = true,
   sourceTemplate,
+  failedParentRepair,
 ) {
   const app = role === "api" ? API_APP : role === "worker" ? WORKER_APP : CONSOLE_APP;
   const resourceId = role === "api"
@@ -4291,10 +4292,52 @@ function updateApp(
     activateRevision(runner, request, role, revision, releaseLockRequired);
   }
   if (!preexisting) {
-    azureMutation(
-      runner,
-      request,
-      [
+    if (failedParentRepair !== undefined) {
+      exactKeys(
+        failedParentRepair,
+        ["copyFromRevision", "conflictingRevisionSuffix"],
+        "failed-parent revision-copy repair",
+      );
+      const { copyFromRevision, conflictingRevisionSuffix } = failedParentRepair;
+      const expectedDeploymentError =
+        "The following field(s) are either invalid or missing. " +
+        `Field 'template.revisionsuffix' is invalid with details: 'Invalid value: ` +
+        `\"${conflictingRevisionSuffix}\": revision with suffix ` +
+        `${conflictingRevisionSuffix} already exists.';.`;
+      if (role !== "api" ||
+        before.properties?.provisioningState !== "Failed" ||
+        before.properties?.configuration?.ingress !== null ||
+        before.properties?.configuration?.activeRevisionsMode !== "Single" ||
+        before.properties?.latestReadyRevisionName !== copyFromRevision ||
+        before.properties?.deploymentErrors !== expectedDeploymentError) {
+        fail("failed-parent revision-copy repair posture is invalid");
+      }
+      assertExactActiveRevision(runner, request, app, copyFromRevision, image);
+      const copyArgs = [
+        "containerapp", "revision", "copy",
+        "--name", app,
+        "--resource-group", RESOURCE_GROUP,
+        "--from-revision", copyFromRevision,
+        "--revision-suffix", plannedSuffix(revision, app),
+        "--image", image,
+        "--container-name", app,
+        "--min-replicas", String(expectedTemplate.scale?.minReplicas),
+        "--max-replicas", String(expectedTemplate.scale?.maxReplicas),
+      ];
+      if (envValues.length > 0) copyArgs.push("--set-env-vars", ...envValues);
+      if (removeEnvValues.length > 0) {
+        copyArgs.push("--remove-env-vars", ...removeEnvValues);
+      }
+      copyArgs.push("--output", "none");
+      azureMutation(
+        runner,
+        request,
+        copyArgs,
+        `${role} failed-parent revision-copy repair`,
+        releaseLockRequired,
+      );
+    } else {
+      azureMutation(runner, request, [
         "rest",
         "--method", "patch",
         "--url", `${resourceId}?api-version=2024-03-01`,
@@ -4307,10 +4350,8 @@ function updateApp(
           },
         }),
         "--output", "none",
-      ],
-      `${role} bootstrap revision update`,
-      releaseLockRequired,
-    );
+      ], `${role} bootstrap revision update`, releaseLockRequired);
+    }
   }
   let expected = null;
   for (let observation = 0; observation < 36; observation += 1) {
@@ -4855,6 +4896,12 @@ function ensureFirstClassDeploymentsForResume(
     ],
     true,
     apiSourceTemplate,
+    validatedStoredRecoveryParentRepair
+      ? {
+          copyFromRevision: state.activeIdentities.api,
+          conflictingRevisionSuffix: `bootstrap-hold-${terminalOpenGeneration}`,
+        }
+      : undefined,
   );
   const workerRevision = updateApp(
     runner,
