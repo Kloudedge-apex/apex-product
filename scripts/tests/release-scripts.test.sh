@@ -900,6 +900,7 @@ test_deploy_admission() {
   azure_release="az storage blob lease release --account-name workforcebootstrap --container-name production-control --blob-name workforce-os/initial-production-bootstrap/state-v1.json --auth-mode login --subscription 11111111-2222-3333-4444-555555555555 --only-show-errors --lease-id"
   assert_log_contains "${CALL_LOG}" "${azure_acquire}"
   assert_log_contains "${CALL_LOG}" "${azure_release}"
+  assert_log_excludes "${CALL_LOG}" "--query leaseId"
   assert_before "${CALL_LOG}" "${azure_acquire}" \
     "push --force-with-lease=refs/heads/workforce-os-release-lock/production-gtm-platform:"
   assert_before "${CALL_LOG}" "${azure_acquire}" "az acr build"
