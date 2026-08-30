@@ -456,7 +456,6 @@ verify_production_mutation_lease() {
   local returned_lease_id
   returned_lease_id="$(production_mutation_blob_lease renew \
     --lease-id "${PRODUCTION_MUTATION_LEASE_ID}" \
-    --query leaseId \
     --output tsv)" || return 1
   [[ "${returned_lease_id}" == "${PRODUCTION_MUTATION_LEASE_ID}" ]]
 }
@@ -483,7 +482,6 @@ acquire_production_mutation_lease() {
   returned_lease_id="$(production_mutation_blob_lease acquire \
     --lease-duration -1 \
     --proposed-lease-id "${PRODUCTION_MUTATION_LEASE_ID}" \
-    --query leaseId \
     --output tsv)" || {
       # A successful acquire can lose its acknowledgement. Exact-ID renewal
       # adopts only this attempt; it never breaks or steals another lease.
