@@ -1,0 +1,397 @@
+name: Enable Global Live Email
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type ENABLE LIVE EMAIL FOR ALL READY WORKFORCE OS ORGANIZATIONS exactly
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+  id-token: write
+
+concurrency:
+  group: workforce-os-production
+  cancel-in-progress: false
+
+jobs:
+  enable-global-live-send:
+    name: Enable Global Live Email
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: workforce-os-production
+
+    steps:
+      - name: Admit exact global live-send request
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+          GH_TOKEN: ${{ github.token }}
+          REF_PROTECTED: ${{ github.ref_protected }}
+        run: |
+          set -Eeuo pipefail
+          expected_confirmation="ENABLE LIVE EMAIL FOR ALL READY WORKFORCE OS ORGANIZATIONS"
+          if [[ "${CONFIRMATION}" != "${expected_confirmation}" ||
+            "${GITHUB_REF}" != "refs/heads/master" ||
+            "${REF_PROTECTED}" != "true" ]]; then
+            echo "ERROR: global live email requires protected master and the exact confirmation" >&2
+            exit 1
+          fi
+          remote_master_sha="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/master" --jq '.object.sha')"
+          [[ "${remote_master_sha}" == "${GITHUB_SHA}" ]]
+
+      - name: Checkout trusted activation source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify activation source and runtime contract
+        run: |
+          set -Eeuo pipefail
+          [[ "$(git rev-parse HEAD)" == "${GITHUB_SHA}" ]]
+          [[ -z "$(git status --porcelain --untracked-files=all)" ]]
+          scripts/verify-production-release-workflow.sh \
+            .github/workflows/release-production.yml
+          grep -Fq 'OUTREACH_ALLOW_WILDCARD !== "true"' \
+            apps/api/src/outreach/outreach-allowlist.util.ts
+          grep -Fq 'AdminOrManagerGuard' \
+            apps/api/src/outreach/outreach-artifacts.controller.ts
+
+      - name: Azure login with protected OIDC identity
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5
+        with:
+          client-id: 2efd64b0-87c1-43a7-a064-30679ce8b764
+          tenant-id: d4b3813d-146f-4d03-96b8-d6e5862d58a2
+          subscription-id: 3171575e-f164-425c-9ee0-2fb10cf93884
+
+      - name: Enable global live email under the production lease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+
+          subscription="3171575e-f164-425c-9ee0-2fb10cf93884"
+          resource_group="workforce-os-prod"
+          storage_account="workforceosprodctrl"
+          storage_container="production-control"
+          storage_blob="workforce-os/initial-production-bootstrap/state-v1.json"
+          api_app="apex-gtm-api"
+          worker_app="apex-gtm-worker"
+          console_app="nikxius-web"
+          expected_image="workforceosprodacr.azurecr.io/apex-api@sha256:a047fe1ceb54bc022475e44ef7c006550d9384eaaf6083c08fbbcafdc38added"
+          expected_api_revision="apex-gtm-api--88oi4d1"
+          expected_worker_revision="apex-gtm-worker--p5xoesg"
+          expected_console_image="workforceosprodacr.azurecr.io/workforceos-fe@sha256:0eacf76d078cbc914a1b493864372b77510572cd9241b4e561fd951667311f12"
+          expected_console_revision="nikxius-web--bdrngs2"
+          release_lock_ref="refs/heads/workforce-os-release-lock/production-gtm-platform"
+          lock_created=false
+          lease_acquired=false
+          lease_safe_to_release=true
+          api_mutated=false
+          worker_mutated=false
+          completed=false
+          state_dir="$(mktemp -d)"
+          lease_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+
+          env_value() {
+            local state_file=$1
+            local name=$2
+            jq -er --arg name "${name}" '
+              [.properties.template.containers[0].env[]? | select(.name == $name)]
+              | if length == 0 then ""
+                elif length == 1 and ((.[0].secretRef // "") == "")
+                then (.[0].value // "")
+                else error("missing, duplicate, or secret-backed value")
+                end
+            ' "${state_file}"
+          }
+
+          capture_active_revision() {
+            local app=$1
+            local output_file=$2
+            local list_file="${output_file}.list"
+            local revision attempt
+            for attempt in {1..60}; do
+              az containerapp revision list --subscription "${subscription}" \
+                --resource-group "${resource_group}" --name "${app}" \
+                --output json >"${list_file}"
+              revision="$(jq -r '
+                [.[] | select(.properties.active == true)]
+                | if length == 1 then .[0].name else empty end
+              ' "${list_file}")"
+              if [[ -n "${revision}" ]] &&
+                az containerapp revision show --subscription "${subscription}" \
+                  --resource-group "${resource_group}" --name "${app}" \
+                  --revision "${revision}" --output json >"${output_file}" &&
+                jq -e --arg revision "${revision}" '
+                  .name == $revision
+                  and .properties.active == true
+                  and .properties.healthState == "Healthy"
+                  and .properties.provisioningState == "Provisioned"
+                  and (.properties.template.containers | length == 1)
+                ' "${output_file}" >/dev/null; then
+                return 0
+              fi
+              sleep 2
+            done
+            echo "ERROR: ${app} did not converge to one healthy active revision" >&2
+            return 1
+          }
+
+          assert_identity() {
+            local state_file=$1
+            local revision=$2
+            local image=$3
+            jq -e --arg revision "${revision}" --arg image "${image}" '
+              .name == $revision
+              and .properties.template.containers[0].image == $image
+            ' "${state_file}" >/dev/null
+          }
+
+          assert_global_live_config() {
+            local state_file=$1
+            [[ "$(env_value "${state_file}" OUTREACH_LIVE_FOR_ORGS)" == "*" ]]
+            [[ "$(env_value "${state_file}" OUTREACH_ALLOW_WILDCARD)" == "true" ]]
+          }
+
+          assert_dry_run_config() {
+            local state_file=$1
+            local allowlist wildcard
+            allowlist="$(env_value "${state_file}" OUTREACH_LIVE_FOR_ORGS)"
+            wildcard="$(env_value "${state_file}" OUTREACH_ALLOW_WILDCARD)"
+            [[ -z "${allowlist}" ]]
+            [[ -z "${wildcard}" || "${wildcard}" == "false" ]]
+          }
+
+          assert_no_release_runs() {
+            local repository=$1
+            local workflow_id runs
+            if [[ "${repository}" == "${GITHUB_REPOSITORY}" ]]; then
+              workflow_id="$(gh api \
+                "repos/${repository}/actions/workflows/release-production.yml" --jq '.id')"
+              runs="$(gh api \
+                "repos/${repository}/actions/workflows/${workflow_id}/runs?per_page=20")"
+            else
+              runs="$(curl --fail-with-body --silent --show-error \
+                -H 'Accept: application/vnd.github+json' \
+                "https://api.github.com/repos/${repository}/actions/workflows/release-production.yml/runs?per_page=20")"
+            fi
+            jq -e '[.workflow_runs[] | select(.status == "queued" or .status == "in_progress" or .status == "waiting" or .status == "pending")] | length == 0' \
+              <<<"${runs}" >/dev/null
+          }
+
+          delete_exact_lock() {
+            local current_lock
+            current_lock="$(gh api \
+              "repos/${GITHUB_REPOSITORY}/git/ref/heads/workforce-os-release-lock/production-gtm-platform" \
+              --jq '.object.sha')" || return 1
+            [[ "${current_lock}" == "${GITHUB_SHA}" ]] || return 1
+            git -c credential.helper= \
+              -c 'credential.helper=!gh auth git-credential' \
+              push --porcelain \
+              --force-with-lease="${release_lock_ref}:${GITHUB_SHA}" \
+              "https://github.com/${GITHUB_REPOSITORY}.git" ":${release_lock_ref}"
+            if gh api \
+              "repos/${GITHUB_REPOSITORY}/git/ref/heads/workforce-os-release-lock/production-gtm-platform" \
+              >/dev/null 2>&1; then
+              echo "ERROR: production Git lock still exists after cleanup" >&2
+              return 1
+            fi
+            lock_created=false
+          }
+
+          release_lease() {
+            local lease_json
+            if ! az storage blob lease release --account-name "${storage_account}" \
+              --container-name "${storage_container}" --blob-name "${storage_blob}" \
+              --auth-mode login --subscription "${subscription}" \
+              --lease-id "${lease_id}" --only-show-errors --output none; then
+              echo "Lease release acknowledgement was lost; checking provider state" >&2
+            fi
+            lease_json="$(az storage blob show --account-name "${storage_account}" \
+              --container-name "${storage_container}" --name "${storage_blob}" \
+              --auth-mode login --subscription "${subscription}" \
+              --only-show-errors --query properties.lease --output json)"
+            jq -e '
+              .status == "unlocked"
+              and (.state == "available" or .state == "broken" or .state == "expired")
+            ' <<<"${lease_json}" >/dev/null
+            lease_acquired=false
+          }
+
+          assert_authority_held() {
+            local current_lock renewed_lease_id
+            current_lock="$(gh api \
+              "repos/${GITHUB_REPOSITORY}/git/ref/heads/workforce-os-release-lock/production-gtm-platform" \
+              --jq '.object.sha')"
+            [[ "${current_lock}" == "${GITHUB_SHA}" ]]
+            renewed_lease_id="$(az storage blob lease renew \
+              --account-name "${storage_account}" --container-name "${storage_container}" \
+              --blob-name "${storage_blob}" --auth-mode login \
+              --subscription "${subscription}" --lease-id "${lease_id}" \
+              --only-show-errors --output tsv)"
+            [[ "${renewed_lease_id}" == "${lease_id}" ]]
+            [[ "$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/master" --jq '.object.sha')" == "${GITHUB_SHA}" ]]
+          }
+
+          rollback() {
+            local rollback_failed=false
+            set +e
+            if [[ "${worker_mutated}" == "true" ]]; then
+              az containerapp revision activate --subscription "${subscription}" \
+                --resource-group "${resource_group}" --name "${worker_app}" \
+                --revision "${expected_worker_revision}" --output none || rollback_failed=true
+            fi
+            if [[ "${api_mutated}" == "true" ]]; then
+              az containerapp revision activate --subscription "${subscription}" \
+                --resource-group "${resource_group}" --name "${api_app}" \
+                --revision "${expected_api_revision}" --output none || rollback_failed=true
+              az containerapp ingress traffic set --subscription "${subscription}" \
+                --resource-group "${resource_group}" --name "${api_app}" \
+                --revision-weight "${expected_api_revision}=100" --output none || rollback_failed=true
+            fi
+            if ! capture_active_revision "${api_app}" "${state_dir}/rollback-api.json" ||
+              ! capture_active_revision "${worker_app}" "${state_dir}/rollback-worker.json" ||
+              ! assert_identity "${state_dir}/rollback-api.json" "${expected_api_revision}" "${expected_image}" ||
+              ! assert_identity "${state_dir}/rollback-worker.json" "${expected_worker_revision}" "${expected_image}" ||
+              ! assert_dry_run_config "${state_dir}/rollback-api.json" ||
+              ! assert_dry_run_config "${state_dir}/rollback-worker.json"; then
+              rollback_failed=true
+            fi
+            set -e
+            [[ "${rollback_failed}" == "false" ]]
+          }
+
+          cleanup() {
+            local status=$?
+            trap - EXIT
+            if [[ "${completed}" != "true" &&
+              ( "${api_mutated}" == "true" || "${worker_mutated}" == "true" ) ]]; then
+              if ! rollback; then
+                lease_safe_to_release=false
+                echo "ERROR: activation rollback could not be proven; retaining lock and lease" >&2
+              fi
+            fi
+            if [[ "${lease_safe_to_release}" == "true" ]]; then
+              if [[ "${lock_created}" == "true" ]]; then delete_exact_lock || status=1; fi
+              if [[ "${lease_acquired}" == "true" ]]; then release_lease || status=1; fi
+            fi
+            exit "${status}"
+          }
+          trap cleanup EXIT
+
+          assert_no_release_runs "Kloudedge-apex/apex-product"
+          assert_no_release_runs "Kloudedge-apex/Workforce-OS"
+          if gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/workforce-os-release-lock/production-gtm-platform" \
+            >/dev/null 2>&1; then
+            echo "ERROR: backend production Git lock already exists" >&2
+            exit 1
+          fi
+          if curl --fail --silent --show-error \
+            "https://api.github.com/repos/Kloudedge-apex/Workforce-OS/git/ref/heads/workforce-os-release-lock/production-console" \
+            >/dev/null 2>&1; then
+            echo "ERROR: console production Git lock already exists" >&2
+            exit 1
+          fi
+
+          account_json="$(az account show --output json)"
+          jq -e '
+            (.id | ascii_downcase) == "3171575e-f164-425c-9ee0-2fb10cf93884"
+            and (.tenantId | ascii_downcase) == "d4b3813d-146f-4d03-96b8-d6e5862d58a2"
+            and .user.type == "servicePrincipal"
+            and (.user.name | ascii_downcase) == "2efd64b0-87c1-43a7-a064-30679ce8b764"
+          ' <<<"${account_json}" >/dev/null
+
+          capture_active_revision "${api_app}" "${state_dir}/api-before.json"
+          capture_active_revision "${worker_app}" "${state_dir}/worker-before.json"
+          capture_active_revision "${console_app}" "${state_dir}/console-before.json"
+          assert_identity "${state_dir}/api-before.json" "${expected_api_revision}" "${expected_image}"
+          assert_identity "${state_dir}/worker-before.json" "${expected_worker_revision}" "${expected_image}"
+          assert_identity "${state_dir}/console-before.json" "${expected_console_revision}" "${expected_console_image}"
+          assert_dry_run_config "${state_dir}/api-before.json"
+          assert_dry_run_config "${state_dir}/worker-before.json"
+          scripts/verify-containerapp-release-config.sh "${expected_image}" "${expected_image}"
+
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f ref="${release_lock_ref}" -f sha="${GITHUB_SHA}" >/dev/null
+          lock_created=true
+          if ! returned_lease_id="$(az storage blob lease acquire \
+            --account-name "${storage_account}" --container-name "${storage_container}" \
+            --blob-name "${storage_blob}" --auth-mode login \
+            --subscription "${subscription}" --lease-duration -1 \
+            --proposed-lease-id "${lease_id}" --only-show-errors --output tsv)"; then
+            returned_lease_id="$(az storage blob lease renew \
+              --account-name "${storage_account}" --container-name "${storage_container}" \
+              --blob-name "${storage_blob}" --auth-mode login \
+              --subscription "${subscription}" --lease-id "${lease_id}" \
+              --only-show-errors --output tsv)"
+          fi
+          lease_acquired=true
+          [[ "${returned_lease_id}" == "${lease_id}" ]]
+
+          assert_no_release_runs "Kloudedge-apex/apex-product"
+          assert_no_release_runs "Kloudedge-apex/Workforce-OS"
+          capture_active_revision "${api_app}" "${state_dir}/api-recheck.json"
+          capture_active_revision "${worker_app}" "${state_dir}/worker-recheck.json"
+          assert_identity "${state_dir}/api-recheck.json" "${expected_api_revision}" "${expected_image}"
+          assert_identity "${state_dir}/worker-recheck.json" "${expected_worker_revision}" "${expected_image}"
+          assert_dry_run_config "${state_dir}/api-recheck.json"
+          assert_dry_run_config "${state_dir}/worker-recheck.json"
+          assert_authority_held
+
+          api_mutated=true
+          az containerapp update --subscription "${subscription}" \
+            --resource-group "${resource_group}" --name "${api_app}" \
+            --set-env-vars 'OUTREACH_LIVE_FOR_ORGS=*' 'OUTREACH_ALLOW_WILDCARD=true' \
+            --output none
+          capture_active_revision "${api_app}" "${state_dir}/api-after.json"
+          api_revision="$(jq -er '.name' "${state_dir}/api-after.json")"
+          [[ "${api_revision}" != "${expected_api_revision}" ]]
+          assert_identity "${state_dir}/api-after.json" "${api_revision}" "${expected_image}"
+          assert_global_live_config "${state_dir}/api-after.json"
+
+          api_fqdn="$(az containerapp show --subscription "${subscription}" \
+            --resource-group "${resource_group}" --name "${api_app}" \
+            --query properties.configuration.ingress.fqdn --output tsv)"
+          curl --fail --silent --show-error --max-time 20 \
+            "https://${api_fqdn}/api/health/ready" >/dev/null
+
+          assert_no_release_runs "Kloudedge-apex/apex-product"
+          assert_no_release_runs "Kloudedge-apex/Workforce-OS"
+          assert_authority_held
+          worker_mutated=true
+          az containerapp update --subscription "${subscription}" \
+            --resource-group "${resource_group}" --name "${worker_app}" \
+            --set-env-vars 'OUTREACH_LIVE_FOR_ORGS=*' 'OUTREACH_ALLOW_WILDCARD=true' \
+            --output none
+          capture_active_revision "${worker_app}" "${state_dir}/worker-after.json"
+          worker_revision="$(jq -er '.name' "${state_dir}/worker-after.json")"
+          [[ "${worker_revision}" != "${expected_worker_revision}" ]]
+          assert_identity "${state_dir}/worker-after.json" "${worker_revision}" "${expected_image}"
+          assert_global_live_config "${state_dir}/worker-after.json"
+
+          scripts/verify-containerapp-release-config.sh "${expected_image}" "${expected_image}"
+          assert_no_release_runs "Kloudedge-apex/apex-product"
+          assert_no_release_runs "Kloudedge-apex/Workforce-OS"
+          assert_authority_held
+
+          completed=true
+          delete_exact_lock
+          release_lease
+          trap - EXIT
+
+          {
+            echo "### Global live email enabled"
+            echo "- API revision: \`${api_revision}\`"
+            echo "- Worker revision: \`${worker_revision}\`"
+            echo "- Image: \`${expected_image}\`"
+            echo "- Eligibility: every organization"
+            echo "- Dispatch still requires manager/admin approval, ready Gmail, complete sender identity, suppression/cooldown checks, and daily capacity"
+            echo "- Production Git lock removed and shared Azure lease released"
+          } >>"${GITHUB_STEP_SUMMARY}"

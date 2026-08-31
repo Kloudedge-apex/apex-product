@@ -409,7 +409,7 @@ if [[ "${FRONTEND_HOST_LOWER}" != *.* ]]; then
   exit 1
 fi
 
-for DISABLED_ENV in OUTREACH_ALLOW_WILDCARD ALLOW_DEV_ORG_HEADER ENCRYPTION_KEY_DEV_FALLBACK; do
+for DISABLED_ENV in ALLOW_DEV_ORG_HEADER ENCRYPTION_KEY_DEV_FALLBACK; do
   require_unset_or_false \
     "$(env_value "${API_JSON}" "${DISABLED_ENV}")" \
     "${DISABLED_ENV}"
@@ -501,13 +501,25 @@ require_value \
 
 API_OUTREACH_ALLOWLIST="$(env_value "${API_JSON}" OUTREACH_LIVE_FOR_ORGS)"
 WORKER_OUTREACH_ALLOWLIST="$(env_value "${WORKER_JSON}" OUTREACH_LIVE_FOR_ORGS)"
+API_OUTREACH_WILDCARD_ACK="$(env_value "${API_JSON}" OUTREACH_ALLOW_WILDCARD)"
+WORKER_OUTREACH_WILDCARD_ACK="$(env_value "${WORKER_JSON}" OUTREACH_ALLOW_WILDCARD)"
 require_value \
   "${WORKER_OUTREACH_ALLOWLIST}" \
   "${API_OUTREACH_ALLOWLIST}" \
   "OUTREACH_LIVE_FOR_ORGS parity"
+require_value \
+  "${WORKER_OUTREACH_WILDCARD_ACK}" \
+  "${API_OUTREACH_WILDCARD_ACK}" \
+  "OUTREACH_ALLOW_WILDCARD parity"
 if [[ "${API_OUTREACH_ALLOWLIST}" =~ ^[[:space:]]*\*[[:space:]]*$ ]]; then
-  echo "ERROR: OUTREACH_LIVE_FOR_ORGS wildcard is forbidden for the guarded-SDR release" >&2
-  exit 1
+  require_value \
+    "${API_OUTREACH_WILDCARD_ACK}" \
+    "true" \
+    "global live-send acknowledgement"
+else
+  require_unset_or_false \
+    "${API_OUTREACH_WILDCARD_ACK}" \
+    "OUTREACH_ALLOW_WILDCARD"
 fi
 API_CLERK_PARTIES="$(env_value "${API_JSON}" CLERK_AUTHORIZED_PARTIES)"
 if [[ -z "${API_CLERK_PARTIES}" ]]; then

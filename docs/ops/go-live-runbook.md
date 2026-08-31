@@ -16,7 +16,7 @@ verified before acting.
 | ACR / repo            | `workforceosprodacr` / `apex-api`                                                                                                                                         |
 | BullMQ queues         | `graph-runs` (pipeline runs), `outreach-send` (post-approval delivery)                                                                                          |
 | Tenant-zero org id    | `cmpe63k370000ap01vsiehbj2`                                                                                                                                     |
-| Allowlisted send orgs | `OUTREACH_LIVE_FOR_ORGS` env on `apex-gtm-worker` (currently tenant-zero only)                                                                                  |
+| Live-send eligibility | Matching `OUTREACH_LIVE_FOR_ORGS` and `OUTREACH_ALLOW_WILDCARD` values on API and worker; global mode is exactly `*` plus `true`                                  |
 | Prod DB access        | `workforceosprodacr`/pgclient ACI workflow (see memory: prod-schema-snapshot-workflow). All writes go through the DB-safety workflow: dry-run + diff + explicit approval. |
 
 Resolve the API ingress FQDN whenever a command below needs it:
@@ -771,9 +771,20 @@ test "$RESTORED_WORKER_ALLOWLIST" = "$CURRENT_WORKER_ALLOWLIST"
 Restore API truth first and worker delivery last so the UI cannot report dry
 run while the worker is already live-enabled.
 
-Never set `*` in production. The runtime guard requires the explicit
-`OUTREACH_ALLOW_WILDCARD=true` escape before it will accept a wildcard, but the
-production release verifier rejects both the wildcard and that escape flag.
+Production may enable live email for every organization only with the exact,
+two-part configuration `OUTREACH_LIVE_FOR_ORGS="*"` and
+`OUTREACH_ALLOW_WILDCARD=true` on both API and worker. The release verifier
+rejects a wildcard without that acknowledgement, rejects the acknowledgement
+without the wildcard, and rejects API/worker drift. This changes eligibility,
+not dispatch authorization: an admin or manager must still approve each email,
+and mailbox readiness, sender identity, unsubscribe, suppression, cooldown,
+daily-cap, reservation, and delivery-ambiguity gates remain fail-closed.
+
+To disable global live send, update the worker first to an empty
+`OUTREACH_LIVE_FOR_ORGS` and `OUTREACH_ALLOW_WILDCARD=false`, verify the worker
+revision, then update the API. This preserves the worker-first kill direction;
+use `OUTREACH_WORKER_ENABLED=false` first when an immediate hard pause is
+required.
 
 ### KS-2 — `OUTREACH_WORKER_ENABLED=false` (pause the send loop)
 
@@ -1141,10 +1152,11 @@ they churn rather than accumulate in `waiting`.
 
 ## (d) GL10 SMOKE CHECKLIST — tenant-zero, ONE real email
 
-Goal: exactly one real, tracked email out of prod, end to end. Org
-`cmpe63k370000ap01vsiehbj2` is already in `OUTREACH_LIVE_FOR_ORGS`. The
-recipient must be an inbox **you control** — step 8 permanently suppresses it
-for this org, and GL8b will cooldown-block it for 14 days regardless.
+Goal: exactly one real, tracked email out of prod, end to end. Verify the org
+is live-eligible through either the explicit allowlist or the acknowledged
+global mode. The recipient must be an inbox **you control** — step 8
+permanently suppresses it for this org, and GL8b will cooldown-block it for 14
+days regardless.
 
 **Preconditions**
 
