@@ -912,43 +912,45 @@ capture_active_revision_state() {
   local app=$1
   local output_file=$2
   local list_file="${output_file}.list"
-  local active_revision
-  if ! az containerapp revision list \
-    --name "${app}" \
-    --resource-group "${RESOURCE_GROUP}" \
-    --output json >"${list_file}"; then
-    echo "ERROR: could not list active revisions for ${app}" >&2
-    return 1
-  fi
-  active_revision="$(jq -er '
-    [.[] | select(.properties.active == true)]
-    | if length == 1 and (.[0].name | type == "string" and length > 0)
-      then .[0].name
-      else error("expected exactly one active revision")
-      end
-  ' "${list_file}")" || {
-    echo "ERROR: ${app} does not have exactly one active revision" >&2
-    return 1
-  }
-  if ! az containerapp revision show \
-    --name "${app}" \
-    --resource-group "${RESOURCE_GROUP}" \
-    --revision "${active_revision}" \
-    --output json >"${output_file}"; then
-    echo "ERROR: could not read active revision ${active_revision} for ${app}" >&2
-    return 1
-  fi
-  jq -e --arg revision "${active_revision}" '
-    .name == $revision
-    and .properties.active == true
-    and .properties.healthState == "Healthy"
-    and .properties.provisioningState == "Provisioned"
-    and (.properties.template.containers | length == 1)
-    and (.properties.template.containers[0].image | type == "string" and length > 0)
-  ' "${output_file}" >/dev/null || {
-    echo "ERROR: ${app} active revision is not a single healthy provisioned container" >&2
-    return 1
-  }
+  local active_revision attempt
+  # Container Apps can briefly report both the retiring and replacement
+  # revisions active after an image update in Single mode. Wait for the
+  # provider to converge instead of treating that documented transition as a
+  # permanent ambiguity. No caller chooses either revision while two are
+  # active, and every accepted revision is still re-read and health-checked.
+  for ((attempt = 1; attempt <= 60; attempt++)); do
+    if az containerapp revision list \
+      --name "${app}" \
+      --resource-group "${RESOURCE_GROUP}" \
+      --output json >"${list_file}"; then
+      active_revision="$(jq -r '
+        [.[] | select(.properties.active == true)]
+        | if length == 1 and (.[0].name | type == "string" and length > 0)
+          then .[0].name
+          else empty
+          end
+      ' "${list_file}")"
+      if [[ -n "${active_revision}" ]] &&
+        az containerapp revision show \
+          --name "${app}" \
+          --resource-group "${RESOURCE_GROUP}" \
+          --revision "${active_revision}" \
+          --output json >"${output_file}" &&
+        jq -e --arg revision "${active_revision}" '
+          .name == $revision
+          and .properties.active == true
+          and .properties.healthState == "Healthy"
+          and .properties.provisioningState == "Provisioned"
+          and (.properties.template.containers | length == 1)
+          and (.properties.template.containers[0].image | type == "string" and length > 0)
+        ' "${output_file}" >/dev/null; then
+        return 0
+      fi
+    fi
+    sleep 2
+  done
+  echo "ERROR: ${app} did not converge to exactly one healthy active revision" >&2
+  return 1
 }
 
 assert_active_revision_identity() {
@@ -1064,23 +1066,31 @@ verify_retained_revision() {
   local revision=$2
   local expected_image=$3
   local state_file=$4
-  if ! az containerapp revision show \
-    --name "${app}" \
-    --resource-group "${RESOURCE_GROUP}" \
-    --revision "${revision}" \
-    --output json >"${state_file}"; then
-    echo "ERROR: signed rollback revision ${revision} is no longer available" >&2
-    return 1
-  fi
-  jq -e --arg revision "${revision}" --arg image "${expected_image}" '
-    .name == $revision
-    and .properties.active == false
-    and (.properties.template.containers | length == 1)
-    and .properties.template.containers[0].image == $image
-  ' "${state_file}" >/dev/null || {
-    echo "ERROR: signed rollback revision ${revision} was not retained exactly" >&2
-    return 1
-  }
+  local attempt
+  for ((attempt = 1; attempt <= 60; attempt++)); do
+    if ! az containerapp revision show \
+      --name "${app}" \
+      --resource-group "${RESOURCE_GROUP}" \
+      --revision "${revision}" \
+      --output json >"${state_file}"; then
+      echo "ERROR: signed rollback revision ${revision} is no longer available" >&2
+      return 1
+    fi
+    if ! jq -e --arg revision "${revision}" --arg image "${expected_image}" '
+      .name == $revision
+      and (.properties.template.containers | length == 1)
+      and .properties.template.containers[0].image == $image
+    ' "${state_file}" >/dev/null; then
+      echo "ERROR: signed rollback revision ${revision} changed identity" >&2
+      return 1
+    fi
+    if jq -e '.properties.active == false' "${state_file}" >/dev/null; then
+      return 0
+    fi
+    sleep 2
+  done
+  echo "ERROR: signed rollback revision ${revision} did not become inactive" >&2
+  return 1
 }
 
 require_exclusive_containerapp_mutation_authority() {
