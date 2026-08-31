@@ -3382,6 +3382,49 @@ test_go_live_runbook_uses_mounted_gmail_readiness() {
   pass
 }
 
+test_partial_release_recovery_workflow_source() {
+  local workflow="${REPO_ROOT}/.github/workflows/recover-partial-production-release.yml"
+  [[ -f "${workflow}" && ! -L "${workflow}" ]] ||
+    fail "partial-release recovery workflow is missing or unsafe"
+  assert_log_contains "${workflow}" "  workflow_dispatch:"
+  assert_log_contains "${workflow}" "  actions: read"
+  assert_log_contains "${workflow}" "  contents: write"
+  assert_log_contains "${workflow}" "  id-token: write"
+  assert_log_contains "${workflow}" "  group: workforce-os-production"
+  assert_log_contains "${workflow}" "    environment: workforce-os-production"
+  assert_log_contains "${workflow}" \
+    'expected_confirmation="RECOVER FAILED WORKFORCE OS BACKEND RELEASE ${failed_run_id}"'
+  assert_log_contains "${workflow}" 'failed_run_id="33341922807"'
+  assert_log_contains "${workflow}" \
+    'candidate_commit="d1cb5fc2a9945414c8412f8bd193418cb2e1c4d8"'
+  assert_log_contains "${workflow}" \
+    'candidate_image="workforceosprodacr.azurecr.io/apex-api@sha256:a047fe1ceb54bc022475e44ef7c006550d9384eaaf6083c08fbbcafdc38added"'
+  assert_log_contains "${workflow}" 'api_revision="apex-gtm-api--88oi4d1"'
+  assert_log_contains "${workflow}" \
+    'prior_worker_revision="apex-gtm-worker--bootstrap-first-class-629881c-r4"'
+  assert_log_contains "${workflow}" 'console_revision="nikxius-web--bdrngs2"'
+  assert_log_contains "${workflow}" \
+    'release_lock_commit="a2d5c61bd5c84db45d63ac76160359c2840504d9"'
+  assert_log_contains "${workflow}" \
+    'ERROR: failed run does not prove the exact known partial-rollout incident'
+  assert_log_contains "${workflow}" \
+    'incident-candidate/scripts/verify-migration-release-receipt.sh'
+  assert_log_contains "${workflow}" \
+    '--name apex-gtm-worker --image "${candidate_image}"'
+  assert_log_contains "${workflow}" \
+    '"--force-with-lease=${release_lock_ref}:${release_lock_commit}"'
+  assert_log_contains "${workflow}" "az storage blob lease break"
+  assert_log_contains "${workflow}" "--lease-break-period 0"
+  assert_log_excludes "${workflow}" "storage blob delete"
+  assert_log_excludes "${workflow}" \
+    '--name apex-gtm-api --image "${candidate_image}"'
+  assert_log_contains "${REPO_ROOT}/scripts/deploy-prod.sh" \
+    'did not converge to exactly one healthy active revision'
+  assert_log_contains "${REPO_ROOT}/scripts/deploy-prod.sh" \
+    'signed rollback revision ${revision} did not become inactive'
+  pass
+}
+
 test_registry_verifier
 test_deploy_admission
 test_deploy_rollback
@@ -3391,6 +3434,7 @@ test_release_lease_real_git_protocol
 test_bootstrap_archive_attribute_isolation
 test_snapshot_helper_symlink_rejection
 test_no_mutable_bitbucket_deploy_path
+test_partial_release_recovery_workflow_source
 test_production_release_workflow_verifier
 test_github_ci_verifier
 test_migration_receipt_contract_parity

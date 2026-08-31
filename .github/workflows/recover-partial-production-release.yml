@@ -1,0 +1,527 @@
+name: Recover Failed Partial Backend Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type RECOVER FAILED WORKFORCE OS BACKEND RELEASE 33341922807 exactly
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+  id-token: write
+
+concurrency:
+  group: workforce-os-production
+  cancel-in-progress: false
+
+jobs:
+  recover-partial-release:
+    name: Recover Failed Partial Backend Release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: workforce-os-production
+
+    steps:
+      - name: Admit exact failed release incident
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+          GH_TOKEN: ${{ github.token }}
+          REF_PROTECTED: ${{ github.ref_protected }}
+        run: |
+          set -Eeuo pipefail
+          failed_run_id="33341922807"
+          failed_release_sha="d1cb5fc2a9945414c8412f8bd193418cb2e1c4d8"
+          release_branch="release/go-live-2026-08-30-d1cb5fc2"
+          expected_confirmation="RECOVER FAILED WORKFORCE OS BACKEND RELEASE ${failed_run_id}"
+          if [[ "${CONFIRMATION}" != "${expected_confirmation}" ||
+            "${GITHUB_REF}" != "refs/heads/master" ||
+            "${REF_PROTECTED}" != "true" ]]; then
+            echo "ERROR: partial-release recovery requires protected master and the exact run-bound confirmation" >&2
+            exit 1
+          fi
+
+          remote_master_sha="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+            --jq '.object.sha')"
+          if [[ "${remote_master_sha}" != "${GITHUB_SHA}" ]]; then
+            echo "ERROR: recovery workflow commit is not the current remote master head" >&2
+            exit 1
+          fi
+
+          release_workflow_id="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/release-production.yml" \
+            --jq '.id')"
+          failed_run_json="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${failed_run_id}")"
+          jq -e \
+            --arg failed_release_sha "${failed_release_sha}" \
+            --argjson release_workflow_id "${release_workflow_id}" '
+              .id == 33341922807
+              and .workflow_id == $release_workflow_id
+              and .name == "Protected production release"
+              and .event == "workflow_dispatch"
+              and .status == "completed"
+              and .conclusion == "failure"
+              and .head_branch == "master"
+              and .head_sha == $failed_release_sha
+            ' <<<"${failed_run_json}" >/dev/null
+
+          release_branch_path="$(jq -rn --arg branch "${release_branch}" '$branch | @uri')"
+          gh api "repos/${GITHUB_REPOSITORY}/branches/${release_branch_path}" | \
+            jq -e --arg sha "${failed_release_sha}" \
+              '.protected == true and .commit.sha == $sha' >/dev/null
+
+          failed_jobs_json="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${failed_run_id}/jobs?per_page=100")"
+          jq -e '
+            any(.jobs[];
+              .name == "Protected production release"
+              and .status == "completed"
+              and .conclusion == "failure"
+              and any(.steps[];
+                .name == "Verify Azure production identity"
+                and .conclusion == "success")
+              and any(.steps[];
+                .name == "Decode protected migration evidence and release"
+                and .conclusion == "failure"))
+          ' <<<"${failed_jobs_json}" >/dev/null
+
+          failed_logs="${RUNNER_TEMP}/failed-backend-release-${failed_run_id}.zip"
+          failed_logs_text="${RUNNER_TEMP}/failed-backend-release-${failed_run_id}.log"
+          gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${failed_run_id}/logs" \
+            >"${failed_logs}"
+          unzip -p "${failed_logs}" >"${failed_logs_text}"
+          for expected_log in \
+            'Resolved run output: workforceosprodacr.azurecr.io/apex-api@sha256:a047fe1ceb54bc022475e44ef7c006550d9384eaaf6083c08fbbcafdc38added' \
+            'ERROR: signed rollback revision apex-gtm-api--bootstrap-api-0767c74-r1-r4 was not retained exactly' \
+            'ERROR: automatic rollback verification failed; operator intervention is required.' \
+            'ERROR: retaining the shared Azure production mutation lease because release state is uncertain'; do
+            if ! grep -Fq "${expected_log}" "${failed_logs_text}"; then
+              echo "ERROR: failed run does not prove the exact known partial-rollout incident" >&2
+              exit 1
+            fi
+          done
+
+      - name: Checkout trusted recovery source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout exact runtime candidate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: d1cb5fc2a9945414c8412f8bd193418cb2e1c4d8
+          path: incident-candidate
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Audit protected recovery authority
+        id: recovery_environment
+        run: |
+          set -Eeuo pipefail
+          azure_client_id="2efd64b0-87c1-43a7-a064-30679ce8b764"
+          azure_subscription_id="3171575e-f164-425c-9ee0-2fb10cf93884"
+          azure_tenant_id="d4b3813d-146f-4d03-96b8-d6e5862d58a2"
+          production_control_storage_account="workforceosprodctrl"
+          production_control_storage_container="production-control"
+          production_control_storage_blob="workforce-os/initial-production-bootstrap/state-v1.json"
+          guid_pattern='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+          [[ "${azure_client_id}" =~ ${guid_pattern} ]]
+          [[ "${azure_subscription_id}" =~ ${guid_pattern} ]]
+          [[ "${azure_tenant_id}" =~ ${guid_pattern} ]]
+          [[ "${production_control_storage_account}" =~ ^[a-z0-9]{3,24}$ ]]
+          [[ "${production_control_storage_container}" == "production-control" ]]
+          [[ "${production_control_storage_blob}" == "workforce-os/initial-production-bootstrap/state-v1.json" ]]
+          {
+            printf 'azure_client_id=%s\n' "${azure_client_id}"
+            printf 'azure_subscription_id=%s\n' "${azure_subscription_id}"
+            printf 'azure_tenant_id=%s\n' "${azure_tenant_id}"
+            printf 'production_control_storage_account=%s\n' "${production_control_storage_account}"
+            printf 'production_control_storage_container=%s\n' "${production_control_storage_container}"
+            printf 'production_control_storage_blob=%s\n' "${production_control_storage_blob}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Azure login with protected OIDC identity
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ steps.recovery_environment.outputs.azure_client_id }}
+          subscription-id: ${{ steps.recovery_environment.outputs.azure_subscription_id }}
+          tenant-id: ${{ steps.recovery_environment.outputs.azure_tenant_id }}
+
+      - name: Complete exact partial rollout and release incident locks
+        env:
+          AZURE_CLIENT_ID: ${{ steps.recovery_environment.outputs.azure_client_id }}
+          AZURE_SUBSCRIPTION_ID: ${{ steps.recovery_environment.outputs.azure_subscription_id }}
+          AZURE_TENANT_ID: ${{ steps.recovery_environment.outputs.azure_tenant_id }}
+          GH_TOKEN: ${{ github.token }}
+          MIGRATION_ALLOWED_SIGNERS_B64: ${{ secrets.PRODUCTION_MIGRATION_ALLOWED_SIGNERS_B64 }}
+          MIGRATION_RECEIPT_B64: ${{ secrets.PRODUCTION_MIGRATION_RECEIPT_B64 }}
+          MIGRATION_SIGNATURE_B64: ${{ secrets.PRODUCTION_MIGRATION_SIGNATURE_B64 }}
+          STORAGE_ACCOUNT: ${{ steps.recovery_environment.outputs.production_control_storage_account }}
+          STORAGE_BLOB: ${{ steps.recovery_environment.outputs.production_control_storage_blob }}
+          STORAGE_CONTAINER: ${{ steps.recovery_environment.outputs.production_control_storage_container }}
+        run: |
+          set -Eeuo pipefail
+          failed_run_id="33341922807"
+          candidate_commit="d1cb5fc2a9945414c8412f8bd193418cb2e1c4d8"
+          candidate_image="workforceosprodacr.azurecr.io/apex-api@sha256:a047fe1ceb54bc022475e44ef7c006550d9384eaaf6083c08fbbcafdc38added"
+          api_revision="apex-gtm-api--88oi4d1"
+          prior_api_image="workforceosprodacr.azurecr.io/apex-api@sha256:6eb0734c3e27a7c4eaec61aa69ccc37e325ab227a4a19789ac64e5efbac9f699"
+          prior_api_revision="apex-gtm-api--bootstrap-api-0767c74-r1-r4"
+          prior_worker_image="workforceosprodacr.azurecr.io/apex-api@sha256:6eb0734c3e27a7c4eaec61aa69ccc37e325ab227a4a19789ac64e5efbac9f699"
+          prior_worker_revision="apex-gtm-worker--bootstrap-first-class-629881c-r4"
+          console_image="workforceosprodacr.azurecr.io/workforceos-fe@sha256:0eacf76d078cbc914a1b493864372b77510572cd9241b4e561fd951667311f12"
+          console_revision="nikxius-web--bdrngs2"
+          release_lock_ref="refs/heads/workforce-os-release-lock/production-gtm-platform"
+          release_lock_commit="a2d5c61bd5c84db45d63ac76160359c2840504d9"
+          resource_group="workforce-os-prod"
+
+          assert_no_running_releases() {
+            local repository=$1
+            local runs_json
+            if [[ "${repository}" == "${GITHUB_REPOSITORY}" ]]; then
+              runs_json="$(gh api \
+                "repos/${repository}/actions/workflows/release-production.yml/runs?per_page=100")"
+            else
+              runs_json="$(curl --fail-with-body --silent --show-error \
+                -H 'Accept: application/vnd.github+json' \
+                -H 'X-GitHub-Api-Version: 2022-11-28' \
+                "https://api.github.com/repos/${repository}/actions/workflows/release-production.yml/runs?per_page=100")"
+            fi
+            jq -e '[.workflow_runs[] | select(.status != "completed")] | length == 0' \
+              <<<"${runs_json}" >/dev/null
+          }
+
+          capture_active_revision() {
+            local app=$1
+            local output_file=$2
+            local list_file="${output_file}.list"
+            local active_revision attempt
+            for attempt in {1..60}; do
+              az containerapp revision list --all \
+                --subscription "${AZURE_SUBSCRIPTION_ID}" \
+                --resource-group "${resource_group}" \
+                --name "${app}" --output json >"${list_file}"
+              active_revision="$(jq -r '
+                [.[] | select(.properties.active == true)]
+                | if length == 1 then .[0].name else empty end
+              ' "${list_file}")"
+              if [[ -n "${active_revision}" ]] &&
+                az containerapp revision show \
+                  --subscription "${AZURE_SUBSCRIPTION_ID}" \
+                  --resource-group "${resource_group}" \
+                  --name "${app}" --revision "${active_revision}" \
+                  --output json >"${output_file}" &&
+                jq -e --arg revision "${active_revision}" '
+                  .name == $revision
+                  and .properties.active == true
+                  and .properties.healthState == "Healthy"
+                  and .properties.provisioningState == "Provisioned"
+                  and (.properties.template.containers | length == 1)
+                ' "${output_file}" >/dev/null; then
+                return 0
+              fi
+              sleep 2
+            done
+            echo "ERROR: ${app} did not converge to one healthy active revision" >&2
+            return 1
+          }
+
+          assert_revision_identity() {
+            local state_file=$1
+            local expected_revision=$2
+            local expected_image=$3
+            jq -e --arg revision "${expected_revision}" --arg image "${expected_image}" '
+              .name == $revision
+              and .properties.template.containers[0].image == $image
+            ' "${state_file}" >/dev/null
+          }
+
+          env_value() {
+            local state_file=$1
+            local name=$2
+            jq -er --arg name "${name}" '
+              [.properties.template.containers[0].env[]? | select(.name == $name)]
+              | if length == 0 then "__ABSENT__"
+                elif length == 1 and (.[0] | keys == ["name", "value"]) then .[0].value
+                else error("environment value is missing, duplicated, or secret-backed")
+                end
+            ' "${state_file}"
+          }
+
+          account_json="$(az account show --output json)"
+          jq -e \
+            --arg client "${AZURE_CLIENT_ID}" \
+            --arg subscription "${AZURE_SUBSCRIPTION_ID}" \
+            --arg tenant "${AZURE_TENANT_ID}" '
+              (.id | ascii_downcase) == ($subscription | ascii_downcase)
+              and (.tenantId | ascii_downcase) == ($tenant | ascii_downcase)
+              and .state == "Enabled"
+              and .user.type == "servicePrincipal"
+              and (.user.name | ascii_downcase) == ($client | ascii_downcase)
+            ' <<<"${account_json}" >/dev/null
+
+          remote_master_sha="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/master" --jq '.object.sha')"
+          [[ "${remote_master_sha}" == "${GITHUB_SHA}" ]]
+          assert_no_running_releases "Kloudedge-apex/apex-product"
+          assert_no_running_releases "Kloudedge-apex/Workforce-OS"
+
+          lock_json="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/workforce-os-release-lock/production-gtm-platform")"
+          jq -e --arg sha "${release_lock_commit}" \
+            '.ref == "refs/heads/workforce-os-release-lock/production-gtm-platform" and .object.sha == $sha' \
+            <<<"${lock_json}" >/dev/null
+          lock_commit_json="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/commits/${release_lock_commit}")"
+          candidate_commit_json="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/commits/${candidate_commit}")"
+          candidate_tree="$(jq -er '.tree.sha' <<<"${candidate_commit_json}")"
+          jq -e --arg parent "${candidate_commit}" --arg tree "${candidate_tree}" '
+            (.parents | length == 1)
+            and .parents[0].sha == $parent
+            and .tree.sha == $tree
+            and (.message | startswith("workforce-os production release lease "))
+          ' <<<"${lock_commit_json}" >/dev/null
+
+          console_lock_response=""
+          if console_lock_response="$(curl --fail-with-body --silent --show-error \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            'https://api.github.com/repos/Kloudedge-apex/Workforce-OS/git/ref/heads/workforce-os-release-lock/production-console' \
+            2>&1)"; then
+            echo "ERROR: console production release lock is present" >&2
+            exit 1
+          fi
+          if [[ "${console_lock_response}" != *"404"* &&
+            "${console_lock_response}" != *"Not Found"* ]]; then
+            echo "ERROR: could not prove the console production release lock is absent" >&2
+            exit 1
+          fi
+
+          lease_json="$(az storage blob show \
+            --account-name "${STORAGE_ACCOUNT}" \
+            --container-name "${STORAGE_CONTAINER}" \
+            --name "${STORAGE_BLOB}" \
+            --auth-mode login --subscription "${AZURE_SUBSCRIPTION_ID}" \
+            --only-show-errors --query properties.lease --output json)"
+          jq -e '
+            .status == "locked" and .state == "leased" and .duration == "infinite"
+          ' <<<"${lease_json}" >/dev/null
+
+          state_dir="$(mktemp -d "${RUNNER_TEMP}/workforce-backend-recovery.XXXXXX")"
+          trap 'rm -rf -- "${state_dir}"' EXIT
+          api_state="${state_dir}/api.json"
+          worker_state="${state_dir}/worker.json"
+          console_state="${state_dir}/console.json"
+          capture_active_revision apex-gtm-api "${api_state}"
+          capture_active_revision apex-gtm-worker "${worker_state}"
+          capture_active_revision nikxius-web "${console_state}"
+          assert_revision_identity "${api_state}" "${api_revision}" "${candidate_image}"
+          assert_revision_identity "${console_state}" "${console_revision}" "${console_image}"
+
+          worker_image="$(jq -er '.properties.template.containers[0].image' "${worker_state}")"
+          worker_revision="$(jq -er '.name' "${worker_state}")"
+          if [[ "${worker_image}" == "${prior_worker_image}" ]]; then
+            [[ "${worker_revision}" == "${prior_worker_revision}" ]]
+            worker_requires_update="true"
+          elif [[ "${worker_image}" == "${candidate_image}" &&
+            "${worker_revision}" =~ ^apex-gtm-worker--[a-z0-9][a-z0-9-]*$ &&
+            "${worker_revision}" != "${prior_worker_revision}" ]]; then
+            worker_requires_update="false"
+          else
+            echo "ERROR: worker is not in an admissible pre- or post-recovery state" >&2
+            exit 1
+          fi
+
+          api_mode="$(env_value "${api_state}" OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE)"
+          api_ack="$(env_value "${api_state}" OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK)"
+          api_epoch="$(env_value "${api_state}" OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH)"
+          worker_mode="$(env_value "${worker_state}" OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE)"
+          worker_ack="$(env_value "${worker_state}" OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK)"
+          worker_epoch="$(env_value "${worker_state}" OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH)"
+          api_live_send="$(env_value "${api_state}" OUTREACH_LIVE_FOR_ORGS)"
+          worker_live_send="$(env_value "${worker_state}" OUTREACH_LIVE_FOR_ORGS)"
+          [[ "${api_mode}" == "disabled" && "${api_ack}" == "__ABSENT__" &&
+            "${api_epoch}" == "__ABSENT__" ]]
+          [[ "${worker_mode}" == "first-class" &&
+            "${worker_ack}" == "readers-drained-rollback-baselines-verified-v1" &&
+            "${worker_epoch}" == "outreach-delivery-unknown-v1" ]]
+          [[ "${api_live_send}" == "__ABSENT__" || -z "${api_live_send}" ]]
+          [[ "${worker_live_send}" == "__ABSENT__" || -z "${worker_live_send}" ]]
+
+          api_guard="$(env_value "${api_state}" WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID):$(env_value "${api_state}" WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION)"
+          worker_guard="$(env_value "${worker_state}" WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID):$(env_value "${worker_state}" WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION)"
+          [[ "${api_guard}" == "${worker_guard}" ]]
+          [[ "${api_guard}" =~ ^[0-9a-f]{32}:[1-9][0-9]*$ ]]
+
+          prior_api_state="${state_dir}/prior-api.json"
+          az containerapp revision show \
+            --subscription "${AZURE_SUBSCRIPTION_ID}" \
+            --resource-group "${resource_group}" \
+            --name apex-gtm-api --revision "${prior_api_revision}" \
+            --output json >"${prior_api_state}"
+          jq -e --arg revision "${prior_api_revision}" --arg image "${prior_api_image}" '
+            .name == $revision
+            and .properties.active == false
+            and .properties.healthState == "Healthy"
+            and .properties.provisioningState == "Provisioned"
+            and .properties.template.containers[0].image == $image
+          ' "${prior_api_state}" >/dev/null
+
+          evidence_dir="${state_dir}/evidence"
+          mkdir "${evidence_dir}"
+          receipt_file="${evidence_dir}/receipt.json"
+          signature_file="${evidence_dir}/receipt.sig"
+          allowed_signers_file="${evidence_dir}/allowed-signers"
+          printf '%s' "${MIGRATION_RECEIPT_B64}" | base64 --decode >"${receipt_file}"
+          printf '%s' "${MIGRATION_SIGNATURE_B64}" | base64 --decode >"${signature_file}"
+          printf '%s' "${MIGRATION_ALLOWED_SIGNERS_B64}" | base64 --decode >"${allowed_signers_file}"
+          chmod 600 "${receipt_file}" "${signature_file}" "${allowed_signers_file}"
+          unset MIGRATION_RECEIPT_B64 MIGRATION_SIGNATURE_B64 MIGRATION_ALLOWED_SIGNERS_B64
+          incident-candidate/scripts/verify-migration-release-receipt.sh \
+            "${receipt_file}" "${signature_file}" "${allowed_signers_file}" \
+            "${candidate_commit}" "${candidate_image}" "${api_revision}" \
+            "${worker_image}" "${worker_revision}" \
+            "${console_image}" "${console_revision}" first-class
+
+          assert_no_running_releases "Kloudedge-apex/apex-product"
+          assert_no_running_releases "Kloudedge-apex/Workforce-OS"
+          current_lock="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/workforce-os-release-lock/production-gtm-platform" \
+            --jq '.object.sha')"
+          [[ "${current_lock}" == "${release_lock_commit}" ]]
+          lease_json="$(az storage blob show \
+            --account-name "${STORAGE_ACCOUNT}" \
+            --container-name "${STORAGE_CONTAINER}" \
+            --name "${STORAGE_BLOB}" \
+            --auth-mode login --subscription "${AZURE_SUBSCRIPTION_ID}" \
+            --only-show-errors --query properties.lease --output json)"
+          jq -e '
+            .status == "locked" and .state == "leased" and .duration == "infinite"
+          ' <<<"${lease_json}" >/dev/null
+          if [[ "${worker_requires_update}" == "true" ]]; then
+            az containerapp update \
+              --subscription "${AZURE_SUBSCRIPTION_ID}" \
+              --resource-group "${resource_group}" \
+              --name apex-gtm-worker --image "${candidate_image}" \
+              --output none
+          fi
+
+          capture_active_revision apex-gtm-worker "${worker_state}"
+          worker_revision="$(jq -er '.name' "${worker_state}")"
+          assert_revision_identity "${worker_state}" "${worker_revision}" "${candidate_image}"
+          [[ "${worker_revision}" =~ ^apex-gtm-worker--[a-z0-9][a-z0-9-]*$ ]]
+          [[ "${worker_revision}" != "${prior_worker_revision}" ]]
+          [[ "$(env_value "${worker_state}" OUTREACH_DELIVERY_UNKNOWN_WRITE_MODE)" == "first-class" ]]
+          [[ "$(env_value "${worker_state}" OUTREACH_DELIVERY_UNKNOWN_WRITE_ACK)" == "readers-drained-rollback-baselines-verified-v1" ]]
+          [[ "$(env_value "${worker_state}" OUTREACH_ROLLBACK_COMPATIBILITY_EPOCH)" == "outreach-delivery-unknown-v1" ]]
+          [[ "$(env_value "${worker_state}" WORKFORCE_PRODUCTION_BOOTSTRAP_ATTEMPT_ID):$(env_value "${worker_state}" WORKFORCE_PRODUCTION_BOOTSTRAP_MIN_WRITER_FENCE_GENERATION)" == "${api_guard}" ]]
+
+          for attempt in {1..60}; do
+            prior_worker_state="${state_dir}/prior-worker.json"
+            az containerapp revision show \
+              --subscription "${AZURE_SUBSCRIPTION_ID}" \
+              --resource-group "${resource_group}" \
+              --name apex-gtm-worker --revision "${prior_worker_revision}" \
+              --output json >"${prior_worker_state}"
+            if jq -e --arg image "${prior_worker_image}" '
+              .properties.active == false
+              and .properties.template.containers[0].image == $image
+            ' "${prior_worker_state}" >/dev/null; then
+              break
+            fi
+            if [[ "${attempt}" == 60 ]]; then
+              echo "ERROR: prior worker revision did not become an exact inactive rollback target" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+
+          capture_active_revision apex-gtm-api "${api_state}"
+          capture_active_revision nikxius-web "${console_state}"
+          assert_revision_identity "${api_state}" "${api_revision}" "${candidate_image}"
+          assert_revision_identity "${console_state}" "${console_revision}" "${console_image}"
+          scripts/verify-containerapp-release-config.sh "${candidate_image}" "${candidate_image}"
+
+          api_fqdn="$(az containerapp show \
+            --subscription "${AZURE_SUBSCRIPTION_ID}" \
+            --resource-group "${resource_group}" --name apex-gtm-api \
+            --query properties.configuration.ingress.fqdn --output tsv)"
+          curl --fail --silent --show-error --max-time 20 \
+            "https://${api_fqdn}/api/health/ready" >/dev/null
+
+          assert_no_running_releases "Kloudedge-apex/apex-product"
+          assert_no_running_releases "Kloudedge-apex/Workforce-OS"
+          remote_master_sha="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/master" --jq '.object.sha')"
+          [[ "${remote_master_sha}" == "${GITHUB_SHA}" ]]
+          current_lock="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/workforce-os-release-lock/production-gtm-platform" \
+            --jq '.object.sha')"
+          [[ "${current_lock}" == "${release_lock_commit}" ]]
+          git -c core.hooksPath=/dev/null \
+            -c credential.helper= \
+            -c 'credential.helper=!gh auth git-credential' \
+            -c credential.interactive=false \
+            -c http.sslVerify=true \
+            push \
+            "--force-with-lease=${release_lock_ref}:${release_lock_commit}" \
+            "https://github.com/${GITHUB_REPOSITORY}.git" \
+            ":${release_lock_ref}"
+          if gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/workforce-os-release-lock/production-gtm-platform" \
+            >/dev/null 2>&1; then
+            echo "ERROR: exact incident Git lock still exists after conditional cleanup" >&2
+            exit 1
+          fi
+
+          lease_json="$(az storage blob show \
+            --account-name "${STORAGE_ACCOUNT}" \
+            --container-name "${STORAGE_CONTAINER}" \
+            --name "${STORAGE_BLOB}" \
+            --auth-mode login --subscription "${AZURE_SUBSCRIPTION_ID}" \
+            --only-show-errors --query properties.lease --output json)"
+          jq -e '
+            .status == "locked" and .state == "leased" and .duration == "infinite"
+          ' <<<"${lease_json}" >/dev/null
+          az storage blob lease break \
+            --account-name "${STORAGE_ACCOUNT}" \
+            --container-name "${STORAGE_CONTAINER}" \
+            --blob-name "${STORAGE_BLOB}" \
+            --auth-mode login --subscription "${AZURE_SUBSCRIPTION_ID}" \
+            --lease-break-period 0 --only-show-errors --output none
+          for attempt in {1..12}; do
+            lease_json="$(az storage blob show \
+              --account-name "${STORAGE_ACCOUNT}" \
+              --container-name "${STORAGE_CONTAINER}" \
+              --name "${STORAGE_BLOB}" \
+              --auth-mode login --subscription "${AZURE_SUBSCRIPTION_ID}" \
+              --only-show-errors --query properties.lease --output json)"
+            if jq -e '
+              .status == "unlocked"
+              and (.state == "available" or .state == "broken" or .state == "expired")
+            ' <<<"${lease_json}" >/dev/null; then
+              {
+                echo "### Partial backend release recovery"
+                echo "- Failed release: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${failed_run_id}"
+                echo "- API and worker image: \`${candidate_image}\`"
+                echo "- API revision: \`${api_revision}\`"
+                echo "- Worker revision: \`${worker_revision}\`"
+                echo "- Exact incident Git lock removed and shared lease read back unlocked"
+              } >>"${GITHUB_STEP_SUMMARY}"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "ERROR: shared production mutation lease did not become unlocked" >&2
+          exit 1
+
+      - name: Post Azure login with protected OIDC identity
+        if: always()
+        run: az logout
