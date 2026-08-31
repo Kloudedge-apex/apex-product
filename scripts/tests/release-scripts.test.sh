@@ -3226,26 +3226,44 @@ EOF
   jq '(.properties.template.containers[0].env[] | select(.name == "OUTREACH_LIVE_FOR_ORGS").value) = "*"' \
     "${harness}/api.json" >"${harness}/api-wildcard.json"
   jq '(.properties.template.containers[0].env[] | select(.name == "OUTREACH_LIVE_FOR_ORGS").value) = "*"' \
-    "${harness}/worker.json" >"${harness}/worker-wildcard.json"
+    "${harness}/worker-attested-delivery-unknown-write-gate.json" >"${harness}/worker-wildcard.json"
   if env PATH="${harness}/bin:${PATH}" \
     API_JSON_FILE="${harness}/api-wildcard.json" WORKER_JSON_FILE="${harness}/worker-wildcard.json" \
     API_REVISION_FILE="${harness}/api-revision.json" WORKER_REVISION_FILE="${harness}/worker-revision.json" \
     "${harness}/scripts/verify-containerapp-release-config.sh" \
     "${api_image}" "${worker_image}" >/dev/null 2>&1; then
-    fail "Container App verifier accepted the live-send wildcard"
+    fail "Container App verifier accepted an unacknowledged live-send wildcard"
   fi
   pass
 
-  jq '(.properties.template.containers[0].env[] | select(.name == "OUTREACH_ALLOW_WILDCARD").value) = "true"' \
+  jq '(.properties.template.containers[0].env[] |
+    select(.name == "OUTREACH_ALLOW_WILDCARD").value) = "true"' \
+    "${harness}/api-wildcard.json" >"${harness}/api-wildcard-acknowledged.json"
+  jq '(.properties.template.containers[0].env[] |
+    select(.name == "OUTREACH_ALLOW_WILDCARD").value) = "true"' \
+    "${harness}/worker-wildcard.json" >"${harness}/worker-wildcard-acknowledged.json"
+  if ! env PATH="${harness}/bin:${PATH}" \
+    API_JSON_FILE="${harness}/api-wildcard-acknowledged.json" \
+    WORKER_JSON_FILE="${harness}/worker-wildcard-acknowledged.json" \
+    API_REVISION_FILE="${harness}/api-revision.json" WORKER_REVISION_FILE="${harness}/worker-revision.json" \
+    "${harness}/scripts/verify-containerapp-release-config.sh" \
+    "${api_image}" "${worker_image}" >/dev/null 2>&1; then
+    fail "Container App verifier rejected the explicitly acknowledged live-send wildcard"
+  fi
+  pass
+
+  jq '(.properties.template.containers[0].env[] |
+    select(.name == "OUTREACH_ALLOW_WILDCARD").value) = "true"' \
     "${harness}/api.json" >"${harness}/api-wildcard-escape.json"
-  jq '(.properties.template.containers[0].env[] | select(.name == "OUTREACH_ALLOW_WILDCARD").value) = "true"' \
+  jq '(.properties.template.containers[0].env[] |
+    select(.name == "OUTREACH_ALLOW_WILDCARD").value) = "true"' \
     "${harness}/worker.json" >"${harness}/worker-wildcard-escape.json"
   if env PATH="${harness}/bin:${PATH}" \
     API_JSON_FILE="${harness}/api-wildcard-escape.json" WORKER_JSON_FILE="${harness}/worker-wildcard-escape.json" \
     API_REVISION_FILE="${harness}/api-revision.json" WORKER_REVISION_FILE="${harness}/worker-revision.json" \
     "${harness}/scripts/verify-containerapp-release-config.sh" \
     "${api_image}" "${worker_image}" >/dev/null 2>&1; then
-    fail "Container App verifier accepted OUTREACH_ALLOW_WILDCARD=true"
+    fail "Container App verifier accepted OUTREACH_ALLOW_WILDCARD=true without the wildcard"
   fi
   pass
 
@@ -3425,6 +3443,37 @@ test_partial_release_recovery_workflow_source() {
   pass
 }
 
+test_global_live_send_workflow_source() {
+  local workflow="${REPO_ROOT}/.github/workflows/enable-global-live-send.yml"
+  [[ -f "${workflow}" && ! -L "${workflow}" ]] ||
+    fail "global live-send workflow is missing or unsafe"
+  assert_log_contains "${workflow}" "  workflow_dispatch:"
+  assert_log_contains "${workflow}" "  actions: read"
+  assert_log_contains "${workflow}" "  contents: write"
+  assert_log_contains "${workflow}" "  id-token: write"
+  assert_log_contains "${workflow}" "  group: workforce-os-production"
+  assert_log_contains "${workflow}" "    environment: workforce-os-production"
+  assert_log_contains "${workflow}" \
+    'expected_confirmation="ENABLE LIVE EMAIL FOR ALL READY WORKFORCE OS ORGANIZATIONS"'
+  assert_log_contains "${workflow}" \
+    'expected_image="workforceosprodacr.azurecr.io/apex-api@sha256:a047fe1ceb54bc022475e44ef7c006550d9384eaaf6083c08fbbcafdc38added"'
+  assert_log_contains "${workflow}" \
+    "--set-env-vars 'OUTREACH_LIVE_FOR_ORGS=*' 'OUTREACH_ALLOW_WILDCARD=true'"
+  assert_log_contains "${workflow}" "scripts/verify-containerapp-release-config.sh"
+  assert_log_contains "${workflow}" "az storage blob lease acquire"
+  assert_log_contains "${workflow}" "az storage blob lease renew"
+  assert_log_contains "${workflow}" "az storage blob lease release"
+  assert_log_contains "${workflow}" \
+    '--force-with-lease="${release_lock_ref}:${GITHUB_SHA}"'
+  assert_log_contains "${workflow}" 'if ! rollback; then'
+  assert_log_contains "${workflow}" \
+    'Dispatch still requires manager/admin approval, ready Gmail, complete sender identity, suppression/cooldown checks, and daily capacity'
+  assert_log_excludes "${workflow}" "storage blob lease break"
+  assert_log_excludes "${workflow}" "storage blob delete"
+  assert_log_excludes "${workflow}" "containerapp delete"
+  pass
+}
+
 test_registry_verifier
 test_deploy_admission
 test_deploy_rollback
@@ -3435,6 +3484,7 @@ test_bootstrap_archive_attribute_isolation
 test_snapshot_helper_symlink_rejection
 test_no_mutable_bitbucket_deploy_path
 test_partial_release_recovery_workflow_source
+test_global_live_send_workflow_source
 test_production_release_workflow_verifier
 test_github_ci_verifier
 test_migration_receipt_contract_parity
