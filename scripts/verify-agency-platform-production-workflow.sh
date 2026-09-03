@@ -45,5 +45,7 @@ require '--file="${MIGRATION}"' "${CONTROLLER}"
 require 'assert_postconditions' "${CONTROLLER}"
 require 'queuesRemainPaused:true' "${CONTROLLER}"
 require 'productionBootstrapRedisIdentityHash()' "${QUEUE_CONTROLLER}"
+require 'async function main()' "${QUEUE_CONTROLLER}"
+require 'void main().catch' "${QUEUE_CONTROLLER}"
 
 echo "Agency platform production migration workflow verified"
