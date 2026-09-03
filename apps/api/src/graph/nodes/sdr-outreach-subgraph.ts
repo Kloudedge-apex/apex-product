@@ -22,6 +22,7 @@ import type { EvidenceLedgerService } from "../../observability/evidence-ledger.
 import type { RunLevelEvaluatorService } from "../../observability/run-level-evaluator.service";
 import { withNodeSpan } from "../../observability/graph-tracing";
 import { isMocked } from "../../runtime/tools/mock-metadata";
+import { SDR_AGENT_CORE_PROMPT } from "../../runtime/prompts/sdr-agent";
 import { isFresh } from "./research/freshness";
 import type { SelectedOutreachRecipient } from "../outreach-recipient";
 
@@ -290,7 +291,13 @@ const UNGROUNDED_REFUSAL: DrafterRefusal = {
 // "reference a specific signal" because (a) the brief lists explicit fact_ids,
 // (b) refusal is a first-class JSON output, and (c) the model declares which
 // fact_ids it used in the self-check, giving evaluators a deterministic citation.
-const SDR_DRAFT_SYSTEM_PROMPT = `You are an outbound SDR writing on behalf of the sender's organization.
+const SDR_DRAFT_SYSTEM_PROMPT = `${SDR_AGENT_CORE_PROMPT}
+
+<draft_call_scope>
+Research, scoring, and recipient compliance have already run. For this call,
+use only the supplied <brief>, return the internal schema below, and do not
+attempt tool calls. The resulting artifact will enter human review.
+</draft_call_scope>
 
 <role>
 Write one short cold email to one named buyer. You are calibrated for
@@ -381,6 +388,8 @@ async function defaultDrafter(
     ],
     {
       maxTokens: 700,
+      temperature: 0.3,
+      topP: 0.9,
       agent: "sdr_agent.draft_message",
       node: "sdr_outreach.draft_message",
       tags: ["sdr_outreach", "draft_message", "customer_facing"],
@@ -742,9 +751,9 @@ export async function runSdrOutreachSubgraph(
  * structured `facts` array is preserved on state so downstream evaluators
  * (citation_coverage) can verify citation-by-id without re-parsing XML.
  *
- * Today the brief is sourced from Company + Person + LeadScore + recent
- * EvidenceEvents. The `<website_excerpt>` slot is left empty until the
- * web_fetch sidecar lands later this week; the schema is forward-compatible.
+ * The brief is sourced from Company + Person + LeadScore + recent
+ * EvidenceEvents, with the Serper company-description excerpt as a first-party
+ * fallback when no dated event is available.
  */
 export async function assembleResearchBrief(
   prisma: PrismaService,
@@ -765,6 +774,8 @@ export async function assembleResearchBrief(
       city: true,
       fundingStage: true,
       techStack: true,
+      serpDescription: true,
+      serpSourceUrl: true,
     },
   });
 
@@ -887,6 +898,24 @@ export async function assembleResearchBrief(
     }
   }
 
+  // A company-owned page is a valid first-party grounding source when news
+  // is unavailable, but only if the persisted Serper excerpt is specific
+  // enough to say something concrete. Generic title/search boilerplate is
+  // still refused by the code gate below.
+  if (signalCount === 0 && company?.serpDescription) {
+    const excerpt = company.serpDescription.trim();
+    const source = company.serpSourceUrl ?? `https://${lead.companyDomain}`;
+    if (isSpecificWebsiteExcerpt(excerpt)) {
+      signalCount += 1;
+      facts.push({
+        id: `S${signalCount}`,
+        category: "signal",
+        source,
+        text: `Website excerpt: ${truncate(excerpt, 320)}`,
+      });
+    }
+  }
+
   // ICP fit (ICP1) — only if we have a score.
   const score = await prisma.leadScore.findFirst({
     where: { orgId: lead.orgId, personId: lead.personId },
@@ -916,6 +945,13 @@ export async function assembleResearchBrief(
     doNotClaim,
     hasGroundingSignal: signalCount > 0,
   };
+}
+
+function isSpecificWebsiteExcerpt(value: string): boolean {
+  if (value.length < 40 || value.split(/\s+/).length < 7) return false;
+  return !/^(official (site|website)|home|welcome|learn more|about us)\b/i.test(
+    value,
+  );
 }
 
 function renderBriefXml(facts: readonly BriefFact[], doNotClaim: readonly string[]): string {

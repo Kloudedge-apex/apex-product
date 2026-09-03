@@ -50,7 +50,12 @@ describe("EmailPatternService — Hunter retry wiring", () => {
       new ConfigService({ HUNTER_API_KEY: "test" }),
     );
 
-    const candidates = await svc.generateCandidates("Jane", "Doe", "acme.com");
+    const candidates = await svc.generateCandidates(
+      "org-test",
+      "Jane",
+      "Doe",
+      "acme.com",
+    );
     // Hunter retried once (429 -> 200) and contributed a HUNTER-sourced entry.
     // Whether unshifted or merged onto an existing pattern, the HUNTER source
     // must be present somewhere in the candidate list.

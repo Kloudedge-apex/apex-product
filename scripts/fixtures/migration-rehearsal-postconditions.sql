@@ -1,4 +1,4 @@
--- Fail-closed postconditions for the synthetic nine-file rehearsal.
+-- Fail-closed postconditions for the synthetic migration rehearsal.
 -- Successful execution emits no row data. The controller separately records
 -- only the resulting aggregate counts in its non-authoritative receipt.
 
@@ -136,6 +136,95 @@ BEGIN
       AND column_default IS NOT NULL
   ) <> 1 THEN
     RAISE EXCEPTION 'IcpProfile exclusionDomains postcondition failed';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_enum AS e
+    JOIN pg_type AS t ON t.oid = e.enumtypid
+    JOIN pg_namespace AS n ON n.oid = t.typnamespace
+    WHERE n.nspname = current_schema()
+      AND t.typname = 'EmailSource'
+      AND e.enumlabel = 'VERIFIED_PATTERN'
+  ) THEN
+    RAISE EXCEPTION 'VERIFIED_PATTERN enum postcondition failed';
+  END IF;
+
+  IF (
+    SELECT COUNT(*)
+    FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND (
+        (table_name = 'Org' AND column_name = 'designPartner'
+          AND data_type = 'boolean' AND is_nullable = 'NO'
+          AND column_default = 'true')
+        OR (table_name = 'Org' AND column_name = 'plan'
+          AND is_nullable = 'NO' AND column_default LIKE '%ENTERPRISE%')
+        OR (table_name = 'Company' AND column_name = 'orgId'
+          AND data_type = 'text' AND is_nullable = 'NO')
+        OR (table_name = 'Company' AND column_name = 'serpDescription'
+          AND data_type = 'text' AND is_nullable = 'YES')
+        OR (table_name = 'Company' AND column_name = 'serpSourceUrl'
+          AND data_type = 'text' AND is_nullable = 'YES')
+        OR (table_name = 'PatternStore' AND column_name = 'orgId'
+          AND data_type = 'text' AND is_nullable = 'NO')
+      )
+  ) <> 6 THEN
+    RAISE EXCEPTION 'agency platform column/default postcondition failed';
+  END IF;
+
+  IF (
+    SELECT COUNT(*)
+    FROM pg_constraint AS c
+    JOIN pg_class AS rel ON rel.oid = c.conrelid
+    JOIN pg_namespace AS n ON n.oid = rel.relnamespace
+    WHERE n.nspname = current_schema()
+      AND (
+        (rel.relname = 'Company' AND c.conname = 'Company_orgId_fkey')
+        OR (rel.relname = 'PatternStore' AND c.conname = 'PatternStore_orgId_fkey')
+      )
+      AND c.contype = 'f'
+      AND c.confupdtype = 'c'
+      AND c.confdeltype = 'c'
+  ) <> 2 THEN
+    RAISE EXCEPTION 'agency platform tenant foreign-key postcondition failed';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_class AS idx
+    JOIN pg_index AS i ON i.indexrelid = idx.oid
+    JOIN pg_class AS rel ON rel.oid = i.indrelid
+    JOIN pg_namespace AS n ON n.oid = rel.relnamespace
+    WHERE n.nspname = current_schema()
+      AND idx.relname = 'PatternStore_orgId_domain_key'
+      AND rel.relname = 'PatternStore'
+      AND i.indisunique AND i.indisvalid AND i.indisready AND i.indislive
+      AND ARRAY(
+        SELECT a.attname
+        FROM unnest(i.indkey::SMALLINT[]) WITH ORDINALITY AS k(attnum, position)
+        JOIN pg_attribute AS a
+          ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+        WHERE k.position <= i.indnkeyatts
+        ORDER BY k.position
+      ) = ARRAY['orgId', 'domain']::NAME[]
+  ) OR to_regclass(format('%I.%I', current_schema(), 'PatternStore_domain_key')) IS NOT NULL
+  THEN
+    RAISE EXCEPTION 'PatternStore tenant-unique index postcondition failed';
+  END IF;
+
+  IF (SELECT COUNT(*) FROM "PatternStore" WHERE "domain" = 'shared.workforce.invalid') <> 2
+    OR (SELECT COUNT(DISTINCT "orgId") FROM "PatternStore"
+        WHERE "domain" = 'shared.workforce.invalid') <> 2
+    OR EXISTS (
+      SELECT 1
+      FROM "PatternStore" AS p
+      LEFT JOIN "Company" AS c
+        ON c."domain" = p."domain" AND c."orgId" = p."orgId"
+      WHERE p."domain" = 'shared.workforce.invalid' AND c."id" IS NULL
+    )
+  THEN
+    RAISE EXCEPTION 'PatternStore tenant backfill postcondition failed';
   END IF;
 
   IF NOT EXISTS (
@@ -433,6 +522,10 @@ BEGIN
     OR (SELECT COUNT(DISTINCT "orgId") FROM "User" WHERE "id" LIKE 'ci_user_%') <> 2
     OR (SELECT COUNT(DISTINCT "orgId") FROM "Integration"
         WHERE "id" LIKE 'ci_integration_%') <> 2
+    OR (SELECT COUNT(DISTINCT "orgId") FROM "Company"
+        WHERE "id" LIKE 'ci_company_%') <> 2
+    OR (SELECT COUNT(DISTINCT "orgId") FROM "PatternStore"
+        WHERE "domain" = 'shared.workforce.invalid') <> 2
     OR (SELECT COUNT(DISTINCT "orgId") FROM "GraphRun"
         WHERE "id" LIKE 'ci_graph_%') <> 2
     OR EXISTS (

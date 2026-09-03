@@ -174,8 +174,9 @@ MIGRATIONS=(
   "docs/migrations/2026-08-12_graph-run-activity-expand.sql"
   "docs/migrations/2026-08-12_graph-run-lifecycle-expand.sql"
   "docs/migrations/2026-08-20_icp-exclusion-domains-expand.sql"
+  "docs/migrations/2026-09-03_agency-platform-expand.sql"
 )
-WRITER_PAUSE=("observed" "observed" "not-required" "not-required" "not-required" "observed" "not-required" "observed" "not-required")
+WRITER_PAUSE=("observed" "observed" "not-required" "not-required" "not-required" "observed" "not-required" "observed" "not-required" "observed")
 EXPECTED_MIGRATION_COUNT="${#MIGRATIONS[@]}"
 
 if ! jq -e \

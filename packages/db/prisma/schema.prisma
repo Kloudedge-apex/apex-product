@@ -207,7 +207,8 @@ model Org {
   physicalAddress      String?
   country              String?
   senderName           String?
-  plan                 Plan                  @default(TRIAL)
+  plan                 Plan                  @default(ENTERPRISE)
+  designPartner        Boolean               @default(true)
   trialEndsAt          DateTime?
   billingId            String? // Razorpay subscription ID
   createdAt            DateTime              @default(now())
@@ -220,6 +221,7 @@ model Org {
   companies            Company[]
   leadScores           LeadScore[]
   scrapeJobs           ScrapeJob[]
+  patternStores        PatternStore[]
   graphRuns            GraphRun[]
   outreachArtifacts    OutreachArtifact[]
   workflowRuns         WorkflowRun[]
@@ -548,6 +550,7 @@ enum Department {
 enum EmailSource {
   TEAM_PAGE
   GITHUB_COMMIT
+  VERIFIED_PATTERN
   PATTERN_GUESS
   HUNTER
   SEC_FILING
@@ -604,29 +607,31 @@ model IcpProfile {
 }
 
 model Company {
-  id             String   @id @default(cuid())
-  orgId          String?
-  org            Org?     @relation(fields: [orgId], references: [id], onDelete: SetNull)
-  domain         String
-  name           String
-  industry       String?
-  employeeRange  String?
-  country        String?
-  city           String?
-  registryId     String?
-  registrySource String?
-  fundingStage   String?
-  techStack      String[]
-  atsProvider    String?
-  atsSlug        String?
-  teamPageUrl    String?
-  raw            Json?
-  confidence     Float    @default(0)
-  intentScore    Int      @default(0)
-  intentSignals  String[]
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
-  people         Person[]
+  id              String   @id @default(cuid())
+  orgId           String
+  org             Org      @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  domain          String
+  name            String
+  industry        String?
+  employeeRange   String?
+  country         String?
+  city            String?
+  registryId      String?
+  registrySource  String?
+  fundingStage    String?
+  techStack       String[]
+  atsProvider     String?
+  atsSlug         String?
+  teamPageUrl     String?
+  serpDescription String?
+  serpSourceUrl   String?
+  raw             Json?
+  confidence      Float    @default(0)
+  intentScore     Int      @default(0)
+  intentSignals   String[]
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  people          Person[]
 
   @@unique([orgId, domain])
   @@index([domain])
@@ -680,10 +685,15 @@ model EmailCandidate {
 
 model PatternStore {
   id          String   @id @default(cuid())
-  domain      String   @unique
+  orgId       String
+  org         Org      @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  domain      String
   patterns    Json
   sampleSize  Int      @default(0)
   lastUpdated DateTime @default(now())
+
+  @@unique([orgId, domain])
+  @@index([orgId])
 }
 
 model LeadScore {

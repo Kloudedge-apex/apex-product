@@ -76,6 +76,25 @@ INSERT INTO "Integration" (
     '{"synthetic":true}'::jsonb, ARRAY['ci.synthetic'], clock_timestamp()
   );
 
+INSERT INTO "Company" (
+  "id", "orgId", "domain", "name", "techStack", "intentSignals", "updatedAt"
+) VALUES
+  (
+    'ci_company_alpha', 'ci_org_alpha', 'shared.workforce.invalid',
+    'Synthetic Shared Alpha', ARRAY[]::TEXT[], ARRAY[]::TEXT[], clock_timestamp()
+  ),
+  (
+    'ci_company_beta', 'ci_org_beta', 'shared.workforce.invalid',
+    'Synthetic Shared Beta', ARRAY[]::TEXT[], ARRAY[]::TEXT[], clock_timestamp()
+  );
+
+INSERT INTO "PatternStore" (
+  "id", "domain", "patterns", "sampleSize", "lastUpdated"
+) VALUES (
+  'ci_pattern_shared', 'shared.workforce.invalid',
+  '[{"pattern":"first.last","count":2}]'::jsonb, 2, clock_timestamp()
+);
+
 INSERT INTO "GraphRun" (
   "id", "orgId", "threadId", "graphName", "status", "state"
 ) VALUES
@@ -108,6 +127,8 @@ BEGIN
   IF (SELECT COUNT(*) FROM "Org" WHERE "id" LIKE 'ci_org_%') <> 2
     OR (SELECT COUNT(*) FROM "User" WHERE "id" LIKE 'ci_user_%') <> 2
     OR (SELECT COUNT(*) FROM "Integration" WHERE "id" LIKE 'ci_integration_%') <> 2
+    OR (SELECT COUNT(*) FROM "Company" WHERE "id" LIKE 'ci_company_%') <> 2
+    OR (SELECT COUNT(*) FROM "PatternStore" WHERE "id" = 'ci_pattern_shared') <> 1
     OR (SELECT COUNT(*) FROM "GraphRun" WHERE "id" LIKE 'ci_graph_%') <> 2
     OR (SELECT COUNT(*) FROM "OutreachArtifact" WHERE "id" LIKE 'ci_artifact_%') <> 2
   THEN

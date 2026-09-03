@@ -17,6 +17,7 @@ interface DiscoveredPerson {
   title?: string;
   linkedinUrl?: string;
   linkedinSlug?: string;
+  email?: string;
 }
 
 interface JsonLdPerson {
@@ -26,6 +27,7 @@ interface JsonLdPerson {
   familyName?: string;
   jobTitle?: string;
   sameAs?: string | string[];
+  email?: string;
 }
 
 const TEAM_PATHS = [
@@ -57,7 +59,7 @@ const TEAM_PAGE_EXTRACTOR_SYSTEM_PROMPT = [
   "Your job: read the page text and return ONLY real human team members that the page explicitly identifies as employees of the company that owns this URL.",
   "",
   "Return shape (always — no other format):",
-  '  {"people": [{"firstName": string, "lastName": string, "title"?: string, "linkedinUrl"?: string}]}',
+  '  {"people": [{"firstName": string, "lastName": string, "title"?: string, "linkedinUrl"?: string, "email"?: string}]}',
   '  Empty: {"people": []}',
   "",
   "POSITIVE CRITERIA — include a row ONLY if ALL of these hold:",
@@ -65,6 +67,7 @@ const TEAM_PAGE_EXTRACTOR_SYSTEM_PROMPT = [
   "  2. Both tokens start with an uppercase letter and contain only letters (and optionally an apostrophe or hyphen for names like O'Brien or Jean-Luc).",
   "  3. The name is adjacent to (within the same paragraph or card) a recognizable job title at the company — e.g. CEO, Chief Marketing Officer, VP of Sales, Engineering Manager, Director of Product, Lead Designer, Senior Software Engineer, Co-Founder.",
   "  4. The surrounding text makes it clear the person works at THIS company — not a customer logo, partner reference, advisor name, blog author from another company, or a quoted external expert.",
+  "  5. Include email only when the page explicitly shows it for that person. Never infer an address or email pattern.",
   "",
   "NEGATIVE CRITERIA — NEVER emit a row whose firstName or lastName is any of these (these are real false positives we have seen in production):",
   '  - FAQ / accordion headers: "Frequently Asked Questions", "Frequently", "Asked", "Questions"',
@@ -208,6 +211,7 @@ export class TeamPageScraper {
             title: item.jobTitle,
             linkedinUrl,
             linkedinSlug: linkedinUrl ? this.extractLinkedinSlug(linkedinUrl) : undefined,
+            email: item.email?.replace(/^mailto:/i, ""),
           });
         }
       } catch {
@@ -282,6 +286,25 @@ export class TeamPageScraper {
       }
     }
 
+    const pageEmails = [...html.matchAll(/(?:mailto:)?([a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})/gi)]
+      .map((match) => match[1]?.toLowerCase())
+      .filter((email): email is string => Boolean(email));
+    for (const person of people) {
+      const first = person.firstName.toLowerCase().replace(/[^a-z]/g, "");
+      const last = person.lastName.toLowerCase().replace(/[^a-z]/g, "");
+      const expectedLocals = new Set([
+        `${first}.${last}`,
+        `${first[0] ?? ""}.${last}`,
+        `${first}_${last}`,
+        `${first[0] ?? ""}${last}`,
+        `${first}${last[0] ?? ""}`,
+        `${last}.${first}`,
+      ]);
+      person.email = pageEmails.find((email) =>
+        expectedLocals.has(email.split("@")[0] ?? ""),
+      );
+    }
+
     return people;
   }
 
@@ -334,7 +357,7 @@ export class TeamPageScraper {
         },
         guard: isTeamPagePayload,
         schemaDescription:
-          '{"people": [{"firstName": string, "lastName": string, "title"?: string, "linkedinUrl"?: string}]}',
+          '{"people": [{"firstName": string, "lastName": string, "title"?: string, "linkedinUrl"?: string, "email"?: string}]}',
         onRetry: (err) =>
           this.logger.warn(
             `Team-page LLM extract: retrying after parse failure for ${url}: ${err}`,
@@ -391,6 +414,7 @@ function isDiscoveredPerson(value: unknown): value is DiscoveredPerson {
   // Optional fields must be string when present (or undefined).
   if (obj.title !== undefined && typeof obj.title !== "string") return false;
   if (obj.linkedinUrl !== undefined && typeof obj.linkedinUrl !== "string") return false;
+  if (obj.email !== undefined && typeof obj.email !== "string") return false;
   return true;
 }
 

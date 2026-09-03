@@ -133,6 +133,8 @@ export interface ChatOptions {
    * regression that motivated the sourcing-quality fix branch.
    */
   temperature?: number;
+  /** Nucleus sampling cap. Defaults to 0.9 for every model-backed node. */
+  topP?: number;
   plan?: string;
   tools?: OpenAIFunctionDef[];
   toolChoice?: "auto" | "none" | "required";
@@ -229,11 +231,20 @@ export class LLMService {
     // default inside the transport — structured-extraction callers explicitly
     // pass 0 to suppress hallucinated rows.
     const temperature = options?.temperature;
+    const topP = options?.topP ?? 0.9;
 
     // Route Claude models to Anthropic API
     if (model.startsWith("claude-")) {
       if (process.env.ANTHROPIC_API_KEY) {
-        return this.callAnthropic(messages, model, maxTokens, options?.tools, attribution, temperature);
+        return this.callAnthropic(
+          messages,
+          model,
+          maxTokens,
+          options?.tools,
+          attribution,
+          temperature,
+          topP,
+        );
       }
       // Fall back to GPT-4o if no Anthropic key
       return this.callOpenAIOrMock(
@@ -244,6 +255,7 @@ export class LLMService {
         options?.toolChoice,
         attribution,
         temperature,
+        topP,
       );
     }
 
@@ -255,6 +267,7 @@ export class LLMService {
       options?.toolChoice,
       attribution,
       temperature,
+      topP,
     );
   }
 
@@ -266,6 +279,7 @@ export class LLMService {
     toolChoice?: string,
     attribution?: LlmAttribution,
     temperature?: number,
+    topP?: number,
   ): Promise<LLMResponse> {
     const azureDeployment = azureDeploymentFor(model);
     if (azureDeployment) {
@@ -278,10 +292,20 @@ export class LLMService {
         toolChoice,
         attribution,
         temperature,
+        topP,
       );
     }
     if (this.apiKey) {
-      return this.callOpenAI(messages, model, maxTokens, tools, toolChoice, attribution, temperature);
+      return this.callOpenAI(
+        messages,
+        model,
+        maxTokens,
+        tools,
+        toolChoice,
+        attribution,
+        temperature,
+        topP,
+      );
     }
     if (process.env.NODE_ENV === "production") {
       // Constructor guard should have caught this, but defend-in-depth: refuse
@@ -328,6 +352,7 @@ export class LLMService {
     toolChoice?: string,
     attribution?: LlmAttribution,
     temperature?: number,
+    topP?: number,
   ): Promise<LLMResponse> {
     return this.wrapWithLangSmith(
       { name: "azure.chat", model, inputs: messages, attribution },
@@ -342,6 +367,7 @@ export class LLMService {
           // 0.7 is the historical default for chat/agent calls; structured
           // extractors override to 0 to suppress fabricated rows.
           temperature: typeof temperature === "number" ? temperature : 0.7,
+          top_p: topP,
         };
         if (tools && tools.length > 0) {
           body.tools = tools;
@@ -405,6 +431,7 @@ export class LLMService {
     toolChoice?: string,
     attribution?: LlmAttribution,
     temperature?: number,
+    topP?: number,
   ): Promise<LLMResponse> {
     try {
       return await this.wrapWithLangSmith(
@@ -417,6 +444,7 @@ export class LLMService {
             // 0.7 is the historical default for chat/agent calls; structured
             // extractors override to 0 to suppress fabricated rows.
             temperature: typeof temperature === "number" ? temperature : 0.7,
+            top_p: topP,
           };
 
           if (tools && tools.length > 0) {
@@ -478,6 +506,7 @@ export class LLMService {
     tools?: OpenAIFunctionDef[],
     attribution?: LlmAttribution,
     temperature?: number,
+    topP?: number,
   ): Promise<LLMResponse> {
     const anthropicKey = process.env.ANTHROPIC_API_KEY;
     if (!anthropicKey) {
@@ -502,6 +531,7 @@ export class LLMService {
             max_tokens: maxTokens,
             system: systemMsg,
             messages: nonSystemMessages,
+            top_p: topP,
           };
           // Forward an explicit temperature when the caller pinned one.
           // Anthropic defaults to 1.0 server-side, but for structured

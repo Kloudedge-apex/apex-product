@@ -41,8 +41,9 @@ const SOURCE_CONFIRMED_EMAIL_SOURCES = new Set<EmailSource>([
   "GITHUB_COMMIT",
   "SEC_FILING",
   "PRESS_RELEASE",
+  "VERIFIED_PATTERN",
 ]);
-const EMAIL_VERIFICATION_BATCH_LIMIT = 2;
+const EMAIL_VERIFICATION_BATCH_LIMIT = 10;
 
 interface CompanyFilters {
   page: number;
@@ -218,13 +219,14 @@ export class LeadsService {
     orgId: string,
     icp: { targetTitles: string[]; targetIndustries: string[]; targetGeos: string[]; minEmployees?: number | null; maxEmployees?: number | null; techStackSignals: string[]; seedDomains?: string[]; intentKeywords?: string[]; exclusionDomains?: string[] },
     jobId?: string,
+    serperOnly = false,
   ): Promise<string[]> {
     const companyIds = new Set<string>();
     const seenDomains = new Set<string>();
     let processed = 0;
-    const totalSteps = 4;
+    const totalSteps = serperOnly ? 1 : 4;
 
-    const upsertCompany = async (co: { domain: string; name: string; industry?: string; country?: string; employeeRange?: string; atsProvider?: string; atsSlug?: string; source?: string; linkedinCompanyUrl?: string }): Promise<boolean> => {
+    const upsertCompany = async (co: { domain: string; name: string; industry?: string; country?: string; employeeRange?: string; atsProvider?: string; atsSlug?: string; source?: string; linkedinCompanyUrl?: string; description?: string; sourceUrl?: string }): Promise<boolean> => {
       if (!co.domain || co.domain.length === 0) return false;
       if (isIcpExcludedDomain(co.domain, icp.exclusionDomains ?? [])) {
         this.logger.log(
@@ -253,6 +255,8 @@ export class LeadsService {
           employeeRange: co.employeeRange,
           atsProvider: co.atsProvider,
           atsSlug: co.atsSlug,
+          serpDescription: co.description,
+          serpSourceUrl: co.sourceUrl,
         };
         const company = await this.prisma.company.upsert({
           where: { orgId_domain: { orgId, domain: co.domain } },
@@ -271,12 +275,15 @@ export class LeadsService {
     };
 
     // Step 1: SERP discovery (primary)
-    const serpCompanies = await withRetry(() => this.serpDiscovery.discoverCompanies(icp));
+    const serpCompanies = await withRetry(() =>
+      this.serpDiscovery.discoverCompanies(orgId, icp),
+    );
     for (const co of serpCompanies) {
       await upsertCompany(co);
     }
     processed++;
     if (jobId) await this.updateJobProgress(jobId, processed, totalSteps, { stage: "serp-complete", found: serpCompanies.length });
+    if (serperOnly) return [...companyIds];
 
     // Step 2: TheirStack (hiring intent)
     const theirStackCompanies = await withRetry(() => this.theirStack.discoverHiringCompanies(icp));
@@ -379,6 +386,7 @@ export class LeadsService {
         personIds.add(id);
         count++;
       }
+      return id;
     };
 
     // SERP-discovered people
@@ -441,7 +449,21 @@ export class LeadsService {
           co.teamPageUrl,
         );
         for (const p of teamPeople) {
-          await trackUpsert(co.id, p);
+          const personId = await trackUpsert(co.id, p);
+          const email = normalizePublicCompanyEmail(p.email, co.domain);
+          if (!personId || !email) continue;
+          await this.prisma.emailCandidate.upsert({
+            where: { personId_email: { personId, email } },
+            create: {
+              personId,
+              email,
+              source: "TEAM_PAGE",
+              verificationResult: "UNKNOWN",
+              confidence: 0.9,
+            },
+            update: { source: "TEAM_PAGE", confidence: 0.9 },
+          });
+          await this.emailPatternService.learnPattern(orgId, email, co.domain);
         }
       } catch (err) {
         this.logger.warn(`Team page scrape failed for ${co.domain}: ${err instanceof Error ? err.message : String(err)}`);
@@ -475,7 +497,7 @@ export class LeadsService {
 
   private async upsertPerson(
     companyId: string,
-    p: { firstName: string; lastName: string; title?: string; seniority?: Seniority; department?: Department; linkedinSlug?: string; linkedinUrl?: string; githubHandle?: string },
+    p: { firstName: string; lastName: string; title?: string; seniority?: Seniority; department?: Department; linkedinSlug?: string; linkedinUrl?: string; githubHandle?: string; email?: string },
   ) {
     // Quality gate (1/3): shared validator — catches FAQ headers, country
     // names, all-caps DOM headings. Runs FIRST because it has the strongest
@@ -635,6 +657,7 @@ export class LeadsService {
 
       try {
         const generatedCandidates = await this.emailPatternService.generateCandidates(
+          orgId,
           person.firstName,
           person.lastName,
           person.company.domain,
@@ -666,7 +689,8 @@ export class LeadsService {
         }
         for (const generated of generatedCandidates) {
           const key = generated.email.trim().toLowerCase();
-          if (!candidatesByAddress.has(key)) {
+          const existing = candidatesByAddress.get(key);
+          if (!existing || generated.source === "VERIFIED_PATTERN") {
             candidatesByAddress.set(key, generated);
           }
         }
@@ -778,6 +802,8 @@ export class LeadsService {
               ...verificationFields,
             },
             update: {
+              pattern: c.pattern,
+              source: c.source,
               confidence: adjustedConfidence,
               ...(verification ? verificationFields : {}),
             },
@@ -789,8 +815,12 @@ export class LeadsService {
         // Learn patterns from verified or source-confirmed emails
         for (const c of candidates) {
           const verification = verifyResults.get(c.email);
-          if ((verification && verification.result === 'VALID') || ['TEAM_PAGE', 'GITHUB_COMMIT', 'SEC_FILING'].includes(c.source)) {
-            await this.emailPatternService.learnPattern(c.email, person.company.domain);
+          if ((verification && verification.result === 'VALID') || ['TEAM_PAGE', 'GITHUB_COMMIT', 'SEC_FILING', 'PRESS_RELEASE'].includes(c.source)) {
+            await this.emailPatternService.learnPattern(
+              orgId,
+              c.email,
+              person.company.domain,
+            );
             break; // Learn from the first confirmed email only
           }
         }
@@ -870,6 +900,7 @@ export class LeadsService {
   async runSourcingStage(
     orgId: string,
     icpProfileId: string,
+    options: { serperOnly?: boolean } = {},
   ): Promise<{ companies: number; people: number; companyIds: string[]; personIds: string[] }> {
     const icp = await this.prisma.icpProfile.findFirstOrThrow({
       where: { id: icpProfileId, orgId },
@@ -880,7 +911,12 @@ export class LeadsService {
     let companyIds: string[] = [];
     try {
       await this.markJobRunning(companyJobId);
-      companyIds = await this.discoverCompanies(orgId, icp, companyJobId);
+      companyIds = await this.discoverCompanies(
+        orgId,
+        icp,
+        companyJobId,
+        options.serperOnly === true,
+      );
       companies = companyIds.length;
       await this.markJobCompleted(companyJobId, companies);
     } catch (err) {
@@ -1608,4 +1644,22 @@ function isEligibleOutreachEmail(candidate: {
     candidate.verificationResult !== "INVALID" &&
     SOURCE_CONFIRMED_EMAIL_SOURCES.has(candidate.source)
   );
+}
+
+function normalizePublicCompanyEmail(
+  value: string | undefined,
+  companyDomain: string,
+): string | null {
+  if (!value) return null;
+  const email = value.trim().toLowerCase().replace(/^mailto:/, "");
+  const parts = email.split("@");
+  if (
+    parts.length !== 2 ||
+    !parts[0] ||
+    parts[1] !== companyDomain.trim().toLowerCase() ||
+    !/^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+$/.test(email)
+  ) {
+    return null;
+  }
+  return email;
 }

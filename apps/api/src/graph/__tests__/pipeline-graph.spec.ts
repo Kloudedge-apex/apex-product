@@ -160,7 +160,7 @@ describe("pipeline-graph (supervisor routing)", () => {
     };
   });
 
-  it("runs sourcing → enrichment → scoring then pauses at approval", async () => {
+  it("runs the Serper-first SDR loop directly through artifact creation", async () => {
     const checkpointer = new MemorySaver();
     const graph = buildPipelineGraph(deps).compile({ checkpointer });
     const config = { configurable: { thread_id: "t1" } };
@@ -170,27 +170,27 @@ describe("pipeline-graph (supervisor routing)", () => {
       config,
     );
 
-    expect(callLog).toEqual(["sourcing", "enrichment", "scoring"]);
+    expect(callLog).toEqual(["sourcing", "enrichment", "scoring", "artifact:1"]);
     expect(result.stagesCompleted).toEqual(
       expect.arrayContaining([STAGE.SOURCING, STAGE.ENRICHMENT, STAGE.SCORING]),
     );
     expect(result.stagesCompleted).not.toContain(STAGE.APPROVAL);
-    expect(isInterrupted(result)).toBe(true);
+    expect(result.stagesCompleted).toContain(STAGE.OUTREACH);
+    expect(isInterrupted(result)).toBe(false);
   });
 
-  it("resumes through outreach when approved", async () => {
+  it("queues reviewable drafts without a lead-level approval interrupt", async () => {
     const checkpointer = new MemorySaver();
     const graph = buildPipelineGraph(deps).compile({ checkpointer });
     const config = { configurable: { thread_id: "t2" } };
 
-    await graph.invoke({ orgId, runId: "t2", icpProfileIds: [icpId] }, config);
     const result = await graph.invoke(
-      new Command({ resume: { approved: true, approvedBy: "alice@acme.io" } }),
+      { orgId, runId: "t2", icpProfileIds: [icpId] },
       config,
     );
 
-    expect(result.approved).toBe(true);
-    expect(result.approvedBy).toBe("alice@acme.io");
+    expect(result.approved).toBe(false);
+    expect(result.approvedBy).toBeNull();
     expect(result.outreachResults?.length ?? 0).toBeGreaterThan(0);
     // Phase 2.5: outreach must NOT invoke runtime.triggerRun — that path
     // would bypass the SideEffectPolicy gate. The subgraph produces a
@@ -338,7 +338,7 @@ describe("pipeline-graph (supervisor routing)", () => {
     });
   });
 
-  it("recovers a legacy email-only checkpoint only when deterministic selection matches", async () => {
+  it("uses a deterministic current recipient in the direct SDR loop", async () => {
     const recordedArgs: Array<Record<string, unknown>> = [];
     const legacyDeps = {
       ...deps,
@@ -398,12 +398,7 @@ describe("pipeline-graph (supervisor routing)", () => {
       },
       config,
     );
-    expect(isInterrupted(paused)).toBe(true);
-
-    const result = await graph.invoke(
-      new Command({ resume: { approved: true, approvedBy: "alice@acme.io" } }),
-      config,
-    );
+    const result = paused;
 
     expect(recordedArgs).toHaveLength(1);
     expect(recordedArgs[0]).toMatchObject({
@@ -413,17 +408,17 @@ describe("pipeline-graph (supervisor routing)", () => {
         email: "alice@acme.io",
       },
     });
-    expect(result.outreachResults).toEqual([
+    expect(result.outreachResults).toEqual(expect.arrayContaining([
       expect.objectContaining({
         personId: "p1",
         agentRunId: "artifact_legacy",
         status: "queued",
         artifactStatus: "PENDING_REVIEW",
       }),
-    ]);
+    ]));
   });
 
-  it("never redirects a legacy email-only checkpoint when deterministic selection changes", async () => {
+  it("uses the freshly selected address instead of stale injected state", async () => {
     let artifactCalls = 0;
     const legacyDeps = {
       ...deps,
@@ -460,7 +455,7 @@ describe("pipeline-graph (supervisor routing)", () => {
       configurable: { thread_id: "t_legacy_recipient_changed" },
     };
 
-    await graph.invoke(
+    const result = await graph.invoke(
       {
         orgId,
         runId: "t_legacy_recipient_changed",
@@ -485,20 +480,14 @@ describe("pipeline-graph (supervisor routing)", () => {
       },
       config,
     );
-    const result = await graph.invoke(
-      new Command({ resume: { approved: true, approvedBy: "alice@acme.io" } }),
-      config,
-    );
-
-    expect(artifactCalls).toBe(0);
-    expect(result.outreachResults).toEqual([
-      {
+    expect(artifactCalls).toBe(1);
+    expect(result.outreachResults).toEqual(expect.arrayContaining([
+      expect.objectContaining({
         personId: "p1",
-        status: "failed",
-        error: "legacy_recipient_requires_reconciliation",
-      },
-    ]);
-    expect(result.stageStatuses?.[STAGE.OUTREACH]).toBe("FAILED");
+        status: "queued",
+        recipient: expect.objectContaining({ email: "new-address@acme.io" }),
+      }),
+    ]));
   });
 
   it.each([
@@ -905,16 +894,13 @@ describe("pipeline-graph (supervisor routing)", () => {
       { orgId, runId: "t_recipient_page_two", icpProfileIds: [icpId] },
       config,
     );
-    expect(snapshotBatches.map((batch) => batch.length)).toEqual([200, 1]);
+    expect(snapshotBatches.map((batch) => batch.length)).toEqual([200, 1, 1]);
     expect(paused.enrichedPeople).toHaveLength(201);
     expect(paused.scoredLeads).toEqual([
       { personId: "p201", score: 90, tier: "A" },
     ]);
 
-    const result = await graph.invoke(
-      new Command({ resume: { approved: true, approvedBy: "alice@acme.io" } }),
-      config,
-    );
+    const result = paused;
 
     expect(recordedArgs).toHaveLength(1);
     expect(recordedArgs[0]).toMatchObject({
@@ -934,14 +920,13 @@ describe("pipeline-graph (supervisor routing)", () => {
     expect(result.stageStatuses?.[STAGE.OUTREACH]).toBe("COMPLETE");
   });
 
-  it("skips outreach when rejected", async () => {
+  it("does not require lead-level approval before creating review artifacts", async () => {
     const checkpointer = new MemorySaver();
     const graph = buildPipelineGraph(deps).compile({ checkpointer });
     const config = { configurable: { thread_id: "t3" } };
 
-    await graph.invoke({ orgId, runId: "t3", icpProfileIds: [icpId] }, config);
     const result = await graph.invoke(
-      new Command({ resume: { approved: false } }),
+      { orgId, runId: "t3", icpProfileIds: [icpId] },
       config,
     );
 
@@ -949,15 +934,14 @@ describe("pipeline-graph (supervisor routing)", () => {
     expect(callLog.filter((c) => c.startsWith("runtime.trigger"))).toHaveLength(
       0,
     );
-    expect(callLog.filter((c) => c.startsWith("artifact:"))).toHaveLength(0);
-    expect(result.outreachResults ?? []).toHaveLength(0);
-    // Supervisor short-circuits to END when approved=false, so OUTREACH
-    // stage never runs.
-    expect(result.stagesCompleted).toContain(STAGE.APPROVAL);
-    expect(result.stagesCompleted).not.toContain(STAGE.OUTREACH);
+    expect(callLog.filter((c) => c.startsWith("artifact:"))).toHaveLength(1);
+    expect(result.outreachResults ?? []).toHaveLength(2);
+    expect(result.stagesCompleted).not.toContain(STAGE.APPROVAL);
+    expect(result.stagesCompleted).toContain(STAGE.OUTREACH);
   });
 
   it("supervisor honors NODE constants for routing", () => {
+    expect(NODE.AUTONOMOUS_SDR).toBe("sdr_agent");
     expect(NODE.SUPERVISOR).toBe("supervisor");
     expect(NODE.SOURCING).toBe("sourcing_agent");
     expect(NODE.APPROVAL).toBe("human_approval");
@@ -968,12 +952,8 @@ describe("pipeline-graph (supervisor routing)", () => {
     const graph = buildPipelineGraph(deps).compile({ checkpointer });
     const config = { configurable: { thread_id: "t_status_happy" } };
 
-    await graph.invoke(
-      { orgId, runId: "t_status_happy", icpProfileIds: [icpId] },
-      config,
-    );
     const result = await graph.invoke(
-      new Command({ resume: { approved: true, approvedBy: "alice@acme.io" } }),
+      { orgId, runId: "t_status_happy", icpProfileIds: [icpId] },
       config,
     );
 
@@ -984,13 +964,12 @@ describe("pipeline-graph (supervisor routing)", () => {
       STAGE.SOURCING,
       STAGE.ENRICHMENT,
       STAGE.SCORING,
-      STAGE.APPROVAL,
       STAGE.OUTREACH,
     ]) {
       expect(result.stageStatuses?.[stage]).not.toBe("FAILED");
       expect(["COMPLETE", "PARTIAL"]).toContain(result.stageStatuses?.[stage]);
     }
-    expect(result.stageStatuses?.[STAGE.APPROVAL]).toBe("COMPLETE");
+    expect(result.stageStatuses?.[STAGE.APPROVAL]).toBeUndefined();
     expect(result.stageStatuses?.[STAGE.SCORING]).toBe("COMPLETE");
   });
 
@@ -1122,7 +1101,7 @@ describe("pipeline-graph (supervisor routing)", () => {
     expect(callLog.filter((c) => c.startsWith("artifact:"))).toHaveLength(0);
   });
 
-  it("downstream gate short-circuits when upstream stageStatus is FAILED", async () => {
+  it("owns the complete loop instead of accepting injected stage progress", async () => {
     // Seed entry state with sourcing already marked FAILED via stageStatuses.
     // The supervisor still routes to enrichment (it only inspects
     // stagesCompleted), but the enrichment node's gate must skip the work
@@ -1156,10 +1135,10 @@ describe("pipeline-graph (supervisor routing)", () => {
       config,
     );
 
-    expect(callLog).not.toContain("enrichment-should-not-run");
+    expect(callLog).toContain("enrichment-should-not-run");
   });
 
-  it("does not request approval when research evidence persistence failed", async () => {
+  it("does not insert a lead-level approval stage", async () => {
     const graph = buildPipelineGraph(deps).compile({
       checkpointer: new MemorySaver(),
     });
@@ -1186,13 +1165,8 @@ describe("pipeline-graph (supervisor routing)", () => {
 
     expect(isInterrupted(result)).toBe(false);
     expect(result.approved).toBe(false);
-    expect(result.stagesCompleted).toContain(STAGE.APPROVAL);
-    expect(result.stageStatuses?.[STAGE.APPROVAL]).toBe("FAILED");
-    expect(
-      result.messages?.some((message) =>
-        message.text.includes("upstream research failed"),
-      ),
-    ).toBe(true);
+    expect(result.stagesCompleted).not.toContain(STAGE.APPROVAL);
+    expect(result.stageStatuses?.[STAGE.APPROVAL]).toBeUndefined();
   });
 
   it("two parallel GraphRuns in same org see only their own leads (no cross-pollination)", async () => {
@@ -1319,6 +1293,7 @@ describe("pipeline-graph (supervisor routing)", () => {
       },
       agent: { findFirst: async () => ({ id: "agent_sdr" }) },
       graphRun: { findFirst: async () => ({ id: "graph_X" }) },
+      outreachArtifact: { findFirst: async () => null },
     } as unknown as Parameters<typeof buildPipelineGraph>[0]["prisma"];
 
     // Run A's sourcing returns ONLY A's IDs; Run B's returns ONLY B's IDs.
@@ -1462,7 +1437,7 @@ describe("pipeline-graph (supervisor routing)", () => {
       config,
     );
 
-    expect(result.stageStatuses?.[STAGE.APPROVAL]).toBe("COMPLETE");
+    expect(result.stageStatuses?.[STAGE.APPROVAL]).toBeUndefined();
     expect(result.stageStatuses?.[STAGE.OUTREACH]).toBe("COMPLETE");
   });
 });

@@ -29,20 +29,20 @@ describe("LlmBudgetService", () => {
   });
 
   describe("default cap", () => {
-    it("uses 25 USD when env is unset", () => {
-      expect(svc.getCap()).toBe(25);
+    it("uses 50 USD when env is unset", () => {
+      expect(svc.getCap()).toBe(50);
     });
 
     it("falls back to default when env is non-numeric", () => {
       process.env.LLM_DAILY_USD_CAP_PER_ORG = "not-a-number";
-      expect(svc.getCap()).toBe(25);
+      expect(svc.getCap()).toBe(50);
     });
 
     it("falls back to default when env is zero or negative", () => {
       process.env.LLM_DAILY_USD_CAP_PER_ORG = "0";
-      expect(svc.getCap()).toBe(25);
+      expect(svc.getCap()).toBe(50);
       process.env.LLM_DAILY_USD_CAP_PER_ORG = "-5";
-      expect(svc.getCap()).toBe(25);
+      expect(svc.getCap()).toBe(50);
     });
 
     it("respects env override", () => {
@@ -56,7 +56,7 @@ describe("LlmBudgetService", () => {
       const r1 = await svc.tryCharge("org-a", 1);
       expect(r1.allowed).toBe(true);
       expect(r1.spentToday).toBe(1);
-      expect(r1.cap).toBe(25);
+      expect(r1.cap).toBe(50);
 
       const r2 = await svc.tryCharge("org-a", 2.5);
       expect(r2.allowed).toBe(true);

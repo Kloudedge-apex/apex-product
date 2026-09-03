@@ -1,4 +1,4 @@
-import { afterEach, describe, it, expect, beforeEach } from "vitest";
+import { afterEach, describe, it, expect, beforeEach, vi } from "vitest";
 import { LLMService } from "../llm.service";
 
 const PROVIDER_ENV_KEYS = [
@@ -12,6 +12,7 @@ const PROVIDER_ENV_KEYS = [
 ] as const;
 
 let originalProviderEnv: Partial<Record<(typeof PROVIDER_ENV_KEYS)[number], string>>;
+const ORIGINAL_FETCH = globalThis.fetch;
 
 describe("LLMService", () => {
   let llm: LLMService;
@@ -28,6 +29,7 @@ describe("LLMService", () => {
   });
 
   afterEach(() => {
+    globalThis.fetch = ORIGINAL_FETCH;
     for (const key of PROVIDER_ENV_KEYS) {
       const original = originalProviderEnv[key];
       if (original === undefined) delete process.env[key];
@@ -145,6 +147,26 @@ describe("LLMService", () => {
   });
 
   describe("production provider readiness", () => {
+    it("sends top_p 0.9 by default to the model provider", async () => {
+      process.env.OPENAI_API_KEY = "test-key";
+      const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+            usage: { total_tokens: 1 },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      await new LLMService().chat([{ role: "user", content: "hello" }]);
+
+      expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({
+        top_p: 0.9,
+      });
+    });
+
     it("rejects production startup without an OpenAI-compatible provider", () => {
       process.env.NODE_ENV = "production";
       process.env.ANTHROPIC_API_KEY = "anthropic-only";

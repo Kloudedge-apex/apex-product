@@ -133,7 +133,7 @@ export function assertArtifactDispatchEligible(
     )
   ) {
     throw new BadRequestException(
-      "Artifact cannot be approved without citing a fresh, non-mock signal",
+      "Artifact cannot be approved without citing a verified signal or company-site excerpt",
     );
   }
 }
