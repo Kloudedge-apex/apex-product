@@ -7,6 +7,7 @@ describe("DashboardService.stats", () => {
       leadScore: {
         count: vi.fn().mockResolvedValueOnce(12).mockResolvedValueOnce(5),
       },
+      emailCandidate: { count: vi.fn().mockResolvedValue(8) },
       outreachArtifact: { count: vi.fn().mockResolvedValue(3) },
       meetingLedger: { count: vi.fn().mockResolvedValue(2) },
     };
@@ -15,8 +16,15 @@ describe("DashboardService.stats", () => {
     await expect(service.stats("org_1")).resolves.toEqual({
       leadsSourced: 12,
       leadsQualified: 5,
+      verifiedEmails: 8,
       emailsSent: 3,
       meetingsBooked: 2,
+    });
+    expect(prisma.emailCandidate.count).toHaveBeenCalledWith({
+      where: {
+        verified: true,
+        person: { company: { orgId: "org_1" } },
+      },
     });
   });
 });
