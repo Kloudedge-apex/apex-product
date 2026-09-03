@@ -12,6 +12,7 @@ import {
 export interface DashboardStats {
   leadsSourced: number;
   leadsQualified: number;
+  verifiedEmails: number;
   emailsSent: number;
   meetingsBooked: number;
 }
@@ -41,11 +42,20 @@ export class DashboardService {
   constructor(private readonly prisma: PrismaService) {}
 
   async stats(orgId: string): Promise<DashboardStats> {
-    const [leadsSourced, leadsQualified, emailsSent, meetingsBooked] =
+    const [
+      leadsSourced,
+      leadsQualified,
+      verifiedEmails,
+      emailsSent,
+      meetingsBooked,
+    ] =
       await Promise.all([
         this.prisma.leadScore.count({ where: { orgId } }),
         this.prisma.leadScore.count({
           where: { orgId, qualifiedAt: { not: null } },
+        }),
+        this.prisma.emailCandidate.count({
+          where: { verified: true, person: { company: { orgId } } },
         }),
         this.prisma.outreachArtifact.count({
           where: { orgId, sentAt: { not: null } },
@@ -61,6 +71,7 @@ export class DashboardService {
     return {
       leadsSourced,
       leadsQualified,
+      verifiedEmails,
       emailsSent,
       meetingsBooked,
     };
