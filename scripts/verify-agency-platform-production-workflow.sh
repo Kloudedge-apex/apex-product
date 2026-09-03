@@ -34,7 +34,6 @@ require 'az storage blob lease acquire' "${CONTROLLER}"
 require 'workforce-os-release-lock/production-gtm-platform' "${CONTROLLER}"
 require 'queue_control pause' "${CONTROLLER}"
 require 'queue_control resume' "${CONTROLLER}"
-require 'revision deactivate' "${CONTROLLER}"
 require "PGSSLMODE=disable PGSSLROOTCERT=''" "${CONTROLLER}"
 require 'pg_restore --clean --if-exists' "${CONTROLLER}"
 if grep -Fq -- 'pg_dump --no-owner --no-acl --format=custom --schema=' "${CONTROLLER}"; then
@@ -45,6 +44,10 @@ require '--file="${MIGRATION}"' "${CONTROLLER}"
 require 'assert_postconditions' "${CONTROLLER}"
 require 'queuesRemainPaused:true' "${CONTROLLER}"
 require 'productionBootstrapRedisIdentityHash()' "${QUEUE_CONTROLLER}"
+if grep -Eq -- 'containerapp (update|revision (activate|deactivate|set-mode))' "${CONTROLLER}"; then
+  echo 'ERROR: agency schema migration must not mutate Container Apps' >&2
+  exit 1
+fi
 require 'async function main()' "${QUEUE_CONTROLLER}"
 require 'void main().catch' "${QUEUE_CONTROLLER}"
 

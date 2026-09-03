@@ -47,7 +47,6 @@ RUNTIME_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/workforce-agency-migration.XXXXXX
 chmod 700 "${RUNTIME_DIR}"
 LOCK_ACQUIRED=false
 LEASE_ACQUIRED=false
-SERVICES_QUIESCED=false
 MIGRATION_COMPLETED=false
 QUEUE_PAUSED=false
 CLONE_CONTAINER=""
@@ -61,39 +60,6 @@ queue_control() {
   WORKFORCE_AGENCY_MIGRATION_AUTHORITY_CONFIRMED=true \
     corepack pnpm --filter @apex/api exec tsx \
       "${PWD}/scripts/agency-platform-production-queues.ts" "${operation}" "${destination}"
-}
-
-reactivate_services() {
-  local failed=false
-  if [[ -n "${API_REVISION}" ]]; then
-    az containerapp revision activate --name "${API_APP}" --resource-group "${RESOURCE_GROUP}" \
-      --revision "${API_REVISION}" --only-show-errors --output none || failed=true
-    az containerapp revision set-mode --name "${API_APP}" --resource-group "${RESOURCE_GROUP}" \
-      --mode single --only-show-errors --output none || failed=true
-  fi
-  if [[ -n "${WORKER_REVISION}" ]]; then
-    az containerapp revision activate --name "${WORKER_APP}" --resource-group "${RESOURCE_GROUP}" \
-      --revision "${WORKER_REVISION}" --only-show-errors --output none || failed=true
-    az containerapp revision set-mode --name "${WORKER_APP}" --resource-group "${RESOURCE_GROUP}" \
-      --mode single --only-show-errors --output none || failed=true
-  fi
-  for attempt in $(seq 1 60); do
-    local api_ready worker_ready
-    api_ready="$(az containerapp revision show --name "${API_APP}" --resource-group "${RESOURCE_GROUP}" \
-      --revision "${API_REVISION}" --query "properties.active && properties.healthState == 'Healthy'" \
-      --output tsv --only-show-errors 2>/dev/null || true)"
-    worker_ready="$(az containerapp revision show --name "${WORKER_APP}" --resource-group "${RESOURCE_GROUP}" \
-      --revision "${WORKER_REVISION}" --query "properties.active && properties.healthState == 'Healthy'" \
-      --output tsv --only-show-errors 2>/dev/null || true)"
-    if [[ "${api_ready}" == "true" && "${worker_ready}" == "true" ]]; then
-      SERVICES_QUIESCED=false
-      [[ "${failed}" == "false" ]]
-      return
-    fi
-    sleep 5
-  done
-  echo "ERROR: original API or worker revision did not recover" >&2
-  return 1
 }
 
 release_authority() {
@@ -123,7 +89,6 @@ cleanup() {
   trap - EXIT HUP INT TERM
   set +e
   if [[ -n "${CLONE_CONTAINER}" ]]; then docker rm --force "${CLONE_CONTAINER}" >/dev/null 2>&1; fi
-  if [[ "${SERVICES_QUIESCED}" == "true" ]]; then reactivate_services || status=1; fi
   if [[ "${QUEUE_PAUSED}" == "true" && "${MIGRATION_COMPLETED}" != "true" ]]; then
     queue_control resume "${RUNTIME_DIR}/queue-failure-resume.json" || status=1
   fi
@@ -364,18 +329,6 @@ CLONE_CONTAINER=""
 
 queue_control pause "${RUNTIME_DIR}/queues-paused.json"
 QUEUE_PAUSED=true
-SERVICES_QUIESCED=true
-az containerapp revision set-mode --name "${API_APP}" --resource-group "${RESOURCE_GROUP}" --mode multiple --only-show-errors --output none
-az containerapp revision set-mode --name "${WORKER_APP}" --resource-group "${RESOURCE_GROUP}" --mode multiple --only-show-errors --output none
-az containerapp revision deactivate --name "${API_APP}" --resource-group "${RESOURCE_GROUP}" --revision "${API_REVISION}" --only-show-errors --output none
-az containerapp revision deactivate --name "${WORKER_APP}" --resource-group "${RESOURCE_GROUP}" --revision "${WORKER_REVISION}" --only-show-errors --output none
-for attempt in $(seq 1 60); do
-  api_replicas="$(az containerapp replica list --name "${API_APP}" --resource-group "${RESOURCE_GROUP}" --revision "${API_REVISION}" --query length\(@\) --output tsv --only-show-errors)"
-  worker_replicas="$(az containerapp replica list --name "${WORKER_APP}" --resource-group "${RESOURCE_GROUP}" --revision "${WORKER_REVISION}" --query length\(@\) --output tsv --only-show-errors)"
-  [[ "${api_replicas}" == 0 && "${worker_replicas}" == 0 ]] && break
-  [[ "${attempt}" -lt 60 ]] || { echo "ERROR: API or worker did not quiesce" >&2; exit 1; }
-  sleep 5
-done
 
 preflight >"${RUNTIME_DIR}/production-preflight.json"
 jq -e '.companyNullOrgRows == 0 and .patternOrphanRows == 0' "${RUNTIME_DIR}/production-preflight.json" >/dev/null
@@ -409,8 +362,6 @@ MIGRATION_COMPLETED=true
 postconditions >"${RUNTIME_DIR}/production-postconditions.json"
 assert_postconditions "${RUNTIME_DIR}/production-postconditions.json"
 POSTCONDITION_HASH="$(hash_json "${RUNTIME_DIR}/production-postconditions.json")"
-
-reactivate_services
 
 QUEUE_HASH="$(jq -r .evidenceHash "${RUNTIME_DIR}/queues-paused.json")"
 PRODUCTION_APPLY_HASH="$(jq -cnS --arg commit "${EXPECTED_COMMIT}" --arg migration "${MIGRATION_SHA}" \
