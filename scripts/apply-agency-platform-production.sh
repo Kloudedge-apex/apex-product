@@ -317,13 +317,13 @@ for attempt in $(seq 1 60); do
 done
 CLONE_PORT="$(docker port "${CLONE_CONTAINER}" 5432/tcp | awk -F: 'NR==1{print $NF}')"
 pg_dump --no-owner --no-acl --format=custom --schema=public --file="${RUNTIME_DIR}/production.dump"
-PGPASSWORD=synthetic_local_only PGSSLMODE=disable PGOPTIONS='' pg_restore --no-owner --no-acl \
+PGPASSWORD=synthetic_local_only PGSSLMODE=disable PGSSLROOTCERT='' PGOPTIONS='' pg_restore --no-owner --no-acl \
   --exit-on-error --host=127.0.0.1 --port="${CLONE_PORT}" --username=rehearsal \
   --dbname=rehearsal "${RUNTIME_DIR}/production.dump" >/dev/null
-PGPASSWORD=synthetic_local_only PGSSLMODE=disable PGOPTIONS='' psql --no-psqlrc --set=ON_ERROR_STOP=1 \
+PGPASSWORD=synthetic_local_only PGSSLMODE=disable PGSSLROOTCERT='' PGOPTIONS='' psql --no-psqlrc --set=ON_ERROR_STOP=1 \
   --host=127.0.0.1 --port="${CLONE_PORT}" --username=rehearsal --dbname=rehearsal \
   --file="${MIGRATION}" >/dev/null
-PGPASSWORD=synthetic_local_only PGSSLMODE=disable PGOPTIONS='' postconditions \
+PGPASSWORD=synthetic_local_only PGSSLMODE=disable PGSSLROOTCERT='' PGOPTIONS='' postconditions \
   --host=127.0.0.1 --port="${CLONE_PORT}" --username=rehearsal --dbname=rehearsal \
   >"${RUNTIME_DIR}/staging-postconditions.json"
 assert_postconditions "${RUNTIME_DIR}/staging-postconditions.json"
@@ -344,10 +344,10 @@ for attempt in $(seq 1 60); do
   sleep 2
 done
 CLONE_PORT="$(docker port "${CLONE_CONTAINER}" 5432/tcp | awk -F: 'NR==1{print $NF}')"
-PGPASSWORD=synthetic_local_only PGSSLMODE=disable PGOPTIONS='' pg_restore --no-owner --no-acl \
+PGPASSWORD=synthetic_local_only PGSSLMODE=disable PGSSLROOTCERT='' PGOPTIONS='' pg_restore --no-owner --no-acl \
   --exit-on-error --host=127.0.0.1 --port="${CLONE_PORT}" --username=rehearsal \
   --dbname=rehearsal "${RUNTIME_DIR}/production.dump" >/dev/null
-PGPASSWORD=synthetic_local_only PGSSLMODE=disable PGOPTIONS='' psql --no-psqlrc --set=ON_ERROR_STOP=1 --quiet --tuples-only --no-align \
+PGPASSWORD=synthetic_local_only PGSSLMODE=disable PGSSLROOTCERT='' PGOPTIONS='' psql --no-psqlrc --set=ON_ERROR_STOP=1 --quiet --tuples-only --no-align \
   --host=127.0.0.1 --port="${CLONE_PORT}" --username=rehearsal --dbname=rehearsal \
   >"${RUNTIME_DIR}/rollback.json" <<'SQL'
 SELECT pg_catalog.json_build_object(
