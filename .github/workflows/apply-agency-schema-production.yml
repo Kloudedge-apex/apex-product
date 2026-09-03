@@ -1,0 +1,146 @@
+name: Apply Workforce OS agency schema in production
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Apply the agency schema or resume queues after release"
+        required: true
+        type: choice
+        options:
+          - apply
+          - resume
+      release_sha:
+        description: "Exact protected master SHA being released"
+        required: true
+        type: string
+      confirmation:
+        description: "Type MIGRATE WORKFORCE OS PRODUCTION"
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+  deployments: read
+  id-token: write
+
+concurrency:
+  group: workforce-os-production
+  cancel-in-progress: false
+
+jobs:
+  agency-schema:
+    name: ${{ inputs.action }} agency production schema
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment: workforce-os-production
+
+    steps:
+      - name: Validate protected migration authority
+        id: authority
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          REF_PROTECTED: ${{ github.ref_protected }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ||
+            "${GITHUB_REF}" != "refs/heads/master" || "${REF_PROTECTED}" != "true" ||
+            "${CONFIRMATION}" != "MIGRATE WORKFORCE OS PRODUCTION" ||
+            ! "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ || "${RELEASE_SHA}" != "${WORKFLOW_SHA}" ]]; then
+            echo "ERROR: agency migration requires protected master, its exact SHA, and confirmation" >&2
+            exit 1
+          fi
+          repository_json="$(gh api "repos/${GITHUB_REPOSITORY}")"
+          master_json="$(gh api "repos/${GITHUB_REPOSITORY}/branches/master")"
+          jq -e '.default_branch == "master"' >/dev/null <<<"${repository_json}"
+          jq -e --arg sha "${WORKFLOW_SHA}" '.protected == true and .commit.sha == $sha' >/dev/null <<<"${master_json}"
+          printf '%s\n' \
+            'client_id=2efd64b0-87c1-43a7-a064-30679ce8b764' \
+            'tenant_id=d4b3813d-146f-4d03-96b8-d6e5862d58a2' \
+            'subscription_id=3171575e-f164-425c-9ee0-2fb10cf93884' \
+            >>"${GITHUB_OUTPUT}"
+
+      - name: Checkout exact protected source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact-commit CI and migration controller
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          scripts/verify-agency-platform-production-workflow.sh
+          scripts/verify-github-release-ci.sh "${SOURCE_SHA}"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24"
+          cache: pnpm
+
+      - name: Install protected controller dependencies
+        run: |
+          corepack pnpm install --frozen-lockfile --ignore-scripts
+          corepack pnpm --filter @apex/db db:generate
+          if ! command -v psql >/dev/null || [[ "$(psql --version)" != *" 16."* ]]; then
+            sudo apt-get update
+            sudo apt-get install --yes --no-install-recommends postgresql-client-16
+          fi
+
+      - name: Authenticate to Azure with protected OIDC
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5
+        with:
+          client-id: ${{ steps.authority.outputs.client_id }}
+          tenant-id: ${{ steps.authority.outputs.tenant_id }}
+          subscription-id: ${{ steps.authority.outputs.subscription_id }}
+
+      - name: Verify Azure production identity
+        env:
+          AZURE_CLIENT_ID: ${{ steps.authority.outputs.client_id }}
+          AZURE_TENANT_ID: ${{ steps.authority.outputs.tenant_id }}
+          AZURE_SUBSCRIPTION_ID: ${{ steps.authority.outputs.subscription_id }}
+        run: |
+          set -Eeuo pipefail
+          account_json="$(az account show --output json --only-show-errors)"
+          jq -e --arg client "${AZURE_CLIENT_ID}" --arg tenant "${AZURE_TENANT_ID}" --arg subscription "${AZURE_SUBSCRIPTION_ID}" '
+            (.id | ascii_downcase) == ($subscription | ascii_downcase) and
+            (.tenantId | ascii_downcase) == ($tenant | ascii_downcase) and
+            .state == "Enabled" and .user.type == "servicePrincipal" and
+            (.user.name | ascii_downcase) == ($client | ascii_downcase)
+          ' >/dev/null <<<"${account_json}"
+
+      - name: Rehearse and apply exact schema change
+        id: migration
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_RELEASE_SHA: ${{ inputs.release_sha }}
+          WORKFORCE_AGENCY_MIGRATION_AUTHORITY_CONFIRMED: "true"
+          PGPASS_B64: ${{ secrets.PRODUCTION_BOOTSTRAP_PGPASS_B64 }}
+          PGHOST: ${{ vars.PRODUCTION_PGHOST }}
+          PGPORT: ${{ vars.PRODUCTION_PGPORT }}
+          PGDATABASE: ${{ vars.PRODUCTION_PGDATABASE }}
+          PGUSER: ${{ vars.PRODUCTION_PGUSER }}
+          REDIS_URL: ${{ secrets.PRODUCTION_REDIS_URL }}
+        run: |
+          set -Eeuo pipefail
+          evidence="${RUNNER_TEMP}/agency-platform-production-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+          scripts/apply-agency-platform-production.sh "${{ inputs.action }}" "${evidence}"
+          printf 'evidence=%s\n' "${evidence}" >>"${GITHUB_OUTPUT}"
+
+      - name: Upload sanitized migration evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: agency-platform-production-${{ inputs.action }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.migration.outputs.evidence }}
+          if-no-files-found: error
+          retention-days: 30
