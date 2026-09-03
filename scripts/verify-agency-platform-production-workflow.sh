@@ -16,7 +16,7 @@ done
 bash -n "${CONTROLLER}"
 
 require() {
-  rg -F --quiet -- "$1" "$2" || {
+  grep -Fq -- "$1" "$2" || {
     echo "ERROR: agency migration control is missing: $1" >&2
     exit 1
   }
