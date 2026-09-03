@@ -10,9 +10,10 @@ import {
 } from "../apps/api/src/ops/production-bootstrap-quiescence";
 import { canonicalJson } from "./production-bootstrap-phase-ledger.mjs";
 
-const action = process.argv[2];
-const output = process.argv[3];
-const expectedIdentity = process.env.EXPECTED_REDIS_IDENTITY_HASH;
+async function main() {
+  const action = process.argv[2];
+  const output = process.argv[3];
+  const expectedIdentity = process.env.EXPECTED_REDIS_IDENTITY_HASH;
 
 if ((action !== "pause" && action !== "resume") || !output ||
   !/^sha256:[0-9a-f]{64}$/.test(expectedIdentity ?? "") ||
@@ -85,6 +86,12 @@ try {
     flag: "wx",
     mode: 0o600,
   });
-} finally {
-  await Promise.all(Object.values(queues).map((queue) => queue.close()));
+  } finally {
+    await Promise.all(Object.values(queues).map((queue) => queue.close()));
+  }
 }
+
+void main().catch((error: unknown) => {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exitCode = 1;
+});
