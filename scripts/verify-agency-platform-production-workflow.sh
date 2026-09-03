@@ -37,6 +37,10 @@ require 'queue_control resume' "${CONTROLLER}"
 require 'revision deactivate' "${CONTROLLER}"
 require "PGSSLMODE=disable PGSSLROOTCERT=''" "${CONTROLLER}"
 require 'pg_restore --clean --if-exists' "${CONTROLLER}"
+if grep -Fq -- 'pg_dump --no-owner --no-acl --format=custom --schema=' "${CONTROLLER}"; then
+  echo 'ERROR: production rehearsal dump must include extension definitions' >&2
+  exit 1
+fi
 require '--file="${MIGRATION}"' "${CONTROLLER}"
 require 'assert_postconditions' "${CONTROLLER}"
 require 'queuesRemainPaused:true' "${CONTROLLER}"

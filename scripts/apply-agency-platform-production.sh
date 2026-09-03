@@ -316,7 +316,7 @@ for attempt in $(seq 1 60); do
   sleep 2
 done
 CLONE_PORT="$(docker port "${CLONE_CONTAINER}" 5432/tcp | awk -F: 'NR==1{print $NF}')"
-pg_dump --no-owner --no-acl --format=custom --schema=public --file="${RUNTIME_DIR}/production.dump"
+pg_dump --no-owner --no-acl --format=custom --file="${RUNTIME_DIR}/production.dump"
 PGPASSWORD=synthetic_local_only PGSSLMODE=disable PGSSLROOTCERT='' PGOPTIONS='' pg_restore --clean --if-exists --no-owner --no-acl \
   --exit-on-error --host=127.0.0.1 --port="${CLONE_PORT}" --username=rehearsal \
   --dbname=rehearsal "${RUNTIME_DIR}/production.dump" >/dev/null
