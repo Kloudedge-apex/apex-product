@@ -1,6 +1,8 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable, Logger, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { fetchWithRetry, withCircuitBreaker } from "../../common/http-retry.util";
+import { chatJsonWithRetry } from "../../common/json-output.util";
+import { LLMService } from "../../runtime/llm.service";
 import { ssrfGuardedFetch } from "../../runtime/util/ssrf-guard";
 import {
   isAggregatorDomain,
@@ -22,6 +24,8 @@ interface DiscoveredCompany {
   industry?: string;
   linkedinCompanyUrl?: string;
   source: string;
+  description: string;
+  sourceUrl: string;
 }
 
 interface DiscoveredPerson {
@@ -50,7 +54,10 @@ export class SerpDiscoveryService {
   private readonly apiKey: string;
   private readonly MAX_QUERIES = 50;
 
-  constructor(private readonly config: ConfigService) {
+  constructor(
+    private readonly config: ConfigService,
+    @Optional() private readonly llm?: LLMService,
+  ) {
     this.apiKey = this.config.get<string>('SERPER_API_KEY') ?? '';
   }
 
@@ -60,7 +67,10 @@ export class SerpDiscoveryService {
 
   // ─── Company Discovery ───────────────────────────────
 
-  async discoverCompanies(icp: IcpInput): Promise<DiscoveredCompany[]> {
+  async discoverCompanies(
+    orgId: string,
+    icp: IcpInput,
+  ): Promise<DiscoveredCompany[]> {
     if (!this.enabled) {
       this.logger.warn("SERP discovery skipped: no SERPER_API_KEY");
       return [];
@@ -76,7 +86,7 @@ export class SerpDiscoveryService {
       try {
         const results = await this.executeSearch(q, 30);
         for (const r of results) {
-          const parsed = this.parseCompanyResult(r, icp);
+          const parsed = this.parseCompanyResult(r);
           if (parsed && !seenDomains.has(parsed.domain)) {
             seenDomains.add(parsed.domain);
             allResults.push(parsed);
@@ -94,6 +104,9 @@ export class SerpDiscoveryService {
       const validDomain = await this.validateDomain(co.domain);
       if (validDomain) {
         co.domain = validDomain;
+        const classification = await this.classifyCompany(co, orgId);
+        co.industry = classification.industry;
+        co.country = classification.country;
         validated.push(co);
       }
     }
@@ -230,14 +243,7 @@ export class SerpDiscoveryService {
 
   // ─── Result Parsing ─────────────────────────────────
 
-  private parseCompanyResult(result: SerperResult, icp: IcpInput): DiscoveredCompany | null {
-    // The `icp` param is intentionally unused now — we no longer mechanically
-    // stamp `icp.targetIndustries[0]` / `icp.targetGeos[0]` onto every row.
-    // The destination Company schema accepts null industry/country and a real
-    // classifier (or downstream enrichment) fills those in later. See TODO
-    // at the bottom of this method.
-    void icp;
-
+  private parseCompanyResult(result: SerperResult): DiscoveredCompany | null {
     const link = result.link;
     let domain: string;
     let name: string;
@@ -286,19 +292,72 @@ export class SerpDiscoveryService {
     // that survived URL parsing but is obviously bogus.
     if (domain.length > 253) return null;
 
-    // TODO(deep-research follow-up): replace null industry/country with a
-    // real classifier (homepage-text → industry, WHOIS/CDN/IP → country).
-    // We deliberately do NOT stamp icp.targetIndustries[0] / icp.targetGeos[0]
-    // onto every row anymore — that produced the "all 200 companies are B2B
-    // SaaS in UAE" pathology in prod.
     return {
       domain,
       name: name || domain,
-      country: undefined,
-      industry: undefined,
+      country: "Unknown",
+      industry: "Unknown",
       linkedinCompanyUrl,
       source: "serp",
+      description: result.snippet.trim(),
+      sourceUrl: result.link,
     };
+  }
+
+  private async classifyCompany(
+    company: Pick<
+      DiscoveredCompany,
+      "domain" | "name" | "description" | "sourceUrl"
+    >,
+    orgId: string,
+  ): Promise<{ industry: string; country: string }> {
+    if (!this.llm || company.description.length === 0) {
+      return { industry: "Unknown", country: "Unknown" };
+    }
+
+    try {
+      const parsed = await chatJsonWithRetry<{
+        industry: string;
+        country: string;
+      }>(this.llm, {
+        messages: [
+          {
+            role: "system",
+            content:
+              "Classify a company only from the supplied Serper result. Return JSON with industry and country. Use the literal string Unknown when the description does not support a value. Never copy assumptions from a search query or invent a location.",
+          },
+          {
+            role: "user",
+            content: JSON.stringify(company),
+          },
+        ],
+        chatOptions: {
+          model: process.env.SYSTEM_MODEL_MINI ?? "gpt-4o-mini",
+          maxTokens: 120,
+          temperature: 0,
+          topP: 0.9,
+          agent: "serp_company_classifier.classify",
+          tags: ["pipeline", "serp", "company_classifier"],
+          orgId,
+          metadata: { org_id: orgId, domain: company.domain },
+        },
+        guard: isCompanyClassification,
+        schemaDescription: '{"industry": string, "country": string}',
+        onFailure: (err) =>
+          this.logger.warn(
+            `SERP classifier failed for ${company.domain}: ${err}`,
+          ),
+      });
+
+      return parsed
+        ? { industry: parsed.industry.trim(), country: parsed.country.trim() }
+        : { industry: "Unknown", country: "Unknown" };
+    } catch (err) {
+      this.logger.warn(
+        `SERP classifier unavailable for ${company.domain}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return { industry: "Unknown", country: "Unknown" };
+    }
   }
 
   private async validateDomain(candidateDomain: string): Promise<string | null> {
@@ -397,6 +456,21 @@ export class SerpDiscoveryService {
       companyName,
     };
   }
+}
+
+function isCompanyClassification(
+  value: unknown,
+): value is { industry: string; country: string } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const item = value as Record<string, unknown>;
+  return (
+    typeof item.industry === "string" &&
+    item.industry.trim().length > 0 &&
+    item.industry.length <= 120 &&
+    typeof item.country === "string" &&
+    item.country.trim().length > 0 &&
+    item.country.length <= 120
+  );
 }
 
 function delay(ms: number): Promise<void> {

@@ -129,7 +129,7 @@ export class GraphService {
             threadId: runId,
             graphName: GRAPH_NAME,
             status: GraphRunStatus.RUNNING,
-            currentNode: NODE.SUPERVISOR,
+            currentNode: NODE.AUTONOMOUS_SDR,
             startIcpProfileIds: canonicalIcpProfileIds,
             dispatchGeneration: 0,
           },

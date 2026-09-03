@@ -2208,8 +2208,9 @@ test_migration_receipt_verifier() {
     "docs/migrations/2026-08-12_graph-run-activity-expand.sql"
     "docs/migrations/2026-08-12_graph-run-lifecycle-expand.sql"
     "docs/migrations/2026-08-20_icp-exclusion-domains-expand.sql"
+    "docs/migrations/2026-09-03_agency-platform-expand.sql"
   )
-  pauses=("observed" "observed" "not-required" "not-required" "not-required" "observed" "not-required" "observed" "not-required")
+  pauses=("observed" "observed" "not-required" "not-required" "not-required" "observed" "not-required" "observed" "not-required" "observed")
   for path in "${paths[@]}"; do
     mkdir -p "${harness}/repo/$(dirname "${path}")"
     cp "${REPO_ROOT}/${path}" "${harness}/repo/${path}"

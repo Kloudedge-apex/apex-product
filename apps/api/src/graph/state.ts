@@ -122,6 +122,7 @@ export type PipelineStateUpdate = typeof PipelineStateAnnotation.Update;
 
 /** Node names — kept as a const so the supervisor + edges can refer to them. */
 export const NODE = {
+  AUTONOMOUS_SDR: "sdr_agent",
   SUPERVISOR: "supervisor",
   SOURCING: "sourcing_agent",
   ENRICHMENT: "enrichment_agent",

@@ -95,6 +95,21 @@ describe("selectOutreachRecipient", () => {
     expect(selected).toBeNull();
   });
 
+  it("allows a catch-all address only when it uses a learned public pattern", () => {
+    const selected = selectOutreachRecipient([
+      candidate({
+        source: EmailSource.VERIFIED_PATTERN,
+        verificationResult: VerificationResult.CATCH_ALL,
+      }),
+    ]);
+
+    expect(selected).toMatchObject({
+      selectionBasis: "VERIFIED_PATTERN",
+      verificationResult: VerificationResult.CATCH_ALL,
+      operatorWarning: expect.stringContaining("Review before approval"),
+    });
+  });
+
   it("uses stable timestamps and ids to break equal-confidence ties", () => {
     const selected = selectOutreachRecipient([
       candidate({

@@ -4,8 +4,6 @@ import {
   StateGraph,
   START,
   END,
-  Command,
-  interrupt,
   type LangGraphRunnableConfig,
 } from "@langchain/langgraph";
 import {
@@ -110,6 +108,28 @@ function stageStatus(
   return { stageStatuses: { [stage]: status } };
 }
 
+function mergePipelineState(
+  state: PipelineState,
+  update: Partial<PipelineState>,
+): PipelineState {
+  return {
+    ...state,
+    ...update,
+    stagesCompleted: [
+      ...new Set([
+        ...state.stagesCompleted,
+        ...(update.stagesCompleted ?? []),
+      ]),
+    ],
+    stageStatuses: {
+      ...state.stageStatuses,
+      ...(update.stageStatuses ?? {}),
+    },
+    messages: [...state.messages, ...(update.messages ?? [])],
+    errors: [...state.errors, ...(update.errors ?? [])],
+  };
+}
+
 /**
  * Defensive gate: short-circuit a downstream node if a required upstream
  * stage is FAILED. In practice the throw from the upstream node already
@@ -134,44 +154,20 @@ function outcomeStatusForArtifact(artifact: {
 }
 
 /**
- * Build the supervisor StateGraph. Returned graph is uncompiled — caller
+ * Build the autonomous SDR StateGraph. Returned graph is uncompiled — caller
  * compiles with their checkpointer of choice.
  *
- *   START → supervisor → (routes based on stagesCompleted)
- *           ├→ sourcing      → supervisor
- *           ├→ enrichment    → supervisor
- *           ├→ scoring       → supervisor
- *           ├→ human_approval (interrupt) → supervisor
- *           └→ outreach      → supervisor
- *                                ↓
- *                                END (when all stages done)
+ *   START → sdr_agent → END
+ *
+ * The single node owns the Serper-first research loop and persists each
+ * intermediate result under the tenant. Drafts still land in the artifact
+ * review queue; this removes the lead-level approval interruption, not the
+ * final human send gate.
  */
 export function buildPipelineGraph(deps: Deps) {
-  const supervisor = async (state: PipelineState): Promise<Command> => {
-    return withNodeSpan(
-      NODE.SUPERVISOR,
-      {
-        "apex.run_id": state.runId,
-        "apex.org_id": state.orgId,
-        "apex.node": NODE.SUPERVISOR,
-      },
-      async () => {
-        const done = new Set(state.stagesCompleted);
-        const next = pickNext(done, state.approved);
-        log.log(
-          `supervisor → ${next} (done=[${[...done].join(",")}], approved=${state.approved})`,
-        );
-
-        return new Command({
-          goto: next === "END" ? END : next,
-          update: nowMsg(NODE.SUPERVISOR, `routing → ${next}`),
-        });
-      },
-    );
-  };
-
   const sourcingAgent = async (
     state: PipelineState,
+    serperOnly: boolean,
   ): Promise<Partial<PipelineState>> => {
     return withNodeSpan(
       NODE.SOURCING,
@@ -200,7 +196,9 @@ export function buildPipelineGraph(deps: Deps) {
         for (const icpId of state.icpProfileIds) {
           try {
             const { companies, people, companyIds, personIds } =
-              await deps.leads.runSourcingStage(state.orgId, icpId);
+              await deps.leads.runSourcingStage(state.orgId, icpId, {
+                serperOnly,
+              });
             totalCompanies += companies;
             totalPeople += people;
             for (const id of companyIds) runCompanyIds.add(id);
@@ -547,66 +545,6 @@ export function buildPipelineGraph(deps: Deps) {
         const status: StageStatus = errors.length > 0 ? "PARTIAL" : "COMPLETE";
         Object.assign(update, stageStatus(STAGE.SCORING, status));
         return update;
-      },
-    );
-  };
-
-  const humanApproval = async (
-    state: PipelineState,
-  ): Promise<Partial<PipelineState>> => {
-    return withNodeSpan(
-      NODE.APPROVAL,
-      {
-        "apex.run_id": state.runId,
-        "apex.org_id": state.orgId,
-        "apex.node": NODE.APPROVAL,
-      },
-      async () => {
-        if (upstreamFailed(state, STAGE.RESEARCH)) {
-          log.warn(
-            `skipping ${STAGE.APPROVAL} — upstream ${STAGE.RESEARCH} failed`,
-          );
-          return {
-            approved: false,
-            approvedBy: null,
-            stagesCompleted: [STAGE.APPROVAL],
-            ...stageStatus(STAGE.APPROVAL, "FAILED"),
-            ...nowMsg(
-              NODE.APPROVAL,
-              `skipped — upstream ${STAGE.RESEARCH} failed`,
-              "error",
-            ),
-          };
-        }
-
-        // Top tier-A/B leads we'd send to outreach if approved.
-        const candidates = state.scoredLeads
-          .filter((s) => s.tier === "A" || s.tier === "B")
-          .slice(0, MAX_OUTREACH);
-
-        // `interrupt` suspends the graph; resume happens via Command({ resume: ... })
-        // wired by GraphService.resumePipelineGraph.
-        const decision = interrupt({
-          reason: "approval_required",
-          candidateCount: candidates.length,
-          candidates: candidates.slice(0, 5),
-          message: `Approve outreach to ${candidates.length} qualified lead(s)?`,
-        }) as { approved: boolean; approvedBy?: string };
-
-        // Approval is always COMPLETE: "nothing to approve" is a valid
-        // outcome and rejection is a deliberate decision, not a failure.
-        return {
-          approved: !!decision?.approved,
-          approvedBy: decision?.approvedBy ?? null,
-          stagesCompleted: [STAGE.APPROVAL],
-          ...stageStatus(STAGE.APPROVAL, "COMPLETE"),
-          ...nowMsg(
-            NODE.APPROVAL,
-            decision?.approved
-              ? `approved by ${decision?.approvedBy ?? "unknown"}`
-              : "rejected — skipping outreach",
-          ),
-        };
       },
     );
   };
@@ -966,44 +904,62 @@ export function buildPipelineGraph(deps: Deps) {
     evidenceLedger: deps.evidenceLedger,
   });
 
+  const autonomousSdrAgent = async (
+    state: PipelineState,
+  ): Promise<Partial<PipelineState>> =>
+    withNodeSpan(
+      NODE.AUTONOMOUS_SDR,
+      {
+        "apex.run_id": state.runId,
+        "apex.org_id": state.orgId,
+        "apex.node": NODE.AUTONOMOUS_SDR,
+      },
+      async () => {
+        let current = mergePipelineState(
+          state,
+          nowMsg(
+            NODE.AUTONOMOUS_SDR,
+            "starting Serper-first research, scoring, and draft loop",
+          ),
+        );
+        current = mergePipelineState(
+          current,
+          await sourcingAgent(current, true),
+        );
+        current = mergePipelineState(
+          current,
+          await enrichmentAgent(current),
+        );
+        current = mergePipelineState(current, await scoringAgent(current));
+        current = mergePipelineState(current, await researchAgent(current));
+        current = mergePipelineState(
+          current,
+          await outreachAgent({ ...current, approved: true }),
+        );
+
+        return {
+          sourcedCompanies: current.sourcedCompanies,
+          sourcedPersonIds: current.sourcedPersonIds,
+          enrichedPeople: current.enrichedPeople,
+          enrichedPersonIds: current.enrichedPersonIds,
+          scoredLeads: current.scoredLeads,
+          outreachResults: current.outreachResults,
+          stagesCompleted: current.stagesCompleted.filter(
+            (stage) => !state.stagesCompleted.includes(stage),
+          ),
+          stageStatuses: current.stageStatuses,
+          messages: current.messages.slice(state.messages.length),
+          errors: current.errors.slice(state.errors.length),
+        };
+      },
+    );
+
   const graph = new StateGraph(PipelineStateAnnotation)
-    .addNode(NODE.SUPERVISOR, supervisor, {
-      ends: [
-        NODE.SOURCING,
-        NODE.ENRICHMENT,
-        NODE.SCORING,
-        NODE.RESEARCH,
-        NODE.APPROVAL,
-        NODE.OUTREACH,
-        END,
-      ],
-    })
-    .addNode(NODE.SOURCING, sourcingAgent)
-    .addNode(NODE.ENRICHMENT, enrichmentAgent)
-    .addNode(NODE.SCORING, scoringAgent)
-    .addNode(NODE.RESEARCH, researchAgent)
-    .addNode(NODE.APPROVAL, humanApproval)
-    .addNode(NODE.OUTREACH, outreachAgent)
-    .addEdge(START, NODE.SUPERVISOR)
-    .addEdge(NODE.SOURCING, NODE.SUPERVISOR)
-    .addEdge(NODE.ENRICHMENT, NODE.SUPERVISOR)
-    .addEdge(NODE.SCORING, NODE.SUPERVISOR)
-    .addEdge(NODE.RESEARCH, NODE.SUPERVISOR)
-    .addEdge(NODE.APPROVAL, NODE.SUPERVISOR)
-    .addEdge(NODE.OUTREACH, NODE.SUPERVISOR);
+    .addNode(NODE.AUTONOMOUS_SDR, autonomousSdrAgent)
+    .addEdge(START, NODE.AUTONOMOUS_SDR)
+    .addEdge(NODE.AUTONOMOUS_SDR, END);
 
   return graph;
-}
-
-/** Deterministic supervisor routing: pick the next stage that hasn't run. */
-function pickNext(done: Set<string>, approved: boolean): string {
-  if (!done.has(STAGE.SOURCING)) return NODE.SOURCING;
-  if (!done.has(STAGE.ENRICHMENT)) return NODE.ENRICHMENT;
-  if (!done.has(STAGE.SCORING)) return NODE.SCORING;
-  if (!done.has(STAGE.RESEARCH)) return NODE.RESEARCH;
-  if (!done.has(STAGE.APPROVAL)) return NODE.APPROVAL;
-  if (approved && !done.has(STAGE.OUTREACH)) return NODE.OUTREACH;
-  return "END";
 }
 
 // keep the unused param happy for tsc when LangGraphRunnableConfig isn't referenced elsewhere

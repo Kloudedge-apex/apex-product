@@ -17,7 +17,11 @@ function lead(): SdrLeadInput {
   };
 }
 
-function fakePrisma(events: unknown[], intentSignals: string[] = []) {
+function fakePrisma(
+  events: unknown[],
+  intentSignals: string[] = [],
+  raw: { serperDescription?: string; serperSourceUrl?: string } = {},
+) {
   return {
     company: {
       findFirst: vi.fn().mockResolvedValue({
@@ -31,6 +35,8 @@ function fakePrisma(events: unknown[], intentSignals: string[] = []) {
         fundingStage: null,
         techStack: [],
         intentSignals,
+        serpDescription: raw.serperDescription ?? null,
+        serpSourceUrl: raw.serperSourceUrl ?? null,
       }),
     },
     person: {
@@ -97,6 +103,21 @@ describe("assembleResearchBrief grounding (refusal-first)", () => {
     const prisma = fakePrisma([], ["hiring-spike", "budget-approved", "evaluating-vendors"]);
     const brief = await assembleResearchBrief(prisma, lead());
     expect(brief.hasGroundingSignal).toBe(false);
+  });
+
+  it("accepts a specific company-domain excerpt when dated news is unavailable", async () => {
+    const prisma = fakePrisma([], [], {
+      serperDescription:
+        "Our platform automates warehouse scheduling for regional logistics teams.",
+      serperSourceUrl: "https://acme.io/platform",
+    });
+    const brief = await assembleResearchBrief(prisma, lead());
+
+    expect(brief.hasGroundingSignal).toBe(true);
+    expect(brief.facts.find((fact) => fact.id === "S1")).toMatchObject({
+      category: "signal",
+      source: "https://acme.io/platform",
+    });
   });
 
   it("refuses when the only signal is mocked", async () => {

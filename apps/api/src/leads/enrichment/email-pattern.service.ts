@@ -49,6 +49,7 @@ export class EmailPatternService {
   }
 
   async generateCandidates(
+    orgId: string,
     firstName: string,
     lastName: string,
     domain: string,
@@ -60,7 +61,7 @@ export class EmailPatternService {
     const candidates: EmailCandidate[] = [];
 
     // Check if we have a known pattern for this domain
-    const stored = await this.getStoredPattern(domain);
+    const stored = await this.getStoredPattern(orgId, domain);
 
     if (stored) {
       // Use the known pattern with high confidence
@@ -69,7 +70,7 @@ export class EmailPatternService {
         candidates.push({
           email: patternDef.generate(first, last, domain),
           pattern: stored.pattern,
-          source: "PATTERN_GUESS",
+          source: "VERIFIED_PATTERN",
           confidence: stored.confidence,
         });
       }
@@ -114,7 +115,7 @@ export class EmailPatternService {
   }
 
   /** Learn a pattern from a known-good email on a domain */
-  async learnPattern(email: string, domain: string): Promise<void> {
+  async learnPattern(orgId: string, email: string, domain: string): Promise<void> {
     const localPart = email.split("@")[0];
     if (!localPart) return;
 
@@ -123,7 +124,7 @@ export class EmailPatternService {
     if (!detectedPattern) return;
 
     const existing = await this.prisma.patternStore.findUnique({
-      where: { domain },
+      where: { orgId_domain: { orgId, domain } },
     });
 
     if (existing) {
@@ -137,7 +138,7 @@ export class EmailPatternService {
       }
 
       await this.prisma.patternStore.update({
-        where: { domain },
+        where: { orgId_domain: { orgId, domain } },
         data: {
           patterns: JSON.parse(JSON.stringify(patterns)),
           sampleSize: existing.sampleSize + 1,
@@ -147,6 +148,7 @@ export class EmailPatternService {
     } else {
       await this.prisma.patternStore.create({
         data: {
+          orgId,
           domain,
           patterns: JSON.parse(JSON.stringify([{ pattern: detectedPattern, frequency: 1, confidence: 0.5 }])),
           sampleSize: 1,
@@ -176,9 +178,9 @@ export class EmailPatternService {
     }
   }
 
-  private async getStoredPattern(domain: string): Promise<StoredPattern | null> {
+  private async getStoredPattern(orgId: string, domain: string): Promise<StoredPattern | null> {
     const store = await this.prisma.patternStore.findUnique({
-      where: { domain },
+      where: { orgId_domain: { orgId, domain } },
     });
 
     if (!store) return null;

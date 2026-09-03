@@ -6,8 +6,8 @@ import { buildRedisConnectionOptions } from "./queue.service";
  * LlmBudgetService — per-org daily cap on LLM spend.
  *
  * Audit P0 #16. The previous in-memory `Map` was per-process: with N api
- * replicas + worker replicas each holding its own ledger, a $25 daily cap
- * effectively became $25 × N. This rewrite swaps to a Redis-backed counter
+ * replicas + worker replicas each holding its own ledger, a daily cap
+ * effectively became the cap × N. This rewrite swaps to a Redis-backed counter
  * keyed on `llm_budget:{orgId}:{yyyy-mm-dd}` with TTL 25h, atomically
  * incremented via a Lua script so the check + add is replica-safe.
  *
@@ -25,7 +25,7 @@ import { buildRedisConnectionOptions } from "./queue.service";
  * and `getSpentToday` are now async. Callers updated in this commit.
  */
 
-const DEFAULT_CAP_USD = 25;
+const DEFAULT_CAP_USD = 50;
 const TTL_SECONDS = 25 * 60 * 60; // 25h — covers UTC day boundary + clock skew
 const KEY_PREFIX = "llm_budget";
 

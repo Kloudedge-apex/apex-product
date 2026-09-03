@@ -194,7 +194,7 @@ describe("assertArtifactDispatchEligible", () => {
           unsupportedClaims: [],
         },
       }),
-      "Artifact cannot be approved without citing a fresh, non-mock signal",
+      "Artifact cannot be approved without citing a verified signal or company-site excerpt",
     );
   });
 

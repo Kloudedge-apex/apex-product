@@ -11,8 +11,8 @@ import {
 const { qaCheck, parseDrafterJson, SDR_DRAFT_SYSTEM_PROMPT } = _internalForTests;
 
 describe("SDR draft system prompt", () => {
-  it("uses a tenant-neutral role rather than a legacy product identity", () => {
-    expect(SDR_DRAFT_SYSTEM_PROMPT).toContain("sender's organization");
+  it("uses the WorkforceOS agency role rather than a legacy product identity", () => {
+    expect(SDR_DRAFT_SYSTEM_PROMPT).toContain("WorkforceOS Agency framework");
     expect(SDR_DRAFT_SYSTEM_PROMPT).not.toMatch(/Apex SDR|Nikxius/i);
   });
 });
@@ -361,6 +361,31 @@ describe("SDR outreach subgraph", () => {
 
     expect(drafter).toHaveBeenCalled();
     expect(deps.llm.chat).not.toHaveBeenCalled();
+  });
+
+  it("pins SDR drafting to temperature 0.3 and top_p 0.9", async () => {
+    const deps = mockDeps();
+    vi.mocked(deps.llm.chat).mockResolvedValue({
+      content: JSON.stringify({
+        subject: "acme growth question",
+        body: VALID_BODY,
+        refusal: null,
+        groundedness_self_check: {
+          cited_fact_ids: ["S1"],
+          unsupported_claims: [],
+        },
+      }),
+      tokensUsed: 100,
+      model: "test",
+      cost: 0,
+    });
+
+    await runSdrOutreachSubgraph(deps, lead());
+
+    expect(deps.llm.chat).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({ temperature: 0.3, topP: 0.9 }),
+    );
   });
 
   it("propagates graphRunId from the input lead to the artifact", async () => {

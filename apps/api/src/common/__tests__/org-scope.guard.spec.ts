@@ -74,7 +74,7 @@ describe("OrgScopeGuard clean-tenant bootstrap", () => {
     vi.unstubAllEnvs();
   });
 
-  it("provisions one TRIAL Org/User for concurrent verified requests without org_id", async () => {
+  it("provisions one enterprise design-partner Org/User for concurrent verified requests without org_id", async () => {
     const orgId = "org_internal_trial";
     verifyClerkTokenMock.mockResolvedValue({
       sub: "user_clerk_new",
@@ -144,7 +144,8 @@ describe("OrgScopeGuard clean-tenant bootstrap", () => {
       expect(call[0]).toMatchObject({
         data: {
           name: "Acme",
-          plan: "TRIAL",
+          plan: "ENTERPRISE",
+          designPartner: true,
           users: {
             create: {
               clerkId: "user_clerk_new",

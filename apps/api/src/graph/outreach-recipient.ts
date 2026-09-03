@@ -26,7 +26,11 @@ export interface SelectedOutreachRecipient {
   readonly verificationResult: VerificationResult;
   readonly confidence: number;
   readonly verifiedAt: string | null;
-  readonly selectionBasis: "VERIFIED_VALID" | "SOURCE_CONFIRMED";
+  readonly selectionBasis:
+    | "VERIFIED_VALID"
+    | "SOURCE_CONFIRMED"
+    | "VERIFIED_PATTERN";
+  readonly operatorWarning?: string;
 }
 
 export function sameSelectedOutreachRecipient(
@@ -41,7 +45,8 @@ export function sameSelectedOutreachRecipient(
     left.verificationResult === right.verificationResult &&
     left.confidence === right.confidence &&
     left.verifiedAt === right.verifiedAt &&
-    left.selectionBasis === right.selectionBasis
+    left.selectionBasis === right.selectionBasis &&
+    left.operatorWarning === right.operatorWarning
   );
 }
 
@@ -94,6 +99,7 @@ export function selectOutreachRecipient(
     confidence: selected.candidate.confidence,
     verifiedAt: toIsoString(selected.candidate.verifiedAt),
     selectionBasis: selected.selectionBasis,
+    ...operatorWarningFor(selected),
   };
 }
 
@@ -106,7 +112,27 @@ function selectionBasisFor(
   if (SOURCE_CONFIRMED.has(candidate.source)) {
     return "SOURCE_CONFIRMED";
   }
+  if (
+    candidate.source === "VERIFIED_PATTERN" &&
+    (candidate.verificationResult === "CATCH_ALL" ||
+      candidate.verificationResult === "UNKNOWN")
+  ) {
+    return "VERIFIED_PATTERN";
+  }
   return null;
+}
+
+function operatorWarningFor(
+  selected: RankedCandidate,
+): { operatorWarning: string } | Record<string, never> {
+  const result = selected.candidate.verificationResult;
+  if (result !== "CATCH_ALL" && result !== "UNKNOWN") return {};
+  return {
+    operatorWarning:
+      selected.selectionBasis === "VERIFIED_PATTERN"
+        ? `SMTP returned ${result}; address matches a pattern learned from a verified company email. Review before approval.`
+        : `SMTP returned ${result}; address was published by the company. Review before approval.`,
+  };
 }
 
 function compareRanked(a: RankedCandidate, b: RankedCandidate): number {
@@ -128,7 +154,8 @@ function compareRanked(a: RankedCandidate, b: RankedCandidate): number {
 }
 
 function basisRank(value: SelectedOutreachRecipient["selectionBasis"]): number {
-  return value === "VERIFIED_VALID" ? 0 : 1;
+  if (value === "VERIFIED_VALID") return 0;
+  return value === "SOURCE_CONFIRMED" ? 1 : 2;
 }
 
 function finiteConfidence(value: number): number {

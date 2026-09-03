@@ -101,6 +101,27 @@ afterEach(() => {
 });
 
 describe("TeamPageScraper.extractWithLlm — JSON validation retry", () => {
+  it("keeps an explicitly published email only when it matches the named person", async () => {
+    const html = (
+      "<html><body><h3>Jane Doe</h3><p>Chief Executive Officer</p>" +
+      '<a href="mailto:jane.doe@acme.com">Email Jane</a></body></html>'
+    ).padEnd(800, " ");
+    globalThis.fetch = vi.fn(async () =>
+      new Response(html, { status: 200, headers: { "Content-Type": "text/html" } }),
+    ) as unknown as typeof fetch;
+    const { llm, chatMock } = makeLlm([]);
+
+    const people = await new TeamPageScraper(makeConfig(), llm).scrapeTeamPage(
+      "org-test",
+      "acme.com",
+    );
+
+    expect(people).toEqual([
+      expect.objectContaining({ firstName: "Jane", lastName: "Doe", email: "jane.doe@acme.com" }),
+    ]);
+    expect(chatMock).not.toHaveBeenCalled();
+  });
+
   it("uses the injected LLM provider without requiring OPENAI_API_KEY", async () => {
     const { llm, chatMock } = makeLlm([
       JSON.stringify({

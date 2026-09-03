@@ -229,8 +229,9 @@ export class OrgsService {
           data: {
             name: data.name,
             slug,
-            plan: "TRIAL",
-            trialEndsAt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000),
+            plan: "ENTERPRISE",
+            designPartner: true,
+            trialEndsAt: null,
             users: {
               create: {
                 email,

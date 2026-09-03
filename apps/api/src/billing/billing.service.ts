@@ -58,12 +58,19 @@ export class BillingService {
    * the subscription to avoid leaving the org in a half-paid state.
    */
   async createSubscription(orgId: string, planId: string) {
+    const org = await this.prisma.org.findUnique({ where: { id: orgId } });
+    if (!org) throw new NotFoundException("Org not found");
+    if (org.designPartner) {
+      return {
+        plan: org.plan,
+        subscription: null,
+        billingBypassed: true,
+      };
+    }
+
     if (!this.razorpay) {
       throw new ServiceUnavailableException("Billing is not configured");
     }
-
-    const org = await this.prisma.org.findUnique({ where: { id: orgId } });
-    if (!org) throw new NotFoundException("Org not found");
 
     const subscription = await this.razorpay.subscriptions.create({
       plan_id: planId,
@@ -99,8 +106,12 @@ export class BillingService {
   async getSubscription(orgId: string) {
     const org = await this.prisma.org.findUnique({ where: { id: orgId } });
     if (!org) throw new NotFoundException("Org not found");
-    if (!org.billingId || !this.razorpay) {
-      return { plan: org.plan, subscription: null };
+    if (org.designPartner || !org.billingId || !this.razorpay) {
+      return {
+        plan: org.plan,
+        subscription: null,
+        billingBypassed: org.designPartner,
+      };
     }
     try {
       const subscription = await this.razorpay.subscriptions.fetch(org.billingId);
@@ -146,6 +157,12 @@ export class BillingService {
     if (!org) {
       this.logger.warn(
         `Razorpay webhook ${event} for sub ${subId} matched no org`,
+      );
+      return;
+    }
+    if (org.designPartner) {
+      this.logger.log(
+        `Ignored Razorpay ${event} for design-partner org ${org.id}`,
       );
       return;
     }

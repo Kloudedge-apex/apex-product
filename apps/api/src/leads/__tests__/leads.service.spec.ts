@@ -557,6 +557,7 @@ describe("LeadsService per-run lead scopes", () => {
     expect(emailPatternService.verifyBatch).toHaveBeenCalledWith([
       "legacy.one@scoped.example",
       "ada@scoped.example",
+      "legacy.two@scoped.example",
     ]);
     expect(prisma.emailCandidate.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -580,7 +581,7 @@ describe("LeadsService per-run lead scopes", () => {
     );
   });
 
-  it("rotates an all-existing UNKNOWN backlog after each bounded attempt", async () => {
+  it("checks an all-existing UNKNOWN backlog within the ten-address batch", async () => {
     const prisma = mockPrisma();
     const existingCandidate = (email: string, confidence: number) => ({
       id: `email_${email}`,
@@ -672,10 +673,12 @@ describe("LeadsService per-run lead scopes", () => {
     expect(emailPatternService.verifyBatch).toHaveBeenNthCalledWith(1, [
       "a@scoped.example",
       "b@scoped.example",
+      "c@scoped.example",
     ]);
     expect(emailPatternService.verifyBatch).toHaveBeenNthCalledWith(2, [
       "c@scoped.example",
       "a@scoped.example",
+      "b@scoped.example",
     ]);
     expect(prisma.emailCandidate.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
