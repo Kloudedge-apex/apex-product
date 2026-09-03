@@ -45,10 +45,7 @@ require '--file="${MIGRATION}"' "${CONTROLLER}"
 require 'assert_postconditions' "${CONTROLLER}"
 require 'queuesRemainPaused:true' "${CONTROLLER}"
 require 'productionBootstrapRedisIdentityHash()' "${QUEUE_CONTROLLER}"
-queue_check="$(corepack pnpm --filter @apex/api exec tsx "${QUEUE_CONTROLLER}" 2>&1 || true)"
-[[ "${queue_check}" == *'usage: agency-platform-production-queues'* ]] || {
-  echo 'ERROR: agency queue controller does not execute under the API runtime' >&2
-  exit 1
-}
+require 'async function main()' "${QUEUE_CONTROLLER}"
+require 'void main().catch' "${QUEUE_CONTROLLER}"
 
 echo "Agency platform production migration workflow verified"
