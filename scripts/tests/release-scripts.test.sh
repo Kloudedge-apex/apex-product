@@ -3475,6 +3475,25 @@ test_global_live_send_workflow_source() {
   pass
 }
 
+test_provider_activation_workflow_source() {
+  local workflow="${REPO_ROOT}/.github/workflows/activate-production-providers.yml"
+  [[ -f "${workflow}" && ! -L "${workflow}" ]] ||
+    fail "provider activation workflow is missing or unsafe"
+  "${REPO_ROOT}/scripts/verify-production-provider-activation-workflow.sh" "${workflow}" >/dev/null
+  pass
+
+  assert_log_contains "${workflow}" \
+    'initial_image="$(jq -er '\''.properties.template.containers[0].image'\'' "${state_dir}/api-before.json")"'
+  assert_log_contains "${workflow}" \
+    '[[ "${initial_image}" == "${worker_image}" ]]'
+  assert_log_contains "${workflow}" \
+    '--revision-suffix "${revision_suffix}"'
+  assert_log_contains "${workflow}" \
+    'unset TAVILY_API_KEY THEIRSTACK_API_KEY HUNTER_API_KEY'
+  assert_log_excludes "${workflow}" "containerapp secret list"
+  pass
+}
+
 test_registry_verifier
 test_deploy_admission
 test_deploy_rollback
@@ -3486,6 +3505,7 @@ test_snapshot_helper_symlink_rejection
 test_no_mutable_bitbucket_deploy_path
 test_partial_release_recovery_workflow_source
 test_global_live_send_workflow_source
+test_provider_activation_workflow_source
 test_production_release_workflow_verifier
 test_github_ci_verifier
 test_migration_receipt_contract_parity

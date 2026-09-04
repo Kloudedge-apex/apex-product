@@ -1,0 +1,369 @@
+name: Activate Production Providers
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type ACTIVATE WORKFORCE OS PROVIDERS exactly
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: workforce-os-production
+  cancel-in-progress: false
+
+jobs:
+  activate:
+    name: Activate Production Providers
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: workforce-os-production
+
+    steps:
+      - name: Admit exact provider activation request
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+          GH_TOKEN: ${{ github.token }}
+          REF_PROTECTED: ${{ github.ref_protected }}
+        run: |
+          set -Eeuo pipefail
+          if [[ "${CONFIRMATION}" != "ACTIVATE WORKFORCE OS PROVIDERS" ||
+            "${GITHUB_REF}" != "refs/heads/master" ||
+            "${REF_PROTECTED}" != "true" ]]; then
+            echo "ERROR: provider activation requires protected master and the exact confirmation" >&2
+            exit 1
+          fi
+          remote_master_sha="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/master" --jq '.object.sha')"
+          [[ "${remote_master_sha}" == "${GITHUB_SHA}" ]]
+
+      - name: Checkout trusted activation source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify activation source contract
+        run: |
+          set -Eeuo pipefail
+          [[ "$(git rev-parse HEAD)" == "${GITHUB_SHA}" ]]
+          [[ -z "$(git status --porcelain --untracked-files=all)" ]]
+          scripts/verify-production-provider-activation-workflow.sh
+
+      - name: Azure login with protected OIDC identity
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5
+        with:
+          client-id: 2efd64b0-87c1-43a7-a064-30679ce8b764
+          tenant-id: d4b3813d-146f-4d03-96b8-d6e5862d58a2
+          subscription-id: 3171575e-f164-425c-9ee0-2fb10cf93884
+
+      - name: Activate provider credentials under the production lease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAVILY_API_KEY: ${{ secrets.PRODUCTION_TAVILY_API_KEY }}
+          THEIRSTACK_API_KEY: ${{ secrets.PRODUCTION_THEIRSTACK_API_KEY }}
+          HUNTER_API_KEY: ${{ secrets.PRODUCTION_HUNTER_API_KEY }}
+        run: |
+          set -Eeuo pipefail
+          set +x
+
+          subscription="3171575e-f164-425c-9ee0-2fb10cf93884"
+          tenant="d4b3813d-146f-4d03-96b8-d6e5862d58a2"
+          client="2efd64b0-87c1-43a7-a064-30679ce8b764"
+          resource_group="workforce-os-prod"
+          api_app="apex-gtm-api"
+          worker_app="apex-gtm-worker"
+          storage_account="workforceosprodctrl"
+          storage_container="production-control"
+          storage_blob="workforce-os/initial-production-bootstrap/state-v1.json"
+          release_lock_ref="refs/heads/workforce-os-release-lock/production-gtm-platform"
+          revision_suffix="providers-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          state_dir="$(mktemp -d)"
+          lease_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+          lock_created=false
+          lease_acquired=false
+          runtime_mutation_attempted=false
+          api_mutated=false
+          worker_mutated=false
+          completed=false
+
+          validate_secret() {
+            local value=$1
+            [[ ${#value} -ge 16 && "${value}" != *$'\n'* && "${value}" != *$'\r'* ]]
+          }
+
+          capture_active_revision() {
+            local app=$1
+            local output_file=$2
+            local list_file="${output_file}.list"
+            local revision attempt
+            for attempt in {1..90}; do
+              az containerapp revision list --subscription "${subscription}" \
+                --resource-group "${resource_group}" --name "${app}" \
+                --output json >"${list_file}"
+              revision="$(jq -r '
+                [.[] | select(.properties.active == true)]
+                | if length == 1 then .[0].name else empty end
+              ' "${list_file}")"
+              if [[ -n "${revision}" ]] &&
+                az containerapp revision show --subscription "${subscription}" \
+                  --resource-group "${resource_group}" --name "${app}" \
+                  --revision "${revision}" --output json >"${output_file}" &&
+                jq -e --arg revision "${revision}" '
+                  .name == $revision
+                  and .properties.active == true
+                  and .properties.healthState == "Healthy"
+                  and .properties.provisioningState == "Provisioned"
+                  and (.properties.template.containers | length == 1)
+                ' "${output_file}" >/dev/null; then
+                return 0
+              fi
+              sleep 2
+            done
+            echo "ERROR: ${app} did not converge to one healthy active revision" >&2
+            return 1
+          }
+
+          assert_identity() {
+            local state_file=$1
+            local revision=$2
+            local image=$3
+            jq -e --arg revision "${revision}" --arg image "${image}" '
+              .name == $revision
+              and .properties.template.containers[0].image == $image
+            ' "${state_file}" >/dev/null
+          }
+
+          assert_provider_refs() {
+            local state_file=$1
+            jq -e '
+              [
+                .properties.template.containers[0].env[]?
+                | select(
+                    .name == "TAVILY_API_KEY"
+                    or .name == "THEIRSTACK_API_KEY"
+                    or .name == "HUNTER_API_KEY"
+                  )
+                | {name, secretRef}
+              ] | sort_by(.name) == [
+                {name: "HUNTER_API_KEY", secretRef: "hunter-api-key"},
+                {name: "TAVILY_API_KEY", secretRef: "tavily-api-key"},
+                {name: "THEIRSTACK_API_KEY", secretRef: "theirstack-api-key"}
+              ]
+            ' "${state_file}" >/dev/null
+          }
+
+          release_lease() {
+            local lease_json
+            if ! az storage blob lease release --account-name "${storage_account}" \
+              --container-name "${storage_container}" --blob-name "${storage_blob}" \
+              --auth-mode login --subscription "${subscription}" \
+              --lease-id "${lease_id}" --only-show-errors --output none; then
+              echo "Lease release acknowledgement was lost; checking provider state" >&2
+            fi
+            lease_json="$(az storage blob show --account-name "${storage_account}" \
+              --container-name "${storage_container}" --name "${storage_blob}" \
+              --auth-mode login --subscription "${subscription}" \
+              --only-show-errors --query properties.lease --output json)"
+            jq -e '
+              .status == "unlocked"
+              and (.state == "available" or .state == "broken" or .state == "expired")
+            ' <<<"${lease_json}" >/dev/null
+            lease_acquired=false
+          }
+
+          delete_exact_lock() {
+            local current_lock
+            current_lock="$(gh api \
+              "repos/${GITHUB_REPOSITORY}/git/ref/heads/workforce-os-release-lock/production-gtm-platform" \
+              --jq '.object.sha')" || return 1
+            [[ "${current_lock}" == "${GITHUB_SHA}" ]] || return 1
+            git -c credential.helper= \
+              -c 'credential.helper=!gh auth git-credential' \
+              push --porcelain \
+              --force-with-lease="${release_lock_ref}:${GITHUB_SHA}" \
+              "https://github.com/${GITHUB_REPOSITORY}.git" ":${release_lock_ref}"
+            lock_created=false
+          }
+
+          assert_authority_held() {
+            local current_lock renewed_lease_id
+            current_lock="$(gh api \
+              "repos/${GITHUB_REPOSITORY}/git/ref/heads/workforce-os-release-lock/production-gtm-platform" \
+              --jq '.object.sha')"
+            [[ "${current_lock}" == "${GITHUB_SHA}" ]]
+            renewed_lease_id="$(az storage blob lease renew \
+              --account-name "${storage_account}" --container-name "${storage_container}" \
+              --blob-name "${storage_blob}" --auth-mode login \
+              --subscription "${subscription}" --lease-id "${lease_id}" \
+              --only-show-errors --output tsv)"
+            [[ "${renewed_lease_id}" == "${lease_id}" ]]
+            [[ "$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/master" --jq '.object.sha')" == "${GITHUB_SHA}" ]]
+          }
+
+          rollback() {
+            local rollback_failed=false
+            set +e
+            if [[ "${api_mutated}" == "true" ]]; then
+              az containerapp revision activate --subscription "${subscription}" \
+                --resource-group "${resource_group}" --name "${api_app}" \
+                --revision "${initial_api_revision}" --output none || rollback_failed=true
+              az containerapp ingress traffic set --subscription "${subscription}" \
+                --resource-group "${resource_group}" --name "${api_app}" \
+                --revision-weight "${initial_api_revision}=100" --output none || rollback_failed=true
+            fi
+            if [[ "${worker_mutated}" == "true" ]]; then
+              az containerapp revision activate --subscription "${subscription}" \
+                --resource-group "${resource_group}" --name "${worker_app}" \
+                --revision "${initial_worker_revision}" --output none || rollback_failed=true
+            fi
+            capture_active_revision "${api_app}" "${state_dir}/rollback-api.json" || rollback_failed=true
+            capture_active_revision "${worker_app}" "${state_dir}/rollback-worker.json" || rollback_failed=true
+            assert_identity "${state_dir}/rollback-api.json" \
+              "${initial_api_revision}" "${initial_image}" || rollback_failed=true
+            assert_identity "${state_dir}/rollback-worker.json" \
+              "${initial_worker_revision}" "${initial_image}" || rollback_failed=true
+            set -e
+            [[ "${rollback_failed}" == "false" ]]
+          }
+
+          cleanup() {
+            local status=$?
+            trap - EXIT
+            set +e
+            if [[ "${completed}" != "true" && "${runtime_mutation_attempted}" == "true" ]]; then
+              if ! rollback; then
+                echo "ERROR: provider activation rollback could not be proven; retaining lock and lease" >&2
+                exit 1
+              fi
+            fi
+            if [[ "${lock_created}" == "true" ]]; then delete_exact_lock || status=1; fi
+            if [[ "${lease_acquired}" == "true" ]]; then release_lease || status=1; fi
+            rm -rf -- "${state_dir}"
+            exit "${status}"
+          }
+          trap cleanup EXIT
+
+          validate_secret "${TAVILY_API_KEY}"
+          validate_secret "${THEIRSTACK_API_KEY}"
+          validate_secret "${HUNTER_API_KEY}"
+          [[ "${revision_suffix}" =~ ^[a-z0-9-]{1,64}$ ]]
+
+          account_json="$(az account show --output json)"
+          jq -e --arg subscription "${subscription}" --arg tenant "${tenant}" --arg client "${client}" '
+            (.id | ascii_downcase) == ($subscription | ascii_downcase)
+            and (.tenantId | ascii_downcase) == ($tenant | ascii_downcase)
+            and .user.type == "servicePrincipal"
+            and (.user.name | ascii_downcase) == ($client | ascii_downcase)
+          ' <<<"${account_json}" >/dev/null
+
+          if gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/workforce-os-release-lock/production-gtm-platform" \
+            >/dev/null 2>&1; then
+            echo "ERROR: backend production Git lock already exists" >&2
+            exit 1
+          fi
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f ref="${release_lock_ref}" -f sha="${GITHUB_SHA}" >/dev/null
+          lock_created=true
+
+          if ! returned_lease_id="$(az storage blob lease acquire \
+            --account-name "${storage_account}" --container-name "${storage_container}" \
+            --blob-name "${storage_blob}" --auth-mode login \
+            --subscription "${subscription}" --lease-duration -1 \
+            --proposed-lease-id "${lease_id}" --only-show-errors --output tsv)"; then
+            returned_lease_id="$(az storage blob lease renew \
+              --account-name "${storage_account}" --container-name "${storage_container}" \
+              --blob-name "${storage_blob}" --auth-mode login \
+              --subscription "${subscription}" --lease-id "${lease_id}" \
+              --only-show-errors --output tsv)"
+          fi
+          lease_acquired=true
+          [[ "${returned_lease_id}" == "${lease_id}" ]]
+          assert_authority_held
+
+          capture_active_revision "${api_app}" "${state_dir}/api-before.json"
+          capture_active_revision "${worker_app}" "${state_dir}/worker-before.json"
+          initial_api_revision="$(jq -er '.name' "${state_dir}/api-before.json")"
+          initial_worker_revision="$(jq -er '.name' "${state_dir}/worker-before.json")"
+          initial_image="$(jq -er '.properties.template.containers[0].image' "${state_dir}/api-before.json")"
+          worker_image="$(jq -er '.properties.template.containers[0].image' "${state_dir}/worker-before.json")"
+          [[ "${initial_image}" == "${worker_image}" ]]
+          [[ "${initial_image}" =~ ^workforceosprodacr\.azurecr\.io/apex-api@sha256:[0-9a-f]{64}$ ]]
+
+          az containerapp secret set --subscription "${subscription}" \
+            --resource-group "${resource_group}" --name "${worker_app}" \
+            --secrets "tavily-api-key=${TAVILY_API_KEY}" \
+              "theirstack-api-key=${THEIRSTACK_API_KEY}" \
+              "hunter-api-key=${HUNTER_API_KEY}" \
+            --only-show-errors --output none
+          az containerapp secret set --subscription "${subscription}" \
+            --resource-group "${resource_group}" --name "${api_app}" \
+            --secrets "tavily-api-key=${TAVILY_API_KEY}" \
+              "theirstack-api-key=${THEIRSTACK_API_KEY}" \
+              "hunter-api-key=${HUNTER_API_KEY}" \
+            --only-show-errors --output none
+          unset TAVILY_API_KEY THEIRSTACK_API_KEY HUNTER_API_KEY
+
+          assert_authority_held
+          runtime_mutation_attempted=true
+          worker_mutated=true
+          az containerapp update --subscription "${subscription}" \
+            --resource-group "${resource_group}" --name "${worker_app}" \
+            --revision-suffix "${revision_suffix}" \
+            --set-env-vars \
+              'TAVILY_API_KEY=secretref:tavily-api-key' \
+              'THEIRSTACK_API_KEY=secretref:theirstack-api-key' \
+              'HUNTER_API_KEY=secretref:hunter-api-key' \
+            --output none
+          capture_active_revision "${worker_app}" "${state_dir}/worker-after.json"
+          worker_revision="$(jq -er '.name' "${state_dir}/worker-after.json")"
+          [[ "${worker_revision}" != "${initial_worker_revision}" ]]
+          assert_identity "${state_dir}/worker-after.json" "${worker_revision}" "${initial_image}"
+          assert_provider_refs "${state_dir}/worker-after.json"
+
+          assert_authority_held
+          api_mutated=true
+          az containerapp update --subscription "${subscription}" \
+            --resource-group "${resource_group}" --name "${api_app}" \
+            --revision-suffix "${revision_suffix}" \
+            --set-env-vars \
+              'TAVILY_API_KEY=secretref:tavily-api-key' \
+              'THEIRSTACK_API_KEY=secretref:theirstack-api-key' \
+              'HUNTER_API_KEY=secretref:hunter-api-key' \
+            --output none
+          capture_active_revision "${api_app}" "${state_dir}/api-after.json"
+          api_revision="$(jq -er '.name' "${state_dir}/api-after.json")"
+          [[ "${api_revision}" != "${initial_api_revision}" ]]
+          assert_identity "${state_dir}/api-after.json" "${api_revision}" "${initial_image}"
+          assert_provider_refs "${state_dir}/api-after.json"
+
+          scripts/verify-containerapp-release-config.sh "${initial_image}" "${initial_image}"
+          api_fqdn="$(az containerapp show --subscription "${subscription}" \
+            --resource-group "${resource_group}" --name "${api_app}" \
+            --query properties.configuration.ingress.fqdn --output tsv)"
+          curl --fail --silent --show-error --max-time 20 \
+            "https://${api_fqdn}/api/health/ready" >/dev/null
+          curl --fail --silent --show-error --max-time 20 \
+            "https://${api_fqdn}/api/health/worker" >/dev/null
+          assert_authority_held
+
+          completed=true
+          delete_exact_lock
+          release_lease
+          trap - EXIT
+          rm -rf -- "${state_dir}"
+
+          {
+            echo "### Production providers activated"
+            echo "- API revision: \`${api_revision}\`"
+            echo "- Worker revision: \`${worker_revision}\`"
+            echo "- Image preserved: \`${initial_image}\`"
+            echo "- Secret references: Tavily, TheirStack, Hunter"
+            echo "- Production Git lock removed and shared Azure lease released"
+          } >>"${GITHUB_STEP_SUMMARY}"
