@@ -62,6 +62,11 @@ describe("EmailPatternService — Hunter retry wiring", () => {
     const hunterHit = candidates.find((c) => c.source === "HUNTER");
     expect(hunterHit).toBeDefined();
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("hunter.io");
+    const [url, request] = fetchMock.mock.calls[0]!;
+    expect(String(url)).toContain("hunter.io");
+    expect(String(url)).not.toContain("api_key");
+    expect((request as RequestInit).headers).toMatchObject({
+      "X-API-KEY": "test",
+    });
   });
 });

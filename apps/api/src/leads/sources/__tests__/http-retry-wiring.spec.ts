@@ -131,6 +131,104 @@ describe("TheirStackService — retry wiring", () => {
     expect(result).toEqual([]);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
+
+  it("maps the current TheirStack job schema into grounded company data", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      mockResponse({
+        body: {
+          data: [
+            {
+              id: 42,
+              job_title: "VP Sales",
+              company: "Acme",
+              company_domain: "www.acme.com",
+              date_posted: "2026-09-01",
+              url: "https://acme.com/jobs/vp-sales",
+              company_object: {
+                name: "Acme Inc.",
+                domain: "www.acme.com",
+                country: "United States",
+                industry: "software",
+                employee_count_range: "51-200",
+              },
+            },
+          ],
+        },
+      }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const { TheirStackService } = await import("../theirstack.service");
+    const svc = new TheirStackService(makeConfig({ THEIRSTACK_API_KEY: "test" }));
+
+    const result = await svc.discoverHiringCompanies({
+      targetTitles: ["VP Sales"],
+      targetIndustries: ["software"],
+      targetGeos: ["US"],
+      minEmployees: 50,
+      maxEmployees: 200,
+    });
+
+    expect(result).toEqual([
+      expect.objectContaining({
+        domain: "acme.com",
+        name: "Acme Inc.",
+        country: "United States",
+        industry: "software",
+        employeeRange: "51-200",
+        jobTitles: ["VP Sales"],
+        jobs: [
+          {
+            title: "VP Sales",
+            url: "https://acme.com/jobs/vp-sales",
+            postedAt: "2026-09-01",
+          },
+        ],
+      }),
+    ]);
+    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(JSON.parse(String(request.body))).toMatchObject({
+      industry_or: ["software"],
+      min_employee_count: 50,
+      max_employee_count: 200,
+    });
+  });
+
+  it("maps current hiring-team records and uses the supported domain filter", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      mockResponse({
+        body: {
+          data: [
+            {
+              id: 42,
+              job_title: "Account Executive",
+              hiring_team: [
+                { full_name: "Jane Doe", role: "VP Sales" },
+              ],
+            },
+          ],
+        },
+      }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const { TheirStackService } = await import("../theirstack.service");
+    const svc = new TheirStackService(makeConfig({ THEIRSTACK_API_KEY: "test" }));
+
+    await expect(svc.getHiringManagers("acme.com")).resolves.toEqual([
+      {
+        firstName: "Jane",
+        lastName: "Doe",
+        title: "VP Sales",
+        department: "Sales",
+        companyDomain: "acme.com",
+      },
+    ]);
+    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(JSON.parse(String(request.body))).toMatchObject({
+      company_domain_or: ["acme.com"],
+    });
+  });
 });
 
 describe("GithubEnrichment — retry wiring", () => {

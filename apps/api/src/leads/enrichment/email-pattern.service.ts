@@ -199,10 +199,20 @@ export class EmailPatternService {
 
     await new Promise((r) => setTimeout(r, 500)); // Rate limit
 
-    const url = `https://api.hunter.io/v2/email-finder?domain=${encodeURIComponent(domain)}&first_name=${encodeURIComponent(firstName)}&last_name=${encodeURIComponent(lastName)}&api_key=${this.hunterKey}`;
+    const url = new URL("https://api.hunter.io/v2/email-finder");
+    url.searchParams.set("domain", domain);
+    url.searchParams.set("first_name", firstName);
+    url.searchParams.set("last_name", lastName);
 
     const res = await withCircuitBreaker("hunter", () =>
-      fetchWithRetry(url, { signal: AbortSignal.timeout(10000) }, { provider: "hunter" }),
+      fetchWithRetry(
+        url,
+        {
+          headers: { "X-API-KEY": this.hunterKey! },
+          signal: AbortSignal.timeout(10000),
+        },
+        { provider: "hunter" },
+      ),
     );
     if (!res.ok) return null;
 

@@ -11,16 +11,26 @@ interface IcpInput {
 }
 
 interface TheirStackJob {
-  id: string;
-  title: string;
+  id: string | number;
+  job_title: string;
   description?: string;
-  company_name?: string;
-  company_domain?: string;
-  company_country?: string;
-  company_size?: string;
-  company_industry?: string;
-  hiring_manager_name?: string;
-  posted_at?: string;
+  company?: string;
+  company_domain?: string | null;
+  date_posted?: string;
+  source_url?: string;
+  url?: string;
+  hiring_team?: Array<{
+    full_name?: string | null;
+    first_name?: string | null;
+    role?: string | null;
+  }> | null;
+  company_object?: {
+    name: string;
+    domain?: string | null;
+    country?: string | null;
+    industry?: string | null;
+    employee_count_range?: string | null;
+  };
 }
 
 interface TheirStackResponse {
@@ -37,6 +47,7 @@ interface DiscoveredCompany {
   intentScore: number;
   intentSignals: string[];
   jobTitles: string[];
+  jobs: Array<{ title: string; url: string; postedAt: string }>;
   source: string;
 }
 
@@ -63,7 +74,7 @@ export class TheirStackService {
   private readonly apiKey: string;
 
   constructor(private readonly config: ConfigService) {
-    this.apiKey = this.config.get<string>('THEIRSTACK_API_KEY') ?? '';
+    this.apiKey = this.config.get<string>("THEIRSTACK_API_KEY") ?? "";
   }
 
   private get enabled(): boolean {
@@ -86,8 +97,9 @@ export class TheirStackService {
       limit: 100,
     };
     if (countryCodes.length > 0) body.company_country_code_or = countryCodes;
-    if (icp.minEmployees) body.company_size_min = icp.minEmployees;
-    if (icp.maxEmployees) body.company_size_max = icp.maxEmployees;
+    if (icp.targetIndustries.length > 0) body.industry_or = icp.targetIndustries;
+    if (icp.minEmployees) body.min_employee_count = icp.minEmployees;
+    if (icp.maxEmployees) body.max_employee_count = icp.maxEmployees;
 
     this.logger.log("TheirStack: searching for hiring companies");
 
@@ -120,29 +132,32 @@ export class TheirStackService {
       // Group by company domain
       const companyMap = new Map<string, DiscoveredCompany>();
       for (const job of jobs) {
-        if (!job.company_domain) continue;
+        const domain = (job.company_object?.domain ?? job.company_domain)
+          ?.trim()
+          .toLowerCase()
+          .replace(/^www\./, "");
+        if (!domain || !job.job_title) continue;
 
-        const domain = job.company_domain;
+        const sourceUrl = job.url ?? job.source_url;
+        const datedJob =
+          sourceUrl && job.date_posted
+            ? { title: job.job_title, url: sourceUrl, postedAt: job.date_posted }
+            : null;
         const existing = companyMap.get(domain);
         if (existing) {
-          existing.jobTitles.push(job.title);
-          if (job.hiring_manager_name) {
-            existing.intentSignals.push(`hiring-manager:${job.hiring_manager_name}`);
-          }
+          existing.jobTitles.push(job.job_title);
+          if (datedJob) existing.jobs.push(datedJob);
         } else {
-          const signals: string[] = ["theirstack-active-hiring"];
-          if (job.hiring_manager_name) {
-            signals.push(`hiring-manager:${job.hiring_manager_name}`);
-          }
           companyMap.set(domain, {
             domain,
-            name: job.company_name ?? domain,
-            country: job.company_country,
-            industry: job.company_industry,
-            employeeRange: job.company_size,
+            name: job.company_object?.name ?? job.company ?? domain,
+            country: job.company_object?.country ?? undefined,
+            industry: job.company_object?.industry ?? undefined,
+            employeeRange: job.company_object?.employee_count_range ?? undefined,
             intentScore: 0,
-            intentSignals: signals,
-            jobTitles: [job.title],
+            intentSignals: ["theirstack-active-hiring"],
+            jobTitles: [job.job_title],
+            jobs: datedJob ? [datedJob] : [],
             source: "theirstack",
           });
         }
@@ -176,7 +191,7 @@ export class TheirStackService {
               "Content-Type": "application/json",
             },
             body: JSON.stringify({
-              company_domain: companyDomain,
+              company_domain_or: [companyDomain],
               posted_at_max_age_days: 90,
               limit: 50,
             }),
@@ -194,21 +209,22 @@ export class TheirStackService {
       const seen = new Set<string>();
 
       for (const job of jobs) {
-        if (!job.hiring_manager_name) continue;
-        const name = job.hiring_manager_name.trim();
-        if (seen.has(name.toLowerCase())) continue;
-        seen.add(name.toLowerCase());
+        for (const person of job.hiring_team ?? []) {
+          const name = (person.full_name ?? person.first_name ?? "").trim();
+          if (!name || seen.has(name.toLowerCase())) continue;
+          seen.add(name.toLowerCase());
 
-        const parts = name.split(/\s+/);
-        if (parts.length < 2) continue;
+          const parts = name.split(/\s+/);
+          if (parts.length < 2) continue;
 
-        managers.push({
-          firstName: parts[0]!,
-          lastName: parts.slice(1).join(" "),
-          title: this.inferManagerTitle(job.title),
-          department: this.inferDepartment(job.title),
-          companyDomain,
-        });
+          managers.push({
+            firstName: parts[0]!,
+            lastName: parts.slice(1).join(" "),
+            title: person.role ?? this.inferManagerTitle(job.job_title),
+            department: this.inferDepartment(job.job_title),
+            companyDomain,
+          });
+        }
       }
 
       return managers;

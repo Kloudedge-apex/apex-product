@@ -219,14 +219,14 @@ export class LeadsService {
     orgId: string,
     icp: { targetTitles: string[]; targetIndustries: string[]; targetGeos: string[]; minEmployees?: number | null; maxEmployees?: number | null; techStackSignals: string[]; seedDomains?: string[]; intentKeywords?: string[]; exclusionDomains?: string[] },
     jobId?: string,
-    serperOnly = false,
+    primarySourcesOnly = false,
   ): Promise<string[]> {
     const companyIds = new Set<string>();
     const seenDomains = new Set<string>();
     let processed = 0;
-    const totalSteps = serperOnly ? 1 : 4;
+    const totalSteps = primarySourcesOnly ? 2 : 4;
 
-    const upsertCompany = async (co: { domain: string; name: string; industry?: string; country?: string; employeeRange?: string; atsProvider?: string; atsSlug?: string; source?: string; linkedinCompanyUrl?: string; description?: string; sourceUrl?: string }): Promise<boolean> => {
+    const upsertCompany = async (co: { domain: string; name: string; industry?: string; country?: string; employeeRange?: string; atsProvider?: string; atsSlug?: string; source?: string; linkedinCompanyUrl?: string; description?: string; sourceUrl?: string; jobs?: Array<{ title: string; url: string; postedAt: string }> }): Promise<boolean> => {
       if (!co.domain || co.domain.length === 0) return false;
       if (isIcpExcludedDomain(co.domain, icp.exclusionDomains ?? [])) {
         this.logger.log(
@@ -257,6 +257,7 @@ export class LeadsService {
           atsSlug: co.atsSlug,
           serpDescription: co.description,
           serpSourceUrl: co.sourceUrl,
+          raw: co.jobs ? { jobs: co.jobs } : undefined,
         };
         const company = await this.prisma.company.upsert({
           where: { orgId_domain: { orgId, domain: co.domain } },
@@ -283,8 +284,6 @@ export class LeadsService {
     }
     processed++;
     if (jobId) await this.updateJobProgress(jobId, processed, totalSteps, { stage: "serp-complete", found: serpCompanies.length });
-    if (serperOnly) return [...companyIds];
-
     // Step 2: TheirStack (hiring intent)
     const theirStackCompanies = await withRetry(() => this.theirStack.discoverHiringCompanies(icp));
     for (const co of theirStackCompanies) {
@@ -294,6 +293,7 @@ export class LeadsService {
         country: co.country,
         industry: co.industry,
         employeeRange: co.employeeRange,
+        jobs: co.jobs,
       });
       if (!accepted) continue;
       // Score intent from TheirStack job data
@@ -318,6 +318,7 @@ export class LeadsService {
     }
     processed++;
     if (jobId) await this.updateJobProgress(jobId, processed, totalSteps, { stage: "theirstack-complete", found: theirStackCompanies.length });
+    if (primarySourcesOnly) return [...companyIds];
 
     // Step 3: ATS slug detection for discovered companies
     const atsCompanies = await withRetry(() => this.atsScraper.discoverCompanies(icp, icp.seedDomains));
@@ -900,7 +901,7 @@ export class LeadsService {
   async runSourcingStage(
     orgId: string,
     icpProfileId: string,
-    options: { serperOnly?: boolean } = {},
+    options: { primarySourcesOnly?: boolean } = {},
   ): Promise<{ companies: number; people: number; companyIds: string[]; personIds: string[] }> {
     const icp = await this.prisma.icpProfile.findFirstOrThrow({
       where: { id: icpProfileId, orgId },
@@ -915,7 +916,7 @@ export class LeadsService {
         orgId,
         icp,
         companyJobId,
-        options.serperOnly === true,
+        options.primarySourcesOnly === true,
       );
       companies = companyIds.length;
       await this.markJobCompleted(companyJobId, companies);

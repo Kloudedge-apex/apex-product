@@ -110,6 +110,8 @@ type ScopedLeadsInternals = {
       techStackSignals: string[];
       exclusionDomains?: string[];
     },
+    jobId?: string,
+    primarySourcesOnly?: boolean,
   ): Promise<string[]>;
   discoverPeople(
     orgId: string,
@@ -257,6 +259,81 @@ describe("LeadsService ICP domain exclusions", () => {
       "allowed.example",
     ]);
     expect(companyIds).toEqual(["company_allowed.example"]);
+  });
+});
+
+describe("LeadsService autonomous sources", () => {
+  it("uses TheirStack and persists dated jobs without invoking legacy sources", async () => {
+    const prisma = mockPrisma();
+    prisma.company.upsert.mockResolvedValue({ id: "company_acme" });
+    const serpDiscovery = {
+      discoverCompanies: vi.fn().mockResolvedValue([]),
+    } as unknown as SerpDiscoveryService;
+    const theirStack = {
+      discoverHiringCompanies: vi.fn().mockResolvedValue([
+        {
+          domain: "acme.com",
+          name: "Acme",
+          jobTitles: ["VP Sales"],
+          jobs: [
+            {
+              title: "VP Sales",
+              url: "https://acme.com/jobs/vp-sales",
+              postedAt: "2026-09-01",
+            },
+          ],
+          intentScore: 5,
+          intentSignals: ["theirstack-active-hiring"],
+          source: "theirstack",
+        },
+      ]),
+    } as unknown as TheirStackService;
+    const atsScraper = {
+      discoverCompanies: vi.fn(),
+      discoverAtsSlugs: vi.fn(),
+    } as unknown as AtsScraper;
+    const registryScraper = {
+      discoverCompanies: vi.fn(),
+    } as unknown as RegistryScraper;
+    const service = buildService(prisma, {
+      serpDiscovery,
+      theirStack,
+      atsScraper,
+      registryScraper,
+    });
+
+    await scopedInternals(service).discoverCompanies(
+      "org_1",
+      {
+        targetTitles: ["VP Sales"],
+        targetIndustries: ["software"],
+        targetGeos: ["US"],
+        techStackSignals: [],
+      },
+      undefined,
+      true,
+    );
+
+    expect(theirStack.discoverHiringCompanies).toHaveBeenCalledOnce();
+    expect(atsScraper.discoverCompanies).not.toHaveBeenCalled();
+    expect(registryScraper.discoverCompanies).not.toHaveBeenCalled();
+    expect(prisma.company.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { orgId_domain: { orgId: "org_1", domain: "acme.com" } },
+        create: expect.objectContaining({
+          orgId: "org_1",
+          raw: {
+            jobs: [
+              {
+                title: "VP Sales",
+                url: "https://acme.com/jobs/vp-sales",
+                postedAt: "2026-09-01",
+              },
+            ],
+          },
+        }),
+      }),
+    );
   });
 });
 
