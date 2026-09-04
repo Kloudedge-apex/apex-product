@@ -17,6 +17,8 @@ param publicConsoleHostname string = 'workforceos.xyz'
 param publicApiHostname string = 'api.workforceos.xyz'
 param publicConsoleCertificateName string = 'workforceos-root-v1'
 param publicApiCertificateName string = 'workforceos-api-v1'
+@description('Create immutable managed certificates on the initial apply. Set false for later stack updates.')
+param createManagedCertificates bool = true
 param identityNamePrefix string = 'workforce-os-v2'
 param githubOwner string = 'Kloudedge-apex'
 param backendRepository string = 'apex-product'
@@ -162,6 +164,7 @@ module isolatedResources './resources.bicep' = {
     publicApiHostname: publicApiHostname
     publicConsoleCertificateName: publicConsoleCertificateName
     publicApiCertificateName: publicApiCertificateName
+    createManagedCertificates: createManagedCertificates
     identityNamePrefix: identityNamePrefix
     githubOwner: githubOwner
     backendRepository: backendRepository
