@@ -54,6 +54,9 @@ describe("WebSearchTool provider selection", () => {
     expect(r.success).toBe(true);
     expect(isMocked(r.data)).toBe(false);
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain("tavily.com");
+    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(request.headers).toMatchObject({ Authorization: "Bearer tav" });
+    expect(JSON.parse(String(request.body))).not.toHaveProperty("api_key");
     expect((r.data as { results: Array<{ url: string }> }).results[0].url).toBe("https://t/1");
   });
 
@@ -201,7 +204,7 @@ describe("WebSearchTool date forwarding + news vertical", () => {
     expect(resultsOf(r)[0].date).toBe("2026-06-03");
   });
 
-  it("default vertical sends a byte-identical Tavily body (no topic key)", async () => {
+  it("default vertical omits both the news topic and credentials from the body", async () => {
     process.env.TAVILY_API_KEY = "tav";
     const fetchMock = vi.fn().mockResolvedValue(mockResponse(200, { results: [] }));
     globalThis.fetch = fetchMock as unknown as typeof fetch;
@@ -211,5 +214,6 @@ describe("WebSearchTool date forwarding + news vertical", () => {
 
     const body = JSON.parse(String((fetchMock.mock.calls[0]?.[1] as { body: string }).body)) as Record<string, unknown>;
     expect("topic" in body).toBe(false);
+    expect("api_key" in body).toBe(false);
   });
 });

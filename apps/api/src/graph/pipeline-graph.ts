@@ -159,7 +159,7 @@ function outcomeStatusForArtifact(artifact: {
  *
  *   START → sdr_agent → END
  *
- * The single node owns the Serper-first research loop and persists each
+ * The single node owns the live search and hiring-signal loop and persists each
  * intermediate result under the tenant. Drafts still land in the artifact
  * review queue; this removes the lead-level approval interruption, not the
  * final human send gate.
@@ -167,7 +167,7 @@ function outcomeStatusForArtifact(artifact: {
 export function buildPipelineGraph(deps: Deps) {
   const sourcingAgent = async (
     state: PipelineState,
-    serperOnly: boolean,
+    primarySourcesOnly: boolean,
   ): Promise<Partial<PipelineState>> => {
     return withNodeSpan(
       NODE.SOURCING,
@@ -197,7 +197,7 @@ export function buildPipelineGraph(deps: Deps) {
           try {
             const { companies, people, companyIds, personIds } =
               await deps.leads.runSourcingStage(state.orgId, icpId, {
-                serperOnly,
+                primarySourcesOnly,
               });
             totalCompanies += companies;
             totalPeople += people;
@@ -919,7 +919,7 @@ export function buildPipelineGraph(deps: Deps) {
           state,
           nowMsg(
             NODE.AUTONOMOUS_SDR,
-            "starting Serper-first research, scoring, and draft loop",
+            "starting live search, hiring-signal, scoring, and draft loop",
           ),
         );
         current = mergePipelineState(

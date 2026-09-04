@@ -69,9 +69,11 @@ export class WebSearchTool implements Tool {
           "https://api.tavily.com/search",
           {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              "Content-Type": "application/json",
+            },
             body: JSON.stringify({
-              api_key: apiKey,
               query,
               max_results: maxResults,
               include_answer: true,

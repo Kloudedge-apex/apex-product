@@ -4,6 +4,7 @@
  * Required environment variables:
  * - A configured LLMService provider (OpenAI or Azure OpenAI) enables the
  *   unstructured team-page extraction fallback.
+ * - THEIRSTACK_API_KEY    (optional - hiring-intent company discovery)
  * - HUNTER_API_KEY        (optional - fallback email finder via Hunter.io)
  * - COMPANIES_HOUSE_API_KEY (optional - UK Companies House registry)
  * - GITHUB_TOKEN          (optional - GitHub enrichment, higher rate limits)
