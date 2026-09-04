@@ -63,6 +63,11 @@ An authorized initial apply uses the same arguments with `az stack sub create`
 and `--yes`. Capture the sanitized output IDs; never copy secrets or registry or
 Storage credentials into evidence.
 
+For later stack updates, also pass `--parameters createManagedCertificates=false`.
+Azure managed certificates are immutable after issuance; update mode adopts the
+existing certificates without replaying their properties. They remain covered by
+the environment's child-scope deployment-stack deny assignment.
+
 After the stack is applied, a separately authorized provisioning operator may
 create the fixed zero-byte controller state exactly once:
 

@@ -60,6 +60,9 @@ rejected("public blob access is rejected", "resources.bicep", (source) =>
 rejected("HTTP certificate validation is rejected", "resources.bicep", (source) =>
   source.replace("domainControlValidation: 'TXT'", "domainControlValidation: 'HTTP'"));
 
+rejected("managed certificate replay guard is mandatory", "resources.bicep", (source) =>
+  source.replace(" = if (createManagedCertificates) {", " = {"));
+
 rejected("hostname binding analysis authority is mandatory", "main.bicep", (source) =>
   source.replace("          'Microsoft.App/containerApps/listCustomHostNameAnalysis/action'\n", ""));
 

@@ -12,6 +12,7 @@ param publicConsoleHostname string
 param publicApiHostname string
 param publicConsoleCertificateName string
 param publicApiCertificateName string
+param createManagedCertificates bool
 param identityNamePrefix string
 param githubOwner string
 param backendRepository string
@@ -147,7 +148,7 @@ resource containerAppsEnvironment 'Microsoft.App/managedEnvironments@2024-03-01'
   }
 }
 
-resource publicConsoleCertificate 'Microsoft.App/managedEnvironments/managedCertificates@2024-03-01' = {
+resource publicConsoleCertificate 'Microsoft.App/managedEnvironments/managedCertificates@2024-03-01' = if (createManagedCertificates) {
   parent: containerAppsEnvironment
   name: publicConsoleCertificateName
   location: location
@@ -157,7 +158,7 @@ resource publicConsoleCertificate 'Microsoft.App/managedEnvironments/managedCert
   }
 }
 
-resource publicApiCertificate 'Microsoft.App/managedEnvironments/managedCertificates@2024-03-01' = {
+resource publicApiCertificate 'Microsoft.App/managedEnvironments/managedCertificates@2024-03-01' = if (createManagedCertificates) {
   parent: containerAppsEnvironment
   name: publicApiCertificateName
   location: location
@@ -387,14 +388,14 @@ output containerAppsEnvironment object = {
 
 output managedCertificates object = {
   publicConsole: {
-    name: publicConsoleCertificate.name
+    name: publicConsoleCertificateName
     hostname: publicConsoleHostname
-    resourceId: publicConsoleCertificate.id
+    resourceId: resourceId('Microsoft.App/managedEnvironments/managedCertificates', containerAppsEnvironmentName, publicConsoleCertificateName)
   }
   publicApi: {
-    name: publicApiCertificate.name
+    name: publicApiCertificateName
     hostname: publicApiHostname
-    resourceId: publicApiCertificate.id
+    resourceId: resourceId('Microsoft.App/managedEnvironments/managedCertificates', containerAppsEnvironmentName, publicApiCertificateName)
   }
 }
 

@@ -171,6 +171,7 @@ const expectedDefaults = {
   publicApiHostname: contract.managedCertificates.publicApi.hostname,
   publicConsoleCertificateName: contract.managedCertificates.publicConsole.name,
   publicApiCertificateName: contract.managedCertificates.publicApi.name,
+  createManagedCertificates: true,
   identityNamePrefix: contract.identityNamePrefix,
   githubOwner: "Kloudedge-apex",
   backendRepository: "apex-product",
@@ -307,6 +308,7 @@ for (const [key, expected] of Object.entries(contract.managedCertificates)) {
   const certificate = managedCertificates.find((item) =>
     item.name === certificateName);
   if (!certificate ||
+    certificate.condition !== "[parameters('createManagedCertificates')]" ||
     certificate.properties?.subjectName !== `[parameters('${prefix}Hostname')]` ||
     certificate.properties?.domainControlValidation !== expected.validation ||
     certificate.location !== "[parameters('location')]") {
