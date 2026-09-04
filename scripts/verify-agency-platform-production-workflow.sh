@@ -40,6 +40,7 @@ if grep -Fq -- 'pg_dump --no-owner --no-acl --format=custom --schema=' "${CONTRO
   echo 'ERROR: production rehearsal dump must include extension definitions' >&2
   exit 1
 fi
+require 'staging-preexisting-postconditions.json' "${CONTROLLER}"
 require '--file="${MIGRATION}"' "${CONTROLLER}"
 require 'assert_postconditions' "${CONTROLLER}"
 require 'queuesRemainPaused:true' "${CONTROLLER}"

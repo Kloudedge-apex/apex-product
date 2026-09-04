@@ -285,9 +285,16 @@ pg_dump --no-owner --no-acl --format=custom --file="${RUNTIME_DIR}/production.du
 PGPASSWORD=synthetic_local_only PGSSLMODE=disable PGSSLROOTCERT='' PGOPTIONS='' pg_restore --clean --if-exists --no-owner --no-acl \
   --exit-on-error --host=127.0.0.1 --port="${CLONE_PORT}" --username=rehearsal \
   --dbname=rehearsal "${RUNTIME_DIR}/production.dump" >/dev/null
-PGPASSWORD=synthetic_local_only PGSSLMODE=disable PGSSLROOTCERT='' PGOPTIONS='' psql --no-psqlrc --set=ON_ERROR_STOP=1 \
+if PGPASSWORD=synthetic_local_only PGSSLMODE=disable PGSSLROOTCERT='' PGOPTIONS='' postconditions \
   --host=127.0.0.1 --port="${CLONE_PORT}" --username=rehearsal --dbname=rehearsal \
-  --file="${MIGRATION}" >/dev/null
+  >"${RUNTIME_DIR}/staging-preexisting-postconditions.json" 2>/dev/null &&
+  assert_postconditions "${RUNTIME_DIR}/staging-preexisting-postconditions.json" 2>/dev/null; then
+  :
+else
+  PGPASSWORD=synthetic_local_only PGSSLMODE=disable PGSSLROOTCERT='' PGOPTIONS='' psql --no-psqlrc --set=ON_ERROR_STOP=1 \
+    --host=127.0.0.1 --port="${CLONE_PORT}" --username=rehearsal --dbname=rehearsal \
+    --file="${MIGRATION}" >/dev/null
+fi
 PGPASSWORD=synthetic_local_only PGSSLMODE=disable PGSSLROOTCERT='' PGOPTIONS='' postconditions \
   --host=127.0.0.1 --port="${CLONE_PORT}" --username=rehearsal --dbname=rehearsal \
   >"${RUNTIME_DIR}/staging-postconditions.json"
