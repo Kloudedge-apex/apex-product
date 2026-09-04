@@ -3477,9 +3477,25 @@ test_global_live_send_workflow_source() {
 
 test_provider_activation_workflow_source() {
   local workflow="${REPO_ROOT}/.github/workflows/activate-production-providers.yml"
+  local filter="${REPO_ROOT}/scripts/containerapp-provider-secrets.jq"
+  local rendered
   [[ -f "${workflow}" && ! -L "${workflow}" ]] ||
     fail "provider activation workflow is missing or unsafe"
+  [[ -f "${filter}" && ! -L "${filter}" ]] ||
+    fail "provider secret merge filter is missing or unsafe"
   "${REPO_ROOT}/scripts/verify-production-provider-activation-workflow.sh" "${workflow}" >/dev/null
+  pass
+
+  rendered="$(
+    HUNTER_API_KEY='hunter-new-value' \
+      TAVILY_API_KEY='tavily-new-value' \
+      THEIRSTACK_API_KEY='theirstack-new-value' \
+      jq -cS -f "${filter}" <<'JSON'
+{"value":[{"name":"database-url","value":"preserved"},{"name":"hunter-api-key","value":"old"},{"name":"tavily-api-key","value":"old"}]}
+JSON
+  )"
+  [[ "${rendered}" == '{"properties":{"configuration":{"secrets":[{"name":"database-url","value":"preserved"},{"name":"hunter-api-key","value":"hunter-new-value"},{"name":"tavily-api-key","value":"tavily-new-value"},{"name":"theirstack-api-key","value":"theirstack-new-value"}]}}}' ]] ||
+    fail "provider secret merge filter did not preserve and replace exact secrets"
   pass
 
   assert_log_contains "${workflow}" \
@@ -3491,6 +3507,7 @@ test_provider_activation_workflow_source() {
   assert_log_contains "${workflow}" \
     'unset TAVILY_API_KEY THEIRSTACK_API_KEY HUNTER_API_KEY'
   assert_log_excludes "${workflow}" "containerapp secret list"
+  assert_log_excludes "${workflow}" "containerapp secret set"
   pass
 }
 

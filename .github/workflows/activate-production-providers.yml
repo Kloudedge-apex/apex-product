@@ -71,6 +71,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           set +x
+          umask 077
 
           subscription="3171575e-f164-425c-9ee0-2fb10cf93884"
           tenant="d4b3813d-146f-4d03-96b8-d6e5862d58a2"
@@ -156,6 +157,63 @@ jobs:
                 {name: "THEIRSTACK_API_KEY", secretRef: "theirstack-api-key"}
               ]
             ' "${state_file}" >/dev/null
+          }
+
+          set_provider_secrets() {
+            local app=$1
+            local app_uri="https://management.azure.com/subscriptions/${subscription}/resourceGroups/${resource_group}/providers/Microsoft.App/containerApps/${app}"
+            local current_file="${state_dir}/${app}-secrets.json"
+            local patch_file="${state_dir}/${app}-secret-patch.json"
+            local verify_file="${state_dir}/${app}-secrets-verify.json"
+            local attempt
+
+            # JSON Merge Patch avoids the CLI's unnecessary managed-environment join check.
+            az rest --method post \
+              --url "${app_uri}/listSecrets?api-version=2024-03-01" \
+              --only-show-errors --output json >"${current_file}"
+            jq -e '.value | type == "array"' "${current_file}" >/dev/null
+            jq -f scripts/containerapp-provider-secrets.jq \
+              "${current_file}" >"${patch_file}"
+            jq -e '
+              (keys == ["properties"])
+              and (.properties | keys == ["configuration"])
+              and (.properties.configuration | keys == ["secrets"])
+              and ([.properties.configuration.secrets[]
+                | select(
+                    .name == "hunter-api-key"
+                    or .name == "tavily-api-key"
+                    or .name == "theirstack-api-key"
+                  )] | length == 3)
+            ' "${patch_file}" >/dev/null
+            az rest --method patch \
+              --url "${app_uri}?api-version=2024-03-01" \
+              --headers Content-Type=application/json \
+              --body "@${patch_file}" --only-show-errors --output none
+
+            for attempt in {1..30}; do
+              az rest --method post \
+                --url "${app_uri}/listSecrets?api-version=2024-03-01" \
+                --only-show-errors --output json >"${verify_file}"
+              if jq -e '
+                [.value[]
+                  | select(
+                      .name == "hunter-api-key"
+                      or .name == "tavily-api-key"
+                      or .name == "theirstack-api-key"
+                    )
+                  | {name, value}]
+                | sort_by(.name) == [
+                    {name: "hunter-api-key", value: env.HUNTER_API_KEY},
+                    {name: "tavily-api-key", value: env.TAVILY_API_KEY},
+                    {name: "theirstack-api-key", value: env.THEIRSTACK_API_KEY}
+                  ]
+              ' "${verify_file}" >/dev/null; then
+                return 0
+              fi
+              sleep 2
+            done
+            echo "ERROR: ${app} provider secrets did not converge" >&2
+            return 1
           }
 
           release_lease() {
@@ -296,18 +354,8 @@ jobs:
           [[ "${initial_image}" == "${worker_image}" ]]
           [[ "${initial_image}" =~ ^workforceosprodacr\.azurecr\.io/apex-api@sha256:[0-9a-f]{64}$ ]]
 
-          az containerapp secret set --subscription "${subscription}" \
-            --resource-group "${resource_group}" --name "${worker_app}" \
-            --secrets "tavily-api-key=${TAVILY_API_KEY}" \
-              "theirstack-api-key=${THEIRSTACK_API_KEY}" \
-              "hunter-api-key=${HUNTER_API_KEY}" \
-            --only-show-errors --output none
-          az containerapp secret set --subscription "${subscription}" \
-            --resource-group "${resource_group}" --name "${api_app}" \
-            --secrets "tavily-api-key=${TAVILY_API_KEY}" \
-              "theirstack-api-key=${THEIRSTACK_API_KEY}" \
-              "hunter-api-key=${HUNTER_API_KEY}" \
-            --only-show-errors --output none
+          set_provider_secrets "${worker_app}"
+          set_provider_secrets "${api_app}"
           unset TAVILY_API_KEY THEIRSTACK_API_KEY HUNTER_API_KEY
 
           assert_authority_held
