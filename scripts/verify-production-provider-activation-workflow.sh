@@ -5,6 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 WORKFLOW="${1:-${REPO_ROOT}/.github/workflows/activate-production-providers.yml}"
+FILTER="${REPO_ROOT}/scripts/containerapp-provider-secrets.jq"
 
 fail() {
   echo "ERROR: production provider activation workflow contract failed: $*" >&2
@@ -13,6 +14,7 @@ fail() {
 
 [[ $# -le 1 ]] || { echo "Usage: $0 [activate-production-providers.yml]" >&2; exit 2; }
 [[ -f "${WORKFLOW}" && ! -L "${WORKFLOW}" ]] || fail "workflow must be a regular file"
+[[ -f "${FILTER}" && ! -L "${FILTER}" ]] || fail "secret merge filter must be a regular file"
 
 require() {
   grep -Fq -- "$1" "${WORKFLOW}" || fail "missing required source: $1"
@@ -37,7 +39,10 @@ require 'az storage blob lease acquire'
 require 'az storage blob lease renew'
 require 'az storage blob lease release'
 require '--force-with-lease="${release_lock_ref}:${GITHUB_SHA}"'
-require 'az containerapp secret set'
+require 'scripts/containerapp-provider-secrets.jq'
+require '"${app_uri}/listSecrets?api-version=2024-03-01"'
+require 'az rest --method patch'
+require '--body "@${patch_file}"'
 require 'TAVILY_API_KEY=secretref:tavily-api-key'
 require 'THEIRSTACK_API_KEY=secretref:theirstack-api-key'
 require 'HUNTER_API_KEY=secretref:hunter-api-key'
@@ -45,7 +50,8 @@ require 'scripts/verify-containerapp-release-config.sh "${initial_image}" "${ini
 require '"https://${api_fqdn}/api/health/ready"'
 require '"https://${api_fqdn}/api/health/worker"'
 require 'if ! rollback; then'
-reject 'containerapp secret list' "secret values or secret inventory must not be read"
+reject 'containerapp secret list' "the full-resource secret CLI must not be used"
+reject 'containerapp secret set' "the full-resource secret command requires parent-environment authority"
 reject '(AZURE_CLIENT_SECRET|client-secret:|creds:|password:)' "stored Azure credentials are forbidden"
 reject 'storage blob lease break|storage blob delete|containerapp delete' "destructive recovery is forbidden"
 reject '^\s*pull_request:|^\s*push:' "provider activation must remain manual-only"
