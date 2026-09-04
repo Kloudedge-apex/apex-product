@@ -219,6 +219,8 @@ function exclusiveSnapshot() {
       [ROLE_IDS.app]: role(ROLE_IDS.app, [
         "Microsoft.App/containerApps/read",
         "Microsoft.App/containerApps/write",
+        "Microsoft.App/containerApps/listCustomHostNameAnalysis/action",
+        "Microsoft.App/containerApps/listSecrets/action",
         "Microsoft.App/containerApps/revisions/read",
         "Microsoft.App/containerApps/revisions/activate/action",
         "Microsoft.Authorization/roleAssignments/read",

@@ -70,6 +70,7 @@ resource containerAppReleaseRole 'Microsoft.Authorization/roleDefinitions@2022-0
           'Microsoft.App/containerApps/read'
           'Microsoft.App/containerApps/write'
           'Microsoft.App/containerApps/listCustomHostNameAnalysis/action'
+          'Microsoft.App/containerApps/listSecrets/action'
           'Microsoft.App/containerApps/revisions/read'
           'Microsoft.App/containerApps/revisions/activate/action'
           'Microsoft.Authorization/roleAssignments/read'

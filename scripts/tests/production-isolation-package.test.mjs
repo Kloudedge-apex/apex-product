@@ -63,6 +63,9 @@ rejected("HTTP certificate validation is rejected", "resources.bicep", (source) 
 rejected("hostname binding analysis authority is mandatory", "main.bicep", (source) =>
   source.replace("          'Microsoft.App/containerApps/listCustomHostNameAnalysis/action'\n", ""));
 
+rejected("Container App secret-write prerequisite is mandatory", "main.bicep", (source) =>
+  source.replace("          'Microsoft.App/containerApps/listSecrets/action'\n", ""));
+
 rejected("a wrong public API hostname is rejected", "authority-contract.json", (source) =>
   source.replace('"hostname": "api.workforceos.xyz"', '"hostname": "wrong.workforceos.xyz"'));
 
